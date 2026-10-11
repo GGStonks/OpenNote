@@ -34,3 +34,6 @@ android/build/
 ios/App/build/
 ios/App/Pods/
 ios/App/DerivedData/
+
+# Local releases directory
+releases/
