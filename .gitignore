@@ -37,3 +37,10 @@ ios/App/DerivedData/
 
 # Local releases directory
 releases/
+
+# Generated at build time from node_modules/@drgrice1/tikzjax
+public/tikzjax/
+
+# Synced web assets inside native projects
+android/app/src/main/assets/public/
+ios/App/App/public/

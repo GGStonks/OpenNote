@@ -1,18 +1,23 @@
 {
   "name": "opennote",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
-    "build": "vite build",
-    "preview": "vite preview"
+    "copy-tikzjax": "node scripts/copy-tikzjax.mjs",
+    "dev": "npm run copy-tikzjax && vite --host 0.0.0.0 --port 5173",
+    "build": "npm run copy-tikzjax && tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",
     "@capacitor/cli": "^8.5.3",
     "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.4",
     "@capacitor/ios": "^8.5.3",
+    "@capacitor/share": "^8.0.3",
+    "@drgrice1/tikzjax": "^1.0.0-beta24",
     "katex": "^0.16.21",
     "lucide-react": "^0.575.0",
     "perfect-freehand": "^1.2.3",

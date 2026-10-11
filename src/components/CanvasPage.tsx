@@ -1,903 +1,588 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Stroke, Point, ToolType, PaperStyle, PaperColor, LatexBlock } from '../types';
-import { drawStroke } from '../ink/strokeSmoother';
-import { renderLatexToHtml } from '../services/latexService';
-import { compileTikzToSvg } from '../services/tikzService';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Maximize2 } from 'lucide-react';
 import {
-  isPointInPolygon,
-  detectShapeFromStroke,
-  convertStrokesToTikzDocument
-} from '../services/shapeRecognition';
-import {
-  Sparkles, Trash2, Copy, Move, Share2, Shapes, Palette, Check,
-  CornerDownRight, Download, Maximize2
-} from 'lucide-react';
+  EraserMode, LatexBlock, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, Stroke, TextBlock, ToolType, newId,
+} from '../types';
+import { drawLiveStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg } from '../ink/strokeRenderer';
+import { detectShape } from '../services/shapeRecognition';
+import { NoteEditor } from '../state/useNoteEditor';
+import { GestureBus } from '../editor/gestures';
+import { Selection, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
+import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 
-interface CanvasPageProps {
-  pageId: string;
-  pageNumber: number;
-  strokes: Stroke[];
-  latexBlocks: LatexBlock[];
-  activeTool: ToolType;
+export interface ToolSettings {
+  tool: ToolType;
   penColor: string;
   penWidth: number;
+  penStyle: PenStyle;
   highlighterColor: string;
-  paperStyle: PaperStyle;
-  paperColor: PaperColor;
-  stylusOnlyMode: boolean;
-  onAddStroke: (stroke: Stroke) => void;
-  onDeleteStroke: (strokeId: string) => void;
-  onUpdateStrokes: (strokes: Stroke[]) => void;
-  onAddLatexBlock: (block: LatexBlock) => void;
-  onUpdateLatexBlock: (block: LatexBlock) => void;
-  onDeleteLatexBlock: (blockId: string) => void;
-  onTriggerRegionLatexConvert: (
-    croppedImageBase64: string,
-    bounds: { x: number; y: number; width: number; height: number },
-    mode: 'math' | 'tikz'
-  ) => void;
+  highlighterWidth: number;
+  eraserMode: EraserMode;
+  eraserSize: number;
+  stylusOnly: boolean;
+  holdToSnap: boolean;
 }
 
-const PAGE_WIDTH = 816;
-const PAGE_HEIGHT = 1056;
+interface CanvasPageProps {
+  page: NotePage;
+  pageIndex: number;
+  paperStyle: PaperStyle;
+  paperColor: PaperColor;
+  tools: ToolSettings;
+  zoom: number;
+  editor: NoteEditor;
+  gestures: GestureBus;
+  selection: Selection | null;
+  setSelection: (s: Selection | null) => void;
+  selectedBlockId: string | null;
+  setSelectedBlockId: (id: string | null) => void;
+  editingTextId: string | null;
+  setEditingTextId: (id: string | null) => void;
+  onEditLatex: (pageId: string, block: LatexBlock) => void;
+  printMode: boolean;
+  scrollRoot: HTMLElement | null;
+}
 
-export const CanvasPage: React.FC<CanvasPageProps> = ({
-  pageId,
-  pageNumber,
-  strokes,
-  latexBlocks,
-  activeTool,
-  penColor,
-  penWidth,
-  highlighterColor,
-  paperStyle,
-  paperColor,
-  stylusOnlyMode,
-  onAddStroke,
-  onDeleteStroke,
-  onUpdateStrokes,
-  onAddLatexBlock,
-  onUpdateLatexBlock,
-  onDeleteLatexBlock,
-  onTriggerRegionLatexConvert,
-}) => {
-  const bgCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const strokeCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const activeCanvasRef = useRef<HTMLCanvasElement | null>(null);
+export const PAPER_COLORS: Record<PaperColor, string> = {
+  white: '#FFFFFF',
+  cream: '#FBF7EE',
+  yellow: '#FEF9C3',
+  dark: '#1C1C1F',
+};
 
-  const [isDrawing, setIsDrawing] = useState(false);
-  const currentPoints = useRef<Point[]>([]);
+/** Paper patterns as CSS backgrounds (no canvas memory, prints as vectors). */
+export function paperBackground(style: PaperStyle, color: PaperColor): React.CSSProperties {
+  const dark = color === 'dark';
+  const base = PAPER_COLORS[color];
+  const line = dark ? 'rgba(255,255,255,0.13)' : 'rgba(59,130,246,0.22)';
+  const grid = dark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.08)';
+  const margin = dark ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.4)';
+  const css: React.CSSProperties = { backgroundColor: base };
+  if (style === 'ruled') {
+    css.backgroundImage = [
+      `linear-gradient(to right, transparent 79px, ${margin} 79px, ${margin} 80px, transparent 80px)`,
+      `linear-gradient(${base}, ${base})`,
+      `linear-gradient(to bottom, transparent 31px, ${line} 31px, ${line} 32px)`,
+    ].join(',');
+    css.backgroundSize = `100% 100%, 100% 79px, 100% 32px`;
+    css.backgroundPosition = `0 0, 0 0, 0 48px`;
+    css.backgroundRepeat = 'no-repeat, no-repeat, repeat';
+  } else if (style === 'grid') {
+    css.backgroundImage = `linear-gradient(to right, ${grid} 1px, transparent 1px), linear-gradient(to bottom, ${grid} 1px, transparent 1px)`;
+    css.backgroundSize = '24px 24px';
+  } else if (style === 'dots') {
+    css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} 1.3px, transparent 1.7px)`;
+    css.backgroundSize = '24px 24px';
+    css.backgroundPosition = '12px 12px';
+  }
+  return css;
+}
 
-  // Advanced Lasso Selection State (PDEDraw + Notability Architecture)
-  const [lassoPolygon, setLassoPolygon] = useState<Point[]>([]);
-  const [selectedStrokeIds, setSelectedStrokeIds] = useState<string[]>([]);
-  const [selectedBlockIds, setSelectedBlockIds] = useState<string[]>([]);
-  const [selectionBounds, setSelectionBounds] = useState<{
-    x: number;
-    y: number;
-    width: number;
-    height: number;
-  } | null>(null);
+const MAX_CANVAS_PIXELS = 16_000_000;
 
-  // Lasso Transform / Dragging State
-  const [isDraggingSelection, setIsDraggingSelection] = useState(false);
-  const [isScalingSelection, setIsScalingSelection] = useState(false);
-  const dragAnchor = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const originalStrokesRef = useRef<Stroke[]>([]);
-  const originalBlocksRef = useRef<LatexBlock[]>([]);
-  const originalBoundsRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+function canvasRatio(zoom: number): number {
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  const wanted = dpr * Math.max(1, Math.min(zoom, 2.5));
+  const maxByBudget = Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * PAGE_HEIGHT));
+  return Math.max(1, Math.min(wanted, maxByBudget));
+}
 
-  // Transparent LaTeX Block Selection / Dragging State
-  const [activeBlockId, setActiveBlockId] = useState<string | null>(null);
-  const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
-  const blockDragStartOffset = useRef<{ offsetX: number; offsetY: number }>({ offsetX: 0, offsetY: 0 });
+function setupCanvas(canvas: HTMLCanvasElement, ratio: number): CanvasRenderingContext2D | null {
+  const w = Math.round(PAGE_WIDTH * ratio);
+  const h = Math.round(PAGE_HEIGHT * ratio);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx?.setTransform(ratio, 0, 0, ratio, 0, 0);
+  return ctx;
+}
 
-  // Setup HiDPI Canvas with clean transform reset
-  const setupCanvas = useCallback((canvas: HTMLCanvasElement) => {
-    const dpr = window.devicePixelRatio || 2;
-    canvas.width = PAGE_WIDTH * dpr;
-    canvas.height = PAGE_HEIGHT * dpr;
-    canvas.style.width = `${PAGE_WIDTH}px`;
-    canvas.style.height = `${PAGE_HEIGHT}px`;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    }
-  }, []);
+function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
+  const anyE = e as PointerEvent & { altitudeAngle?: number; azimuthAngle?: number };
+  if (e.pointerType !== 'pen') return {};
+  if (typeof anyE.altitudeAngle === 'number') return { alt: anyE.altitudeAngle, az: anyE.azimuthAngle };
+  if (e.tiltX || e.tiltY) {
+    const tx = (e.tiltX * Math.PI) / 180, ty = (e.tiltY * Math.PI) / 180;
+    return { alt: Math.PI / 2 - Math.atan(Math.hypot(Math.tan(tx), Math.tan(ty))), az: Math.atan2(Math.tan(ty), Math.tan(tx)) };
+  }
+  return {};
+}
 
-  // Initialize all canvases including activeCanvasRef on mount/resize
+export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
+  const {
+    page, pageIndex, paperStyle, paperColor, tools, zoom, editor, gestures, selection, setSelection,
+    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot,
+  } = props;
+  const containerRef = useRef<HTMLDivElement>(null);
+  const strokeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const activeCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [visible, setVisible] = useState(pageIndex < 2);
+  const darkPaper = paperColor === 'dark';
+  const defaultInk = darkPaper ? '#F3F4F6' : '#111827';
+
+  // Only pages near the viewport get canvases (memory on long notes).
   useEffect(() => {
-    if (bgCanvasRef.current) setupCanvas(bgCanvasRef.current);
-    if (strokeCanvasRef.current) setupCanvas(strokeCanvasRef.current);
-    if (activeCanvasRef.current) setupCanvas(activeCanvasRef.current);
-  }, [setupCanvas]);
+    const el = containerRef.current;
+    if (!el || printMode) return;
+    const io = new IntersectionObserver((entries) => setVisible(entries.some((en) => en.isIntersecting)), {
+      root: scrollRoot,
+      rootMargin: '150% 0px',
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [scrollRoot, printMode]);
 
-  // Render Paper Background
-  useEffect(() => {
-    const canvas = bgCanvasRef.current;
-    if (!canvas) return;
-    setupCanvas(canvas);
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const colors: Record<PaperColor, string> = {
-      white: '#FFFFFF',
-      cream: '#FDFBF7',
-      yellow: '#FEF9C3',
-      dark: '#18181B',
-    };
-
-    ctx.fillStyle = colors[paperColor];
-    ctx.fillRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-
-    const isDark = paperColor === 'dark';
-    const gridLineColor = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
-    const ruledLineColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(59,130,246,0.18)';
-    const marginLineColor = isDark ? 'rgba(239,68,68,0.25)' : 'rgba(239,68,68,0.35)';
-
-    if (paperStyle === 'ruled') {
-      const lineSpacing = 32;
-      const topMargin = 80;
-      ctx.lineWidth = 1;
-
-      // Vertical left margin line (Notability red margin rule)
-      ctx.strokeStyle = marginLineColor;
-      ctx.beginPath();
-      ctx.moveTo(80, 0);
-      ctx.lineTo(80, PAGE_HEIGHT);
-      ctx.stroke();
-
-      // Horizontal ruled lines
-      ctx.strokeStyle = ruledLineColor;
-      for (let y = topMargin; y < PAGE_HEIGHT - 20; y += lineSpacing) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(PAGE_WIDTH, y);
-        ctx.stroke();
-      }
-    } else if (paperStyle === 'grid') {
-      const gridSize = 24;
-      ctx.strokeStyle = gridLineColor;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let x = 0; x < PAGE_WIDTH; x += gridSize) {
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, PAGE_HEIGHT);
-      }
-      for (let y = 0; y < PAGE_HEIGHT; y += gridSize) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(PAGE_WIDTH, y);
-      }
-      ctx.stroke();
-    } else if (paperStyle === 'dots') {
-      const dotSpacing = 24;
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.15)';
-      for (let x = dotSpacing; x < PAGE_WIDTH; x += dotSpacing) {
-        for (let y = dotSpacing; y < PAGE_HEIGHT; y += dotSpacing) {
-          ctx.beginPath();
-          ctx.arc(x, y, 1.2, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-  }, [paperStyle, paperColor, setupCanvas]);
-
-  // Render Committed Strokes
-  useEffect(() => {
+  // Committed ink.
+  const ratio = canvasRatio(zoom);
+  useLayoutEffect(() => {
     const canvas = strokeCanvasRef.current;
+    if (!canvas || !visible) return;
+    const ctx = setupCanvas(canvas, ratio);
+    if (!ctx) return;
+    ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+    drawStrokes(ctx, page.strokes);
+  }, [page.strokes, ratio, visible]);
+
+  useLayoutEffect(() => {
+    if (activeCanvasRef.current && visible) setupCanvas(activeCanvasRef.current, ratio);
+  }, [ratio, visible]);
+
+  // ------------------------------------------------------------------ input state
+  const drawing = useRef<{
+    pointerId: number;
+    pointerType: string;
+    tool: ToolType;
+    points: Point[];
+    predicted: Point[];
+    start: number;
+    snapped: { points: Point[]; closed: boolean; kind: Stroke['shapeKind'] } | null;
+    holdTimer: ReturnType<typeof setTimeout> | null;
+    lastMove: { x: number; y: number };
+  } | null>(null);
+  const raf = useRef<number | null>(null);
+  const eraserPos = useRef<{ x: number; y: number } | null>(null);
+
+  const liveStyle = useCallback(
+    (tool: ToolType): InkStyle =>
+      tool === 'highlighter'
+        ? { tool: 'highlighter', color: tools.highlighterColor, width: tools.highlighterWidth, penStyle: 'ballpoint' }
+        : { tool: 'pen', color: tools.penColor, width: tools.penWidth, penStyle: tools.penStyle },
+    [tools.highlighterColor, tools.highlighterWidth, tools.penColor, tools.penWidth, tools.penStyle]
+  );
+
+  const renderActive = useCallback(() => {
+    raf.current = null;
+    const canvas = activeCanvasRef.current;
     if (!canvas) return;
-    setupCanvas(canvas);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
     ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+    const d = drawing.current;
+    if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
+      if (d.snapped) {
+        drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed });
+      } else {
+        drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
+      }
+    } else if (d && d.tool === 'lasso' && d.points.length > 1) {
+      ctx.save();
+      ctx.strokeStyle = '#3B82F6';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 5]);
+      ctx.fillStyle = 'rgba(59,130,246,0.07)';
+      ctx.beginPath();
+      ctx.moveTo(d.points[0].x, d.points[0].y);
+      for (const p of d.points) ctx.lineTo(p.x, p.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (eraserPos.current && (d?.tool === 'eraser' || !d)) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(100,116,139,0.9)';
+      ctx.fillStyle = 'rgba(148,163,184,0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(eraserPos.current.x, eraserPos.current.y, tools.eraserSize, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+  }, [liveStyle, tools.eraserSize]);
 
-    // 1. Draw Highlighters first
-    strokes.filter(s => s.tool === 'highlighter').forEach(s => {
-      drawStroke(ctx, s.points, s.color, s.width, s.opacity, true, s.lineStyle);
-    });
+  const requestRender = useCallback(() => {
+    if (raf.current === null) raf.current = requestAnimationFrame(renderActive);
+  }, [renderActive]);
 
-    // 2. Draw Pens
-    strokes.filter(s => s.tool === 'pen').forEach(s => {
-      drawStroke(ctx, s.points, s.color, s.width, s.opacity, false, s.lineStyle);
-    });
-  }, [strokes, setupCanvas]);
+  const clearActive = useCallback(() => {
+    drawing.current = null;
+    eraserPos.current = null;
+    requestRender();
+  }, [requestRender]);
 
-  // Coordinate normalizer mapping client events 1:1 to canvas coordinates
-  const getCanvasCoords = (e: React.PointerEvent<HTMLCanvasElement>): Point => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const scaleX = PAGE_WIDTH / rect.width;
-    const scaleY = PAGE_HEIGHT / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-    const pressure = e.pointerType === 'pen' ? (e.pressure || 0.5) : 0.5;
-    return { x, y, pressure };
+  // A pinch starting with a finger that was drawing cancels that stroke.
+  useEffect(
+    () =>
+      gestures.onCancel(() => {
+        const d = drawing.current;
+        if (d && d.pointerType === 'touch') {
+          if (d.holdTimer) clearTimeout(d.holdTimer);
+          if (d.tool === 'eraser') editor.endGesture();
+          clearActive();
+        }
+      }),
+    [gestures, clearActive, editor]
+  );
+
+  const toPoint = (e: { clientX: number; clientY: number; pressure: number; pointerType: string }, start: number, angles = {}): Point => {
+    const rect = activeCanvasRef.current!.getBoundingClientRect();
+    return {
+      x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width,
+      y: ((e.clientY - rect.top) * PAGE_HEIGHT) / rect.height,
+      pressure: e.pointerType === 'pen' ? (e.pressure > 0 ? e.pressure : 0.5) : 0.5,
+      t: Math.round(performance.now() - start),
+      ...angles,
+    };
   };
 
-  // Pointer Down
-  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (activeTool === 'hand') return;
+  const eraseAt = (x: number, y: number) => {
+    const r = tools.eraserSize;
+    if (tools.eraserMode === 'partial') {
+      editor.previewPage(page.id, (p) => {
+        const res = eraseStrokesPartial(p.strokes, x, y, r, () => newId('stroke'));
+        return res.changed ? { ...p, strokes: res.strokes } : p;
+      });
+    } else {
+      editor.previewPage(page.id, (p) => {
+        const keep = p.strokes.filter((s) => !strokeHitTest(s, x, y, r));
+        return keep.length === p.strokes.length ? p : { ...p, strokes: keep };
+      });
+    }
+  };
 
-    // Palm Rejection: reject finger touch when stylus-only mode is active
-    if (stylusOnlyMode && e.pointerType === 'touch') {
+  const armHoldToSnap = () => {
+    const d = drawing.current;
+    if (!d || d.tool !== 'pen' || !tools.holdToSnap || d.snapped) return;
+    if (d.holdTimer) clearTimeout(d.holdTimer);
+    d.holdTimer = setTimeout(() => {
+      const cur = drawing.current;
+      if (!cur || cur !== d || cur.points.length < 6) return;
+      const shape = detectShape(cur.points);
+      if (shape) {
+        cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind };
+        if (navigator.vibrate) navigator.vibrate(8);
+        requestRender();
+      }
+    }, 550);
+  };
+
+  const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const tool = tools.tool;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (tool === 'hand') return;
+    if (e.pointerType === 'touch' && (tools.stylusOnly || gestures.touches > 1 || gestures.navigating)) return;
+    const existing = drawing.current;
+    if (existing) {
+      // Palm rejection: a pencil touching down replaces a finger/palm stroke in progress.
+      if (existing.pointerType === 'touch' && e.pointerType === 'pen') {
+        if (existing.holdTimer) clearTimeout(existing.holdTimer);
+        drawing.current = null;
+      } else return;
+    }
+    e.preventDefault();
+    setSelectedBlockId(null);
+
+    if (tool === 'text') {
+      if (editingTextId) {
+        setEditingTextId(null);
+        return;
+      }
+      const pt = toPoint(e, performance.now());
+      const block: TextBlock = {
+        id: newId('text'),
+        x: pt.x,
+        y: pt.y - 14,
+        width: Math.max(160, Math.min(520, PAGE_WIDTH - pt.x - 32)),
+        text: '',
+        fontSize: 18,
+        color: '#111827',
+        createdAt: Date.now(),
+      };
+      editor.commitPage(page.id, (p) => ({ ...p, textBlocks: [...(p.textBlocks ?? []), block] }));
+      setEditingTextId(block.id);
       return;
     }
 
-    // Dismiss active selections if clicking outside
-    if (activeTool !== 'lasso') {
-      setSelectedStrokeIds([]);
-      setSelectedBlockIds([]);
-      setSelectionBounds(null);
-      setActiveBlockId(null);
+    if (selection && tool !== 'lasso') setSelection(null);
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
     }
-
-    e.currentTarget.setPointerCapture(e.pointerId);
-    const pt = getCanvasCoords(e);
-
-    setIsDrawing(true);
-    currentPoints.current = [pt];
-
-    if (activeTool === 'eraser') {
-      eraseAtPoint(pt.x, pt.y);
-    } else if (activeTool === 'lasso') {
-      // Start freehand lasso path
-      setLassoPolygon([pt]);
-      setSelectedStrokeIds([]);
-      setSelectedBlockIds([]);
-      setSelectionBounds(null);
-    }
-  };
-
-  // Pointer Move
-  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    if (stylusOnlyMode && e.pointerType === 'touch') return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const scaleX = PAGE_WIDTH / rect.width;
-    const scaleY = PAGE_HEIGHT / rect.height;
-
-    const coalescedEvents = (e.nativeEvent as any).getCoalescedEvents
-      ? (e.nativeEvent as any).getCoalescedEvents()
-      : [e.nativeEvent];
-
-    for (const ce of coalescedEvents) {
-      const x = (ce.clientX - rect.left) * scaleX;
-      const y = (ce.clientY - rect.top) * scaleY;
-      const pressure = e.pointerType === 'pen' ? (ce.pressure || 0.5) : 0.5;
-      const pt = { x, y, pressure };
-      currentPoints.current.push(pt);
-
-      if (activeTool === 'eraser') {
-        eraseAtPoint(x, y);
-      } else if (activeTool === 'lasso') {
-        setLassoPolygon(prev => [...prev, pt]);
-      }
-    }
-
-    // Live preview on activeCanvasRef
-    const activeCanvas = activeCanvasRef.current;
-    if (activeCanvas) {
-      const ctx = activeCanvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-
-        if (activeTool === 'pen' || activeTool === 'highlighter') {
-          drawStroke(
-            ctx,
-            currentPoints.current,
-            activeTool === 'pen' ? penColor : highlighterColor,
-            activeTool === 'pen' ? penWidth : 4,
-            activeTool === 'pen' ? 1.0 : 0.4,
-            activeTool === 'highlighter'
-          );
-        } else if (activeTool === 'lasso') {
-          // Render dashed lasso loop
-          ctx.save();
-          ctx.strokeStyle = '#3B82F6';
-          ctx.lineWidth = 1.8;
-          ctx.setLineDash([6, 6]);
-          ctx.fillStyle = 'rgba(59, 130, 246, 0.08)';
-          ctx.beginPath();
-          if (currentPoints.current.length > 0) {
-            ctx.moveTo(currentPoints.current[0].x, currentPoints.current[0].y);
-            for (let i = 1; i < currentPoints.current.length; i++) {
-              ctx.lineTo(currentPoints.current[i].x, currentPoints.current[i].y);
-            }
-            ctx.stroke();
-            ctx.fill();
-          }
-          ctx.restore();
-        }
-      }
-    }
-  };
-
-  // Pointer Up
-  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!isDrawing) return;
-    setIsDrawing(false);
-
-    const activeCanvas = activeCanvasRef.current;
-    if (activeCanvas) {
-      const ctx = activeCanvas.getContext('2d');
-      if (ctx) ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-    }
-
-    if (activeTool === 'pen' || activeTool === 'highlighter') {
-      if (currentPoints.current.length > 0) {
-        const newStroke: Stroke = {
-          id: `stroke_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-          tool: activeTool,
-          color: activeTool === 'pen' ? penColor : highlighterColor,
-          width: activeTool === 'pen' ? penWidth : 4,
-          opacity: activeTool === 'pen' ? 1.0 : 0.4,
-          points: [...currentPoints.current],
-          lineStyle: 'solid'
-        };
-        onAddStroke(newStroke);
-      }
-    } else if (activeTool === 'lasso') {
-      const poly = currentPoints.current;
-      if (poly.length > 3) {
-        // Evaluate which strokes and latex blocks are enclosed in lasso
-        const enclosedStrokeIds: string[] = [];
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-
-        strokes.forEach(s => {
-          // Check if any point or centroid is inside polygon
-          const pointsInside = s.points.filter(p => isPointInPolygon(p, poly));
-          if (pointsInside.length > s.points.length * 0.35 || pointsInside.length >= 3) {
-            enclosedStrokeIds.push(s.id);
-            s.points.forEach(p => {
-              minX = Math.min(minX, p.x);
-              maxX = Math.max(maxX, p.x);
-              minY = Math.min(minY, p.y);
-              maxY = Math.max(maxY, p.y);
-            });
-          }
-        });
-
-        const enclosedBlockIds: string[] = [];
-        latexBlocks.forEach(b => {
-          const center = { x: b.x + b.width / 2, y: b.y + b.height / 2, pressure: 0.5 };
-          if (isPointInPolygon(center, poly)) {
-            enclosedBlockIds.push(b.id);
-            minX = Math.min(minX, b.x);
-            maxX = Math.max(maxX, b.x + b.width);
-            minY = Math.min(minY, b.y);
-            maxY = Math.max(maxY, b.y + b.height);
-          }
-        });
-
-        if (enclosedStrokeIds.length > 0 || enclosedBlockIds.length > 0) {
-          const pad = 12;
-          setSelectedStrokeIds(enclosedStrokeIds);
-          setSelectedBlockIds(enclosedBlockIds);
-          setSelectionBounds({
-            x: Math.max(0, minX - pad),
-            y: Math.max(0, minY - pad),
-            width: Math.min(PAGE_WIDTH - minX, maxX - minX + pad * 2),
-            height: Math.min(PAGE_HEIGHT - minY, maxY - minY + pad * 2),
-          });
-        } else {
-          setSelectedStrokeIds([]);
-          setSelectedBlockIds([]);
-          setSelectionBounds(null);
-        }
-      }
-    }
-
-    currentPoints.current = [];
-  };
-
-  // Stroke Eraser
-  const eraseAtPoint = (x: number, y: number) => {
-    const eraserRadius = 18;
-    strokes.forEach(stroke => {
-      for (const p of stroke.points) {
-        const dist = Math.hypot(p.x - x, p.y - y);
-        if (dist <= eraserRadius) {
-          onDeleteStroke(stroke.id);
-          break;
-        }
-      }
-    });
-  };
-
-  // --- LASSO TRANSFORMATIONS (Move, Scale, Duplicate, Delete, Snap Shape) ---
-
-  const handleLassoMoveStart = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (!selectionBounds) return;
-    setIsDraggingSelection(true);
-    dragAnchor.current = { x: e.clientX, y: e.clientY };
-    originalStrokesRef.current = JSON.parse(JSON.stringify(strokes));
-    originalBlocksRef.current = JSON.parse(JSON.stringify(latexBlocks));
-    originalBoundsRef.current = { ...selectionBounds };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const handleLassoMove = (e: React.PointerEvent) => {
-    if (!isDraggingSelection || !selectionBounds || !originalBoundsRef.current) return;
-    e.stopPropagation();
-
-    const dx = e.clientX - dragAnchor.current.x;
-    const dy = e.clientY - dragAnchor.current.y;
-
-    // Update selection bounds position
-    setSelectionBounds({
-      ...originalBoundsRef.current,
-      x: originalBoundsRef.current.x + dx,
-      y: originalBoundsRef.current.y + dy,
-    });
-
-    // Translate selected strokes
-    const updatedStrokes = originalStrokesRef.current.map(s => {
-      if (!selectedStrokeIds.includes(s.id)) return s;
-      return {
-        ...s,
-        points: s.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy })),
-      };
-    });
-    onUpdateStrokes(updatedStrokes);
-
-    // Translate selected latex blocks
-    originalBlocksRef.current.forEach(b => {
-      if (selectedBlockIds.includes(b.id)) {
-        onUpdateLatexBlock({
-          ...b,
-          x: b.x + dx,
-          y: b.y + dy,
-        });
-      }
-    });
-  };
-
-  const handleLassoMoveEnd = (e: React.PointerEvent) => {
-    if (isDraggingSelection) {
-      setIsDraggingSelection(false);
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    }
-  };
-
-  // Scale selected strokes via corner handle
-  const handleLassoScaleStart = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    if (!selectionBounds) return;
-    setIsScalingSelection(true);
-    dragAnchor.current = { x: e.clientX, y: e.clientY };
-    originalStrokesRef.current = JSON.parse(JSON.stringify(strokes));
-    originalBoundsRef.current = { ...selectionBounds };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  };
-
-  const handleLassoScale = (e: React.PointerEvent) => {
-    if (!isScalingSelection || !originalBoundsRef.current) return;
-    e.stopPropagation();
-
-    const dx = e.clientX - dragAnchor.current.x;
-    const origW = originalBoundsRef.current.width;
-    const origH = originalBoundsRef.current.height;
-    const scaleFactor = Math.max(0.3, Math.min(3.0, (origW + dx) / origW));
-
-    const cx = originalBoundsRef.current.x;
-    const cy = originalBoundsRef.current.y;
-
-    setSelectionBounds({
-      x: cx,
-      y: cy,
-      width: origW * scaleFactor,
-      height: origH * scaleFactor,
-    });
-
-    const scaledStrokes = originalStrokesRef.current.map(s => {
-      if (!selectedStrokeIds.includes(s.id)) return s;
-      return {
-        ...s,
-        points: s.points.map(p => ({
-          ...p,
-          x: cx + (p.x - cx) * scaleFactor,
-          y: cy + (p.y - cy) * scaleFactor,
-        })),
-      };
-    });
-    onUpdateStrokes(scaledStrokes);
-  };
-
-  const handleLassoScaleEnd = (e: React.PointerEvent) => {
-    if (isScalingSelection) {
-      setIsScalingSelection(false);
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    }
-  };
-
-  // Snap to Geometric Shape (PDEDraw Auto-Shape)
-  const handleSnapToShape = () => {
-    if (selectedStrokeIds.length === 0) return;
-    const updated = strokes.map(s => {
-      if (!selectedStrokeIds.includes(s.id)) return s;
-      const detected = detectShapeFromStroke(s, PAGE_HEIGHT);
-      return {
-        ...s,
-        points: detected.points,
-      };
-    });
-    onUpdateStrokes(updated);
-  };
-
-  // Recolor selected strokes
-  const handleRecolorSelection = (color: string) => {
-    const updated = strokes.map(s => {
-      if (!selectedStrokeIds.includes(s.id)) return s;
-      return { ...s, color };
-    });
-    onUpdateStrokes(updated);
-  };
-
-  // Toggle line style: solid -> dashed -> dotted
-  const handleToggleLineStyle = (style: 'solid' | 'dashed' | 'dotted') => {
-    const updated = strokes.map(s => {
-      if (!selectedStrokeIds.includes(s.id)) return s;
-      return { ...s, lineStyle: style };
-    });
-    onUpdateStrokes(updated);
-  };
-
-  // Duplicate selected strokes
-  const handleDuplicateSelection = () => {
-    const offset = 24;
-    const duplicated: Stroke[] = strokes
-      .filter(s => selectedStrokeIds.includes(s.id))
-      .map(s => ({
-        ...s,
-        id: `stroke_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
-        points: s.points.map(p => ({ x: p.x + offset, y: p.y + offset, pressure: p.pressure })),
-      }));
-
-    onUpdateStrokes([...strokes, ...duplicated]);
-    if (selectionBounds) {
-      setSelectionBounds({
-        ...selectionBounds,
-        x: selectionBounds.x + offset,
-        y: selectionBounds.y + offset,
-      });
-      setSelectedStrokeIds(duplicated.map(d => d.id));
-    }
-  };
-
-  // Delete selected strokes
-  const handleDeleteSelection = () => {
-    selectedStrokeIds.forEach(id => onDeleteStroke(id));
-    selectedBlockIds.forEach(id => onDeleteLatexBlock(id));
-    setSelectedStrokeIds([]);
-    setSelectedBlockIds([]);
-    setSelectionBounds(null);
-  };
-
-  // Convert selected strokes to LaTeX Math or TikZ
-  const handleTriggerConvert = (mode: 'math' | 'tikz') => {
-    if (!selectionBounds || !strokeCanvasRef.current) return;
-
-    // 1. If TikZ mode and we have selected strokes, generate TikZ immediately
-    if (mode === 'tikz') {
-      const selectedStrokes = strokes.filter(s => selectedStrokeIds.includes(s.id));
-      if (selectedStrokes.length > 0) {
-        const tikzDoc = convertStrokesToTikzDocument(selectedStrokes, PAGE_HEIGHT);
-        // Create transparent vector TikZ block directly on the note
-        const newBlock: LatexBlock = {
-          id: `tikz_${Date.now()}`,
-          x: selectionBounds.x,
-          y: selectionBounds.y,
-          width: Math.max(260, selectionBounds.width),
-          height: Math.max(160, selectionBounds.height),
-          latexCode: tikzDoc,
-          isTikz: true,
-          createdAt: Date.now(),
-        };
-        onAddLatexBlock(newBlock);
-        // Delete the handwritten strokes so they are replaced by the transparent vector graphic
-        selectedStrokeIds.forEach(id => onDeleteStroke(id));
-        setSelectedStrokeIds([]);
-        setSelectionBounds(null);
-        return;
-      }
-    }
-
-    // 2. For Math or VLM transcription, crop image for VLM
-    const offscreen = document.createElement('canvas');
-    offscreen.width = selectionBounds.width;
-    offscreen.height = selectionBounds.height;
-    const offCtx = offscreen.getContext('2d');
-    if (!offCtx) return;
-
-    offCtx.fillStyle = '#FFFFFF';
-    offCtx.fillRect(0, 0, selectionBounds.width, selectionBounds.height);
-
-    const dpr = window.devicePixelRatio || 2;
-    offCtx.drawImage(
-      strokeCanvasRef.current,
-      selectionBounds.x * dpr,
-      selectionBounds.y * dpr,
-      selectionBounds.width * dpr,
-      selectionBounds.height * dpr,
-      0,
-      0,
-      selectionBounds.width,
-      selectionBounds.height
-    );
-
-    const croppedBase64 = offscreen.toDataURL('image/png');
-    onTriggerRegionLatexConvert(croppedBase64, selectionBounds, mode);
-    setSelectedStrokeIds([]);
-    setSelectionBounds(null);
-  };
-
-  // --- TRANSPARENT VECTOR SVG BLOCK DRAGGING ---
-
-  const handleBlockDragStart = (e: React.PointerEvent, block: LatexBlock) => {
-    e.stopPropagation();
-    setActiveBlockId(block.id);
-    setDraggingBlockId(block.id);
-    blockDragStartOffset.current = {
-      offsetX: e.clientX - block.x,
-      offsetY: e.clientY - block.y,
+    const start = performance.now();
+    const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
+    drawing.current = {
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      tool,
+      points: [pt],
+      predicted: [],
+      start,
+      snapped: null,
+      holdTimer: null,
+      lastMove: { x: pt.x, y: pt.y },
     };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    if (tool === 'lasso') setSelection(null);
+    if (tool === 'eraser') {
+      editor.beginGesture();
+      eraserPos.current = pt;
+      eraseAt(pt.x, pt.y);
+    }
+    requestRender();
   };
 
-  const handleBlockDragMove = (e: React.PointerEvent, block: LatexBlock) => {
-    if (draggingBlockId !== block.id) return;
+  const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const d = drawing.current;
+    if (!d) {
+      // Hover preview of the eraser (Apple Pencil hover / mouse).
+      if (tools.tool === 'eraser' && e.pointerType !== 'touch') {
+        const pt = toPoint(e, performance.now());
+        eraserPos.current = { x: pt.x, y: pt.y };
+        requestRender();
+      }
+      return;
+    }
+    if (e.pointerId !== d.pointerId) return;
+    const native = e.nativeEvent;
+    const events: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [native];
+    for (const ce of events.length ? events : [native]) {
+      const pt = toPoint(ce, d.start, stylusAngles(ce));
+      const last = d.points[d.points.length - 1];
+      if (Math.abs(pt.x - last.x) < 0.25 && Math.abs(pt.y - last.y) < 0.25) continue;
+      d.points.push(pt);
+      if (d.tool === 'eraser') {
+        eraserPos.current = pt;
+        eraseAt(pt.x, pt.y);
+      }
+    }
+    if (d.tool === 'pen' || d.tool === 'highlighter') {
+      const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
+      d.predicted = predicted.slice(0, 2).map((pe) => toPoint(pe, d.start));
+      const last = d.points[d.points.length - 1];
+      if (!d.snapped && Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
+        d.lastMove = { x: last.x, y: last.y };
+        armHoldToSnap();
+      }
+    }
+    requestRender();
+  };
+
+  const finish = (e: React.PointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
+    const d = drawing.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    if (d.holdTimer) clearTimeout(d.holdTimer);
+    drawing.current = null;
+
+    if (!cancelled && (d.tool === 'pen' || d.tool === 'highlighter')) {
+      const style = liveStyle(d.tool);
+      const stroke: Stroke = {
+        id: newId('stroke'),
+        tool: d.tool,
+        color: style.color,
+        width: style.width,
+        opacity: 1,
+        penStyle: style.penStyle,
+        lineStyle: 'solid',
+        points: d.snapped ? d.snapped.points : d.points,
+        ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
+      };
+      editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
+    } else if (d.tool === 'eraser') {
+      editor.endGesture();
+      if (e.pointerType === 'touch') eraserPos.current = null;
+    } else if (!cancelled && d.tool === 'lasso') {
+      if (d.points.length > 3) setSelection(selectInLasso(page, d.points));
+    }
+    // Keep the live stroke on screen until the committed canvas has painted it (avoids flicker).
+    requestAnimationFrame(() => requestRender());
+  };
+
+  // ------------------------------------------------------------------ selection transform
+  const transform = useRef<{ mode: 'move' | 'scale'; startX: number; startY: number; snapshot: NotePage; sel: Selection; pointerId: number } | null>(null);
+  const [liveBounds, setLiveBounds] = useState<Selection['bounds'] | null>(null);
+  const shownBounds = liveBounds ?? selection?.bounds ?? null;
+
+  const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale') => {
+    if (!selection) return;
+    if (e.pointerType === 'touch' && tools.stylusOnly && mode === 'move' && gestures.touches > 1) return;
     e.stopPropagation();
-    const newX = Math.max(10, Math.min(PAGE_WIDTH - 60, e.clientX - blockDragStartOffset.current.offsetX));
-    const newY = Math.max(10, Math.min(PAGE_HEIGHT - 40, e.clientY - blockDragStartOffset.current.offsetY));
-    onUpdateLatexBlock({
-      ...block,
-      x: newX,
-      y: newY,
-    });
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    editor.beginGesture();
+    transform.current = { mode, startX: e.clientX, startY: e.clientY, snapshot: page, sel: selection, pointerId: e.pointerId };
   };
 
-  const handleBlockDragEnd = (e: React.PointerEvent) => {
-    if (draggingBlockId) {
-      setDraggingBlockId(null);
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+  const moveTransform = (e: React.PointerEvent) => {
+    const t = transform.current;
+    if (!t || e.pointerId !== t.pointerId) return;
+    e.stopPropagation();
+    const dx = (e.clientX - t.startX) / zoom;
+    const dy = (e.clientY - t.startY) / zoom;
+    const b = t.sel.bounds;
+    if (t.mode === 'move') {
+      editor.previewPage(page.id, () => transformSelection(t.snapshot, t.sel, dx, dy, 1));
+      setLiveBounds({ ...b, x: b.x + dx, y: b.y + dy });
+    } else {
+      const f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
+      editor.previewPage(page.id, () => transformSelection(t.snapshot, t.sel, 0, 0, f));
+      setLiveBounds({ ...b, width: b.width * f, height: b.height * f });
     }
   };
+
+  const endTransform = (e: React.PointerEvent) => {
+    const t = transform.current;
+    if (!t || e.pointerId !== t.pointerId) return;
+    transform.current = null;
+    editor.endGesture();
+    if (liveBounds) setSelection({ ...t.sel, bounds: liveBounds });
+    setLiveBounds(null);
+  };
+
+  // ------------------------------------------------------------------ render
+  const blocksInteractive = tools.tool === 'lasso' || tools.tool === 'text';
+  const pageStyle: React.CSSProperties = {
+    width: PAGE_WIDTH,
+    height: PAGE_HEIGHT,
+    ...paperBackground(paperStyle, paperColor),
+  };
+
+  const latexHandlers = (b: LatexBlock) => ({
+    onSelect: () => {
+      if (tools.tool === 'lasso') {
+        setSelection(singleBlockSelection(page, 'latex', b.id));
+        setSelectedBlockId(null);
+      } else setSelectedBlockId(b.id);
+    },
+    onEdit: () => onEditLatex(page.id, b),
+    onDelete: () => {
+      setSelectedBlockId(null);
+      editor.commitPage(page.id, (p) => ({ ...p, latexBlocks: p.latexBlocks.filter((x) => x.id !== b.id) }));
+    },
+    onSilentUpdate: (patch: Partial<LatexBlock>) =>
+      editor.silentPage(page.id, (p) => ({ ...p, latexBlocks: p.latexBlocks.map((x) => (x.id === b.id ? { ...x, ...patch } : x)) })),
+  });
 
   return (
-    <div className="relative mb-8 flex justify-center select-none">
-      <div
-        className="relative bg-white shadow-2xl rounded-sm overflow-hidden border border-gray-300 dark:border-gray-800"
-        style={{ width: `${PAGE_WIDTH}px`, height: `${PAGE_HEIGHT}px` }}
-      >
-        {/* Layer 1: Paper Background */}
-        <canvas ref={bgCanvasRef} className="absolute inset-0 pointer-events-none" />
+    <div
+      ref={containerRef}
+      className="on-page relative select-none shadow-[0_4px_24px_rgba(0,0,0,0.12)] rounded-[3px] overflow-hidden"
+      style={pageStyle}
+      data-page-index={pageIndex}
+    >
+      {printMode ? (
+        <svg className="absolute inset-0" width={PAGE_WIDTH} height={PAGE_HEIGHT} viewBox={`0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}`}
+          dangerouslySetInnerHTML={{
+            __html: [...page.strokes.filter((s) => s.tool === 'highlighter'), ...page.strokes.filter((s) => s.tool !== 'highlighter')].map((s) => strokeToSvg(s)).join(''),
+          }}
+        />
+      ) : visible ? (
+        <canvas ref={strokeCanvasRef} className="absolute inset-0 pointer-events-none" style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />
+      ) : null}
 
-        {/* Layer 2: Committed Ink Strokes */}
-        <canvas ref={strokeCanvasRef} className="absolute inset-0 pointer-events-none" />
+      {/* Typed / converted content */}
+      {(page.imageBlocks ?? []).map((im) => (
+        <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
+      ))}
+      {page.latexBlocks.map((b) => (
+        <LatexBlockView
+          key={b.id}
+          block={b}
+          inkColor={defaultInk}
+          darkPaper={darkPaper}
+          interactive={blocksInteractive && !printMode}
+          selected={selectedBlockId === b.id}
+          zoom={zoom}
+          measure={!printMode}
+          {...latexHandlers(b)}
+        />
+      ))}
+      {(page.textBlocks ?? []).map((t) => (
+        <TextBlockView
+          key={t.id}
+          block={t}
+          interactive={blocksInteractive && !printMode}
+          editing={editingTextId === t.id}
+          selected={false}
+          zoom={zoom}
+          darkPaper={darkPaper}
+          onStartEdit={() => {
+            if (tools.tool === 'lasso') setSelection(singleBlockSelection(page, 'text', t.id));
+            else setEditingTextId(t.id);
+          }}
+          onCommit={(text) => {
+            setEditingTextId(null);
+            if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
+            else if (text !== t.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
+          }}
+          onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
+          onSilentUpdate={() => undefined}
+        />
+      ))}
 
-        {/* Layer 3: Interactive Drawing / Stylus Canvas */}
+      {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
+      {visible && !printMode && (
         <canvas
           ref={activeCanvasRef}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          className="absolute inset-0 cursor-crosshair touch-none"
+          className="absolute inset-0 z-10"
+          style={{
+            width: PAGE_WIDTH,
+            height: PAGE_HEIGHT,
+            touchAction: 'none',
+            pointerEvents: tools.tool === 'hand' ? 'none' : 'auto',
+            cursor: tools.tool === 'text' ? 'text' : tools.tool === 'eraser' ? 'cell' : 'crosshair',
+          }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={(e) => finish(e, false)}
+          onPointerCancel={(e) => finish(e, true)}
+          onPointerLeave={() => {
+            if (!drawing.current && eraserPos.current) {
+              eraserPos.current = null;
+              requestRender();
+            }
+          }}
         />
+      )}
 
-        {/* Layer 4: Transparent Vector SVG Math & TikZ Blocks (NO WINDOW FRAME, PURE VECTOR) */}
-        {latexBlocks.map(block => {
-          const isSelected = activeBlockId === block.id;
-
-          // Pure vector SVG or transparent KaTeX
-          const contentSvg = block.isTikz
-            ? compileTikzToSvg(block.latexCode, block.width, block.height)
-            : renderLatexToHtml(block.latexCode);
-
-          return (
-            <div
-              key={block.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                setActiveBlockId(block.id);
-              }}
-              className={`absolute select-none touch-none z-20 group transition-all duration-75 ${
-                isSelected
-                  ? 'ring-2 ring-blue-500/80 ring-offset-2 ring-offset-transparent'
-                  : 'hover:ring-1 hover:ring-blue-400/40'
-              }`}
-              style={{
-                left: `${block.x}px`,
-                top: `${block.y}px`,
-                width: `${block.width}px`,
-                height: `${block.height}px`,
-                background: 'transparent',
-              }}
-            >
-              {/* Minimalist Floating Action Pill (Visible on selection or hover) */}
-              {isSelected && (
-                <div
-                  className="absolute -top-10 left-1/2 -translate-x-1/2 flex items-center space-x-1.5 bg-gray-900/90 dark:bg-[#1C1C1E]/95 text-white px-2.5 py-1 rounded-full shadow-xl text-xs z-30 backdrop-blur-md"
-                  onPointerDown={(e) => e.stopPropagation()}
-                >
-                  <button
-                    onPointerDown={(e) => handleBlockDragStart(e, block)}
-                    onPointerMove={(e) => handleBlockDragMove(e, block)}
-                    onPointerUp={handleBlockDragEnd}
-                    className="p-1 hover:text-blue-400 cursor-grab active:cursor-grabbing rounded"
-                    title="Move Vector Block"
-                  >
-                    <Move className="w-3.5 h-3.5" />
-                  </button>
-                  <div className="w-[1px] h-3 bg-gray-600" />
-                  <button
-                    onClick={() => navigator.clipboard.writeText(block.latexCode)}
-                    className="p-1 hover:text-blue-400 rounded"
-                    title="Copy LaTeX / TikZ Source"
-                  >
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
-                  <button
-                    onClick={() => onDeleteLatexBlock(block.id)}
-                    className="p-1 hover:text-red-400 rounded"
-                    title="Delete Vector Block"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {/* Move Handle (Top-left corner indicator on selection) */}
-              {isSelected && (
-                <div
-                  onPointerDown={(e) => handleBlockDragStart(e, block)}
-                  onPointerMove={(e) => handleBlockDragMove(e, block)}
-                  onPointerUp={handleBlockDragEnd}
-                  className="absolute -top-2.5 -left-2.5 w-5 h-5 bg-blue-600 text-white rounded-full flex items-center justify-center cursor-grab active:cursor-grabbing shadow-md z-30"
-                >
-                  <Move className="w-3 h-3" />
-                </div>
-              )}
-
-              {/* Pure Transparent Vector SVG Graphic Content */}
-              {block.isTikz ? (
-                <div
-                  className="w-full h-full flex items-center justify-center overflow-visible pointer-events-none"
-                  dangerouslySetInnerHTML={{ __html: contentSvg }}
-                />
-              ) : (
-                <div
-                  className="w-full h-full flex items-center justify-center text-gray-900 dark:text-gray-100 text-xl font-serif pointer-events-none"
-                  style={{ background: 'transparent' }}
-                  dangerouslySetInnerHTML={{ __html: contentSvg }}
-                />
-              )}
-            </div>
-          );
-        })}
-
-        {/* Layer 5: Advanced Lasso Selection Bounding Box & Floating Toolbar (PDEDraw Architecture) */}
-        {selectionBounds && (
+      {/* Lasso selection box */}
+      {shownBounds && selection && !printMode && (
+        <div
+          className="absolute z-20 border-2 border-dashed border-blue-500 bg-blue-500/5 rounded-lg cursor-move"
+          style={{ left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none' }}
+          onPointerDown={(e) => startTransform(e, 'move')}
+          onPointerMove={moveTransform}
+          onPointerUp={endTransform}
+          onPointerCancel={endTransform}
+        >
           <div
-            className="absolute border-2 border-dashed border-blue-500 bg-blue-500/5 rounded-xl pointer-events-auto z-30"
-            style={{
-              left: `${selectionBounds.x}px`,
-              top: `${selectionBounds.y}px`,
-              width: `${selectionBounds.width}px`,
-              height: `${selectionBounds.height}px`,
-            }}
-            onPointerDown={handleLassoMoveStart}
-            onPointerMove={handleLassoMove}
-            onPointerUp={handleLassoMoveEnd}
+            className="absolute -right-3 -bottom-3 w-7 h-7 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md cursor-nwse-resize"
+            style={{ transform: `scale(${Math.max(1, 1 / zoom)})`, touchAction: 'none' }}
+            onPointerDown={(e) => startTransform(e, 'scale')}
+            onPointerMove={moveTransform}
+            onPointerUp={endTransform}
+            onPointerCancel={endTransform}
           >
-            {/* Center Drag Cursor */}
-            <div className="absolute inset-0 cursor-move" />
-
-            {/* Scale Handle in Bottom-Right Corner */}
-            <div
-              onPointerDown={handleLassoScaleStart}
-              onPointerMove={handleLassoScale}
-              onPointerUp={handleLassoScaleEnd}
-              className="absolute -bottom-2 -right-2 w-5 h-5 bg-blue-600 text-white rounded-full flex items-center justify-center cursor-nwse-resize shadow-md z-40 hover:scale-125 transition"
-              title="Scale Selected Strokes"
-            >
-              <Maximize2 className="w-3 h-3" />
-            </div>
-
-            {/* Advanced PDEDraw / Notability Floating Toolbar */}
-            <div
-              className="absolute -top-12 left-1/2 -translate-x-1/2 flex items-center space-x-1.5 bg-gray-900/95 dark:bg-[#1C1C1E]/95 text-white px-3 py-1.5 rounded-full shadow-2xl text-xs font-semibold whitespace-nowrap z-40 backdrop-blur-md border border-white/10"
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              {/* LaTeX Math Conversion (Notes2LaTeX) */}
-              <button
-                onClick={() => handleTriggerConvert('math')}
-                className="flex items-center space-x-1 px-2.5 py-1 bg-blue-600 hover:bg-blue-500 rounded-full transition shadow-xs text-white"
-                title="Convert handwriting to clean LaTeX formula"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-yellow-300" />
-                <span>LaTeX Math</span>
-              </button>
-
-              {/* TikZ Diagram Conversion */}
-              <button
-                onClick={() => handleTriggerConvert('tikz')}
-                className="flex items-center space-x-1 px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded-full transition shadow-xs text-white"
-                title="Convert sketch to pure transparent TikZ vector diagram"
-              >
-                <Share2 className="w-3.5 h-3.5 text-green-300" />
-                <span>TikZ Diagram</span>
-              </button>
-
-              <div className="w-[1px] h-4 bg-gray-700" />
-
-              {/* Snap to Shape (PDEDraw Auto-Shape) */}
-              <button
-                onClick={handleSnapToShape}
-                className="p-1 hover:text-blue-400 rounded"
-                title="Snap to geometric shape (Line, Ellipse, Rectangle, Triangle)"
-              >
-                <Shapes className="w-3.5 h-3.5" />
-              </button>
-
-              {/* Color Palette Picker */}
-              <div className="flex items-center space-x-1 px-1">
-                {['#000000', '#3B82F6', '#EF4444', '#10B981', '#A855F7'].map(c => (
-                  <button
-                    key={c}
-                    onClick={() => handleRecolorSelection(c)}
-                    className="w-3.5 h-3.5 rounded-full border border-white/30 hover:scale-125 transition"
-                    style={{ backgroundColor: c }}
-                    title={`Recolor: ${c}`}
-                  />
-                ))}
-              </div>
-
-              {/* Line Style Toggles */}
-              <button
-                onClick={() => handleToggleLineStyle('dashed')}
-                className="px-1.5 py-0.5 text-[10px] text-gray-300 hover:text-white border border-gray-700 rounded"
-                title="Convert to Dashed line"
-              >
-                ---
-              </button>
-              <button
-                onClick={() => handleToggleLineStyle('dotted')}
-                className="px-1.5 py-0.5 text-[10px] text-gray-300 hover:text-white border border-gray-700 rounded"
-                title="Convert to Dotted line"
-              >
-                ···
-              </button>
-
-              <div className="w-[1px] h-4 bg-gray-700" />
-
-              {/* Duplicate */}
-              <button
-                onClick={handleDuplicateSelection}
-                className="p-1 hover:text-blue-400 rounded"
-                title="Duplicate Selection"
-              >
-                <Copy className="w-3.5 h-3.5" />
-              </button>
-
-              {/* Delete */}
-              <button
-                onClick={handleDeleteSelection}
-                className="p-1 hover:text-red-400 rounded"
-                title="Delete Selection"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            <Maximize2 className="w-3.5 h-3.5" />
           </div>
-        )}
-
-        {/* Page Footer */}
-        <div className="absolute bottom-2 right-4 text-[11px] font-medium text-gray-400 select-none">
-          Page {pageNumber}
         </div>
-      </div>
+      )}
+
+      {!printMode && (
+        <div className="absolute bottom-2 right-4 text-[11px] font-medium text-gray-400 pointer-events-none">{pageIndex + 1}</div>
+      )}
     </div>
   );
 };

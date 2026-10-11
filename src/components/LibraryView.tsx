@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  FileText, Plus, Search, Folder, MoreVertical, Trash2, Edit2,
-  Calendar, Layers, Sparkles, BookOpen, Clock, Settings as SettingsIcon,
-  Grid as GridIcon, List as ListIcon, Check, Copy
+  FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Clock, Settings as SettingsIcon,
+  Grid as GridIcon, List as ListIcon, Copy, Menu, X, FolderInput, Upload, Download,
 } from 'lucide-react';
-import { NoteDocument, Subject } from '../types';
+import { NoteDocument, PAGE_HEIGHT, PAGE_WIDTH, Subject } from '../types';
+import { drawStrokes } from '../ink/strokeRenderer';
+import { paperBackground } from './CanvasPage';
 
 interface LibraryViewProps {
   notes: NoteDocument[];
@@ -16,379 +17,239 @@ interface LibraryViewProps {
   onDeleteNote: (noteId: string) => void;
   onDuplicateNote: (noteId: string) => void;
   onRenameNote: (noteId: string, newTitle: string) => void;
+  onMoveNote: (noteId: string, subjectId: string | undefined) => void;
   onCreateSubject: (name: string, color: string) => void;
+  onDeleteSubject: (subjectId: string) => void;
   onOpenSettings: () => void;
+  onBackup: () => void;
+  onImport: (file: File) => void;
 }
 
-export const LibraryView: React.FC<LibraryViewProps> = ({
-  notes,
-  subjects,
-  selectedSubjectId,
-  onSelectSubject,
-  onOpenNote,
-  onCreateNote,
-  onDeleteNote,
-  onDuplicateNote,
-  onRenameNote,
-  onCreateSubject,
-  onOpenSettings,
-}) => {
+const NoteThumb: React.FC<{ note: NoteDocument }> = ({ note }) => {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLCanvasElement>(null);
+  const [scale, setScale] = useState(0.2);
+  const page = note.pages[0];
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setScale(el.clientWidth / PAGE_WIDTH));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c || !page) return;
+    const r = Math.min(2, window.devicePixelRatio || 1) * scale;
+    c.width = Math.round(PAGE_WIDTH * r);
+    c.height = Math.round(PAGE_HEIGHT * r);
+    const ctx = c.getContext('2d')!;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+    for (const t of page.textBlocks ?? []) {
+      ctx.fillStyle = note.paperColor === 'dark' ? '#e5e7eb' : '#374151';
+      ctx.font = `${t.fontSize}px sans-serif`;
+      ctx.fillText(t.text.slice(0, 80), t.x, t.y + t.fontSize, t.width);
+    }
+    for (const b of page.latexBlocks) {
+      ctx.fillStyle = 'rgba(37,99,235,0.14)';
+      ctx.fillRect(b.x, b.y, b.width, b.height);
+    }
+    for (const im of page.imageBlocks ?? []) {
+      ctx.fillStyle = 'rgba(107,114,128,0.2)';
+      ctx.fillRect(im.x, im.y, im.width, im.height);
+    }
+    drawStrokes(ctx, page.strokes);
+  }, [page, note.paperColor, scale]);
+  return (
+    <div ref={wrapRef} className="w-full overflow-hidden relative" style={{ height: Math.min(192, PAGE_HEIGHT * scale) }}>
+      <div style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(note.paperStyle, note.paperColor) }}>
+        <canvas ref={ref} style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />
+      </div>
+    </div>
+  );
+};
+
+export const LibraryView: React.FC<LibraryViewProps> = (p) => {
+  const { notes, subjects, selectedSubjectId } = p;
   const [searchQuery, setSearchQuery] = useState('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [newSubjectName, setNewSubjectName] = useState('');
   const [isAddingSubject, setIsAddingSubject] = useState(false);
-  const [activeMenuNoteId, setActiveMenuNoteId] = useState<string | null>(null);
+  const [menuNoteId, setMenuNoteId] = useState<string | null>(null);
+  const [moveNoteId, setMoveNoteId] = useState<string | null>(null);
   const [renamingNoteId, setRenamingNoteId] = useState<string | null>(null);
   const [renameTitle, setRenameTitle] = useState('');
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
 
-  // Filter notes by search and subject
-  const filteredNotes = notes.filter((n) => {
-    const matchesSearch = n.title.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesSubject =
-      selectedSubjectId === null ||
-      (selectedSubjectId === 'all' ? true : n.subjectId === selectedSubjectId);
-    return matchesSearch && matchesSubject;
-  });
+  const filteredNotes = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return notes.filter((n) => {
+      if (selectedSubjectId && n.subjectId !== selectedSubjectId) return false;
+      if (!q) return true;
+      if (n.title.toLowerCase().includes(q)) return true;
+      return n.pages.some(
+        (pg) => (pg.textBlocks ?? []).some((t) => t.text.toLowerCase().includes(q)) || pg.latexBlocks.some((b) => b.latexCode.toLowerCase().includes(q))
+      );
+    });
+  }, [notes, selectedSubjectId, searchQuery]);
 
-  const currentSubject = subjects.find((s) => s.id === selectedSubjectId);
-  const subjectTitle =
-    selectedSubjectId === null || selectedSubjectId === 'all'
-      ? 'All Notes'
-      : currentSubject?.name || 'Notes';
+  const subjectTitle = selectedSubjectId ? subjects.find((s) => s.id === selectedSubjectId)?.name ?? 'Notes' : 'All Notes';
 
-  const handleAddSubject = (e: React.FormEvent) => {
+  const addSubject = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newSubjectName.trim()) return;
-    const colors = ['#1A73E8', '#10B981', '#9333EA', '#F59E0B', '#EF4444', '#EC4899'];
-    const chosenColor = colors[Math.floor(Math.random() * colors.length)];
-    onCreateSubject(newSubjectName.trim(), chosenColor);
+    const colors = ['#1A73E8', '#10B981', '#9333EA', '#F59E0B', '#EF4444', '#EC4899', '#0EA5E9'];
+    p.onCreateSubject(newSubjectName.trim(), colors[subjects.length % colors.length]);
     setNewSubjectName('');
     setIsAddingSubject(false);
   };
 
-  const handleStartRename = (note: NoteDocument) => {
-    setRenamingNoteId(note.id);
-    setRenameTitle(note.title);
-    setActiveMenuNoteId(null);
-  };
-
-  const handleSaveRename = (id: string) => {
-    if (renameTitle.trim()) {
-      onRenameNote(id, renameTitle.trim());
-    }
+  const saveRename = (id: string) => {
+    if (renameTitle.trim()) p.onRenameNote(id, renameTitle.trim());
     setRenamingNoteId(null);
   };
 
-  return (
-    <div className="h-full flex bg-[#F2F2F7] dark:bg-[#121214] text-gray-900 dark:text-gray-100 select-none overflow-hidden">
-      {/* Left Sidebar (The Classic Notability Dark/Navy Shelf) */}
-      <aside className="w-64 md:w-72 bg-[#E5E5EA]/70 dark:bg-[#1C1C1E] border-r border-gray-300 dark:border-gray-800 flex flex-col p-4 flex-shrink-0">
-        {/* App Title & Logo */}
-        <div className="flex items-center justify-between mb-5 px-2">
-          <div className="flex items-center space-x-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md font-bold text-lg">
-              O
-            </div>
-            <span className="font-bold text-lg tracking-tight text-gray-900 dark:text-gray-100">
-              OpenNote
-            </span>
-          </div>
-          <button
-            onClick={onOpenSettings}
-            className="p-1.5 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 rounded-lg transition"
-            title="Settings"
-          >
-            <SettingsIcon className="w-4 h-4" />
-          </button>
-        </div>
+  const confirmDelete = (n: NoteDocument) => {
+    if (window.confirm(`Delete “${n.title}”? This cannot be undone.`)) p.onDeleteNote(n.id);
+    setMenuNoteId(null);
+  };
 
-        {/* Search Bar */}
-        <div className="relative mb-5">
-          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search notes..."
-            className="w-full bg-white dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl pl-9 pr-3 py-1.5 text-xs text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs"
-          />
-        </div>
-
-        {/* Standard Folders */}
-        <div className="space-y-1 mb-6">
-          <button
-            onClick={() => onSelectSubject(null)}
-            className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition ${
-              selectedSubjectId === null || selectedSubjectId === 'all'
-                ? 'bg-blue-600 text-white shadow-xs'
-                : 'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-800'
-            }`}
-          >
-            <div className="flex items-center space-x-2.5">
-              <BookOpen className="w-4 h-4" />
-              <span>All Notes</span>
-            </div>
-            <span className="text-[11px] opacity-80">{notes.length}</span>
-          </button>
-        </div>
-
-        {/* Subjects / Dividers Section */}
-        <div className="flex-1 overflow-y-auto space-y-1 pr-1">
-          <div className="flex items-center justify-between px-2 mb-2 text-[11px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-            <span>SUBJECTS</span>
-            <button
-              onClick={() => setIsAddingSubject(true)}
-              className="hover:text-blue-600 transition"
-              title="Add Subject"
-            >
-              <Plus className="w-3.5 h-3.5" />
+  const NoteMenu: React.FC<{ note: NoteDocument; up?: boolean }> = ({ note, up }) => (
+    <div className={`absolute right-0 ${up ? 'bottom-8' : 'top-8'} bg-white dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl py-1 w-44 z-30 text-sm`} onClick={(e) => e.stopPropagation()}>
+      {moveNoteId === note.id ? (
+        <>
+          <button onClick={() => { p.onMoveNote(note.id, undefined); setMoveNoteId(null); setMenuNoteId(null); }} className="w-full px-3 py-2 text-left hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500">No subject</button>
+          {subjects.map((s) => (
+            <button key={s.id} onClick={() => { p.onMoveNote(note.id, s.id); setMoveNoteId(null); setMenuNoteId(null); }} className="w-full px-3 py-2 flex items-center gap-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200">
+              <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: s.color }} /> {s.name}
             </button>
-          </div>
+          ))}
+        </>
+      ) : (
+        <>
+          <button onClick={() => { setRenamingNoteId(note.id); setRenameTitle(note.title); setMenuNoteId(null); }} className="w-full px-3 py-2 flex items-center gap-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"><Edit2 className="w-4 h-4" /> Rename</button>
+          <button onClick={() => setMoveNoteId(note.id)} className="w-full px-3 py-2 flex items-center gap-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"><FolderInput className="w-4 h-4" /> Move to…</button>
+          <button onClick={() => { p.onDuplicateNote(note.id); setMenuNoteId(null); }} className="w-full px-3 py-2 flex items-center gap-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"><Copy className="w-4 h-4" /> Duplicate</button>
+          <button onClick={() => confirmDelete(note)} className="w-full px-3 py-2 flex items-center gap-2 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600"><Trash2 className="w-4 h-4" /> Delete</button>
+        </>
+      )}
+    </div>
+  );
 
-          {isAddingSubject && (
-            <form onSubmit={handleAddSubject} className="mb-2 px-1">
-              <input
-                type="text"
-                autoFocus
-                value={newSubjectName}
-                onChange={(e) => setNewSubjectName(e.target.value)}
-                placeholder="Subject name..."
-                onBlur={() => setIsAddingSubject(false)}
-                className="w-full text-xs p-1.5 bg-white dark:bg-[#2C2C2E] border border-blue-500 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none"
-              />
-            </form>
-          )}
-
-          {subjects.map((subj) => {
-            const count = notes.filter((n) => n.subjectId === subj.id).length;
-            const isSelected = selectedSubjectId === subj.id;
-            return (
-              <button
-                key={subj.id}
-                onClick={() => onSelectSubject(subj.id)}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition ${
-                  isSelected
-                    ? 'bg-white dark:bg-[#2C2C2E] text-blue-600 dark:text-blue-400 shadow-xs font-semibold'
-                    : 'text-gray-700 dark:text-gray-300 hover:bg-gray-200/50 dark:hover:bg-gray-800'
-                }`}
-              >
-                <div className="flex items-center space-x-2.5 truncate">
-                  <span
-                    className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: subj.color }}
-                  />
-                  <span className="truncate">{subj.name}</span>
-                </div>
-                <span className="text-[11px] text-gray-400 ml-2">{count}</span>
-              </button>
-            );
-          })}
+  const sidebar = (
+    <aside className="w-72 h-full bg-[#ECECF1] dark:bg-[#1C1C1E] border-r border-gray-300 dark:border-gray-800 flex flex-col p-4 pt-[calc(1rem+env(safe-area-inset-top))]">
+      <div className="flex items-center justify-between mb-4 px-1">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow font-bold text-lg">O</div>
+          <span className="font-bold text-lg text-gray-900 dark:text-gray-100">OpenNote</span>
         </div>
-
-        {/* Offline Badge & New Note Footer Action */}
-        <div className="pt-3 border-t border-gray-300/60 dark:border-gray-800 text-[11px] text-gray-400 flex items-center justify-between">
-          <span className="flex items-center space-x-1">
-            <span className="w-2 h-2 rounded-full bg-green-500"></span>
-            <span>Offline Ready</span>
-          </span>
-          <span>v1.0.0</span>
+        <div className="flex items-center">
+          <button onClick={p.onOpenSettings} className="p-2 text-gray-500 rounded-lg" title="Settings"><SettingsIcon className="w-4 h-4" /></button>
+          <button onClick={() => setDrawerOpen(false)} className="p-2 text-gray-500 rounded-lg md:hidden"><X className="w-4 h-4" /></button>
         </div>
-      </aside>
-
-      {/* Main Note Grid / List */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-[#1C1C1E]">
-        {/* Header Bar */}
-        <header className="h-16 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between px-6 flex-shrink-0">
-          <div className="flex items-center space-x-3">
-            <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">{subjectTitle}</h1>
-            <span className="text-xs font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 px-2 py-0.5 rounded-full">
-              {filteredNotes.length} notes
-            </span>
-          </div>
-
-          <div className="flex items-center space-x-3">
-            {/* View Mode Toggle */}
-            <div className="flex items-center bg-gray-100 dark:bg-[#2C2C2E] p-1 rounded-xl">
-              <button
-                onClick={() => setViewMode('grid')}
-                className={`p-1.5 rounded-lg ${
-                  viewMode === 'grid'
-                    ? 'bg-white dark:bg-[#3A3A3C] text-blue-600 shadow-xs'
-                    : 'text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                <GridIcon className="w-4 h-4" />
+      </div>
+      <div className="relative mb-4">
+        <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
+        <input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder="Search titles, text, LaTeX…" className="w-full bg-white dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl pl-9 pr-3 py-2 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 select-text" />
+      </div>
+      <button onClick={() => { p.onSelectSubject(null); setDrawerOpen(false); }} className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-semibold mb-4 ${selectedSubjectId === null ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-gray-800'}`}>
+        <span className="flex items-center gap-2.5"><BookOpen className="w-4 h-4" /> All Notes</span>
+        <span className="text-xs opacity-80">{notes.length}</span>
+      </button>
+      <div className="flex items-center justify-between px-2 mb-2 text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+        <span>Subjects</span>
+        <button onClick={() => setIsAddingSubject(true)} className="hover:text-blue-600" title="Add subject"><Plus className="w-4 h-4" /></button>
+      </div>
+      <div className="flex-1 overflow-y-auto space-y-0.5">
+        {isAddingSubject && (
+          <form onSubmit={addSubject} className="mb-2 px-1">
+            <input autoFocus value={newSubjectName} onChange={(e) => setNewSubjectName(e.target.value)} onBlur={() => setIsAddingSubject(false)} placeholder="Subject name" className="w-full text-sm p-2 bg-white dark:bg-[#2C2C2E] border border-blue-500 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none select-text" />
+          </form>
+        )}
+        {subjects.map((s) => {
+          const count = notes.filter((n) => n.subjectId === s.id).length;
+          const active = selectedSubjectId === s.id;
+          return (
+            <div key={s.id} className={`group flex items-center rounded-xl ${active ? 'bg-white dark:bg-[#2C2C2E] shadow-sm' : 'hover:bg-gray-200/50 dark:hover:bg-gray-800'}`}>
+              <button onClick={() => { p.onSelectSubject(s.id); setDrawerOpen(false); }} className={`flex-1 flex items-center justify-between px-3 py-2 text-sm min-w-0 ${active ? 'text-blue-600 dark:text-blue-400 font-semibold' : 'text-gray-700 dark:text-gray-300'}`}>
+                <span className="flex items-center gap-2.5 truncate"><span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: s.color }} /><span className="truncate">{s.name}</span></span>
+                <span className="text-xs text-gray-400 ml-2">{count}</span>
               </button>
-              <button
-                onClick={() => setViewMode('list')}
-                className={`p-1.5 rounded-lg ${
-                  viewMode === 'list'
-                    ? 'bg-white dark:bg-[#3A3A3C] text-blue-600 shadow-xs'
-                    : 'text-gray-400 hover:text-gray-600'
-                }`}
-              >
-                <ListIcon className="w-4 h-4" />
-              </button>
+              <button onClick={() => window.confirm(`Delete subject “${s.name}”? Its notes are kept under All Notes.`) && p.onDeleteSubject(s.id)} className="p-1.5 mr-1 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100" title="Delete subject"><Trash2 className="w-3.5 h-3.5" /></button>
             </div>
+          );
+        })}
+      </div>
+      <div className="pt-3 border-t border-gray-300/60 dark:border-gray-800 flex items-center justify-between text-xs text-gray-500">
+        <button onClick={p.onBackup} className="flex items-center gap-1.5 hover:text-blue-600" title="Export all notes"><Download className="w-3.5 h-3.5" /> Backup</button>
+        <button onClick={() => importRef.current?.click()} className="flex items-center gap-1.5 hover:text-blue-600" title="Import .opennote / backup"><Upload className="w-3.5 h-3.5" /> Import</button>
+        <span className="text-gray-400">v1.1</span>
+        <input ref={importRef} type="file" accept=".opennote,.json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) p.onImport(f); e.target.value = ''; }} />
+      </div>
+    </aside>
+  );
 
-            {/* + New Note Button (The Iconic Notability Action Button) */}
-            <button
-              onClick={() => onCreateNote(selectedSubjectId || undefined)}
-              className="flex items-center space-x-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-2 rounded-xl text-xs font-semibold shadow-md active:scale-95 transition"
-            >
-              <Plus className="w-4 h-4" />
-              <span>New Note</span>
+  return (
+    <div className="h-full flex bg-[#F2F2F7] dark:bg-[#121214] text-gray-900 dark:text-gray-100 select-none overflow-hidden" onClick={() => setMenuNoteId(null)}>
+      <div className="hidden md:block flex-shrink-0">{sidebar}</div>
+      {drawerOpen && (
+        <div className="md:hidden fixed inset-0 z-40 flex" onClick={() => setDrawerOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="shadow-2xl">{sidebar}</div>
+          <div className="flex-1 bg-black/30" />
+        </div>
+      )}
+
+      <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-[#1C1C1E]">
+        <header className="border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 px-3 sm:px-6 py-3 flex-shrink-0 pt-[calc(0.75rem+env(safe-area-inset-top))] md:pt-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={(e) => { e.stopPropagation(); setDrawerOpen(true); }} className="md:hidden p-2 -ml-1 text-gray-600 dark:text-gray-300"><Menu className="w-5 h-5" /></button>
+            <h1 className="text-lg sm:text-xl font-bold truncate">{subjectTitle}</h1>
+            <span className="text-xs font-semibold bg-gray-100 dark:bg-gray-800 text-gray-500 px-2 py-0.5 rounded-full">{filteredNotes.length}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className="hidden sm:flex items-center bg-gray-100 dark:bg-[#2C2C2E] p-1 rounded-xl">
+              <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-lg ${viewMode === 'grid' ? 'bg-white dark:bg-[#3A3A3C] text-blue-600 shadow-sm' : 'text-gray-400'}`}><GridIcon className="w-4 h-4" /></button>
+              <button onClick={() => setViewMode('list')} className={`p-1.5 rounded-lg ${viewMode === 'list' ? 'bg-white dark:bg-[#3A3A3C] text-blue-600 shadow-sm' : 'text-gray-400'}`}><ListIcon className="w-4 h-4" /></button>
+            </div>
+            <button onClick={() => p.onCreateNote(selectedSubjectId ?? undefined)} className="flex items-center gap-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-3.5 py-2 rounded-xl text-sm font-semibold shadow active:scale-95 transition">
+              <Plus className="w-4 h-4" /> <span>New</span>
             </button>
           </div>
         </header>
 
-        {/* Note Cards Container */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-3 sm:p-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]" style={{ touchAction: 'pan-y' }}>
           {filteredNotes.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-gray-400">
               <FileText className="w-12 h-12 stroke-[1.2] mb-3 text-gray-300 dark:text-gray-600" />
-              <div className="font-semibold text-sm">No notes found</div>
-              <p className="text-xs mt-1 text-gray-400">
-                Click "+ New Note" above to start handwriting and LaTeXing!
-              </p>
+              <div className="font-semibold text-sm">No notes</div>
+              <p className="text-xs mt-1">Tap “New” to start writing.</p>
             </div>
           ) : viewMode === 'grid' ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3 sm:gap-5">
               {filteredNotes.map((note) => {
-                const noteSubject = subjects.find((s) => s.id === note.subjectId);
-                const hasStrokes = note.pages.some((p) => p.strokes.length > 0);
-                const hasLatex = note.pages.some((p) => p.latexBlocks.length > 0);
-
+                const subj = subjects.find((s) => s.id === note.subjectId);
                 return (
-                  <div
-                    key={note.id}
-                    onClick={() => onOpenNote(note.id)}
-                    className="group relative bg-[#F9F9FB] dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700/60 rounded-2xl overflow-hidden hover:shadow-lg transition cursor-pointer flex flex-col"
-                  >
-                    {/* Note Thumbnail Preview */}
-                    <div className="h-44 bg-white dark:bg-[#18181B] border-b border-gray-100 dark:border-gray-800 p-4 relative flex flex-col justify-between overflow-hidden">
-                      {/* Paper Pattern Hint */}
-                      <div className="absolute inset-0 opacity-20 pointer-events-none">
-                        {note.paperStyle === 'ruled' && (
-                          <div
-                            className="w-full h-full"
-                            style={{
-                              backgroundImage:
-                                'linear-gradient(rgba(59, 130, 246, 0.3) 1px, transparent 1px)',
-                              backgroundSize: '100% 20px',
-                            }}
-                          />
-                        )}
-                        {note.paperStyle === 'grid' && (
-                          <div
-                            className="w-full h-full"
-                            style={{
-                              backgroundImage:
-                                'radial-gradient(circle, #94A3B8 1px, transparent 1px)',
-                              backgroundSize: '16px 16px',
-                            }}
-                          />
-                        )}
-                      </div>
-
-                      {/* Header Badge */}
-                      <div className="flex items-center justify-between z-10">
-                        {noteSubject && (
-                          <span
-                            className="text-[10px] font-semibold px-2 py-0.5 rounded-full text-white"
-                            style={{ backgroundColor: noteSubject.color }}
-                          >
-                            {noteSubject.name}
-                          </span>
-                        )}
-                        <span className="text-[10px] text-gray-400 font-medium ml-auto">
-                          {note.pages.length} {note.pages.length === 1 ? 'page' : 'pages'}
-                        </span>
-                      </div>
-
-                      {/* Preview Highlights */}
-                      <div className="z-10 my-auto text-center">
-                        {hasLatex && (
-                          <div className="inline-flex items-center space-x-1 text-[11px] font-mono text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 px-2.5 py-1 rounded-lg">
-                            <Sparkles className="w-3 h-3" />
-                            <span>LaTeX Math Embedded</span>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="text-[10px] text-gray-400 z-10 flex justify-between">
-                        <span>{new Date(note.updatedAt).toLocaleDateString()}</span>
-                        <span>{hasStrokes ? 'Handwritten' : 'Empty'}</span>
-                      </div>
+                  <div key={note.id} onClick={() => p.onOpenNote(note.id)} className="relative bg-[#F9F9FB] dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700/60 rounded-2xl hover:shadow-lg transition cursor-pointer flex flex-col">
+                    <div className="rounded-t-2xl overflow-hidden border-b border-gray-100 dark:border-gray-800 relative">
+                      <NoteThumb note={note} />
+                      {subj && <span className="absolute top-2 left-2 text-[10px] font-semibold px-2 py-0.5 rounded-full text-white" style={{ backgroundColor: subj.color }}>{subj.name}</span>}
                     </div>
-
-                    {/* Note Card Footer */}
-                    <div className="p-3.5 flex items-center justify-between">
-                      <div className="flex-1 min-w-0 mr-2">
+                    <div className="p-2.5 sm:p-3 flex items-center justify-between">
+                      <div className="flex-1 min-w-0 mr-1">
                         {renamingNoteId === note.id ? (
-                          <input
-                            type="text"
-                            autoFocus
-                            value={renameTitle}
-                            onChange={(e) => setRenameTitle(e.target.value)}
-                            onBlur={() => handleSaveRename(note.id)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSaveRename(note.id)}
-                            onClick={(e) => e.stopPropagation()}
-                            className="w-full text-xs font-semibold p-1 bg-white dark:bg-[#3A3A3C] border border-blue-500 rounded"
-                          />
+                          <input autoFocus value={renameTitle} onChange={(e) => setRenameTitle(e.target.value)} onBlur={() => saveRename(note.id)} onKeyDown={(e) => e.key === 'Enter' && saveRename(note.id)} onClick={(e) => e.stopPropagation()} className="w-full text-sm font-semibold p-1 bg-white dark:bg-[#3A3A3C] border border-blue-500 rounded select-text" />
                         ) : (
-                          <div className="font-semibold text-xs text-gray-900 dark:text-gray-100 truncate">
-                            {note.title}
-                          </div>
+                          <div className="font-semibold text-sm truncate">{note.title}</div>
                         )}
-                        <div className="text-[10px] text-gray-400 mt-0.5 flex items-center space-x-1">
-                          <Clock className="w-2.5 h-2.5" />
-                          <span>{new Date(note.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                        <div className="text-[11px] text-gray-400 mt-0.5 flex items-center gap-1">
+                          <Clock className="w-3 h-3" />
+                          {new Date(note.updatedAt).toLocaleDateString()} · {note.pages.length}p
                         </div>
                       </div>
-
-                      {/* Context Menu Button */}
                       <div className="relative" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          onClick={() =>
-                            setActiveMenuNoteId(activeMenuNoteId === note.id ? null : note.id)
-                          }
-                          className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-700"
-                        >
-                          <MoreVertical className="w-4 h-4" />
-                        </button>
-
-                        {activeMenuNoteId === note.id && (
-                          <div className="absolute right-0 bottom-8 bg-white dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl py-1 w-36 z-30 text-xs">
-                            <button
-                              onClick={() => handleStartRename(note)}
-                              className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-                            >
-                              <Edit2 className="w-3.5 h-3.5" />
-                              <span>Rename</span>
-                            </button>
-                            <button
-                              onClick={() => {
-                                onDuplicateNote(note.id);
-                                setActiveMenuNoteId(null);
-                              }}
-                              className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-700 dark:text-gray-200"
-                            >
-                              <Copy className="w-3.5 h-3.5" />
-                              <span>Duplicate</span>
-                            </button>
-                            <button
-                              onClick={() => {
-                                onDeleteNote(note.id);
-                                setActiveMenuNoteId(null);
-                              }}
-                              className="w-full px-3 py-1.5 flex items-center space-x-2 hover:bg-red-50 dark:hover:bg-red-900/30 text-red-600"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>Delete</span>
-                            </button>
-                          </div>
-                        )}
+                        <button onClick={() => { setMoveNoteId(null); setMenuNoteId(menuNoteId === note.id ? null : note.id); }} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-lg"><MoreVertical className="w-4 h-4" /></button>
+                        {menuNoteId === note.id && <NoteMenu note={note} up />}
                       </div>
                     </div>
                   </div>
@@ -396,34 +257,20 @@ export const LibraryView: React.FC<LibraryViewProps> = ({
               })}
             </div>
           ) : (
-            /* List View */
             <div className="divide-y divide-gray-100 dark:divide-gray-800">
               {filteredNotes.map((note) => (
-                <div
-                  key={note.id}
-                  onClick={() => onOpenNote(note.id)}
-                  className="py-3 px-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-[#2C2C2E] rounded-xl cursor-pointer transition"
-                >
-                  <div className="flex items-center space-x-3 truncate">
+                <div key={note.id} onClick={() => p.onOpenNote(note.id)} className="py-3 px-3 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-[#2C2C2E] rounded-xl cursor-pointer">
+                  <div className="flex items-center gap-3 truncate">
                     <FileText className="w-5 h-5 text-blue-600 flex-shrink-0" />
                     <div className="truncate">
-                      <div className="font-semibold text-xs text-gray-900 dark:text-gray-100 truncate">
-                        {note.title}
-                      </div>
-                      <div className="text-[10px] text-gray-400">
-                        {new Date(note.updatedAt).toLocaleDateString()} · {note.pages.length} pages
-                      </div>
+                      <div className="font-semibold text-sm truncate">{note.title}</div>
+                      <div className="text-[11px] text-gray-400">{new Date(note.updatedAt).toLocaleString()} · {note.pages.length} pages</div>
                     </div>
                   </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onDeleteNote(note.id);
-                    }}
-                    className="p-1.5 text-gray-400 hover:text-red-600 rounded-lg"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="relative" onClick={(e) => e.stopPropagation()}>
+                    <button onClick={() => { setMoveNoteId(null); setMenuNoteId(menuNoteId === note.id ? null : note.id); }} className="p-1.5 text-gray-400 rounded-lg"><MoreVertical className="w-4 h-4" /></button>
+                    {menuNoteId === note.id && <NoteMenu note={note} />}
+                  </div>
                 </div>
               ))}
             </div>

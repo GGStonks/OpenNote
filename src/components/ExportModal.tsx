@@ -1,209 +1,170 @@
-import React from 'react';
-import { X, FileText, Image as ImageIcon, FileCode, Printer, Download } from 'lucide-react';
-import { NoteDocument } from '../types';
-import { compileTikzToSvg } from '../services/tikzService';
+import React, { useState } from 'react';
+import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
+import { NoteDocument, PAGE_HEIGHT, PAGE_WIDTH } from '../types';
+import { strokeToSvg } from '../ink/strokeRenderer';
+import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
+import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
+import { convertStrokesToTikz } from '../services/shapeRecognition';
+import { PAPER_COLORS } from './CanvasPage';
+import { shareFile } from '../platform';
 
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   document: NoteDocument;
+  onPdf: () => void;
+  onError: (msg: string) => void;
 }
 
-export const ExportModal: React.FC<ExportModalProps> = ({
-  isOpen,
-  onClose,
-  document: doc,
-}) => {
+function baseName(doc: NoteDocument): string {
+  return (doc.title || 'OpenNote').replace(/[^\p{L}\p{N}\-_ ]+/gu, '').trim().replace(/\s+/g, '_') || 'OpenNote';
+}
+
+type Item = { y: number; tex: string; md: string };
+
+export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
+  const libs = new Set<string>(['arrows.meta']);
+  const pkgs = new Set<string>();
+  const body: string[] = [];
+  doc.pages.forEach((p, i) => {
+    const items: Item[] = [];
+    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: t.text.replace(/([#%&_{}$])/g, '\\$1') + '\n', md: t.text + '\n' });
+    for (const b of p.latexBlocks) {
+      if (b.isTikz) {
+        const prep = prepareTikz(b.latexCode);
+        prep.libraries.forEach((l) => libs.add(l));
+        Object.keys(prep.packages).forEach((k) => pkgs.add(k));
+        items.push({ y: b.y, tex: `\\begin{center}\n${prep.picture}\n\\end{center}\n`, md: '```latex\n' + prep.picture + '\n```\n' });
+      } else {
+        const tex = latexForDocument(b.latexCode);
+        items.push({ y: b.y, tex: tex + '\n', md: tex.replace(/^\\\[\n?|\n?\\\]$/g, '$$$$') + '\n' });
+      }
+    }
+    const ink = p.strokes.filter((s) => s.tool === 'pen');
+    if (includeInk && ink.length) {
+      let minY = Infinity;
+      ink.forEach((s) => s.points.forEach((pt) => (minY = Math.min(minY, pt.y))));
+      items.push({ y: minY, tex: `% Handwriting on page ${i + 1} (vectorised)\n\\begin{center}\n\\resizebox{\\linewidth}{!}{%\n${convertStrokesToTikz(ink)}}\n\\end{center}\n`, md: '' });
+    }
+    items.sort((a, b) => a.y - b.y);
+    body.push(`% ----- Page ${i + 1} -----\n` + items.map((it) => it.tex).join('\n'));
+  });
+  const preamble = [
+    '\\documentclass[11pt]{article}',
+    '\\usepackage[utf8]{inputenc}',
+    '\\usepackage[margin=2.5cm]{geometry}',
+    '\\usepackage{amsmath,amssymb,amsfonts,amsthm,graphicx}',
+    '\\usepackage{tikz}',
+    ...[...pkgs].map((p) => `\\usepackage{${p}}`),
+    pkgs.has('pgfplots') ? '\\pgfplotsset{compat=1.18}' : '',
+    `\\usetikzlibrary{${[...libs].join(',')}}`,
+    '',
+    `\\title{${doc.title.replace(/([#%&_{}$])/g, '\\$1')}}`,
+    '\\date{}',
+    '\\begin{document}',
+    '\\maketitle',
+    '',
+  ].filter((l) => l !== null);
+  return preamble.join('\n') + body.join('\n\\newpage\n') + '\n\\end{document}\n';
+}
+
+function buildMarkdown(doc: NoteDocument): string {
+  let md = `# ${doc.title}\n\n`;
+  doc.pages.forEach((p, i) => {
+    const items: Item[] = [];
+    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: t.text + '\n' });
+    for (const b of p.latexBlocks) {
+      if (b.isTikz) items.push({ y: b.y, tex: '', md: '```latex\n' + prepareTikz(b.latexCode).picture + '\n```\n' });
+      else {
+        const tex = latexForDocument(b.latexCode);
+        const m = /^\\\[\n?([\s\S]*?)\n?\\\]$/.exec(tex);
+        items.push({ y: b.y, tex: '', md: m ? `$$\n${m[1]}\n$$\n` : tex.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$') + '\n' });
+      }
+    }
+    if (!items.length) return;
+    items.sort((a, b) => a.y - b.y);
+    md += `## Page ${i + 1}\n\n` + items.map((it) => it.md).join('\n') + '\n';
+  });
+  return md;
+}
+
+function buildSvg(doc: NoteDocument): string {
+  const H = PAGE_HEIGHT, W = PAGE_WIDTH, gap = 24;
+  const total = doc.pages.length * (H + gap) - gap;
+  const ink = doc.paperColor === 'dark' ? '#F3F4F6' : '#111827';
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;
+  doc.pages.forEach((p, i) => {
+    const dy = i * (H + gap);
+    out += `<g id="page-${i + 1}">\n<rect x="0" y="${dy}" width="${W}" height="${H}" fill="${PAPER_COLORS[doc.paperColor]}"/>\n`;
+    for (const im of p.imageBlocks ?? []) out += `<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>\n`;
+    const order = [...p.strokes.filter((s) => s.tool === 'highlighter'), ...p.strokes.filter((s) => s.tool !== 'highlighter')];
+    for (const s of order) out += strokeToSvg(s, dy) + '\n';
+    for (const b of p.latexBlocks) {
+      if (b.isTikz) {
+        const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;
+        const inner = svg.replace(/<svg\b/, `<svg x="${b.x}" y="${b.y + dy}" width="${b.width}" height="${b.height}"`).replace(/currentColor/g, b.color ?? ink);
+        out += inner + '\n';
+      } else {
+        const html = renderLatexContent(b.latexCode).html;
+        out += `<foreignObject x="${b.x}" y="${b.y + dy}" width="${Math.max(b.width, 40) + 20}" height="${Math.max(b.height, 30) + 10}"><xhtml:div style="font-size:${22 * (b.scale ?? 1)}px;color:${b.color ?? ink}">${html}</xhtml:div></foreignObject>\n`;
+      }
+    }
+    for (const t of p.textBlocks ?? []) {
+      out += `<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>\n`;
+    }
+    out += '</g>\n';
+  });
+  return out + '</svg>\n';
+}
+
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onError }) => {
+  const [includeInk, setIncludeInk] = useState(true);
+  const [busy, setBusy] = useState(false);
   if (!isOpen) return null;
 
-  // Export as .tex with amsmath & tikz packages
-  const handleExportTex = () => {
-    let texContent = `\\documentclass{article}
-\\usepackage[utf8]{inputenc}
-\\usepackage{amsmath,amssymb,amsfonts,amsthm}
-\\usepackage{tikz}
-\\usepackage{geometry}
-\\geometry{a4paper, margin=1in}
-
-\\title{${doc.title}}
-\\author{OpenNote}
-\\date{\\today}
-
-\\begin{document}
-\\maketitle
-
-`;
-
-    doc.pages.forEach((p, idx) => {
-      texContent += `% ==========================================\n`;
-      texContent += `% --- Page ${idx + 1} ---\n`;
-      texContent += `% ==========================================\n\n`;
-
-      if (p.latexBlocks.length > 0) {
-        p.latexBlocks.forEach((b) => {
-          if (b.isTikz || b.latexCode.includes('tikzpicture')) {
-            texContent += `% TikZ Diagram\n\\begin{center}\n${b.latexCode.trim()}\n\\end{center}\n\n`;
-          } else {
-            const raw = b.latexCode.replace(/<[^>]*>/g, '').trim();
-            texContent += `\\[\n${raw}\n\\]\n\n`;
-          }
-        });
-      } else {
-        texContent += `% [Handwritten ink strokes on page ${idx + 1}]\n\n`;
-      }
-    });
-
-    texContent += `\\end{document}\n`;
-
-    const blob = new Blob([texContent], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = window.document.createElement('a');
-    link.href = url;
-    link.download = `${doc.title.replace(/\s+/g, '_')}.tex`;
-    link.click();
-    URL.revokeObjectURL(url);
-    onClose();
+  const run = async (name: string, content: string | Blob, type: string) => {
+    setBusy(true);
+    try {
+      await shareFile(name, content instanceof Blob ? content : new Blob([content], { type }));
+      onClose();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) onError(`Export failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
-  // Export as Vector SVG Document
-  const handleExportSvg = () => {
-    let svgContent = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 816 ${doc.pages.length * 1056}" width="816" height="${doc.pages.length * 1056}">
-  <style>
-    .page-bg { fill: ${doc.paperColor === 'dark' ? '#18181B' : '#FFFFFF'}; }
-    .ink { stroke-linecap: round; stroke-linejoin: round; }
-  </style>
-`;
-
-    doc.pages.forEach((p, idx) => {
-      const yOffset = idx * 1056;
-      svgContent += `  <!-- Page ${idx + 1} -->\n`;
-      svgContent += `  <rect x="0" y="${yOffset}" width="816" height="1056" class="page-bg" />\n`;
-
-      // Render strokes
-      p.strokes.forEach(s => {
-        if (s.points.length < 2) return;
-        const pts = s.points.map(pt => `${pt.x},${pt.y + yOffset}`).join(' ');
-        const strokeW = s.tool === 'highlighter' ? s.width * 5 : s.width;
-        const opacity = s.tool === 'highlighter' ? 0.35 : (s.opacity || 1);
-        const dash = s.lineStyle === 'dashed' ? 'stroke-dasharray="10,6"' : (s.lineStyle === 'dotted' ? 'stroke-dasharray="3,6"' : '');
-        svgContent += `  <polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="${strokeW}" stroke-opacity="${opacity}" ${dash} class="ink" />\n`;
-      });
-
-      // Render TikZ vector blocks
-      p.latexBlocks.forEach(b => {
-        if (b.isTikz) {
-          const blockSvg = compileTikzToSvg(b.latexCode, b.width, b.height);
-          svgContent += `  <g transform="translate(${b.x}, ${b.y + yOffset})">\n    ${blockSvg}\n  </g>\n`;
-        }
-      });
-    });
-
-    svgContent += `</svg>`;
-
-    const blob = new Blob([svgContent], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = window.document.createElement('a');
-    link.href = url;
-    link.download = `${doc.title.replace(/\s+/g, '_')}.svg`;
-    link.click();
-    URL.revokeObjectURL(url);
-    onClose();
-  };
-
-  // Export as Markdown
-  const handleExportMarkdown = () => {
-    let mdContent = `# ${doc.title}\n\n*Generated with OpenNote on ${new Date(doc.createdAt).toLocaleDateString()}*\n\n`;
-
-    doc.pages.forEach((p, idx) => {
-      mdContent += `## Page ${idx + 1}\n\n`;
-      p.latexBlocks.forEach((b) => {
-        if (b.isTikz || b.latexCode.includes('tikzpicture')) {
-          mdContent += `\`\`\`latex\n${b.latexCode.trim()}\n\`\`\`\n\n`;
-        } else {
-          const raw = b.latexCode.replace(/<[^>]*>/g, '').trim();
-          mdContent += `$$\n${raw}\n$$\n\n`;
-        }
-      });
-    });
-
-    const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = window.document.createElement('a');
-    link.href = url;
-    link.download = `${doc.title.replace(/\s+/g, '_')}.md`;
-    link.click();
-    URL.revokeObjectURL(url);
-    onClose();
-  };
-
-  // Export as Print / PDF
-  const handlePrintPDF = () => {
-    window.print();
-    onClose();
-  };
+  const b = baseName(doc);
+  const Row: React.FC<{ icon: React.ReactNode; title: string; sub: string; onClick: () => void; tint: string }> = ({ icon, title, sub, onClick, tint }) => (
+    <button disabled={busy} onClick={onClick} className="w-full flex items-center p-3 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition text-left disabled:opacity-50">
+      <div className={`p-2.5 rounded-xl mr-3 ${tint}`}>{icon}</div>
+      <div>
+        <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</div>
+        <div className="text-xs text-gray-500">{sub}</div>
+      </div>
+    </button>
+  );
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white dark:bg-[#1C1C1E] rounded-3xl max-w-md w-full shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-        <div className="px-6 py-4 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
-          <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Export Note</h3>
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
+      <div className="bg-white dark:bg-[#1C1C1E] rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[env(safe-area-inset-bottom)]">
+        <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+          <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Export “{doc.title}”</h3>
           <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-full">
             <X className="w-5 h-5" />
           </button>
         </div>
-
-        <div className="p-6 space-y-3">
-          <button
-            onClick={handlePrintPDF}
-            className="w-full flex items-center p-3.5 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 transition group text-left"
-          >
-            <div className="p-2.5 bg-red-100 dark:bg-red-900/40 text-red-600 rounded-xl mr-3 group-hover:scale-105 transition">
-              <Printer className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">Export as PDF (Print)</div>
-              <div className="text-xs text-gray-500">Vector high-DPI document with all handwriting</div>
-            </div>
-          </button>
-
-          <button
-            onClick={handleExportSvg}
-            className="w-full flex items-center p-3.5 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-emerald-500 hover:bg-emerald-50/50 dark:hover:bg-emerald-900/20 transition group text-left"
-          >
-            <div className="p-2.5 bg-emerald-100 dark:bg-emerald-900/40 text-emerald-600 rounded-xl mr-3 group-hover:scale-105 transition">
-              <Download className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">Export Vector SVG (.svg)</div>
-              <div className="text-xs text-gray-500">Lossless resolution-independent vector image</div>
-            </div>
-          </button>
-
-          <button
-            onClick={handleExportTex}
-            className="w-full flex items-center p-3.5 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-indigo-500 hover:bg-indigo-50/50 dark:hover:bg-indigo-900/20 transition group text-left"
-          >
-            <div className="p-2.5 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 rounded-xl mr-3 group-hover:scale-105 transition">
-              <FileCode className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">Export LaTeX (.tex) with TikZ</div>
-              <div className="text-xs text-gray-500">Compilable document with AMS-LaTeX & TikZ diagrams</div>
-            </div>
-          </button>
-
-          <button
-            onClick={handleExportMarkdown}
-            className="w-full flex items-center p-3.5 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 hover:bg-blue-50/50 dark:hover:bg-blue-900/20 transition group text-left"
-          >
-            <div className="p-2.5 bg-blue-100 dark:bg-blue-900/40 text-blue-600 rounded-xl mr-3 group-hover:scale-105 transition">
-              <FileText className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">Export Markdown (.md)</div>
-              <div className="text-xs text-gray-500">Obsidian, Notion, and GitHub compatible</div>
-            </div>
-          </button>
+        <div className="p-5 space-y-2.5 max-h-[75vh] overflow-y-auto">
+          <Row icon={<Printer className="w-5 h-5" />} tint="bg-red-100 text-red-600 dark:bg-red-900/40" title="PDF" sub="Vector PDF through the system print dialog (Save as PDF / Save to Files)" onClick={onPdf} />
+          <Row icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onClick={() => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml')} />
+          <Row icon={<FileCode className="w-5 h-5" />} tint="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40" title="LaTeX (.tex)" sub="Compilable document: math, text, TikZ" onClick={() => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex')} />
+          <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 px-2">
+            <input type="checkbox" checked={includeInk} onChange={(e) => setIncludeInk(e.target.checked)} />
+            Include remaining handwriting in the .tex as TikZ drawings
+          </label>
+          <Row icon={<FileText className="w-5 h-5" />} tint="bg-blue-100 text-blue-600 dark:bg-blue-900/40" title="Markdown (.md)" sub="Obsidian / GitHub compatible ($$ math, latex code blocks)" onClick={() => run(`${b}.md`, buildMarkdown(doc), 'text/markdown')} />
+          <Row icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onClick={() => run(`${b}.opennote`, JSON.stringify(doc), 'application/json')} />
         </div>
       </div>
     </div>

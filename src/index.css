@@ -6,35 +6,84 @@
   * {
     -webkit-tap-highlight-color: transparent;
   }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  input,
+  textarea,
+  [contenteditable='true'] {
+    -webkit-user-select: text;
+    user-select: text;
+    -webkit-touch-callout: default;
+  }
 }
 
-/* Custom scrollbars */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* Rendered LaTeX blocks */
+.on-math .katex-display {
+  margin: 0.15em 0;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+.on-math .katex {
+  font-size: 1em;
 }
-::-webkit-scrollbar-thumb {
-  background: rgba(156, 163, 175, 0.4);
-  border-radius: 4px;
+.on-math-text .katex-display {
+  margin: 0.4em 0;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(156, 163, 175, 0.7);
+.on-text p {
+  margin: 0 0 0.45em 0;
+  line-height: 1.45;
+}
+.on-text .on-h {
+  font-weight: 700;
+  margin: 0.3em 0 0.35em;
+}
+.on-text h3.on-h { font-size: 1.25em; }
+.on-text h4.on-h { font-size: 1.1em; }
+.on-text h5.on-h { font-size: 1em; }
+
+/* TikZ output: scale to the block, inherit ink colour */
+.on-tikz svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.on-tikz-preview svg {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 44vh;
+}
+.on-tikz-dark svg {
+  filter: invert(1) hue-rotate(180deg);
 }
 
-/* Print styling for PDF generation */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, 0.4); border-radius: 4px; }
+
+/* Printing / PDF export: only the print layout (portal into <body>) is shown */
+.on-print-root { display: none; }
 @media print {
-  header, button {
-    display: none !important;
+  @page { size: 8.5in 11in; margin: 0; }
+  html, body { height: auto !important; overflow: visible !important; background: #fff !important; }
+  #root { display: none !important; }
+  .on-print-root { display: block; }
+  .on-print-page {
+    width: 816px;
+    height: 1056px;
+    overflow: hidden;
+    break-after: page;
+    page-break-after: always;
   }
-  body, main {
-    background: white !important;
-    padding: 0 !important;
-  }
-  .shadow-2xl {
+  .on-print-page:last-child { break-after: auto; page-break-after: auto; }
+  .on-page {
     box-shadow: none !important;
-    border: none !important;
+    border-radius: 0 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 }

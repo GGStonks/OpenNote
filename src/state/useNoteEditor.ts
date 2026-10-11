@@ -1,0 +1,189 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { NoteDocument, NotePage } from '../types';
+import { saveNote } from '../storage/db';
+
+/**
+ * Note editing state: immutable document + undo/redo with structural sharing (no JSON deep
+ * copies), gesture transactions (a whole drag/erase = one undo step, no history entry or DB write
+ * per pointermove) and debounced autosave that is flushed when the app goes to background.
+ */
+
+const HISTORY_LIMIT = 200;
+const SAVE_DELAY_MS = 700;
+
+export type PageUpdater = (page: NotePage) => NotePage;
+
+export interface NoteEditor {
+  doc: NoteDocument;
+  canUndo: boolean;
+  canRedo: boolean;
+  /** One undoable change. */
+  commit: (updater: (d: NoteDocument) => NoteDocument) => void;
+  commitPage: (pageId: string, updater: PageUpdater) => void;
+  /** Start of a continuous gesture (drag, erase, scale); changes until endGesture are one undo step. */
+  beginGesture: () => void;
+  previewPage: (pageId: string, updater: PageUpdater) => void;
+  endGesture: () => void;
+  /** Non-undoable bookkeeping (render caches, measured sizes). */
+  silentPage: (pageId: string, updater: PageUpdater) => void;
+  undo: () => void;
+  redo: () => void;
+  flush: () => Promise<void>;
+}
+
+function mapPage(d: NoteDocument, pageId: string, updater: PageUpdater): NoteDocument {
+  let changed = false;
+  const pages = d.pages.map((p) => {
+    if (p.id !== pageId) return p;
+    const np = updater(p);
+    if (np !== p) changed = true;
+    return np;
+  });
+  return changed ? { ...d, pages } : d;
+}
+
+export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) => void): NoteEditor {
+  const [doc, setDocState] = useState(initial);
+  const docRef = useRef(initial);
+  const undoStack = useRef<NoteDocument[]>([]);
+  const redoStack = useRef<NoteDocument[]>([]);
+  const gestureBase = useRef<NoteDocument | null>(null);
+  const [, setHistoryVersion] = useState(0);
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirty = useRef(false);
+  const onSavedRef = useRef(onSaved);
+  onSavedRef.current = onSaved;
+
+  const flush = useCallback(async () => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    if (!dirty.current) return;
+    dirty.current = false;
+    try {
+      const saved = await saveNote(docRef.current);
+      onSavedRef.current(saved);
+    } catch (err) {
+      dirty.current = true;
+      console.error('OpenNote: saving failed', err);
+    }
+  }, []);
+
+  const scheduleSave = useCallback(() => {
+    dirty.current = true;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => void flush(), SAVE_DELAY_MS);
+  }, [flush]);
+
+  const setDoc = useCallback((next: NoteDocument) => {
+    docRef.current = next;
+    setDocState(next);
+  }, []);
+
+  const pushUndo = (snapshot: NoteDocument) => {
+    undoStack.current.push(snapshot);
+    if (undoStack.current.length > HISTORY_LIMIT) undoStack.current.shift();
+    redoStack.current = [];
+    setHistoryVersion((v) => v + 1);
+  };
+
+  const commit = useCallback(
+    (updater: (d: NoteDocument) => NoteDocument) => {
+      const prev = docRef.current;
+      const next = updater(prev);
+      if (next === prev) return;
+      if (!gestureBase.current) pushUndo(prev);
+      setDoc(next);
+      scheduleSave();
+    },
+    [scheduleSave, setDoc]
+  );
+
+  const commitPage = useCallback((pageId: string, updater: PageUpdater) => commit((d) => mapPage(d, pageId, updater)), [commit]);
+
+  const beginGesture = useCallback(() => {
+    if (!gestureBase.current) gestureBase.current = docRef.current;
+  }, []);
+
+  const previewPage = useCallback(
+    (pageId: string, updater: PageUpdater) => {
+      const next = mapPage(docRef.current, pageId, updater);
+      if (next !== docRef.current) setDoc(next);
+    },
+    [setDoc]
+  );
+
+  const endGesture = useCallback(() => {
+    const base = gestureBase.current;
+    gestureBase.current = null;
+    if (base && base !== docRef.current) {
+      pushUndo(base);
+      scheduleSave();
+    }
+  }, [scheduleSave]);
+
+  const silentPage = useCallback(
+    (pageId: string, updater: PageUpdater) => {
+      const next = mapPage(docRef.current, pageId, updater);
+      if (next === docRef.current) return;
+      // Keep the cache in history snapshots too, so undo does not throw it away.
+      const patch = (d: NoteDocument) => mapPage(d, pageId, updater);
+      undoStack.current = undoStack.current.map((d) => (d.pages.some((p) => p.id === pageId) ? patch(d) : d));
+      if (gestureBase.current) gestureBase.current = patch(gestureBase.current);
+      setDoc(next);
+      scheduleSave();
+    },
+    [scheduleSave, setDoc]
+  );
+
+  const undo = useCallback(() => {
+    const prev = undoStack.current.pop();
+    if (!prev) return;
+    redoStack.current.push(docRef.current);
+    setDoc(prev);
+    setHistoryVersion((v) => v + 1);
+    scheduleSave();
+  }, [scheduleSave, setDoc]);
+
+  const redo = useCallback(() => {
+    const next = redoStack.current.pop();
+    if (!next) return;
+    undoStack.current.push(docRef.current);
+    setDoc(next);
+    setHistoryVersion((v) => v + 1);
+    scheduleSave();
+  }, [scheduleSave, setDoc]);
+
+  // Flush on background / close; flush on unmount.
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState === 'hidden') void flush();
+    };
+    const onPageHide = () => void flush();
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', onPageHide);
+    window.addEventListener('beforeunload', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onHide);
+      window.removeEventListener('pagehide', onPageHide);
+      window.removeEventListener('beforeunload', onPageHide);
+      void flush();
+    };
+  }, [flush]);
+
+  return {
+    doc,
+    canUndo: undoStack.current.length > 0,
+    canRedo: redoStack.current.length > 0,
+    commit,
+    commitPage,
+    beginGesture,
+    previewPage,
+    endGesture,
+    silentPage,
+    undo,
+    redo,
+    flush,
+  };
+}
