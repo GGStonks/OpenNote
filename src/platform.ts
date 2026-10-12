@@ -189,3 +189,19 @@ export async function shareFile(filename: string, blob: Blob): Promise<void> {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
+
+/**
+ * Short haptic tick (snap feedback of the smart pen, as in PDEDraw). iOS: UIImpactFeedbackGenerator
+ * through the native shell; Android/other: the Vibration API where available. Never awaited.
+ */
+export function haptic(style: 'snap' | 'light' | 'success' = 'snap'): void {
+  try {
+    if (platformKind() === 'ios') {
+      void window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'haptic', style }).catch(() => undefined);
+    } else if (navigator.vibrate) {
+      navigator.vibrate(style === 'success' ? [6, 40, 6] : style === 'snap' ? 9 : 5);
+    }
+  } catch {
+    /* haptics are best effort */
+  }
+}

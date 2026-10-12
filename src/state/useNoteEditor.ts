@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { NoteDocument, NotePage } from '../types';
 import { saveNote } from '../storage/db';
 
@@ -13,8 +13,18 @@ const SAVE_DELAY_MS = 700;
 
 export type PageUpdater = (page: NotePage) => NotePage;
 
+/** The page-level operations; a stable object, so memoised pages do not re-render on every edit. */
+export interface PageOps {
+  commitPage: (pageId: string, updater: PageUpdater) => void;
+  beginGesture: () => void;
+  previewPage: (pageId: string, updater: PageUpdater) => void;
+  endGesture: () => void;
+  silentPage: (pageId: string, updater: PageUpdater) => void;
+}
+
 export interface NoteEditor {
   doc: NoteDocument;
+  ops: PageOps;
   canUndo: boolean;
   canRedo: boolean;
   /** One undoable change. */
@@ -172,8 +182,14 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     };
   }, [flush]);
 
+  const ops = useMemo<PageOps>(
+    () => ({ commitPage, beginGesture, previewPage, endGesture, silentPage }),
+    [commitPage, beginGesture, previewPage, endGesture, silentPage]
+  );
+
   return {
     doc,
+    ops,
     canUndo: undoStack.current.length > 0,
     canRedo: redoStack.current.length > 0,
     commit,

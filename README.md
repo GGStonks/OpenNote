@@ -22,6 +22,7 @@
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
 - Stroke eraser and precision (partial) eraser that splits strokes.
+- **Smart pen (PDEDraw engine)**: smooth centripetal Catmull-Rom curves that close themselves when you end near the start ("potatoes", with a snap dot and haptic tick), lines with 15° angle lock, rectangles, ellipses from the centre with circle lock, points. Everything snaps to the key points, edges and crossings of existing shapes. Closed shapes take a fill (solid, //// or \\\\ hatching, crosshatch, or a hole that cuts through fills); open lines/curves can get an arrowhead. Fill and arrowheads can also be applied to a lasso selection.
 - **Draw-and-hold shape snapping**: line (axis-snapped), arrow, circle, ellipse, triangle, rectangle, polygon, polyline.
 - Lasso: move, resize, recolour, dashed/dotted, duplicate, delete, snap shapes.
 
@@ -30,7 +31,7 @@
 - "Page → LaTeX" transcribes a whole page.
 - Math rendered with bundled KaTeX (works offline); tolerant of `$$…$$`, `\[…\]`, `align*`, `<think>` blocks, markdown fences, full documents.
 - **TikZ rendered by real TeX** (e-TeX + PGF/TikZ compiled to WebAssembly, from TikZJax) inside the app, offline: libraries such as `arrows.meta`, `positioning`, `calc`, `shapes`, `automata`, plus `pgfplots` and `tikz-cd`. A supervised worker restarts after bad input so one broken diagram cannot block the others; an instant built-in preview is shown while TeX runs.
-- "Vector": converts selected ink to TikZ offline (snapped shapes become exact TikZ primitives).
+- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, freehand ink is Bézier-fitted (no polygons). Fills, hatching, dashes and arrows are kept; the code compiles both in the app and in standard LaTeX.
 
 **Export**: PDF (system print → Save as PDF / Save to Files, vector ink), SVG, `.tex` (compilable, optionally with remaining ink as TikZ), Markdown, `.opennote` (full-fidelity JSON).
 

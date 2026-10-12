@@ -2,13 +2,58 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, FilePlus2, Trash2, Copy, MoreHorizontal,
+  Spline, Slash, Square, Circle, Dot,
 } from 'lucide-react';
-import { EraserMode, PaperColor, PaperStyle, PenStyle, ToolType } from '../types';
+import { EraserMode, FillType, LineStyle, PaperColor, PaperStyle, PenStyle, ShapeMode, ToolType } from '../types';
 import { ToolSettings } from './CanvasPage';
 
 const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
 const PEN_WIDTHS = [1.2, 2, 3, 4.5, 7];
+
+export const FILL_OPTIONS: { id: FillType; label: string }[] = [
+  { id: 'none', label: 'None' },
+  { id: 'solid', label: 'Solid' },
+  { id: 'northEast', label: '////' },
+  { id: 'northWest', label: '\\\\' },
+  { id: 'crosshatch', label: 'Cross' },
+  { id: 'hole', label: 'Hole' },
+];
+
+const SHAPE_MODES: { id: ShapeMode; label: string; icon: React.ReactNode }[] = [
+  { id: 'curve', label: 'Smart curve', icon: <Spline className="w-4 h-4" /> },
+  { id: 'line', label: 'Line', icon: <Slash className="w-4 h-4" /> },
+  { id: 'rectangle', label: 'Rectangle', icon: <Square className="w-4 h-4" /> },
+  { id: 'ellipse', label: 'Ellipse / circle', icon: <Circle className="w-4 h-4" /> },
+  { id: 'point', label: 'Point', icon: <Dot className="w-4 h-4" /> },
+];
+
+/** Small preview of a fill style. */
+export const FillSwatch: React.FC<{ fill: FillType; color: string }> = ({ fill, color }) => {
+  const id = `sw-${fill}`;
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" className="flex-shrink-0">
+      <defs>
+        <clipPath id={id}>
+          <rect x="2" y="2" width="16" height="16" rx="4" />
+        </clipPath>
+      </defs>
+      {fill === 'solid' && <rect x="2" y="2" width="16" height="16" rx="4" fill={color} fillOpacity="0.35" />}
+      {(fill === 'northEast' || fill === 'northWest' || fill === 'crosshatch') && (
+        <g clipPath={`url(#${id})`} stroke={color} strokeWidth="1.2" strokeOpacity="0.8">
+          {[-16, -10, -4, 2, 8, 14, 20].map((x) => (
+            <g key={x}>
+              {fill !== 'northWest' && <line x1={x} y1="20" x2={x + 20} y2="0" />}
+              {fill !== 'northEast' && <line x1={x} y1="0" x2={x + 20} y2="20" />}
+            </g>
+          ))}
+        </g>
+      )}
+      <rect x="2" y="2" width="16" height="16" rx="4" fill="none" stroke={color} strokeWidth="1.4" strokeDasharray={fill === 'hole' ? '2.5 2' : undefined} />
+      {fill === 'none' && <line x1="5" y1="15" x2="15" y2="5" stroke={color} strokeWidth="1.2" />}
+    </svg>
+  );
+};
 
 interface ToolbarProps {
   tools: ToolSettings;
@@ -129,6 +174,63 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               Draw &amp; hold to snap shapes
               <input type="checkbox" checked={tools.holdToSnap} onChange={(e) => setTools({ holdToSnap: e.target.checked })} />
             </label>
+          </Popover>
+        )}
+      </div>
+
+      <div className="relative">
+        <ToolButton active={tools.tool === 'shape'} title="Smart pen: smooth curves that close themselves, lines, rectangles, ellipses, fills (tap again for options)" onClick={() => selectTool('shape', 'shape')}>
+          {SHAPE_MODES.find((m) => m.id === tools.shapeMode)?.icon ?? <Spline className="w-4 h-4" />}
+        </ToolButton>
+        {pop.open === 'shape' && (
+          <Popover>
+            <Label>Draw</Label>
+            <div className="grid grid-cols-5 gap-1 mb-2">
+              {SHAPE_MODES.map((m) => (
+                <button key={m.id} onClick={() => setTools({ shapeMode: m.id })} title={m.label} className={`h-9 rounded-lg border flex items-center justify-center ${tools.shapeMode === m.id ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300'}`}>
+                  {m.icon}
+                </button>
+              ))}
+            </div>
+            <Label>Fill (closed shapes)</Label>
+            <div className="grid grid-cols-6 gap-1 mb-2">
+              {FILL_OPTIONS.map((f) => (
+                <button key={f.id} onClick={() => setTools({ shapeFill: f.id })} title={f.label} className={`h-9 rounded-lg border flex items-center justify-center ${tools.shapeFill === f.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600'}`}>
+                  <FillSwatch fill={f.id} color={tools.penColor === '#FFFFFF' ? '#9CA3AF' : tools.penColor} />
+                </button>
+              ))}
+            </div>
+            <Label>Line</Label>
+            <div className="flex gap-1 mb-2">
+              {(['solid', 'dashed', 'dotted'] as LineStyle[]).map((ls) => (
+                <button key={ls} onClick={() => setTools({ shapeLineStyle: ls })} className={`flex-1 text-xs py-1.5 rounded-lg border capitalize ${tools.shapeLineStyle === ls ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600'}`}>
+                  {ls}
+                </button>
+              ))}
+            </div>
+            <Label>Width</Label>
+            <div className="flex justify-between mb-2">
+              {PEN_WIDTHS.map((w) => (
+                <button key={w} onClick={() => setTools({ penWidth: w })} className={`w-9 h-9 rounded-full flex items-center justify-center border ${tools.penWidth === w ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-transparent'}`}>
+                  <span className="rounded-full bg-gray-900 dark:bg-gray-100" style={{ width: w * 2.2, height: w * 2.2 }} />
+                </button>
+              ))}
+            </div>
+            <Label>Colour</Label>
+            <div className="grid grid-cols-9 gap-1 mb-2">
+              {PEN_COLORS.map((c) => (
+                <button key={c} onClick={() => setTools({ penColor: c })} className={`w-6 h-6 rounded-full border-2 ${tools.penColor === c ? 'border-blue-500 scale-110' : 'border-gray-200 dark:border-gray-600'}`} style={{ backgroundColor: c }} />
+              ))}
+            </div>
+            <label className="flex items-center justify-between mt-1 text-xs text-gray-600 dark:text-gray-300">
+              Arrowhead on open lines
+              <input type="checkbox" checked={tools.shapeArrow} onChange={(e) => setTools({ shapeArrow: e.target.checked })} />
+            </label>
+            <label className="flex items-center justify-between mt-2 text-xs text-gray-600 dark:text-gray-300">
+              Snap to shapes (points, edges, crossings)
+              <input type="checkbox" checked={tools.shapeSnap} onChange={(e) => setTools({ shapeSnap: e.target.checked })} />
+            </label>
+            <p className="text-[10px] text-gray-400 mt-2 leading-snug">End a curve near its start to close it. Closed shapes take the fill.</p>
           </Popover>
         )}
       </div>

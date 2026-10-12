@@ -11,7 +11,10 @@
 //             which a WebView would block as mixed content / CORS),
 //      share  writes an exported file and opens the share sheet (Save to Files, AirDrop, ...),
 //      print  prints the web view (print layout) -> "Save to Files" gives a PDF.
+//      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
+//  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
+//    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
 #import <UIKit/UIKit.h>
@@ -19,7 +22,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"1.1.0";
+static NSString *const kVersion = @"1.2.0";
 
 #pragma mark - Bundled web app over opennote://app/
 
@@ -149,6 +152,15 @@ static NSString *ONMimeType(NSString *ext) {
         [self handleShare:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"print"]) {
         [self handlePrint:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"haptic"]) {
+        NSString *style = msg[@"style"];
+        if ([style isEqualToString:@"success"]) {
+            [[[UINotificationFeedbackGenerator alloc] init] notificationOccurred:UINotificationFeedbackTypeSuccess];
+        } else {
+            UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:[style isEqualToString:@"light"] ? UIImpactFeedbackStyleLight : UIImpactFeedbackStyleMedium];
+            [g impactOccurred];
+        }
+        replyHandler(@{}, nil);
     } else {
         replyHandler(@{@"error": [NSString stringWithFormat:@"Unknown command %@", cmd]}, nil);
     }
@@ -229,6 +241,24 @@ static NSString *ONMimeType(NSString *ext) {
 }
 
 #pragma mark Apple Pencil
+
+// WKContentView installs Scribble interactions; with them the system first tries to recognise Pencil
+// strokes as handwriting for text inputs, which delays and sometimes swallows strokes on the canvas.
+static void ONRemoveScribble(UIView *view) {
+    for (id<UIInteraction> interaction in [view.interactions copy]) {
+        if ([NSStringFromClass([(NSObject *)interaction class]) containsString:@"Scribble"]) [view removeInteraction:interaction];
+    }
+    for (UIView *sub in view.subviews) ONRemoveScribble(sub);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    ONRemoveScribble(self.webView);
+}
+
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    ONRemoveScribble(webView);
+}
 
 - (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction {
     [self.webView evaluateJavaScript:@"window.dispatchEvent(new CustomEvent('opennote:pencilDoubleTap'))" completionHandler:nil];

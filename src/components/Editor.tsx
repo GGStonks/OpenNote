@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
-  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, ZoomIn, ZoomOut, Maximize, AlertCircle,
+  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, ZoomIn, ZoomOut, Maximize, AlertCircle, PaintBucket, MoveUpRight,
 } from 'lucide-react';
-import { LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, Rect, newId, LineStyle } from '../types';
+import { FillType, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, Rect, Stroke, newId, LineStyle } from '../types';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings } from './CanvasPage';
 import { Toolbar } from './Toolbar';
@@ -18,6 +18,7 @@ import { ConversionMode, convertImage } from '../services/vlmService';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
 import { renderLatexContent } from '../services/latexRender';
 import { convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
+import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { createBlankPage } from '../storage/db';
 import { printDocument } from '../platform';
 
@@ -41,6 +42,20 @@ type ConvTarget =
 
 const TOOL_KEY = 'opennote_tools_v2';
 
+/** A freehand loop whose ends (almost) meet can be closed and filled. */
+function canClose(s: Stroke): boolean {
+  const pts = s.points;
+  if (pts.length < 4) return false;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of pts) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const diag = Math.hypot(maxX - minX, maxY - minY);
+  const gap = Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y);
+  return diag > 10 && gap < Math.max(14, diag * 0.2);
+}
+
 function loadToolPrefs(settings: AppSettings): ToolSettings {
   const base: ToolSettings = {
     tool: 'pen',
@@ -53,6 +68,11 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
     eraserSize: 14,
     stylusOnly: settings.stylusOnly,
     holdToSnap: settings.holdToSnap,
+    shapeMode: 'curve',
+    shapeFill: 'none',
+    shapeArrow: false,
+    shapeLineStyle: 'solid',
+    shapeSnap: true,
   };
   try {
     const raw = localStorage.getItem(TOOL_KEY);
@@ -120,6 +140,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [currentPage, setCurrentPage] = useState(0);
 
   const setSelection = useCallback((s: Selection | null) => setSelectionState(isEmptySelection(s) ? null : s), []);
+  const [fillMenu, setFillMenu] = useState(false);
+  useEffect(() => {
+    if (!selection) setFillMenu(false);
+  }, [selection]);
 
   const showToast = useCallback((msg: string, error = false) => {
     setToast({ msg, error });
@@ -170,7 +194,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         e.preventDefault();
         editor.redo();
       } else if (!mod) {
-        const map: Record<string, ToolSettings['tool']> = { '1': 'pen', '2': 'highlighter', '3': 'eraser', '4': 'lasso', '5': 'text', '6': 'hand' };
+        const map: Record<string, ToolSettings['tool']> = { '1': 'pen', '2': 'highlighter', '3': 'eraser', '4': 'lasso', '5': 'text', '6': 'hand', '7': 'shape' };
         if (map[e.key]) setTools({ tool: map[e.key] });
         if ((e.key === 'Delete' || e.key === 'Backspace') && selection) deleteSelection();
         if (e.key === 'Escape') setSelectionState(null);
@@ -248,6 +272,33 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     editor.commitPage(sel.pageId, (p) => ({ ...p, strokes: p.strokes.map((s) => (sel.strokeIds.includes(s.id) ? { ...s, lineStyle } : s)) }));
   };
 
+  /** Fills the selected closed strokes. Nearly closed freehand loops are closed first. */
+  const fillSelection = (fill: FillType) => {
+    if (!selection) return;
+    const sel = selection;
+    let count = 0;
+    editor.commitPage(sel.pageId, (p) => ({
+      ...p,
+      strokes: p.strokes.map((s) => {
+        if (!sel.strokeIds.includes(s.id) || s.tool !== 'pen' || s.shapeKind === 'point') return s;
+        const closed = s.closed || canClose(s);
+        if (!closed) return s;
+        count++;
+        return { ...s, closed: true, arrow: undefined, fill: fill === 'none' ? undefined : fill };
+      }),
+    }));
+    if (!count) showToast('Fill needs a closed shape: draw it with the smart pen or close the loop');
+  };
+
+  const toggleArrowSelection = () => {
+    if (!selection || !selPage) return;
+    const sel = selection;
+    const open = selPage.strokes.filter((s) => sel.strokeIds.includes(s.id) && s.tool === 'pen' && !s.closed && s.points.length > 1 && s.shapeKind !== 'point');
+    if (!open.length) return showToast('Arrowheads go on open lines and curves');
+    const on = !open.every((s) => s.arrow);
+    editor.commitPage(sel.pageId, (p) => ({ ...p, strokes: p.strokes.map((s) => (open.includes(s) ? { ...s, arrow: on || undefined } : s)) }));
+  };
+
   const snapSelection = () => {
     if (!selection || !selPage) return;
     const sel = selection;
@@ -264,14 +315,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     showToast(`Snapped ${count} shape${count > 1 ? 's' : ''}`);
   };
 
+  /** Exact TikZ of the selected ink (no AI, no re-snapping): opens the review sheet to copy/insert/replace. */
   const vectorizeSelection = () => {
-    if (!selection || !selPage || !selStrokes.length) return showToast('Select some ink first');
-    const sel = selection;
-    const tikz = convertStrokesToTikz(selStrokes.map(snapStroke));
-    const b = boundsOfStrokes(selStrokes)!;
-    const block: LatexBlock = { id: newId('tikz'), x: b.x, y: b.y, width: Math.max(80, b.width), height: Math.max(40, b.height), latexCode: tikz, isTikz: true, createdAt: Date.now() };
-    editor.commitPage(sel.pageId, (p) => ({ ...p, strokes: p.strokes.filter((s) => !sel.strokeIds.includes(s.id)), latexBlocks: [...p.latexBlocks, block] }));
-    setSelectionState(null);
+    const ink = selStrokes.filter((s) => s.tool === 'pen');
+    if (!selection || !ink.length) return showToast('Select some ink first');
+    const b = boundsOfStrokes(ink)!;
+    setTarget({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'tikz', image: '' });
+    setModal({ latex: convertStrokesToTikz(ink), isTikz: true, origin: 'new', canReplaceInk: true, subtitle: 'Exact geometry of the selected ink — copy it or insert it as a diagram' });
   };
 
   // ------------------------------------------------------------------------- VLM conversion
@@ -311,7 +361,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const image = renderInkImage(ink, b, texts);
     const hint =
       mode === 'tikz'
-        ? `For reference, a geometric reading of the pen strokes (coordinates in cm from the lower-left corner; shapes may be imprecise; labels and text are NOT included — read them from the image):\n${convertStrokesToTikz(ink.map(snapStroke))}`
+        ? `For reference, a geometric reading of the pen strokes (coordinates in cm from the lower-left corner; shapes may be imprecise; labels and text are NOT included — read them from the image):\n${convertStrokesToTikz(ink)}`
         : undefined;
     void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint });
   };
@@ -369,10 +419,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     setSelectionState(null);
   };
 
-  const onEditLatex = (pageId: string, block: LatexBlock) => {
+  const onEditLatex = useCallback((pageId: string, block: LatexBlock) => {
     setTarget({ kind: 'edit', pageId, blockId: block.id });
     setModal({ latex: block.latexCode, isTikz: !!block.isTikz, origin: 'edit', canReplaceInk: false });
-  };
+  }, []);
 
   const insertLatexManually = () => {
     const page = pageAt(currentPage);
@@ -527,7 +577,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                   paperColor={doc.paperColor}
                   tools={tools}
                   zoom={zoom}
-                  editor={editor}
+                  editor={editor.ops}
                   gestures={gestures}
                   selection={selection?.pageId === page.id ? selection : null}
                   setSelection={setSelection}
@@ -559,6 +609,18 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       </div>
 
       {/* Selection action bar */}
+      {selection && fillMenu && selectionHasInk && (
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-2" style={{ bottom: `calc(64px + env(safe-area-inset-bottom))` }} data-no-pan>
+          <div className="flex items-center gap-1.5 bg-gray-900/95 text-white rounded-2xl shadow-2xl px-2 py-1.5 text-[11px] font-semibold">
+            {FILL_OPTIONS.map((f) => (
+              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-0.5 px-1.5 py-1 rounded-xl hover:bg-white/10" title={f.label}>
+                <FillSwatch fill={f.id} color="#E5E7EB" />
+                <span>{f.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {selection && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-2" style={{ bottom: `calc(12px + env(safe-area-inset-bottom))` }} data-no-pan>
           <div className="flex items-center gap-1 bg-gray-900/95 text-white rounded-2xl shadow-2xl px-2 py-1.5 overflow-x-auto max-w-full text-xs font-semibold">
@@ -584,6 +646,12 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                 <button onClick={() => restyleSelection('solid')} className="px-1.5 text-gray-300" title="Solid">—</button>
                 <button onClick={() => restyleSelection('dashed')} className="px-1.5 text-gray-300" title="Dashed">- -</button>
                 <button onClick={() => restyleSelection('dotted')} className="px-1.5 text-gray-300" title="Dotted">···</button>
+                <div className="relative">
+                  <button onClick={() => setFillMenu((v) => !v)} className={`p-2 rounded-xl hover:bg-white/10 ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">
+                    <PaintBucket className="w-4 h-4" />
+                  </button>
+                </div>
+                <button onClick={toggleArrowSelection} className="p-2 rounded-xl hover:bg-white/10" title="Arrowhead on/off"><MoveUpRight className="w-4 h-4" /></button>
                 <div className="w-px h-5 bg-white/20 mx-0.5" />
               </>
             )}
@@ -648,7 +716,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                   paperColor={doc.paperColor}
                   tools={tools}
                   zoom={1}
-                  editor={editor}
+                  editor={editor.ops}
                   gestures={gestures}
                   selection={null}
                   setSelection={() => undefined}

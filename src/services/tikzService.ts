@@ -131,7 +131,8 @@ function parseOptions(opts: string): Map<string, string> {
   for (const raw of splitTopLevel(opts, ',')) {
     const item = raw.trim();
     if (!item) continue;
-    const eq = item.indexOf('=');
+    // Arrow specs such as -{Stealth[length=3pt]} contain '=' but are keys without a value.
+    const eq = /^[-<]/.test(item) ? -1 : item.indexOf('=');
     if (eq > 0) map.set(item.slice(0, eq).trim(), item.slice(eq + 1).trim());
     else map.set(item, '');
   }
@@ -147,8 +148,13 @@ function styleFrom(cmd: string, opts: Map<string, string>, inherited: Style): St
   if (cmd === 'fill' || cmd === 'filldraw' || cmd === 'shade' || cmd === 'shadedraw') s.fill = s.fill ?? 'currentColor';
   if (cmd === 'fill' || cmd === 'path' || cmd === 'shade') s.stroke = cmd === 'path' ? null : s.stroke === 'currentColor' ? null : s.stroke;
   if (cmd === 'path') s.fill = null;
+  let pattern = false;
+  let patternColor: string | null = null;
   for (const [k, v] of opts) {
-    if (WIDTHS[k] !== undefined) s.width = WIDTHS[k];
+    if (k === 'pattern') pattern = true;
+    else if (k === 'pattern color') patternColor = resolveColor(v);
+    else if (k === 'dash pattern') s.dash = /on\s*0(\.0*)?\s*(pt)?\s+off/.test(v) ? '0.1,3' : '4,3';
+    else if (WIDTHS[k] !== undefined) s.width = WIDTHS[k];
     else if (k === 'line width') s.width = lengthCm(v) * PT_PER_CM;
     else if (k === 'dashed') s.dash = '4,3';
     else if (k === 'densely dashed') s.dash = '3,2';
@@ -174,6 +180,11 @@ function styleFrom(cmd: string, opts: Map<string, string>, inherited: Style): St
       if (cmd === 'fill') s.fill = c;
       else { s.stroke = s.stroke === null ? null : c; if (s.fill === 'currentColor') s.fill = c; if (s.stroke === null && cmd !== 'path') s.stroke = c; }
     }
+  }
+  if (pattern) {
+    // Preview approximation of hatch patterns: a light tint of the pattern colour.
+    s.fill = patternColor ?? (s.stroke && s.stroke !== 'currentColor' ? s.stroke : 'currentColor');
+    s.fillOpacity = 0.3;
   }
   return s;
 }

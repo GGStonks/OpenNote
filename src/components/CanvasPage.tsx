@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Maximize2 } from 'lucide-react';
 import {
-  EraserMode, LatexBlock, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, Stroke, TextBlock, ToolType, newId,
+  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
+  TextBlock, ToolType, newId,
 } from '../types';
-import { drawLiveStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg } from '../ink/strokeRenderer';
+import { drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg } from '../ink/strokeRenderer';
 import { detectShape } from '../services/shapeRecognition';
-import { NoteEditor } from '../state/useNoteEditor';
+import { PageOps } from '../state/useNoteEditor';
+import { SmartPenOptions, SmartPenState, beginSmartPen, moveSmartPen, smartPenShape, smartPenStroke } from '../editor/smartPen';
+import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
 import { Selection, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
@@ -21,6 +24,12 @@ export interface ToolSettings {
   eraserSize: number;
   stylusOnly: boolean;
   holdToSnap: boolean;
+  /** Smart pen (PDEDraw engine). Uses the pen colour and width. */
+  shapeMode: ShapeMode;
+  shapeFill: FillType;
+  shapeArrow: boolean;
+  shapeLineStyle: LineStyle;
+  shapeSnap: boolean;
 }
 
 interface CanvasPageProps {
@@ -30,7 +39,7 @@ interface CanvasPageProps {
   paperColor: PaperColor;
   tools: ToolSettings;
   zoom: number;
-  editor: NoteEditor;
+  editor: PageOps;
   gestures: GestureBus;
   selection: Selection | null;
   setSelection: (s: Selection | null) => void;
@@ -80,11 +89,15 @@ export function paperBackground(style: PaperStyle, color: PaperColor): React.CSS
 
 const MAX_CANVAS_PIXELS = 16_000_000;
 
+/**
+ * Backing-store scale of the page canvases. Quantised in half-zoom steps so that zooming does not
+ * reallocate and repaint the canvases for every small zoom change.
+ */
 function canvasRatio(zoom: number): number {
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const wanted = dpr * Math.max(1, Math.min(zoom, 2.5));
+  const z = Math.ceil(Math.max(1, Math.min(zoom, 2.5)) * 2) / 2;
   const maxByBudget = Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * PAGE_HEIGHT));
-  return Math.max(1, Math.min(wanted, maxByBudget));
+  return Math.max(1, Math.min(dpr * z, maxByBudget));
 }
 
 function setupCanvas(canvas: HTMLCanvasElement, ratio: number): CanvasRenderingContext2D | null {
@@ -99,6 +112,12 @@ function setupCanvas(canvas: HTMLCanvasElement, ratio: number): CanvasRenderingC
   return ctx;
 }
 
+/**
+ * Only one page at a time keeps a full-size live-ink canvas (the one being written on); the others
+ * release theirs. A page canvas is up to 16 Mpx (64 MB) and WebKit has a tight total canvas budget.
+ */
+let liveOwner: { release: () => void } | null = null;
+
 function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
   const anyE = e as PointerEvent & { altitudeAngle?: number; azimuthAngle?: number };
   if (e.pointerType !== 'pen') return {};
@@ -110,7 +129,15 @@ function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
   return {};
 }
 
-export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
+type DirtyRect = { minX: number; minY: number; maxX: number; maxY: number };
+
+function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
+  if (!a) return b;
+  if (!b) return a;
+  return { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) };
+}
+
+const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const {
     page, pageIndex, paperStyle, paperColor, tools, zoom, editor, gestures, selection, setSelection,
     selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot,
@@ -121,6 +148,10 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
   const [visible, setVisible] = useState(pageIndex < 2);
   const darkPaper = paperColor === 'dark';
   const defaultInk = darkPaper ? '#F3F4F6' : '#111827';
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
 
   // Only pages near the viewport get canvases (memory on long notes).
   useEffect(() => {
@@ -128,26 +159,110 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     if (!el || printMode) return;
     const io = new IntersectionObserver((entries) => setVisible(entries.some((en) => en.isIntersecting)), {
       root: scrollRoot,
-      rootMargin: '150% 0px',
+      rootMargin: '100% 0px',
     });
     io.observe(el);
     return () => io.disconnect();
   }, [scrollRoot, printMode]);
 
-  // Committed ink.
+  // Committed ink. Strokes appended on top (the common case while writing) are painted
+  // incrementally; anything else repaints the page.
   const ratio = canvasRatio(zoom);
+  const painted = useRef<{ strokes: Stroke[]; ratio: number } | null>(null);
   useLayoutEffect(() => {
     const canvas = strokeCanvasRef.current;
-    if (!canvas || !visible) return;
+    if (!canvas || !visible) {
+      painted.current = null;
+      return;
+    }
+    const prev = painted.current;
+    const strokes = page.strokes;
+    const appendOnly =
+      prev &&
+      prev.ratio === ratio &&
+      strokes.length > prev.strokes.length &&
+      prev.strokes.every((s, i) => strokes[i] === s) &&
+      strokes.slice(prev.strokes.length).every((s) => s.tool !== 'highlighter' && (!s.fill || s.fill === 'none'));
     const ctx = setupCanvas(canvas, ratio);
     if (!ctx) return;
-    ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
-    drawStrokes(ctx, page.strokes);
+    if (appendOnly) {
+      for (const s of strokes.slice(prev!.strokes.length)) drawStroke(ctx, s);
+    } else {
+      ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+      drawStrokes(ctx, strokes);
+    }
+    painted.current = { strokes, ratio };
   }, [page.strokes, ratio, visible]);
 
+  // ------------------------------------------------------------------ live layer
+  const liveHandle = useRef<{ release: () => void } | null>(null);
+  const dirty = useRef<DirtyRect | null>(null);
+
+  const claimLive = useCallback((): CanvasRenderingContext2D | null => {
+    const canvas = activeCanvasRef.current;
+    if (!canvas) return null;
+    if (!liveHandle.current) {
+      liveHandle.current = {
+        release: () => {
+          const c = activeCanvasRef.current;
+          if (c) {
+            c.width = 0;
+            c.height = 0;
+          }
+          dirty.current = null;
+        },
+      };
+    }
+    if (liveOwner !== liveHandle.current) {
+      liveOwner?.release();
+      liveOwner = liveHandle.current;
+      dirty.current = null;
+    }
+    const fresh = canvas.width === 0;
+    const ctx = setupCanvas(canvas, canvasRatio(zoomRef.current));
+    if (ctx && fresh) ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+    return ctx;
+  }, []);
+
+  // Release the live canvas when the page scrolls away or unmounts.
+  useEffect(() => {
+    if (visible) return;
+    if (liveHandle.current && liveOwner === liveHandle.current) {
+      liveOwner = null;
+      liveHandle.current.release();
+    }
+  }, [visible]);
+  useEffect(
+    () => () => {
+      if (liveHandle.current && liveOwner === liveHandle.current) liveOwner = null;
+    },
+    []
+  );
+
+  // Zoom changed: resize the live canvas if this page owns it.
   useLayoutEffect(() => {
-    if (activeCanvasRef.current && visible) setupCanvas(activeCanvasRef.current, ratio);
+    const c = activeCanvasRef.current;
+    if (c && visible && liveHandle.current && liveOwner === liveHandle.current && c.width > 0) {
+      setupCanvas(c, ratio);
+      dirty.current = null;
+    }
   }, [ratio, visible]);
+
+  // iPadOS Scribble / system gestures: Pencil strokes on the canvas must never be interpreted as
+  // handwriting input or scrolling, which delays and drops strokes.
+  useEffect(() => {
+    const c = activeCanvasRef.current;
+    if (!c) return;
+    const block = (e: TouchEvent) => {
+      if (e.cancelable) e.preventDefault();
+    };
+    c.addEventListener('touchstart', block, { passive: false });
+    c.addEventListener('touchmove', block, { passive: false });
+    return () => {
+      c.removeEventListener('touchstart', block);
+      c.removeEventListener('touchmove', block);
+    };
+  }, [visible, printMode]);
 
   // ------------------------------------------------------------------ input state
   const drawing = useRef<{
@@ -160,62 +275,109 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     snapped: { points: Point[]; closed: boolean; kind: Stroke['shapeKind'] } | null;
     holdTimer: ReturnType<typeof setTimeout> | null;
     lastMove: { x: number; y: number };
+    smart: SmartPenState | null;
+    pressure: number;
   } | null>(null);
   const raf = useRef<number | null>(null);
   const eraserPos = useRef<{ x: number; y: number } | null>(null);
+  const toolsRef = useRef(tools);
+  toolsRef.current = tools;
 
-  const liveStyle = useCallback(
-    (tool: ToolType): InkStyle =>
-      tool === 'highlighter'
-        ? { tool: 'highlighter', color: tools.highlighterColor, width: tools.highlighterWidth, penStyle: 'ballpoint' }
-        : { tool: 'pen', color: tools.penColor, width: tools.penWidth, penStyle: tools.penStyle },
-    [tools.highlighterColor, tools.highlighterWidth, tools.penColor, tools.penWidth, tools.penStyle]
-  );
+  const liveStyle = (tool: ToolType): InkStyle => {
+    const t = toolsRef.current;
+    return tool === 'highlighter'
+      ? { tool: 'highlighter', color: t.highlighterColor, width: t.highlighterWidth, penStyle: 'ballpoint' }
+      : { tool: 'pen', color: t.penColor, width: t.penWidth, penStyle: t.penStyle };
+  };
 
-  const renderActive = useCallback(() => {
+  const smartOptions = (): SmartPenOptions => {
+    const t = toolsRef.current;
+    return { mode: t.shapeMode, color: t.penColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap };
+  };
+
+  const renderActive = () => {
     raf.current = null;
     const canvas = activeCanvasRef.current;
-    if (!canvas) return;
+    if (!canvas || canvas.width === 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    ctx.clearRect(0, 0, PAGE_WIDTH, PAGE_HEIGHT);
+    const prev = dirty.current;
+    if (prev) ctx.clearRect(prev.minX - 3, prev.minY - 3, prev.maxX - prev.minX + 6, prev.maxY - prev.minY + 6);
+    let next: DirtyRect | null = null;
     const d = drawing.current;
-    if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
+    const k = 1 / Math.max(0.3, zoomRef.current);
+    if (d && d.smart) {
+      const opts = smartOptions();
+      const shape = smartPenShape(d.smart, false);
+      if (shape) {
+        next = drawLiveStroke(ctx, shape.points, {
+          tool: 'pen', color: opts.color, width: opts.width, penStyle: 'ballpoint', isShape: true, closed: shape.closed, shapeKind: shape.kind,
+          lineStyle: shape.kind === 'point' ? 'solid' : opts.lineStyle,
+          fill: shape.closed ? opts.fill : undefined,
+          arrow: !shape.closed && opts.arrow,
+        });
+      }
+      const dot = d.smart.snapDot;
+      if (dot) {
+        const r = 6 * k;
+        ctx.save();
+        ctx.fillStyle = '#F97316';
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 2 * k;
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+        next = unionRect(next, { minX: dot.x - r - 2 * k, minY: dot.y - r - 2 * k, maxX: dot.x + r + 2 * k, maxY: dot.y + r + 2 * k });
+      }
+    } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
-        drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed });
+        next = drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
       } else {
-        drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
+        next = drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
       }
     } else if (d && d.tool === 'lasso' && d.points.length > 1) {
       ctx.save();
       ctx.strokeStyle = '#3B82F6';
-      ctx.lineWidth = 1.5;
-      ctx.setLineDash([6, 5]);
+      ctx.lineWidth = 1.5 * k;
+      ctx.setLineDash([6 * k, 5 * k]);
       ctx.fillStyle = 'rgba(59,130,246,0.07)';
       ctx.beginPath();
       ctx.moveTo(d.points[0].x, d.points[0].y);
-      for (const p of d.points) ctx.lineTo(p.x, p.y);
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of d.points) {
+        ctx.lineTo(p.x, p.y);
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      }
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
       ctx.restore();
+      next = { minX: minX - 2 * k, minY: minY - 2 * k, maxX: maxX + 2 * k, maxY: maxY + 2 * k };
     }
-    if (eraserPos.current && (d?.tool === 'eraser' || !d)) {
+    const ep = eraserPos.current;
+    if (ep && (d?.tool === 'eraser' || !d)) {
+      const r = toolsRef.current.eraserSize;
       ctx.save();
       ctx.strokeStyle = 'rgba(100,116,139,0.9)';
       ctx.fillStyle = 'rgba(148,163,184,0.15)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = k;
       ctx.beginPath();
-      ctx.arc(eraserPos.current.x, eraserPos.current.y, tools.eraserSize, 0, Math.PI * 2);
+      ctx.arc(ep.x, ep.y, r, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
       ctx.restore();
+      next = unionRect(next, { minX: ep.x - r - 2, minY: ep.y - r - 2, maxX: ep.x + r + 2, maxY: ep.y + r + 2 });
     }
-  }, [liveStyle, tools.eraserSize]);
+    dirty.current = next;
+  };
+  const renderRef = useRef(renderActive);
+  renderRef.current = renderActive;
 
   const requestRender = useCallback(() => {
-    if (raf.current === null) raf.current = requestAnimationFrame(renderActive);
-  }, [renderActive]);
+    if (raf.current === null) raf.current = requestAnimationFrame(() => renderRef.current());
+  }, []);
 
   const clearActive = useCallback(() => {
     drawing.current = null;
@@ -237,8 +399,12 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     [gestures, clearActive, editor]
   );
 
+  // getBoundingClientRect forces layout: measure once per input event, not per coalesced sample.
+  const rectCache = useRef<DOMRect | null>(null);
+  const canvasRect = () => (rectCache.current ??= activeCanvasRef.current!.getBoundingClientRect());
+
   const toPoint = (e: { clientX: number; clientY: number; pressure: number; pointerType: string }, start: number, angles = {}): Point => {
-    const rect = activeCanvasRef.current!.getBoundingClientRect();
+    const rect = canvasRect();
     return {
       x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width,
       y: ((e.clientY - rect.top) * PAGE_HEIGHT) / rect.height,
@@ -249,8 +415,8 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
   };
 
   const eraseAt = (x: number, y: number) => {
-    const r = tools.eraserSize;
-    if (tools.eraserMode === 'partial') {
+    const r = toolsRef.current.eraserSize;
+    if (toolsRef.current.eraserMode === 'partial') {
       editor.previewPage(page.id, (p) => {
         const res = eraseStrokesPartial(p.strokes, x, y, r, () => newId('stroke'));
         return res.changed ? { ...p, strokes: res.strokes } : p;
@@ -265,7 +431,7 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
 
   const armHoldToSnap = () => {
     const d = drawing.current;
-    if (!d || d.tool !== 'pen' || !tools.holdToSnap || d.snapped) return;
+    if (!d || d.tool !== 'pen' || !toolsRef.current.holdToSnap || d.snapped) return;
     if (d.holdTimer) clearTimeout(d.holdTimer);
     d.holdTimer = setTimeout(() => {
       const cur = drawing.current;
@@ -273,7 +439,7 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       const shape = detectShape(cur.points);
       if (shape) {
         cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind };
-        if (navigator.vibrate) navigator.vibrate(8);
+        haptic('snap');
         requestRender();
       }
     }, 550);
@@ -290,10 +456,14 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       if (existing.pointerType === 'touch' && e.pointerType === 'pen') {
         if (existing.holdTimer) clearTimeout(existing.holdTimer);
         drawing.current = null;
+      } else if (existing.pointerId === e.pointerId || e.pointerType === existing.pointerType) {
+        // A pointerup was lost (e.g. pointer capture dropped by the system): finish the old stroke
+        // instead of ignoring every following stroke.
+        finishStroke(existing, false);
       } else return;
     }
     e.preventDefault();
-    setSelectedBlockId(null);
+    if (selectedBlockId) setSelectedBlockId(null);
 
     if (tool === 'text') {
       if (editingTextId) {
@@ -322,6 +492,8 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     } catch {
       /* ignore */
     }
+    rectCache.current = null;
+    claimLive();
     const start = performance.now();
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
     drawing.current = {
@@ -334,7 +506,10 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       snapped: null,
       holdTimer: null,
       lastMove: { x: pt.x, y: pt.y },
+      smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
+      pressure: pt.pressure,
     };
+    if (drawing.current.smart?.snapDot) haptic('snap');
     if (tool === 'lasso') setSelection(null);
     if (tool === 'eraser') {
       editor.beginGesture();
@@ -349,6 +524,8 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     if (!d) {
       // Hover preview of the eraser (Apple Pencil hover / mouse).
       if (tools.tool === 'eraser' && e.pointerType !== 'touch') {
+        if (!claimLive()) return;
+        rectCache.current = null;
         const pt = toPoint(e, performance.now());
         eraserPos.current = { x: pt.x, y: pt.y };
         requestRender();
@@ -356,21 +533,30 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       return;
     }
     if (e.pointerId !== d.pointerId) return;
+    rectCache.current = null;
     const native = e.nativeEvent;
-    const events: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [native];
-    for (const ce of events.length ? events : [native]) {
+    const coalesced: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [];
+    const events = coalesced.length ? coalesced : [native];
+    let snapTick = false;
+    for (const ce of events) {
       const pt = toPoint(ce, d.start, stylusAngles(ce));
       const last = d.points[d.points.length - 1];
-      if (Math.abs(pt.x - last.x) < 0.25 && Math.abs(pt.y - last.y) < 0.25) continue;
+      if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
+      // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
+      // outline wobble.
+      d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
+      pt.pressure = d.pressure;
       d.points.push(pt);
-      if (d.tool === 'eraser') {
+      if (d.smart) snapTick = moveSmartPen(d.smart, pt) || snapTick;
+      else if (d.tool === 'eraser') {
         eraserPos.current = pt;
         eraseAt(pt.x, pt.y);
       }
     }
-    if (d.tool === 'pen' || d.tool === 'highlighter') {
+    if (snapTick) haptic('snap');
+    if (!d.smart && (d.tool === 'pen' || d.tool === 'highlighter')) {
       const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
-      d.predicted = predicted.slice(0, 2).map((pe) => toPoint(pe, d.start));
+      d.predicted = predicted.slice(0, 2).map((pe) => ({ ...toPoint(pe, d.start), pressure: d.pressure }));
       const last = d.points[d.points.length - 1];
       if (!d.snapped && Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
         d.lastMove = { x: last.x, y: last.y };
@@ -380,13 +566,17 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     requestRender();
   };
 
-  const finish = (e: React.PointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
-    const d = drawing.current;
-    if (!d || e.pointerId !== d.pointerId) return;
+  function finishStroke(d: NonNullable<typeof drawing.current>, cancelled: boolean, pointerType?: string) {
     if (d.holdTimer) clearTimeout(d.holdTimer);
     drawing.current = null;
 
-    if (!cancelled && (d.tool === 'pen' || d.tool === 'highlighter')) {
+    if (!cancelled && d.smart) {
+      const stroke = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
+      if (stroke) {
+        editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
+        if (stroke.closed && d.smart.closing) haptic('success');
+      }
+    } else if (!cancelled && (d.tool === 'pen' || d.tool === 'highlighter')) {
       const style = liveStyle(d.tool);
       const stroke: Stroke = {
         id: newId('stroke'),
@@ -402,12 +592,30 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
     } else if (d.tool === 'eraser') {
       editor.endGesture();
-      if (e.pointerType === 'touch') eraserPos.current = null;
+      if (pointerType === 'touch') eraserPos.current = null;
     } else if (!cancelled && d.tool === 'lasso') {
-      if (d.points.length > 3) setSelection(selectInLasso(page, d.points));
+      if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
     }
-    // Keep the live stroke on screen until the committed canvas has painted it (avoids flicker).
-    requestAnimationFrame(() => requestRender());
+    // The committed canvas paints in the same frame as React's commit (layout effect), so the
+    // live layer can be cleared on the next frame without flicker.
+    requestRender();
+  }
+
+  const finish = (e: React.PointerEvent<HTMLCanvasElement>, cancelled: boolean) => {
+    const d = drawing.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    rectCache.current = null;
+    if (!cancelled && d.tool !== 'eraser' && d.tool !== 'lasso') {
+      // Include the final sample of the stroke.
+      const pt = toPoint(e, d.start, stylusAngles(e.nativeEvent));
+      const last = d.points[d.points.length - 1];
+      if (Math.hypot(pt.x - last.x, pt.y - last.y) > 0.2) {
+        pt.pressure = d.pressure;
+        d.points.push(pt);
+        if (d.smart) moveSmartPen(d.smart, pt);
+      }
+    }
+    finishStroke(d, cancelled, e.pointerType);
   };
 
   // ------------------------------------------------------------------ selection transform
@@ -485,7 +693,7 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
       {printMode ? (
         <svg className="absolute inset-0" width={PAGE_WIDTH} height={PAGE_HEIGHT} viewBox={`0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}`}
           dangerouslySetInnerHTML={{
-            __html: [...page.strokes.filter((s) => s.tool === 'highlighter'), ...page.strokes.filter((s) => s.tool !== 'highlighter')].map((s) => strokeToSvg(s)).join(''),
+            __html: [...page.strokes.filter((s) => s.tool === 'highlighter'), ...page.strokes.filter((s) => s.tool !== 'highlighter')].map((s) => strokeToSvg(s, 0, PAPER_COLORS[paperColor])).join(''),
           }}
         />
       ) : visible ? (
@@ -586,3 +794,5 @@ export const CanvasPage: React.FC<CanvasPageProps> = (props) => {
     </div>
   );
 };
+
+export const CanvasPage = React.memo(CanvasPageImpl);

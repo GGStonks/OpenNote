@@ -1,4 +1,10 @@
-export type ToolType = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'hand';
+export type ToolType = 'pen' | 'shape' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'hand';
+
+/** What the smart pen (PDEDraw's drawing engine) produces. */
+export type ShapeMode = 'curve' | 'line' | 'rectangle' | 'ellipse' | 'point';
+
+/** Fill of closed shapes, as in PDEDraw (TikZ: fill / patterns / white hole). */
+export type FillType = 'none' | 'solid' | 'northEast' | 'northWest' | 'crosshatch' | 'hole';
 
 export type PenStyle = 'fountain' | 'ballpoint';
 
@@ -42,9 +48,17 @@ export interface Stroke {
   /** Closed shapes (rectangle, ellipse, polygon) are rendered as closed paths. */
   closed?: boolean;
   shapeKind?: ShapeKind;
+  /** Fill of a closed stroke (even-odd rule). */
+  fill?: FillType;
+  /** Arrowhead at the end of an open stroke. */
+  arrow?: boolean;
 }
 
-export type ShapeKind = 'line' | 'arrow' | 'polyline' | 'triangle' | 'rectangle' | 'polygon' | 'ellipse' | 'circle';
+/**
+ * 'curve': points are the control points of a centripetal Catmull-Rom spline (PDEDraw smooth curve),
+ * open or closed. 'point': a single filled dot.
+ */
+export type ShapeKind = 'line' | 'arrow' | 'polyline' | 'triangle' | 'rectangle' | 'polygon' | 'ellipse' | 'circle' | 'curve' | 'point';
 
 export interface LatexBlock {
   id: string;

@@ -8,6 +8,11 @@ import { GestureBus } from './gestures';
  * iPad), which also disables native finger scrolling. v1.0 therefore could not be scrolled or
  * zoomed with fingers in stylus-only mode. Here: one finger pans when fingers do not draw, two
  * fingers always pan + pinch-zoom around the midpoint, with momentum; ctrl/⌘+wheel zooms on desktop.
+ *
+ * During a pinch (or a burst of wheel zooming) only a CSS transform is applied to the content, which
+ * the compositor animates without layout or React renders; the real zoom (layout size, canvas
+ * resolution, scroll position) is committed once when the gesture ends. Committing on every
+ * pointermove re-rendered every page and reallocated their canvases, which made pinching lag.
  */
 
 export const MIN_ZOOM = 0.3;
@@ -28,7 +33,10 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
   const fitted = useRef(false);
 
   const pointers = useRef(new Map<number, { x: number; y: number }>());
-  const pinch = useRef<{ dist: number; zoom: number } | null>(null);
+  const pinch = useRef<{ dist: number } | null>(null);
+  /** Visual (transform-only) zoom in progress. */
+  const visual = useRef<{ z0: number; scale: number; m0: { x: number; y: number }; m: { x: number; y: number }; cx: number; cy: number } | null>(null);
+  const wheelTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastPan = useRef<{ x: number; y: number; t: number } | null>(null);
   const velocity = useRef({ vx: 0, vy: 0 });
   const momentum = useRef<number | null>(null);
@@ -52,14 +60,52 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
     setZoomState(nz);
   }, []);
 
-  useLayoutEffect(() => {
+  const applyAnchor = useCallback(() => {
     const a = anchor.current;
     const el = scrollRef.current, outer = outerRef.current;
-    if (!a || !el || !outer) return;
+    if (!el || !outer) return;
+    outer.style.transform = '';
+    outer.style.willChange = '';
+    if (!a) return;
     anchor.current = null;
-    el.scrollLeft = a.cx * zoom + outer.offsetLeft - a.mx;
-    el.scrollTop = a.cy * zoom + outer.offsetTop - a.my;
-  }, [zoom]);
+    el.scrollLeft = a.cx * zoomRef.current + outer.offsetLeft - a.mx;
+    el.scrollTop = a.cy * zoomRef.current + outer.offsetTop - a.my;
+  }, []);
+
+  useLayoutEffect(() => {
+    applyAnchor();
+  }, [zoom, applyAnchor]);
+
+  const beginVisualZoom = (mx: number, my: number) => {
+    const el = scrollRef.current, outer = outerRef.current;
+    if (!el || !outer || visual.current) return;
+    const { cx, cy } = contentPoint(mx, my);
+    visual.current = { z0: zoomRef.current, scale: 1, m0: { x: mx, y: my }, m: { x: mx, y: my }, cx, cy };
+    // Transform origin: the content point under the fingers, in the outer element's own coordinates.
+    outer.style.transformOrigin = `${cx * zoomRef.current}px ${cy * zoomRef.current}px`;
+    outer.style.willChange = 'transform';
+  };
+
+  const updateVisualZoom = (scale: number, mx: number, my: number) => {
+    const v = visual.current, outer = outerRef.current;
+    if (!v || !outer) return;
+    v.scale = Math.max(MIN_ZOOM / v.z0, Math.min(MAX_ZOOM / v.z0, scale));
+    v.m = { x: mx, y: my };
+    outer.style.transform = `translate(${mx - v.m0.x}px, ${my - v.m0.y}px) scale(${v.scale})`;
+  };
+
+  const commitVisualZoom = () => {
+    const v = visual.current;
+    visual.current = null;
+    if (!v) return;
+    const nz = v.z0 * v.scale;
+    anchor.current = { cx: v.cx, cy: v.cy, mx: v.m.x, my: v.m.y };
+    zoomRef.current = nz;
+    if (Math.abs(nz - zoom) < 1e-6) applyAnchor();
+    else setZoomState(nz);
+  };
+  const commitRef = useRef(commitVisualZoom);
+  commitRef.current = commitVisualZoom;
 
   const fitWidth = useCallback(() => {
     const el = scrollRef.current;
@@ -111,7 +157,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
     if (!el) return;
 
     const onDown = (e: PointerEvent) => {
-      const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0;
+      // The mouse pans only where it does not draw (hand tool, gaps between pages).
+      const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && (e.target as HTMLElement).tagName !== 'CANVAS';
       if (e.pointerType !== 'touch' && !navigateMouse) return;
       // Leave touches on UI controls (selection handles, text boxes) alone.
       const target = e.target as HTMLElement;
@@ -123,8 +170,14 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
         gestures.navigating = true;
         gestures.cancelStrokes();
         const [a, b] = [...pointers.current.values()];
-        pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y), zoom: zoomRef.current };
+        pinch.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) };
         lastPan.current = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, t: performance.now() };
+        if (wheelTimer.current) {
+          clearTimeout(wheelTimer.current);
+          wheelTimer.current = null;
+          commitRef.current();
+        }
+        beginVisualZoom(lastPan.current.x, lastPan.current.y);
       } else if (pointers.current.size === 1 && (fingersNavigate() || navigateMouse)) {
         gestures.navigating = true;
         const p = rel(e);
@@ -144,11 +197,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
         mx = (pts[0].x + pts[1].x) / 2;
         my = (pts[0].y + pts[1].y) / 2;
         const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-        // Pan by midpoint movement, then zoom around the midpoint.
-        el.scrollLeft -= mx - lastPan.current.x;
-        el.scrollTop -= my - lastPan.current.y;
-        const z = (pinch.current.zoom * dist) / Math.max(1, pinch.current.dist);
-        if (Math.abs(z - zoomRef.current) > 0.002) zoomAt(z, mx, my);
+        // Pan with the midpoint and scale around it, as a transform only.
+        updateVisualZoom(dist / Math.max(1, pinch.current.dist), mx, my);
+        lastPan.current = { x: mx, y: my, t: now };
+        velocity.current = { vx: 0, vy: 0 };
+        return;
       } else {
         mx = pts[0].x;
         my = pts[0].y;
@@ -163,7 +216,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
     const onUp = (e: PointerEvent) => {
       if (!pointers.current.delete(e.pointerId)) return;
       gestures.touches = pointers.current.size;
-      if (pointers.current.size < 2) pinch.current = null;
+      if (pointers.current.size < 2 && pinch.current) {
+        pinch.current = null;
+        commitRef.current();
+        velocity.current = { vx: 0, vy: 0 };
+      }
       if (pointers.current.size === 1 && gestures.navigating) {
         const p = [...pointers.current.values()][0];
         lastPan.current = { x: p.x, y: p.y, t: performance.now() };
@@ -181,8 +238,18 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
     const onWheel = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
+      if (pinch.current) return;
       const r = el.getBoundingClientRect();
-      zoomAt(zoomRef.current * Math.exp(-e.deltaY * 0.01), e.clientX - r.left, e.clientY - r.top);
+      const mx = e.clientX - r.left, my = e.clientY - r.top;
+      if (!visual.current) beginVisualZoom(mx, my);
+      const v = visual.current!;
+      // Keep the point under the cursor fixed: translate so that m0 stays where it was.
+      updateVisualZoom(v.scale * Math.exp(-e.deltaY * 0.01), v.m0.x, v.m0.y);
+      if (wheelTimer.current) clearTimeout(wheelTimer.current);
+      wheelTimer.current = setTimeout(() => {
+        wheelTimer.current = null;
+        commitRef.current();
+      }, 160);
     };
 
     el.addEventListener('pointerdown', onDown, { capture: true });
@@ -196,6 +263,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
       window.removeEventListener('pointerup', onUp, { capture: true });
       window.removeEventListener('pointercancel', onUp, { capture: true });
       el.removeEventListener('wheel', onWheel);
+      if (wheelTimer.current) clearTimeout(wheelTimer.current);
       stopMomentum();
     };
   }, [fingersNavigate, gestures, zoomAt]);

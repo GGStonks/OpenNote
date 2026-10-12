@@ -1,4 +1,6 @@
-import { Point, Stroke, ShapeKind, PAGE_HEIGHT } from '../types';
+import { FillType, Point, Stroke, ShapeKind, PAGE_HEIGHT } from '../types';
+import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
+import { arrowSize } from '../ink/strokeRenderer';
 
 /**
  * Shape snapping.
@@ -293,6 +295,7 @@ export function snapStroke(stroke: Stroke): Stroke {
 // --- TikZ export of ink ------------------------------------------------------------------------
 
 const PX_PER_CM = 96 / 2.54;
+const PT_PER_PX = 0.75;
 
 function hexToRgb(hex: string): [number, number, number] | null {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
@@ -308,9 +311,16 @@ function tikzColor(hex: string): string {
   return `{rgb,255:red,${rgb[0]};green,${rgb[1]};blue,${rgb[2]}}`;
 }
 
+/** Hatch spacing of the canvas renderer (8 px) in cm. */
+const HATCH_CM = 8 / PX_PER_CM;
+
 /**
- * Converts strokes to a compilable tikzpicture. Snapped shapes become exact TikZ primitives;
- * freehand ink becomes simplified smooth plots. Coordinates are in cm relative to the selection.
+ * Converts strokes to a compilable tikzpicture describing exactly what is drawn on the page:
+ * shapes become TikZ primitives, smart-pen curves become the very Bezier segments that are
+ * rendered (Catmull-Rom converted to `.. controls ..`), freehand ink is fitted with cubic Beziers
+ * within ~0.15 mm. Fills, hatchings, holes, dashes and arrowheads are kept. Hatchings are drawn as
+ * clipped line families (no `patterns` library: identical to the canvas and rendered by TikZJax,
+ * whose SVG driver ignores PGF patterns). Coordinates are in cm from the lower-left corner.
  */
 export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAGE_HEIGHT): string {
   const ink = strokes.filter((s) => s.tool === 'pen' && s.points.length > 0);
@@ -318,23 +328,58 @@ export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAG
   let minX = Infinity, maxY = -Infinity;
   for (const s of ink) for (const p of s.points) { minX = Math.min(minX, p.x); maxY = Math.max(maxY, p.y); }
   void pageHeight;
-  const cx = (p: Point) => ((p.x - minX) / PX_PER_CM).toFixed(2);
-  const cy = (p: Point) => ((maxY - p.y) / PX_PER_CM).toFixed(2);
-  const c = (p: Point) => `(${cx(p)},${cy(p)})`;
+  const num = (v: number) => {
+    const t = v.toFixed(2);
+    return t === '-0.00' ? '0.00' : t;
+  };
+  const cx = (p: XY) => num((p.x - minX) / PX_PER_CM);
+  const cy = (p: XY) => num((maxY - p.y) / PX_PER_CM);
+  const c = (p: XY) => `(${cx(p)},${cy(p)})`;
+  const curve = (segs: Bezier[], closed: boolean) => {
+    if (!segs.length) return '';
+    let out = c(segs[0][0]);
+    segs.forEach(([, c1, c2, e], i) => {
+      const last = i === segs.length - 1;
+      out += ` .. controls ${c(c1)} and ${c(c2)} .. ${closed && last ? c(segs[0][0]) : c(e)}`;
+    });
+    return closed ? `${out} -- cycle` : out;
+  };
 
-  const lines: string[] = ['\\begin{tikzpicture}[line cap=round, line join=round]'];
+  const lines: string[] = [];
   for (const s of ink) {
-    const opts = [`draw=${tikzColor(s.color)}`, `line width=${(s.width * 0.55).toFixed(2)}pt`];
-    if (s.lineStyle === 'dashed') opts.push('dashed');
-    if (s.lineStyle === 'dotted') opts.push('dotted');
-    const o = `[${opts.join(', ')}]`;
     const pts = s.points;
+    const color = tikzColor(s.color);
+    const closed = !!s.closed && pts.length > 2;
+    if (s.shapeKind === 'point' || pts.length === 1) {
+      const r = s.shapeKind === 'point' ? Math.max(2.5, s.width * 1.7) : s.width * 0.7;
+      lines.push(`  \\fill[${color}] ${c(pts[0])} circle (${(r * PT_PER_PX).toFixed(2)}pt);`);
+      continue;
+    }
+    const ls = s.lineStyle ?? 'solid';
+    const lw = (ls === 'dotted' ? s.width * 1.8 : s.width * 1.4) * PT_PER_PX;
+    const opts = [`draw=${color}`, `line width=${lw.toFixed(2)}pt`];
+    if (ls === 'dashed') opts.push(`dash pattern=on ${(s.width * 4 * PT_PER_PX).toFixed(2)}pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    if (ls === 'dotted') opts.push(`dash pattern=on 0pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    let hatch: FillType | null = null;
+    if (closed && s.fill && s.fill !== 'none') {
+      opts.push('even odd rule');
+      if (s.fill === 'solid') opts.push(`fill=${color}`, 'fill opacity=0.22');
+      else if (s.fill === 'hole') opts.push('fill=white');
+      else hatch = s.fill;
+    }
+    const arrowKind = s.shapeKind === 'arrow';
+    if ((s.arrow && !closed) || arrowKind) {
+      const size = arrowKind ? s.width * 2.4 / PT_PER_PX : arrowSize(s.width);
+      opts.push(`-{Stealth[length=${(size * Math.cos(Math.PI / 6) * PT_PER_PX).toFixed(2)}pt, width=${(size * PT_PER_PX).toFixed(2)}pt]}`);
+    }
+    const o = `[${opts.join(', ')}]`;
+    const before = lines.length;
     switch (s.shapeKind) {
       case 'line':
         lines.push(`  \\draw${o} ${c(pts[0])} -- ${c(pts[pts.length - 1])};`);
         break;
       case 'arrow':
-        lines.push(`  \\draw${o.slice(0, -1)}, -{Stealth[length=${(s.width * 2.4).toFixed(1)}pt]}] ${c(pts[0])} -- ${c(pts[1])};`);
+        lines.push(`  \\draw${o} ${c(pts[0])} -- ${c(pts[1])};`);
         break;
       case 'circle':
       case 'ellipse': {
@@ -346,6 +391,7 @@ export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAG
         const rot = (-Math.atan2(pts[0].y - my, pts[0].x - mx) * 180) / Math.PI;
         const center = c(P(mx, my));
         if (s.shapeKind === 'circle') lines.push(`  \\draw${o} ${center} circle (${a.toFixed(2)});`);
+        else if (Math.abs(rot) < 0.05) lines.push(`  \\draw${o} ${center} ellipse (${a.toFixed(2)} and ${b.toFixed(2)});`);
         else lines.push(`  \\draw${o} ${center} ellipse [x radius=${a.toFixed(2)}, y radius=${b.toFixed(2)}, rotate=${rot.toFixed(1)}];`);
         break;
       }
@@ -355,21 +401,38 @@ export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAG
         lines.push(`  \\draw${o} ${pts.map(c).join(' -- ')} -- cycle;`);
         break;
       case 'polyline':
-        lines.push(`  \\draw${o} ${pts.map(c).join(' -- ')};`);
+        lines.push(`  \\draw${o} ${pts.map(c).join(' -- ')}${closed ? ' -- cycle' : ''};`);
+        break;
+      case 'curve':
+        lines.push(`  \\draw${o} ${curve(catmullRomBeziers(pts, closed), closed)};`);
         break;
       default: {
-        if (pts.length === 1) {
-          lines.push(`  \\fill[${tikzColor(s.color)}] ${c(pts[0])} circle (${(s.width * 0.3).toFixed(1)}pt);`);
-          break;
-        }
-        const simplified = rdp(pts, 1.2);
-        if (simplified.length === 2) lines.push(`  \\draw${o} ${c(simplified[0])} -- ${c(simplified[1])};`);
-        else lines.push(`  \\draw${o} plot[smooth, tension=0.5] coordinates {${simplified.map(c).join(' ')}};`);
+        // Freehand: the rendered stroke follows the (smoothed) sample polyline; fit it with cubic Beziers.
+        const segs = fitBeziers(pts, 0.6, closed);
+        lines.push(`  \\draw${o} ${segs.length ? curve(segs, closed) : `${c(pts[0])} -- ${c(pts[pts.length - 1])}`};`);
       }
     }
+    if (hatch && lines.length === before + 1) {
+      // \draw[opts] PATH;  ->  clipped hatch lines, then the outline.
+      const stmt = lines[before];
+      const path = stmt.slice(stmt.indexOf(o) + o.length + 1, -1);
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for (const p of pts) {
+        const x = (p.x - minX) / PX_PER_CM, y = (maxY - p.y) / PX_PER_CM;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+      }
+      y0 -= 0.2; y1 += 0.2;
+      const h = y1 - y0;
+      const from = x0 - 0.2 - h, to = x1 + 0.2;
+      const range = `{${num(from)},${num(from + HATCH_CM)},...,${num(to)}}`;
+      const lineOpts = `draw=${color}, line width=0.83pt, draw opacity=0.5`;
+      const fam: string[] = [];
+      if (hatch === 'northEast' || hatch === 'crosshatch') fam.push(`    \\foreach \\i in ${range} \\draw[${lineOpts}] (\\i,${num(y0)}) -- ++(${num(h)},${num(h)});`);
+      if (hatch === 'northWest' || hatch === 'crosshatch') fam.push(`    \\foreach \\i in ${range} \\draw[${lineOpts}] (\\i,${num(y1)}) -- ++(${num(h)},${num(-h)});`);
+      lines.splice(before, 0, '  \\begin{scope}', `    \\clip ${path};`, ...fam, '  \\end{scope}');
+    }
   }
-  lines.push('\\end{tikzpicture}');
-  return lines.join('\n');
+  return ['\\begin{tikzpicture}[line cap=round, line join=round]', ...lines, '\\end{tikzpicture}'].join('\n');
 }
 
 /** Ray-casting point-in-polygon test. */

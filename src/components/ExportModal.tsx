@@ -44,7 +44,9 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
     if (includeInk && ink.length) {
       let minY = Infinity;
       ink.forEach((s) => s.points.forEach((pt) => (minY = Math.min(minY, pt.y))));
-      items.push({ y: minY, tex: `% Handwriting on page ${i + 1} (vectorised)\n\\begin{center}\n\\resizebox{\\linewidth}{!}{%\n${convertStrokesToTikz(ink)}}\n\\end{center}\n`, md: '' });
+      const prep = prepareTikz(convertStrokesToTikz(ink));
+      prep.libraries.forEach((l) => libs.add(l));
+      items.push({ y: minY, tex: `% Handwriting on page ${i + 1} (vectorised)\n\\begin{center}\n\\resizebox{\\linewidth}{!}{%\n${prep.picture}}\n\\end{center}\n`, md: '' });
     }
     items.sort((a, b) => a.y - b.y);
     body.push(`% ----- Page ${i + 1} -----\n` + items.map((it) => it.tex).join('\n'));
@@ -98,7 +100,7 @@ function buildSvg(doc: NoteDocument): string {
     out += `<g id="page-${i + 1}">\n<rect x="0" y="${dy}" width="${W}" height="${H}" fill="${PAPER_COLORS[doc.paperColor]}"/>\n`;
     for (const im of p.imageBlocks ?? []) out += `<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>\n`;
     const order = [...p.strokes.filter((s) => s.tool === 'highlighter'), ...p.strokes.filter((s) => s.tool !== 'highlighter')];
-    for (const s of order) out += strokeToSvg(s, dy) + '\n';
+    for (const s of order) out += strokeToSvg(s, dy, PAPER_COLORS[doc.paperColor]) + '\n';
     for (const b of p.latexBlocks) {
       if (b.isTikz) {
         const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;
