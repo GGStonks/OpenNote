@@ -117,7 +117,13 @@ export async function convertImage(
         model: settings.modelName,
         temperature: 0,
         top_p: 1,
-        max_tokens: mode === 'math' ? 1024 : 3072,
+        max_tokens: mode === 'math' ? 1024 : mode === 'tikz' ? 2048 : 3072,
+        // Greedy decoding can fall into a loop that runs to max_tokens (minutes of GPU/CPU time and
+        // a timeout in the app). llama.cpp's DRY sampler penalises only long verbatim repeats, so
+        // LaTeX's short recurring patterns (& =, \\) are unaffected.
+        dry_multiplier: 0.8,
+        dry_base: 1.75,
+        dry_allowed_length: 8,
         stream: false,
         messages: [
           {

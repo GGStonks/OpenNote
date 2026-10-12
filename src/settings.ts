@@ -15,6 +15,8 @@ export interface AppSettings {
   holdToSnap: boolean;
   /** Apple Pencil double-tap toggles pen/eraser. */
   pencilDoubleTapEraser: boolean;
+  /** Notability gestures: two-finger tap undoes, three-finger tap redoes. */
+  fingerTapUndo: boolean;
 }
 
 const KEY = 'opennote_settings_v2';
@@ -36,6 +38,7 @@ export function defaultSettings(): AppSettings {
     eraserMode: 'stroke',
     holdToSnap: true,
     pencilDoubleTapEraser: true,
+    fingerTapUndo: true,
   };
 }
 

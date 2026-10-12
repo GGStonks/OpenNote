@@ -13,6 +13,7 @@
 - Library with subjects, search (titles, typed text, LaTeX source), live ink thumbnails, rename / move / duplicate / delete, backup & import.
 - Continuous vertical pages (US Letter, 816×1056 pt @96 dpi) with blank / ruled / grid / dot paper in white, cream, yellow or dark.
 - Pinch-to-zoom (30–400 %), two-finger scroll with momentum, fit-to-width; one-finger scroll when "pencil only" is on.
+- Two-finger tap = undo, three-finger tap = redo (Notability gestures; can be turned off in Settings).
 - Text boxes, images, add / duplicate / delete pages, undo/redo (whole gestures are one step), keyboard shortcuts (1–6 tools, ⌘Z / ⌘⇧Z).
 - Audio recordings per note (record, list, play, delete).
 
@@ -22,7 +23,8 @@
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
 - Stroke eraser and precision (partial) eraser that splits strokes.
-- **Smart pen (PDEDraw engine)**: smooth centripetal Catmull-Rom curves that close themselves when you end near the start ("potatoes", with a snap dot and haptic tick), lines with 15° angle lock, rectangles, ellipses from the centre with circle lock, points. Everything snaps to the key points, edges and crossings of existing shapes. Closed shapes take a fill (solid, //// or \\\\ hatching, crosshatch, or a hole that cuts through fills); open lines/curves can get an arrowhead. Fill and arrowheads can also be applied to a lasso selection.
+- **Smart pen (PDEDraw engine)**: smooth centripetal Catmull-Rom curves that close themselves when you end near the start ("potatoes", with a snap dot and haptic tick), lines with 15° angle lock, rectangles, ellipses from the centre with circle lock, points. Everything snaps to the key points, edges and crossings of existing shapes (curves and ellipses included) and, on grid / dot paper, to the paper's lattice. Lines, rectangles and ellipses show their live size (cm, angle) next to the pen. Closed shapes take a fill (solid, //// or \\\\ hatching, crosshatch, or a hole that cuts through fills); open lines/curves can get an arrowhead. Fill and arrowheads can also be applied to a lasso selection.
+- **Reshape shapes after drawing**: lasso a single shape to get handles: vertices of lines and polygons, corners of rectangles (right angles kept, also when rotated), centre and axes of ellipses and circles, the shaft of snapped arrows, and up to 12 handles on smart curves that bend the curve smoothly. Handles snap like the pen; each drag is one undo step.
 - **Draw-and-hold shape snapping**: line (axis-snapped), arrow, circle, ellipse, triangle, rectangle, polygon, polyline.
 - Lasso: move, resize, recolour, dashed/dotted, duplicate, delete, snap shapes.
 
@@ -31,7 +33,7 @@
 - "Page → LaTeX" transcribes a whole page.
 - Math rendered with bundled KaTeX (works offline); tolerant of `$$…$$`, `\[…\]`, `align*`, `<think>` blocks, markdown fences, full documents.
 - **TikZ rendered by real TeX** (e-TeX + PGF/TikZ compiled to WebAssembly, from TikZJax) inside the app, offline: libraries such as `arrows.meta`, `positioning`, `calc`, `shapes`, `automata`, plus `pgfplots` and `tikz-cd`. A supervised worker restarts after bad input so one broken diagram cannot block the others; an instant built-in preview is shown while TeX runs.
-- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, freehand ink is Bézier-fitted (no polygons). Fills, hatching, dashes and arrows are kept; the code compiles both in the app and in standard LaTeX.
+- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, freehand ink is Bézier-fitted (no polygons). Fills, hatching, dashes and arrows are kept; text boxes and LaTeX blocks in the selection become `\node`s at their position and size. The code compiles both in the app and in standard LaTeX.
 
 **Export**: PDF (system print → Save as PDF / Save to Files, vector ink), SVG, `.tex` (compilable, optionally with remaining ink as TikZ), Markdown, `.opennote` (full-fidelity JSON).
 
@@ -91,7 +93,7 @@ src/
     CanvasPage.tsx            ink input (pen/highlighter/eraser/lasso/text), blocks, paper
     Blocks.tsx                LaTeX / TikZ / text / image blocks
     Toolbar.tsx, LibraryView.tsx, LatexModal.tsx, ExportModal.tsx, SettingsModal.tsx, AudioRecorder.tsx
-  editor/                     selection maths, zoom/pan gestures
+  editor/                     selection maths, zoom/pan/tap gestures, smart pen (smartPen.ts), shape handles (shapeEdit.ts)
   ink/strokeRenderer.ts       pressure ink, Path2D cache, SVG export, partial eraser
   services/
     vlmService.ts             Qwen3-VL client + prompts

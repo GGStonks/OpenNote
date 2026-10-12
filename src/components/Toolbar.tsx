@@ -230,7 +230,11 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               Snap to shapes (points, edges, crossings)
               <input type="checkbox" checked={tools.shapeSnap} onChange={(e) => setTools({ shapeSnap: e.target.checked })} />
             </label>
-            <p className="text-[10px] text-gray-400 mt-2 leading-snug">End a curve near its start to close it. Closed shapes take the fill.</p>
+            <label className="flex items-center justify-between mt-2 text-xs text-gray-600 dark:text-gray-300">
+              Snap to grid / dot paper
+              <input type="checkbox" checked={tools.shapeGridSnap} onChange={(e) => setTools({ shapeGridSnap: e.target.checked })} />
+            </label>
+            <p className="text-[10px] text-gray-400 mt-2 leading-snug">End a curve near its start to close it. Closed shapes take the fill. Lasso a single shape to reshape it with its handles.</p>
           </Popover>
         )}
       </div>

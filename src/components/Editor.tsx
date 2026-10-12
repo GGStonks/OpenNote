@@ -17,7 +17,7 @@ import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
 import { renderLatexContent } from '../services/latexRender';
-import { convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
+import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { createBlankPage } from '../storage/db';
 import { printDocument } from '../platform';
@@ -36,11 +36,13 @@ interface EditorProps {
 }
 
 type ConvTarget =
-  | { kind: 'insert'; pageId: string; bounds: Rect; strokeIds: string[]; textIds: string[]; mode: ConversionMode; image: string; hint?: string }
+  | { kind: 'insert'; pageId: string; bounds: Rect; strokeIds: string[]; textIds: string[]; latexIds?: string[]; mode: ConversionMode; image: string; hint?: string }
   | { kind: 'edit'; pageId: string; blockId: string }
   | { kind: 'new'; pageId: string; at: { x: number; y: number } };
 
 const TOOL_KEY = 'opennote_tools_v2';
+/** Characters of shape geometry sent along with a TikZ conversion (~1k tokens). */
+const MAX_TIKZ_HINT = 4000;
 
 /** A freehand loop whose ends (almost) meet can be closed and filled. */
 function canClose(s: Stroke): boolean {
@@ -73,6 +75,7 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
     shapeArrow: false,
     shapeLineStyle: 'solid',
     shapeSnap: true,
+    shapeGridSnap: true,
   };
   try {
     const raw = localStorage.getItem(TOOL_KEY);
@@ -124,7 +127,17 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   }, [settings.stylusOnly, settings.holdToSnap]);
 
   const fingersNavigate = useCallback(() => toolsRef.current.stylusOnly || toolsRef.current.tool === 'hand', []);
-  const { scrollRef, outerRef, zoom, zoomBy, fitWidth } = useViewport({ contentWidth: CONTENT_WIDTH, fingersNavigate, gestures });
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  const onFingerTap = useCallback(
+    (fingers: number) => {
+      if (!settingsRef.current.fingerTapUndo) return;
+      if (fingers === 2) editor.undo();
+      else if (fingers === 3) editor.redo();
+    },
+    [editor]
+  );
+  const { scrollRef, outerRef, zoom, zoomBy, fitWidth } = useViewport({ contentWidth: CONTENT_WIDTH, fingersNavigate, gestures, onFingerTap });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
   const [selection, setSelectionState] = useState<Selection | null>(null);
@@ -162,7 +175,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       textIds: selection.textIds.filter((id) => (page.textBlocks ?? []).some((b) => b.id === id)),
       imageIds: selection.imageIds.filter((id) => (page.imageBlocks ?? []).some((b) => b.id === id)),
     };
-    if (isEmptySelection({ ...sel, bounds: selection.bounds })) setSelectionState(null);
+    if (isEmptySelection({ ...sel, bounds: selection.bounds })) return setSelectionState(null);
+    // Undo/redo of a move or a reshape: the box follows the content.
+    const b = computeBounds(page, sel);
+    const o = selection.bounds;
+    if (b && (Math.abs(b.x - o.x) > 0.5 || Math.abs(b.y - o.y) > 0.5 || Math.abs(b.width - o.width) > 0.5 || Math.abs(b.height - o.height) > 0.5)) {
+      setSelectionState({ ...sel, bounds: b });
+    }
   }, [doc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -315,13 +334,34 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     showToast(`Snapped ${count} shape${count > 1 ? 's' : ''}`);
   };
 
-  /** Exact TikZ of the selected ink (no AI, no re-snapping): opens the review sheet to copy/insert/replace. */
+  /**
+   * Exact TikZ of the selection (no AI, no re-snapping): ink as geometry, selected text boxes and
+   * LaTeX blocks as nodes at their positions. Opens the review sheet to copy/insert/replace.
+   */
   const vectorizeSelection = () => {
     const ink = selStrokes.filter((s) => s.tool === 'pen');
-    if (!selection || !ink.length) return showToast('Select some ink first');
-    const b = boundsOfStrokes(ink)!;
-    setTarget({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'tikz', image: '' });
-    setModal({ latex: convertStrokesToTikz(ink), isTikz: true, origin: 'new', canReplaceInk: true, subtitle: 'Exact geometry of the selected ink — copy it or insert it as a diagram' });
+    if (!selection || !selPage || !ink.length) return showToast('Select some ink first');
+    const texts = (selPage.textBlocks ?? []).filter((t) => selection.textIds.includes(t.id) && t.text.trim());
+    const maths = selPage.latexBlocks.filter((b) => selection.latexIds.includes(b.id) && !b.isTikz);
+    const labels: TikzLabel[] = [
+      ...texts.map((t) => ({ x: t.x, y: t.y, width: t.width, height: t.fontSize * 1.35 * Math.max(1, t.text.split('\n').length), text: t.text, latex: false, color: t.color, fontPx: t.fontSize })),
+      ...maths.map((b) => ({ x: b.x, y: b.y, width: b.width, height: b.height, text: b.latexCode, latex: true, color: b.color, fontPx: 22 * (b.scale ?? 1) })),
+    ];
+    const ib = boundsOfStrokes(ink)!;
+    let x0 = ib.x, y0 = ib.y, x1 = ib.x + ib.width, y1 = ib.y + ib.height;
+    for (const l of labels) {
+      x0 = Math.min(x0, l.x); y0 = Math.min(y0, l.y);
+      x1 = Math.max(x1, l.x + l.width); y1 = Math.max(y1, l.y + l.height);
+    }
+    const b = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+    setTarget({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: texts.map((t) => t.id), latexIds: maths.map((m) => m.id), mode: 'tikz', image: '' });
+    setModal({
+      latex: convertStrokesToTikz(ink, labels),
+      isTikz: true,
+      origin: 'new',
+      canReplaceInk: true,
+      subtitle: labels.length ? 'Exact geometry of the selected ink, with its text and math as nodes' : 'Exact geometry of the selected ink — copy it or insert it as a diagram',
+    });
   };
 
   // ------------------------------------------------------------------------- VLM conversion
@@ -359,9 +399,14 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const b = boundsOfStrokes(ink, texts);
     if (!b) return showToast('The selection contains no handwriting to transcribe');
     const image = renderInkImage(ink, b, texts);
+    // TikZ: the exact geometry of drawn shapes helps the model, but handwriting as Bezier
+    // coordinates is thousands of tokens (a 14k-token prompt took minutes and timed out), so only
+    // shapes go in, and only while the hint stays small.
+    const shapes = ink.filter((s) => s.isShape);
+    const geometry = mode === 'tikz' && shapes.length ? convertStrokesToTikz(shapes) : '';
     const hint =
-      mode === 'tikz'
-        ? `For reference, a geometric reading of the pen strokes (coordinates in cm from the lower-left corner; shapes may be imprecise; labels and text are NOT included — read them from the image):\n${convertStrokesToTikz(ink)}`
+      geometry && geometry.length <= MAX_TIKZ_HINT
+        ? `For reference, the exact geometry of the drawn shapes (coordinates in cm from the lower-left corner of the shapes; freehand lines, labels and text are NOT included — read them from the image):\n${geometry}`
         : undefined;
     void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint });
   };
@@ -413,7 +458,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       block.scale = Math.max(0.8, Math.min(3, t.bounds.height / lines / 45));
     }
     editor.commitPage(t.pageId, (p) => {
-      const base = replaceInk && t.kind === 'insert' ? { ...p, strokes: p.strokes.filter((s) => !t.strokeIds.includes(s.id)), textBlocks: (p.textBlocks ?? []).filter((x) => !t.textIds.includes(x.id)) } : p;
+      const base =
+        replaceInk && t.kind === 'insert'
+          ? {
+              ...p,
+              strokes: p.strokes.filter((s) => !t.strokeIds.includes(s.id)),
+              textBlocks: (p.textBlocks ?? []).filter((x) => !t.textIds.includes(x.id)),
+              latexBlocks: p.latexBlocks.filter((x) => !(t.latexIds ?? []).includes(x.id)),
+            }
+          : p;
       return { ...base, latexBlocks: [...base.latexBlocks, block] };
     });
     setSelectionState(null);

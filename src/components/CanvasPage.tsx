@@ -1,16 +1,19 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2 } from 'lucide-react';
 import {
   EraserMode, FillType, LatexBlock, LineStyle, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
 } from '../types';
-import { drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg } from '../ink/strokeRenderer';
+import { drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg, styleOf } from '../ink/strokeRenderer';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
-import { SmartPenOptions, SmartPenState, beginSmartPen, moveSmartPen, smartPenShape, smartPenStroke } from '../editor/smartPen';
+import {
+  SmartPenOptions, SmartPenState, SnapCache, beginSmartPen, buildSnapCache, findSnapKind, moveSmartPen, smartPenMeasure, smartPenShape, smartPenStroke,
+} from '../editor/smartPen';
+import { ShapeHandle, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
-import { Selection, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
+import { Selection, computeBounds, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 
 export interface ToolSettings {
@@ -30,6 +33,8 @@ export interface ToolSettings {
   shapeArrow: boolean;
   shapeLineStyle: LineStyle;
   shapeSnap: boolean;
+  /** Snap the smart pen to the lattice of grid / dot paper. */
+  shapeGridSnap: boolean;
 }
 
 interface CanvasPageProps {
@@ -87,6 +92,11 @@ export function paperBackground(style: PaperStyle, color: PaperColor): React.CSS
   return css;
 }
 
+/** Lattice spacing of grid and dot paper (see paperBackground), or null for other papers. */
+export function paperGrid(style: PaperStyle): number | null {
+  return style === 'grid' || style === 'dots' ? 24 : null;
+}
+
 const MAX_CANVAS_PIXELS = 16_000_000;
 
 /**
@@ -131,6 +141,42 @@ function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
 
 type DirtyRect = { minX: number; minY: number; maxX: number; maxY: number };
 
+/** Snap indicator: orange for shapes (PDEDraw), a small blue dot for grid points. */
+function drawSnapDot(ctx: CanvasRenderingContext2D, dot: { x: number; y: number }, grid: boolean, k: number): DirtyRect {
+  const r = (grid ? 4 : 6) * k;
+  ctx.save();
+  ctx.fillStyle = grid ? '#3B82F6' : '#F97316';
+  ctx.strokeStyle = '#FFFFFF';
+  ctx.lineWidth = 2 * k;
+  ctx.beginPath();
+  ctx.arc(dot.x, dot.y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  return { minX: dot.x - r - 2 * k, minY: dot.y - r - 2 * k, maxX: dot.x + r + 2 * k, maxY: dot.y + r + 2 * k };
+}
+
+/** Dimension label (length / angle / size) drawn next to the pen, constant size on screen. */
+function drawMeasure(ctx: CanvasRenderingContext2D, text: string, at: { x: number; y: number }, k: number): DirtyRect {
+  ctx.save();
+  ctx.font = `600 ${12 * k}px -apple-system, system-ui, sans-serif`;
+  const w = ctx.measureText(text).width + 12 * k;
+  const h = 20 * k;
+  // Above-right of the pen tip, kept on the page.
+  const x = Math.min(PAGE_WIDTH - w - 2, Math.max(2, at.x + 14 * k));
+  const y = Math.max(2, at.y - 14 * k - h);
+  ctx.fillStyle = 'rgba(17,24,39,0.82)';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 6 * k);
+  else ctx.rect(x, y, w, h);
+  ctx.fill();
+  ctx.fillStyle = '#FFFFFF';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(text, x + 6 * k, y + h / 2);
+  ctx.restore();
+  return { minX: x - 1, minY: y - 1, maxX: x + w + 1, maxY: y + h + 1 };
+}
+
 function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
   if (!a) return b;
   if (!b) return a;
@@ -152,6 +198,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   pageRef.current = page;
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const paperStyleRef = useRef(paperStyle);
+  paperStyleRef.current = paperStyle;
 
   // Only pages near the viewport get canvases (memory on long notes).
   useEffect(() => {
@@ -165,6 +213,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     return () => io.disconnect();
   }, [scrollRoot, printMode]);
 
+  // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
+  const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
+  const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
+
   // Committed ink. Strokes appended on top (the common case while writing) are painted
   // incrementally; anything else repaints the page.
   const ratio = canvasRatio(zoom);
@@ -176,7 +228,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       return;
     }
     const prev = painted.current;
-    const strokes = page.strokes;
+    const strokes = shownStrokes;
     const appendOnly =
       prev &&
       prev.ratio === ratio &&
@@ -192,7 +244,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       drawStrokes(ctx, strokes);
     }
     painted.current = { strokes, ratio };
-  }, [page.strokes, ratio, visible]);
+  }, [shownStrokes, ratio, visible]);
 
   // ------------------------------------------------------------------ live layer
   const liveHandle = useRef<{ release: () => void } | null>(null);
@@ -292,7 +344,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const smartOptions = (): SmartPenOptions => {
     const t = toolsRef.current;
-    return { mode: t.shapeMode, color: t.penColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap };
+    return {
+      mode: t.shapeMode, color: t.penColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap,
+      grid: t.shapeGridSnap ? paperGrid(paperStyleRef.current) : null,
+    };
   };
 
   const renderActive = () => {
@@ -306,6 +361,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     let next: DirtyRect | null = null;
     const d = drawing.current;
     const k = 1 / Math.max(0.3, zoomRef.current);
+    const edit = handleDrag.current;
+    if (edit) {
+      next = unionRect(next, drawLiveStroke(ctx, edit.last.points, styleOf(edit.last)));
+      if (edit.snapDot) next = unionRect(next, drawSnapDot(ctx, edit.snapDot, false, k));
+    }
     if (d && d.smart) {
       const opts = smartOptions();
       const shape = smartPenShape(d.smart, false);
@@ -318,19 +378,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         });
       }
       const dot = d.smart.snapDot;
-      if (dot) {
-        const r = 6 * k;
-        ctx.save();
-        ctx.fillStyle = '#F97316';
-        ctx.strokeStyle = '#FFFFFF';
-        ctx.lineWidth = 2 * k;
-        ctx.beginPath();
-        ctx.arc(dot.x, dot.y, r, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-        next = unionRect(next, { minX: dot.x - r - 2 * k, minY: dot.y - r - 2 * k, maxX: dot.x + r + 2 * k, maxY: dot.y + r + 2 * k });
-      }
+      if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart.snapKind === 'grid', k));
+      const m = smartPenMeasure(d.smart);
+      if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
@@ -619,9 +669,20 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   };
 
   // ------------------------------------------------------------------ selection transform
-  const transform = useRef<{ mode: 'move' | 'scale'; startX: number; startY: number; snapshot: NotePage; sel: Selection; pointerId: number } | null>(null);
+  // While a selection is moved or scaled nothing is written to the document: the selected ink is
+  // painted once into a floating canvas that follows the pointer as a CSS transform (composited on
+  // the GPU) and is hidden on the page canvas; selected blocks are shifted in place. The change is
+  // committed once, on release, as one undo step. Rewriting the document on every pointermove
+  // repainted the whole page, rebuilt the pressure outline of every moved stroke and re-rendered
+  // the editor, which made moving anything lag.
+  const transform = useRef<{ mode: 'move' | 'scale'; startX: number; startY: number; sel: Selection; pointerId: number; dx: number; dy: number; f: number } | null>(null);
+  const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; f: number } | null>(null);
+  const dragFrame = useRef<number | null>(null);
+  const floatCanvasRef = useRef<HTMLCanvasElement>(null);
   const [liveBounds, setLiveBounds] = useState<Selection['bounds'] | null>(null);
-  const shownBounds = liveBounds ?? selection?.bounds ?? null;
+  const shownBounds = drag
+    ? { x: drag.sel.bounds.x + drag.dx, y: drag.sel.bounds.y + drag.dy, width: drag.sel.bounds.width * drag.f, height: drag.sel.bounds.height * drag.f }
+    : liveBounds ?? selection?.bounds ?? null;
 
   const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale') => {
     if (!selection) return;
@@ -629,8 +690,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     e.stopPropagation();
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    editor.beginGesture();
-    transform.current = { mode, startX: e.clientX, startY: e.clientY, snapshot: page, sel: selection, pointerId: e.pointerId };
+    transform.current = { mode, startX: e.clientX, startY: e.clientY, sel: selection, pointerId: e.pointerId, dx: 0, dy: 0, f: 1 };
+    setDrag({ sel: selection, dx: 0, dy: 0, f: 1 });
+    if (selection.strokeIds.length) setHiddenIds(new Set(selection.strokeIds));
   };
 
   const moveTransform = (e: React.PointerEvent) => {
@@ -641,22 +703,123 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const dy = (e.clientY - t.startY) / zoom;
     const b = t.sel.bounds;
     if (t.mode === 'move') {
-      editor.previewPage(page.id, () => transformSelection(t.snapshot, t.sel, dx, dy, 1));
-      setLiveBounds({ ...b, x: b.x + dx, y: b.y + dy });
+      t.dx = dx;
+      t.dy = dy;
     } else {
-      const f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
-      editor.previewPage(page.id, () => transformSelection(t.snapshot, t.sel, 0, 0, f));
-      setLiveBounds({ ...b, width: b.width * f, height: b.height * f });
+      t.f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
+    }
+    // One React update per frame, however many pointer events arrive.
+    if (dragFrame.current === null) {
+      dragFrame.current = requestAnimationFrame(() => {
+        dragFrame.current = null;
+        const cur = transform.current;
+        if (cur) setDrag({ sel: cur.sel, dx: cur.dx, dy: cur.dy, f: cur.f });
+      });
     }
   };
 
-  const endTransform = (e: React.PointerEvent) => {
+  const endTransform = (e: React.PointerEvent, cancelled = false) => {
     const t = transform.current;
     if (!t || e.pointerId !== t.pointerId) return;
     transform.current = null;
-    editor.endGesture();
-    if (liveBounds) setSelection({ ...t.sel, bounds: liveBounds });
+    if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+    dragFrame.current = null;
+    const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.f - 1) > 1e-4;
+    if (moved && !cancelled) {
+      editor.commitPage(page.id, (p) => transformSelection(p, t.sel, t.dx, t.dy, t.f));
+      const b = t.sel.bounds;
+      setSelection({ ...t.sel, bounds: { x: b.x + t.dx, y: b.y + t.dy, width: b.width * t.f, height: b.height * t.f } });
+    }
+    setDrag(null);
+    setHiddenIds(null);
+  };
+
+  // Floating canvas with the selected ink, painted once per drag.
+  const FLOAT_PAD = 24;
+  const dragSel = drag?.sel ?? null;
+  useLayoutEffect(() => {
+    const c = floatCanvasRef.current;
+    if (!c || !dragSel) return;
+    const b = dragSel.bounds;
+    const w = b.width + FLOAT_PAD * 2, h = b.height + FLOAT_PAD * 2;
+    const r = Math.min(ratio, Math.sqrt(MAX_CANVAS_PIXELS / 2 / Math.max(1, w * h)));
+    c.width = Math.max(1, Math.round(w * r));
+    c.height = Math.max(1, Math.round(h * r));
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
+    const ids = new Set(dragSel.strokeIds);
+    drawStrokes(ctx, pageRef.current.strokes.filter((s) => ids.has(s.id)));
+  }, [dragSel, ratio]);
+
+  // Blocks of the selection follow the drag without touching the document.
+  const blockPage = useMemo(
+    () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.f) : page),
+    [drag, page]
+  );
+
+  // ------------------------------------------------------------------ shape editing (handles)
+  // Same idea for reshaping: the edited shape is drawn on the live layer while dragging and
+  // committed on release.
+  const editShape =
+    selection && !printMode && selection.strokeIds.length === 1 && !selection.latexIds.length && !selection.textIds.length && !selection.imageIds.length
+      ? page.strokes.find((s) => s.id === selection.strokeIds[0])
+      : undefined;
+  const handles = editShape && !drag ? shapeHandles(editShape) : null;
+  const handleDrag = useRef<{
+    pointerId: number; orig: Stroke; handle: ShapeHandle; cache: SnapCache | null; sel: Selection; last: Stroke; snapped: boolean; snapDot: { x: number; y: number } | null;
+  } | null>(null);
+  const [editHandles, setEditHandles] = useState<ShapeHandle[] | null>(null);
+
+  const pagePoint = (e: { clientX: number; clientY: number }) => {
+    const rect = containerRef.current!.getBoundingClientRect();
+    return { x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width, y: ((e.clientY - rect.top) * PAGE_HEIGHT) / rect.height };
+  };
+
+  const startHandle = (e: React.PointerEvent, h: ShapeHandle) => {
+    if (!editShape || !selection) return;
+    e.stopPropagation();
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    const others = page.strokes.filter((s) => s.id !== editShape.id);
+    const grid = tools.shapeGridSnap ? paperGrid(paperStyle) : null;
+    const cache = tools.shapeSnap || grid ? buildSnapCache(tools.shapeSnap ? others : [], grid) : null;
+    if (!claimLive()) return;
+    handleDrag.current = { pointerId: e.pointerId, orig: editShape, handle: h, cache, sel: selection, last: editShape, snapped: false, snapDot: null };
+    setHiddenIds(new Set([editShape.id]));
+    requestRender();
+  };
+
+  const moveHandle = (e: React.PointerEvent) => {
+    const d = handleDrag.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    e.stopPropagation();
+    const p = pagePoint(e);
+    const snap = d.cache ? findSnapKind(d.cache, p, zoom) : null;
+    const shapeSnap = snap?.kind === 'shape';
+    if (shapeSnap && !d.snapped) haptic('snap');
+    d.snapped = shapeSnap;
+    d.snapDot = shapeSnap ? snap!.at : null;
+    d.last = dragHandle(d.orig, d.handle, snap?.at ?? p);
+    requestRender();
+    setEditHandles(shapeHandles(d.last));
+    setLiveBounds(computeBounds({ ...pageRef.current, strokes: [d.last] }, d.sel));
+  };
+
+  const endHandle = (e: React.PointerEvent, cancelled = false) => {
+    const d = handleDrag.current;
+    if (!d || e.pointerId !== d.pointerId) return;
+    handleDrag.current = null;
+    if (!cancelled && d.last !== d.orig) {
+      const next = d.last;
+      editor.commitPage(page.id, (pg) => ({ ...pg, strokes: pg.strokes.map((s) => (s.id === d.orig.id ? next : s)) }));
+      const b = computeBounds({ ...pageRef.current, strokes: [next] }, d.sel);
+      if (b) setSelection({ ...d.sel, bounds: b });
+    }
+    setHiddenIds(null);
+    setEditHandles(null);
     setLiveBounds(null);
+    requestRender();
   };
 
   // ------------------------------------------------------------------ render
@@ -699,12 +862,27 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ) : visible ? (
         <canvas ref={strokeCanvasRef} className="absolute inset-0 pointer-events-none" style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />
       ) : null}
+      {drag && drag.sel.strokeIds.length > 0 && (
+        <canvas
+          ref={floatCanvasRef}
+          className="absolute pointer-events-none"
+          style={{
+            left: drag.sel.bounds.x - FLOAT_PAD,
+            top: drag.sel.bounds.y - FLOAT_PAD,
+            width: drag.sel.bounds.width + FLOAT_PAD * 2,
+            height: drag.sel.bounds.height + FLOAT_PAD * 2,
+            transformOrigin: `${FLOAT_PAD}px ${FLOAT_PAD}px`,
+            transform: `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})`,
+            willChange: 'transform',
+          }}
+        />
+      )}
 
       {/* Typed / converted content */}
-      {(page.imageBlocks ?? []).map((im) => (
+      {(blockPage.imageBlocks ?? []).map((im) => (
         <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
       ))}
-      {page.latexBlocks.map((b) => (
+      {blockPage.latexBlocks.map((b) => (
         <LatexBlockView
           key={b.id}
           block={b}
@@ -717,7 +895,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           {...latexHandlers(b)}
         />
       ))}
-      {(page.textBlocks ?? []).map((t) => (
+      {(blockPage.textBlocks ?? []).map((t) => (
         <TextBlockView
           key={t.id}
           block={t}
@@ -772,21 +950,40 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           style={{ left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none' }}
           onPointerDown={(e) => startTransform(e, 'move')}
           onPointerMove={moveTransform}
-          onPointerUp={endTransform}
-          onPointerCancel={endTransform}
+          onPointerUp={(e) => endTransform(e)}
+          onPointerCancel={(e) => endTransform(e, true)}
         >
           <div
             className="absolute -right-3 -bottom-3 w-7 h-7 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md cursor-nwse-resize"
             style={{ transform: `scale(${Math.max(1, 1 / zoom)})`, touchAction: 'none' }}
             onPointerDown={(e) => startTransform(e, 'scale')}
             onPointerMove={moveTransform}
-            onPointerUp={endTransform}
-            onPointerCancel={endTransform}
+            onPointerUp={(e) => endTransform(e)}
+            onPointerCancel={(e) => endTransform(e, true)}
           >
             <Maximize2 className="w-3.5 h-3.5" />
           </div>
         </div>
       )}
+
+      {/* Shape handles (single smart shape selected) */}
+      {handles && selection &&
+        (editHandles ?? handles).map((h, i) => (
+          <div
+            key={i}
+            data-no-pan
+            className="absolute z-30 flex items-center justify-center"
+            style={{ left: h.x - 15, top: h.y - 15, width: 30, height: 30, transform: `scale(${1 / zoom})`, touchAction: 'none', cursor: 'grab' }}
+            onPointerDown={(e) => startHandle(e, handles[i] ?? h)}
+            onPointerMove={moveHandle}
+            onPointerUp={(e) => endHandle(e)}
+            onPointerCancel={(e) => endHandle(e, true)}
+          >
+            <span
+              className={`block shadow-md border-2 ${h.role === 'center' ? 'w-3 h-3 rounded-sm bg-blue-600 border-white' : h.role === 'axisA' || h.role === 'axisB' ? 'w-3.5 h-3.5 rounded-full bg-blue-600 border-white' : 'w-3.5 h-3.5 rounded-full bg-white border-blue-600'}`}
+            />
+          </div>
+        ))}
 
       {!printMode && (
         <div className="absolute bottom-2 right-4 text-[11px] font-medium text-gray-400 pointer-events-none">{pageIndex + 1}</div>

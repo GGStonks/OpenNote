@@ -1,6 +1,7 @@
-import { FillType, Point, Stroke, ShapeKind, PAGE_HEIGHT } from '../types';
+import { FillType, Point, Stroke, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
 import { arrowSize } from '../ink/strokeRenderer';
+import { latexForDocument } from './latexRender';
 
 /**
  * Shape snapping.
@@ -311,6 +312,48 @@ function tikzColor(hex: string): string {
   return `{rgb,255:red,${rgb[0]};green,${rgb[1]};blue,${rgb[2]}}`;
 }
 
+/** Typed content placed into the picture as a TikZ node (top-left anchored, page px). */
+export interface TikzLabel {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Plain text (escaped) or LaTeX source (used as is). */
+  text: string;
+  latex: boolean;
+  color?: string;
+  /** Rendered font size in px. */
+  fontPx: number;
+}
+
+function escapeTex(t: string): string {
+  return t
+    .replace(/\\/g, '\u0000')
+    .replace(/([#$%&_{}])/g, '\\$1')
+    .replace(/\^/g, '\\^{}')
+    .replace(/~/g, '\\~{}')
+    .replace(/\u0000/g, '\\textbackslash{}');
+}
+
+/** Body of a node for a label: text lines, inline/display math, or LaTeX notes. */
+function labelNode(l: TikzLabel): { body: string; opts: string[] } {
+  // TeX's 10pt base vs. the rendered size on the page.
+  const scale = (l.fontPx * PT_PER_PX) / 10;
+  const opts = ['anchor=north west', 'inner sep=0pt'];
+  if (Math.abs(scale - 1) > 0.02) opts.push(`scale=${scale.toFixed(2)}`);
+  if (!l.latex) {
+    const lines = l.text.split('\n').map(escapeTex);
+    if (lines.length > 1) opts.push('align=left');
+    return { body: lines.join(' \\\\ '), opts };
+  }
+  const tex = latexForDocument(l.text).trim();
+  const display = /^\\\[\s*([\s\S]*?)\s*\\\]$/.exec(tex);
+  if (display && !/\\begin\{/.test(display[1])) return { body: `$\\displaystyle ${display[1].replace(/\s*\n\s*/g, ' ')}$`, opts };
+  // Mixed notes or environments: typeset in a box as wide as the block.
+  opts.push(`text width=${(l.width / PX_PER_CM / scale).toFixed(2)}cm`, 'align=left');
+  return { body: tex, opts };
+}
+
 /** Hatch spacing of the canvas renderer (8 px) in cm. */
 const HATCH_CM = 8 / PX_PER_CM;
 
@@ -322,12 +365,12 @@ const HATCH_CM = 8 / PX_PER_CM;
  * clipped line families (no `patterns` library: identical to the canvas and rendered by TikZJax,
  * whose SVG driver ignores PGF patterns). Coordinates are in cm from the lower-left corner.
  */
-export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAGE_HEIGHT): string {
+export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []): string {
   const ink = strokes.filter((s) => s.tool === 'pen' && s.points.length > 0);
-  if (ink.length === 0) return '\\begin{tikzpicture}\n\\end{tikzpicture}';
+  if (ink.length === 0 && labels.length === 0) return '\\begin{tikzpicture}\n\\end{tikzpicture}';
   let minX = Infinity, maxY = -Infinity;
   for (const s of ink) for (const p of s.points) { minX = Math.min(minX, p.x); maxY = Math.max(maxY, p.y); }
-  void pageHeight;
+  for (const l of labels) { minX = Math.min(minX, l.x); maxY = Math.max(maxY, l.y + l.height); }
   const num = (v: number) => {
     const t = v.toFixed(2);
     return t === '-0.00' ? '0.00' : t;
@@ -431,6 +474,12 @@ export function convertStrokesToTikz(strokes: Stroke[], pageHeight: number = PAG
       if (hatch === 'northWest' || hatch === 'crosshatch') fam.push(`    \\foreach \\i in ${range} \\draw[${lineOpts}] (\\i,${num(y1)}) -- ++(${num(h)},${num(-h)});`);
       lines.splice(before, 0, '  \\begin{scope}', `    \\clip ${path};`, ...fam, '  \\end{scope}');
     }
+  }
+  for (const l of labels) {
+    const { body, opts } = labelNode(l);
+    if (!body.trim()) continue;
+    if (l.color) opts.push(`text=${tikzColor(l.color)}`);
+    lines.push(`  \\node[${opts.join(', ')}] at ${c(l)} {${body}};`);
   }
   return ['\\begin{tikzpicture}[line cap=round, line join=round]', ...lines, '\\end{tikzpicture}'].join('\n');
 }

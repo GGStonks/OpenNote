@@ -13,6 +13,9 @@ import { GestureBus } from './gestures';
  * the compositor animates without layout or React renders; the real zoom (layout size, canvas
  * resolution, scroll position) is committed once when the gesture ends. Committing on every
  * pointermove re-rendered every page and reallocated their canvases, which made pinching lag.
+ *
+ * A quick tap of two or three fingers that barely move is reported through onFingerTap
+ * (Notability: two-finger tap = undo, three-finger tap = redo).
  */
 
 export const MIN_ZOOM = 0.3;
@@ -22,9 +25,13 @@ interface Options {
   contentWidth: number;
   fingersNavigate: () => boolean; // true when a single finger should pan (stylus-only / hand tool)
   gestures: GestureBus;
+  onFingerTap?: (fingers: number) => void;
 }
 
-export function useViewport({ contentWidth, fingersNavigate, gestures }: Options) {
+const TAP_MAX_MS = 320;
+const TAP_SLOP = 14;
+
+export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap }: Options) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const outerRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoomState] = useState(1);
@@ -40,6 +47,9 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
   const lastPan = useRef<{ x: number; y: number; t: number } | null>(null);
   const velocity = useRef({ vx: 0, vy: 0 });
   const momentum = useRef<number | null>(null);
+  const tap = useRef<{ start: number; fingers: number; moved: boolean; origins: Map<number, { x: number; y: number }> } | null>(null);
+  const onTapRef = useRef(onFingerTap);
+  onTapRef.current = onFingerTap;
 
   const contentPoint = (mx: number, my: number) => {
     const el = scrollRef.current!, outer = outerRef.current!;
@@ -164,6 +174,17 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
       const target = e.target as HTMLElement;
       if (target.closest('[data-no-pan], textarea, input, button')) return;
       stopMomentum();
+      if (e.pointerType === 'touch') {
+        const now = performance.now();
+        if (pointers.current.size === 0) tap.current = { start: now, fingers: 0, moved: false, origins: new Map() };
+        const t = tap.current;
+        if (t) {
+          t.origins.set(e.pointerId, rel(e));
+          t.fingers = Math.max(t.fingers, pointers.current.size + 1);
+          // Fingers landing one by one over a long time are not a tap.
+          if (now - t.start > TAP_MAX_MS) t.moved = true;
+        }
+      }
       pointers.current.set(e.pointerId, rel(e));
       gestures.touches = pointers.current.size;
       if (pointers.current.size === 2) {
@@ -189,6 +210,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
     const onMove = (e: PointerEvent) => {
       if (!pointers.current.has(e.pointerId)) return;
       pointers.current.set(e.pointerId, rel(e));
+      const t = tap.current;
+      if (t && !t.moved) {
+        const o = t.origins.get(e.pointerId), p = rel(e);
+        if (o && Math.hypot(p.x - o.x, p.y - o.y) > TAP_SLOP) t.moved = true;
+      }
       if (!gestures.navigating || !lastPan.current) return;
       const pts = [...pointers.current.values()];
       const now = performance.now();
@@ -218,6 +244,12 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
       gestures.touches = pointers.current.size;
       if (pointers.current.size < 2 && pinch.current) {
         pinch.current = null;
+        const t = tap.current, v = visual.current;
+        if (t && v && !t.moved && performance.now() - t.start < TAP_MAX_MS) {
+          // Probably a two-finger tap: do not commit the jitter of the fingers as a zoom change.
+          v.scale = 1;
+          v.m = v.m0;
+        }
         commitRef.current();
         velocity.current = { vx: 0, vy: 0 };
       }
@@ -229,6 +261,16 @@ export function useViewport({ contentWidth, fingersNavigate, gestures }: Options
         }
       }
       if (pointers.current.size === 0) {
+        const t = tap.current;
+        tap.current = null;
+        if (t && !t.moved && t.fingers >= 2 && performance.now() - t.start < TAP_MAX_MS) {
+          // A tap is not a pinch: drop the (tiny) visual zoom it started and report it.
+          velocity.current = { vx: 0, vy: 0 };
+          gestures.navigating = false;
+          lastPan.current = null;
+          onTapRef.current?.(t.fingers);
+          return;
+        }
         if (gestures.navigating && performance.now() - (lastPan.current?.t ?? 0) < 80) startMomentum();
         gestures.navigating = false;
         lastPan.current = null;
