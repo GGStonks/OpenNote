@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
-  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, ZoomIn, ZoomOut, Maximize, AlertCircle, PaintBucket, MoveUpRight,
+  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight,
 } from 'lucide-react';
 import { FillType, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, Rect, Stroke, newId, LineStyle } from '../types';
 import { useNoteEditor } from '../state/useNoteEditor';
@@ -41,6 +41,8 @@ type ConvTarget =
   | { kind: 'new'; pageId: string; at: { x: number; y: number } };
 
 const TOOL_KEY = 'opennote_tools_v2';
+const PILL = 'flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl whitespace-nowrap flex-shrink-0 active:scale-95 transition';
+const ICON_BTN = 'w-11 h-11 flex items-center justify-center rounded-2xl hover:bg-white/10 flex-shrink-0 active:scale-95 transition';
 /** Characters of shape geometry sent along with a TikZ conversion (~1k tokens). */
 const MAX_TIKZ_HINT = 4000;
 
@@ -137,7 +139,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     },
     [editor]
   );
-  const { scrollRef, outerRef, zoom, zoomBy, fitWidth } = useViewport({ contentWidth: CONTENT_WIDTH, fingersNavigate, gestures, onFingerTap });
+  const { scrollRef, outerRef, zoom } = useViewport({ contentWidth: CONTENT_WIDTH, fingersNavigate, gestures, onFingerTap });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
   const [selection, setSelectionState] = useState<Selection | null>(null);
@@ -484,15 +486,14 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   // ------------------------------------------------------------------------- pages & media
-  const addPage = () => {
-    const idx = currentPage + 1;
-    editor.commit((d) => {
-      const pages = [...d.pages];
-      pages.splice(idx, 0, createBlankPage(idx + 1));
-      return { ...d, pages: pages.map((p, i) => ({ ...p, pageNumber: i + 1 })) };
-    });
-    setTimeout(() => scrollToPage(idx), 50);
-  };
+  // Like Notability, a note always ends with one blank page: writing on the last page adds the next.
+  const lastPage = doc.pages[doc.pages.length - 1];
+  const lastPageUsed =
+    !!lastPage && (lastPage.strokes.length > 0 || lastPage.latexBlocks.length > 0 || (lastPage.textBlocks ?? []).length > 0 || (lastPage.imageBlocks ?? []).length > 0);
+  useEffect(() => {
+    if (!lastPageUsed) return;
+    editor.silent((d) => ({ ...d, pages: [...d.pages, createBlankPage(d.pages.length + 1)] }));
+  }, [lastPageUsed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const duplicatePage = () => {
     const src = pageAt(currentPage);
@@ -600,7 +601,6 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onConvertPage={convertPage}
         onExport={() => setExportOpen(true)}
         onSettings={onOpenSettings}
-        onAddPage={addPage}
         onDuplicatePage={duplicatePage}
         onDeletePage={deletePage}
         onInsertLatex={insertLatexManually}
@@ -616,7 +616,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           if (el !== scrollEl) setScrollEl(el);
         }}
         onScroll={onScroll}
-        className="relative flex-1 overflow-auto bg-[#E5E5EA] dark:bg-[#0E0E10]"
+        className="relative flex-1 overflow-y-auto overflow-x-hidden bg-[#E5E5EA] dark:bg-[#0E0E10]"
         style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
       >
         <div ref={outerRef} style={{ width: CONTENT_WIDTH * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
@@ -644,30 +644,25 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                 />
               </div>
             ))}
-            <div className="flex justify-center" data-no-pan>
-              <button onClick={addPage} className="px-6 py-2.5 bg-white dark:bg-[#1C1C1E] border border-gray-300 dark:border-gray-700 rounded-full text-sm font-semibold shadow-sm text-gray-700 dark:text-gray-300">
-                + Add page
-              </button>
-            </div>
           </div>
         </div>
       </div>
 
-      {/* Zoom controls */}
-      <div className="fixed right-3 z-30 flex flex-col gap-1 bg-white/90 dark:bg-[#2C2C2E]/90 rounded-2xl shadow-lg border border-gray-200 dark:border-gray-700 p-1" style={{ bottom: `calc(${selection ? 88 : 16}px + env(safe-area-inset-bottom))` }} data-no-pan>
-        <button className="p-2 text-gray-600 dark:text-gray-300" onClick={() => zoomBy(1.2)} title="Zoom in"><ZoomIn className="w-4 h-4" /></button>
-        <button className="text-[10px] font-semibold text-gray-500" onClick={fitWidth} title="Fit width">{Math.round(zoom * 100)}%</button>
-        <button className="p-2 text-gray-600 dark:text-gray-300" onClick={() => zoomBy(1 / 1.2)} title="Zoom out"><ZoomOut className="w-4 h-4" /></button>
-        <button className="p-2 text-gray-600 dark:text-gray-300" onClick={fitWidth} title="Fit width"><Maximize className="w-4 h-4" /></button>
+      {/* Page indicator */}
+      <div
+        className="fixed right-4 z-30 pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur"
+        style={{ bottom: `calc(${selection ? 96 : 18}px + env(safe-area-inset-bottom))` }}
+      >
+        {currentPage + 1} / {doc.pages.length}
       </div>
 
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-2" style={{ bottom: `calc(64px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1.5 bg-gray-900/95 text-white rounded-2xl shadow-2xl px-2 py-1.5 text-[11px] font-semibold">
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + env(safe-area-inset-bottom))` }} data-no-pan>
+          <div className="flex items-center gap-1 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold">
             {FILL_OPTIONS.map((f) => (
-              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-0.5 px-1.5 py-1 rounded-xl hover:bg-white/10" title={f.label}>
-                <FillSwatch fill={f.id} color="#E5E7EB" />
+              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
+                <span className="scale-125"><FillSwatch fill={f.id} color="#E5E7EB" /></span>
                 <span>{f.label}</span>
               </button>
             ))}
@@ -675,42 +670,43 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         </div>
       )}
       {selection && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-2" style={{ bottom: `calc(12px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1 bg-gray-900/95 text-white rounded-2xl shadow-2xl px-2 py-1.5 overflow-x-auto max-w-full text-xs font-semibold">
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
+          <div className="flex items-center gap-1.5 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
             {selectionHasInk && (
               <>
-                <button onClick={() => convertSelection('math')} className="flex items-center gap-1 px-2.5 py-1.5 bg-blue-600 rounded-xl whitespace-nowrap" title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
-                  <Sparkles className="w-3.5 h-3.5" /> LaTeX
+                <button onClick={() => convertSelection('math')} className={PILL + ' bg-blue-600'} title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
+                  <Sparkles className="w-5 h-5" /> LaTeX
                 </button>
-                <button onClick={() => convertSelection('text')} className="flex items-center gap-1 px-2.5 py-1.5 bg-blue-600/80 rounded-xl whitespace-nowrap" title="Transcribe notes (text + math)">
-                  <FileText className="w-3.5 h-3.5" /> Notes
+                <button onClick={() => convertSelection('text')} className={PILL + ' bg-blue-500/80'} title="Transcribe notes (text + math)">
+                  <FileText className="w-5 h-5" /> Notes
                 </button>
-                <button onClick={() => convertSelection('tikz')} className="flex items-center gap-1 px-2.5 py-1.5 bg-indigo-600 rounded-xl whitespace-nowrap" title="Diagram → TikZ (Qwen3-VL)">
-                  <Share2 className="w-3.5 h-3.5" /> TikZ
+                <button onClick={() => convertSelection('tikz')} className={PILL + ' bg-indigo-600'} title="Diagram → TikZ (Qwen3-VL)">
+                  <Share2 className="w-5 h-5" /> TikZ
                 </button>
-                <button onClick={vectorizeSelection} className="flex items-center gap-1 px-2.5 py-1.5 bg-white/10 rounded-xl whitespace-nowrap" title="Convert ink geometry to TikZ offline (no AI)">
-                  <Wand2 className="w-3.5 h-3.5" /> Vector
+                <button onClick={vectorizeSelection} className={PILL + ' bg-white/10'} title="Convert ink geometry to TikZ offline (no AI)">
+                  <Wand2 className="w-5 h-5" /> Vector
                 </button>
-                <button onClick={snapSelection} className="p-2 rounded-xl hover:bg-white/10" title="Snap to shapes"><Shapes className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-white/20 mx-0.5" />
+                <button onClick={snapSelection} className={ICON_BTN} title="Snap to shapes"><Shapes className="w-5 h-5" /></button>
+                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
                 {['#111827', '#1A73E8', '#D93025', '#188038', '#9B51E0'].map((c) => (
-                  <button key={c} onClick={() => recolorSelection(c)} className="w-5 h-5 rounded-full border border-white/40 flex-shrink-0" style={{ backgroundColor: c }} title="Recolour" />
+                  <button key={c} onClick={() => recolorSelection(c)} className="w-8 h-8 rounded-full ring-2 ring-white/30 flex-shrink-0 active:scale-90 transition" style={{ backgroundColor: c }} title="Recolour" />
                 ))}
-                <button onClick={() => restyleSelection('solid')} className="px-1.5 text-gray-300" title="Solid">—</button>
-                <button onClick={() => restyleSelection('dashed')} className="px-1.5 text-gray-300" title="Dashed">- -</button>
-                <button onClick={() => restyleSelection('dotted')} className="px-1.5 text-gray-300" title="Dotted">···</button>
-                <div className="relative">
-                  <button onClick={() => setFillMenu((v) => !v)} className={`p-2 rounded-xl hover:bg-white/10 ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">
-                    <PaintBucket className="w-4 h-4" />
+                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
+                {(['solid', 'dashed', 'dotted'] as LineStyle[]).map((ls) => (
+                  <button key={ls} onClick={() => restyleSelection(ls)} className={ICON_BTN} title={ls[0].toUpperCase() + ls.slice(1)}>
+                    <svg width="22" height="22" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeDasharray={ls === 'dashed' ? '5 4' : ls === 'dotted' ? '0.1 4.5' : undefined} /></svg>
                   </button>
-                </div>
-                <button onClick={toggleArrowSelection} className="p-2 rounded-xl hover:bg-white/10" title="Arrowhead on/off"><MoveUpRight className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-white/20 mx-0.5" />
+                ))}
+                <button onClick={() => setFillMenu((v) => !v)} className={`${ICON_BTN} ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">
+                  <PaintBucket className="w-5 h-5" />
+                </button>
+                <button onClick={toggleArrowSelection} className={ICON_BTN} title="Arrowhead on/off"><MoveUpRight className="w-5 h-5" /></button>
+                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
               </>
             )}
-            <button onClick={duplicateSelection} className="p-2 rounded-xl hover:bg-white/10" title="Duplicate"><Copy className="w-4 h-4" /></button>
-            <button onClick={deleteSelection} className="p-2 rounded-xl hover:bg-white/10 text-red-300" title="Delete"><Trash2 className="w-4 h-4" /></button>
-            <button onClick={() => setSelectionState(null)} className="p-2 rounded-xl hover:bg-white/10" title="Done"><X className="w-4 h-4" /></button>
+            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><Copy className="w-5 h-5" /></button>
+            <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
+            <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
           </div>
         </div>
       )}

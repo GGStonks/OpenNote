@@ -9,7 +9,7 @@ export default defineConfig({
       output: {
         manualChunks: {
           katex: ['katex'],
-          vendor: ['react', 'react-dom', 'lucide-react', 'perfect-freehand'],
+          vendor: ['react', 'react-dom', 'lucide-react'],
         },
       },
     },

@@ -11,14 +11,14 @@
 
 **Note taking (Notability-style)**
 - Library with subjects, search (titles, typed text, LaTeX source), live ink thumbnails, rename / move / duplicate / delete, backup & import.
-- Continuous vertical pages (US Letter, 816×1056 pt @96 dpi) with blank / ruled / grid / dot paper in white, cream, yellow or dark.
-- Pinch-to-zoom (30–400 %), two-finger scroll with momentum, fit-to-width; one-finger scroll when "pencil only" is on.
+- Continuous vertical pages (US Letter, 816×1056 pt @96 dpi) with blank / ruled / grid / dot paper in white, cream, yellow or dark. A new blank page appears automatically once you write on the last one.
+- The page always fills the width of the screen and only scrolls up and down (two fingers, or one finger when "pencil only" is on, with momentum); it never slides sideways or zooms out of place.
 - Two-finger tap = undo, three-finger tap = redo (Notability gestures; can be turned off in Settings).
 - Text boxes, images, add / duplicate / delete pages, undo/redo (whole gestures are one step), keyboard shortcuts (1–6 tools, ⌘Z / ⌘⇧Z).
 - Audio recordings per note (record, list, play, delete).
 
 **Pencil & ink**
-- Fountain pen (pressure → width via perfect-freehand) and ballpoint (uniform), highlighter drawn behind ink, custom colours.
+- **Handwriting uses the smart pen's spline engine**: samples are thinned like PDEDraw's curve tool, lightly smoothed (sharp corners kept) and drawn as a centripetal Catmull-Rom curve. The fountain pen turns Pencil pressure into a smoothly varying width; the ballpoint is uniform. Live ink and saved ink are the same curve, and the TikZ / SVG exports describe exactly that curve. Highlighter drawn behind ink, custom colours.
 - Per-point pressure, timestamps, altitude and azimuth are stored — the same per-point channels Notability's `InkObjectEncoder` serialises.
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
@@ -33,7 +33,7 @@
 - "Page → LaTeX" transcribes a whole page.
 - Math rendered with bundled KaTeX (works offline); tolerant of `$$…$$`, `\[…\]`, `align*`, `<think>` blocks, markdown fences, full documents.
 - **TikZ rendered by real TeX** (e-TeX + PGF/TikZ compiled to WebAssembly, from TikZJax) inside the app, offline: libraries such as `arrows.meta`, `positioning`, `calc`, `shapes`, `automata`, plus `pgfplots` and `tikz-cd`. A supervised worker restarts after bad input so one broken diagram cannot block the others; an instant built-in preview is shown while TeX runs.
-- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, freehand ink is Bézier-fitted (no polygons). Fills, hatching, dashes and arrows are kept; text boxes and LaTeX blocks in the selection become `\node`s at their position and size. The code compiles both in the app and in standard LaTeX.
+- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, handwriting the same spline the ink engine draws (no polygons). Fills, hatching, dashes and arrows are kept; text boxes and LaTeX blocks in the selection become `\node`s at their position and size. The code compiles both in the app and in standard LaTeX.
 
 **Export**: PDF (system print → Save as PDF / Save to Files, vector ink), SVG, `.tex` (compilable, optionally with remaining ink as TikZ), Markdown, `.opennote` (full-fidelity JSON).
 
@@ -93,8 +93,9 @@ src/
     CanvasPage.tsx            ink input (pen/highlighter/eraser/lasso/text), blocks, paper
     Blocks.tsx                LaTeX / TikZ / text / image blocks
     Toolbar.tsx, LibraryView.tsx, LatexModal.tsx, ExportModal.tsx, SettingsModal.tsx, AudioRecorder.tsx
-  editor/                     selection maths, zoom/pan/tap gestures, smart pen (smartPen.ts), shape handles (shapeEdit.ts)
-  ink/strokeRenderer.ts       pressure ink, Path2D cache, SVG export, partial eraser
+  editor/                     selection maths, scrolling and tap gestures, smart pen (smartPen.ts), shape handles (shapeEdit.ts)
+  ink/inkEngine.ts            handwriting spline engine (sampling, smoothing, pressure width)
+  ink/strokeRenderer.ts       Path2D cache, SVG export, partial eraser
   services/
     vlmService.ts             Qwen3-VL client + prompts
     latexRender.ts            output cleaning, text/math segmentation, KaTeX

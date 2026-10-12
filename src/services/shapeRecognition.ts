@@ -1,5 +1,6 @@
 import { FillType, Point, Stroke, ShapeKind } from '../types';
-import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
+import { Bezier, catmullRomBeziers, XY } from '../ink/spline';
+import { inkControlPoints } from '../ink/inkEngine';
 import { arrowSize } from '../ink/strokeRenderer';
 import { latexForDocument } from './latexRender';
 
@@ -360,8 +361,8 @@ const HATCH_CM = 8 / PX_PER_CM;
 /**
  * Converts strokes to a compilable tikzpicture describing exactly what is drawn on the page:
  * shapes become TikZ primitives, smart-pen curves become the very Bezier segments that are
- * rendered (Catmull-Rom converted to `.. controls ..`), freehand ink is fitted with cubic Beziers
- * within ~0.15 mm. Fills, hatchings, holes, dashes and arrowheads are kept. Hatchings are drawn as
+ * rendered (Catmull-Rom converted to `.. controls ..`), handwriting is the ink engine's own spline.
+ * Fills, hatchings, holes, dashes and arrowheads are kept. Hatchings are drawn as
  * clipped line families (no `patterns` library: identical to the canvas and rendered by TikZJax,
  * whose SVG driver ignores PGF patterns). Coordinates are in cm from the lower-left corner.
  */
@@ -450,8 +451,8 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
         lines.push(`  \\draw${o} ${curve(catmullRomBeziers(pts, closed), closed)};`);
         break;
       default: {
-        // Freehand: the rendered stroke follows the (smoothed) sample polyline; fit it with cubic Beziers.
-        const segs = fitBeziers(pts, 0.6, closed);
+        // Handwriting: the very spline the ink engine draws (thinned samples, Catmull-Rom).
+        const segs = catmullRomBeziers(inkControlPoints(pts), closed);
         lines.push(`  \\draw${o} ${segs.length ? curve(segs, closed) : `${c(pts[0])} -- ${c(pts[pts.length - 1])}`};`);
       }
     }

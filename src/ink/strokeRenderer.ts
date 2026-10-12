@@ -1,14 +1,15 @@
-import { getStroke } from 'perfect-freehand';
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
+import { WidthGroup, hasRealPressure, inkBeziers, inkControlPoints, pressureWidth, variableWidthGroups } from './inkEngine';
 
 /**
  * Ink renderer.
  *
  * Notability stores every curve as variable-width Bezier data (points + per-point fractional
  * width/force/altitude/azimuth, see InkObjectEncoder) and renders it with Metal. We keep the raw
- * samples and render with Canvas2D: pressure-sensitive outlines (perfect-freehand) for the fountain
- * pen, constant-width stroked paths for ballpoint, shapes, dashes and highlighters.
+ * samples and render with Canvas2D. Handwriting (pen and highlighter) goes through the smart pen's
+ * spline engine (inkEngine.ts): thinned samples, centripetal Catmull-Rom curve, pressure-driven
+ * width for the fountain pen. Shapes are drawn from their exact geometry.
  * Smart-pen curves (PDEDraw) are centripetal Catmull-Rom splines through their stored points;
  * closed strokes can be filled (solid, hatch patterns, or a "hole" that punches through fills).
  * Path2D objects are cached per immutable Stroke object so redraws stay cheap on long notes.
@@ -30,6 +31,8 @@ export interface InkStyle {
 interface Built {
   path: Path2D;
   filled: boolean;
+  /** Variable-width handwriting: one path per width. */
+  groups: { width: number; path: Path2D }[] | null;
   /** Region used by fills (closed strokes only). */
   area: Path2D | null;
   arrow: Path2D | null;
@@ -37,24 +40,6 @@ interface Built {
 }
 
 const cache = new WeakMap<Stroke, Built>();
-
-function hasRealPressure(points: Point[]): boolean {
-  for (const p of points) if (p.pressure !== 0.5 && p.pressure > 0) return true;
-  return false;
-}
-
-function outlineToPath(outline: number[][]): Path2D {
-  const path = new Path2D();
-  if (outline.length < 2) return path;
-  path.moveTo(outline[0][0], outline[0][1]);
-  for (let i = 1; i < outline.length; i++) {
-    const [x0, y0] = outline[i - 1];
-    const [x1, y1] = outline[i];
-    path.quadraticCurveTo(x0, y0, (x0 + x1) / 2, (y0 + y1) / 2);
-  }
-  path.closePath();
-  return path;
-}
 
 function centerlinePath(points: XY[], smooth: boolean, closed: boolean): Path2D {
   const path = new Path2D();
@@ -88,22 +73,22 @@ function bezierPath(segs: Bezier[], closed: boolean): Path2D {
   return path;
 }
 
-export function fountainOutline(points: Point[], width: number, last: boolean): number[][] {
-  const realPressure = hasRealPressure(points);
-  return getStroke(
-    points.map((p) => [p.x, p.y, p.pressure > 0 ? p.pressure : 0.5]),
-    {
-      size: width * 1.8,
-      thinning: realPressure ? 0.5 : 0.45,
-      smoothing: 0.62,
-      streamline: 0.42,
-      easing: (t) => Math.sin((t * Math.PI) / 2),
-      simulatePressure: !realPressure,
-      start: { taper: 0, cap: true },
-      end: { taper: 0, cap: true },
-      last,
-    }
-  );
+/** Spline and per-control-point widths of a handwritten stroke (shared by canvas, SVG and TikZ). */
+export function inkGeometry(points: Point[], style: InkStyle): { segs: Bezier[]; ctrl: Point[]; widths: number[] | null; width: number } {
+  const ctrl = inkControlPoints(points);
+  const segs = inkBeziers(ctrl);
+  const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
+  const widths = isVariableWidth(style) && hasRealPressure(points) ? ctrl.map((p) => pressureWidth(width, p.pressure)) : null;
+  return { segs, ctrl, widths, width };
+}
+
+function groupPath(g: WidthGroup): Path2D {
+  const path = new Path2D();
+  for (const run of g.runs) {
+    path.moveTo(run[0], run[1]);
+    for (let i = 2; i < run.length; i += 2) path.lineTo(run[i], run[i + 1]);
+  }
+  return path;
 }
 
 export function isVariableWidth(style: InkStyle): boolean {
@@ -159,6 +144,7 @@ function build(points: Point[], style: InkStyle, last: boolean): Built {
   let path: Path2D;
   let filled = false;
   let area: Path2D | null = null;
+  let groups: Built['groups'] = null;
   if (style.shapeKind === 'point') {
     path = new Path2D();
     const p = points[0];
@@ -167,14 +153,24 @@ function build(points: Point[], style: InkStyle, last: boolean): Built {
   } else if (style.shapeKind === 'curve') {
     path = bezierPath(curveSegments(points, closed), closed);
     if (fillable) area = path;
-  } else if (isVariableWidth(style)) {
-    path = outlineToPath(fountainOutline(points, style.width, last));
-    filled = true;
-    if (fillable) area = centerlinePath(points, true, true);
+  } else if (!style.isShape) {
+    // Handwriting: smart-pen spline engine.
+    const g = inkGeometry(points, style);
+    if (g.segs.length === 0) {
+      path = new Path2D();
+      const p = points[0];
+      path.arc(p.x, p.y, g.width / 2, 0, Math.PI * 2);
+      filled = true;
+    } else {
+      path = bezierPath(g.segs, false);
+      if (g.widths) groups = variableWidthGroups(g.segs, g.widths).map((wg) => ({ width: wg.width, path: groupPath(wg) }));
+    }
+    if (fillable) area = bezierPath(catmullRomBeziers(g.ctrl, true), true);
   } else {
-    path = centerlinePath(points, !style.isShape, closed);
+    path = centerlinePath(points, false, closed);
     if (fillable) area = path;
   }
+  void last;
   let arrow: Path2D | null = null;
   if (style.arrow && !closed && style.shapeKind !== 'point' && points.length > 1) {
     const h = arrowHead(points, style);
@@ -187,7 +183,7 @@ function build(points: Point[], style: InkStyle, last: boolean): Built {
     }
   }
   const pad = style.tool === 'highlighter' ? style.width * 3 : Math.max(style.width * 2, style.arrow ? arrowSize(style.width) : 0, 4);
-  return { path, filled, area, arrow, bounds: boundsOf(points, pad) };
+  return { path, filled, groups, area, arrow, bounds: boundsOf(points, pad) };
 }
 
 export interface PaintOptions {
@@ -250,6 +246,14 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
   if (b.filled) {
     ctx.fillStyle = style.color;
     ctx.fill(b.path);
+  } else if (b.groups) {
+    ctx.strokeStyle = style.color;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const g of b.groups) {
+      ctx.lineWidth = g.width;
+      ctx.stroke(g.path);
+    }
   } else {
     ctx.strokeStyle = style.color;
     ctx.lineWidth = strokeWidth(style);
@@ -382,24 +386,21 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
   let out = '';
   let lineD: string;
   let areaD: string;
+  const ink = !s.isShape ? inkGeometry(pts, style) : null;
   if (s.shapeKind === 'curve') {
     lineD = areaD = svgBezierD(curveSegments(pts, closed), closed);
+  } else if (ink) {
+    lineD = ink.segs.length ? svgBezierD(ink.segs, false) : `M${f2(pts[0].x)} ${f2(pts[0].y)} l0.01 0`;
+    areaD = svgBezierD(catmullRomBeziers(ink.ctrl, true), true);
   } else {
-    lineD = svgCenterlineD(pts, !s.isShape, closed);
-    areaD = s.isShape ? lineD : svgCenterlineD(pts, true, true);
+    lineD = areaD = svgCenterlineD(pts, false, closed);
   }
   if (closed) out += svgFill(style, areaD, pts, paper);
 
-  if (isVariableWidth(style)) {
-    const outline = fountainOutline(pts, style.width, true);
-    if (outline.length >= 2) {
-      let d = `M${f2(outline[0][0])} ${f2(outline[0][1])}`;
-      for (let i = 1; i < outline.length; i++) {
-        const [x0, y0] = outline[i - 1];
-        const [x1, y1] = outline[i];
-        d += ` Q${f2(x0)} ${f2(y0)} ${f2((x0 + x1) / 2)} ${f2((y0 + y1) / 2)}`;
-      }
-      out += `<path d="${d} Z" fill="${s.color}" fill-opacity="${opacity}"/>`;
+  if (ink?.widths && style.tool === 'pen') {
+    for (const g of variableWidthGroups(ink.segs, ink.widths)) {
+      const d = g.runs.map((r) => `M${f2(r[0])} ${f2(r[1])}` + Array.from({ length: r.length / 2 - 1 }, (_, i) => ` L${f2(r[2 + i * 2])} ${f2(r[3 + i * 2])}`).join('')).join(' ');
+      out += `<path d="${d}" fill="none" stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${f2(g.width)}" stroke-linecap="round" stroke-linejoin="round"/>`;
     }
   } else if (style.tool === 'highlighter') {
     out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="0.35" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"/>`;

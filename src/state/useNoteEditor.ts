@@ -36,6 +36,8 @@ export interface NoteEditor {
   endGesture: () => void;
   /** Non-undoable bookkeeping (render caches, measured sizes). */
   silentPage: (pageId: string, updater: PageUpdater) => void;
+  /** Non-undoable change of the whole document (e.g. the automatic blank page at the end). */
+  silent: (updater: (d: NoteDocument) => NoteDocument) => void;
   undo: () => void;
   redo: () => void;
   flush: () => Promise<void>;
@@ -147,6 +149,16 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     [scheduleSave, setDoc]
   );
 
+  const silent = useCallback(
+    (updater: (d: NoteDocument) => NoteDocument) => {
+      const next = updater(docRef.current);
+      if (next === docRef.current) return;
+      setDoc(next);
+      scheduleSave();
+    },
+    [scheduleSave, setDoc]
+  );
+
   const undo = useCallback(() => {
     const prev = undoStack.current.pop();
     if (!prev) return;
@@ -198,6 +210,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     previewPage,
     endGesture,
     silentPage,
+    silent,
     undo,
     redo,
     flush,
