@@ -38,6 +38,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const lastY = useRef<{ y: number; t: number } | null>(null);
   const velocity = useRef(0);
+  /** Recent finger positions (for the release velocity). */
+  const history = useRef<{ y: number; t: number }[]>([]);
+  /** Scroll distance not yet applied: scrolling is applied once per frame. */
+  const pending = useRef(0);
+  const scrollFrame = useRef<number | null>(null);
   const momentum = useRef<number | null>(null);
   const tap = useRef<{ start: number; fingers: number; moved: boolean; origins: Map<number, { x: number; y: number }> } | null>(null);
   const onTapRef = useRef(onFingerTap);
@@ -80,14 +85,17 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     const el = scrollRef.current;
     if (!el) return;
     let v = velocity.current;
-    if (Math.abs(v) < 0.15) return;
+    if (Math.abs(v) < 0.1) return;
     let last = performance.now();
+    // UIScrollView's normal deceleration rate (0.998 per ms): long, soft glide.
     const step = (now: number) => {
       const dt = Math.min(32, now - last);
       last = now;
+      const before = el.scrollTop;
       el.scrollTop -= v * dt;
-      v *= Math.pow(0.995, dt);
-      if (Math.abs(v) > 0.02) momentum.current = requestAnimationFrame(step);
+      v *= Math.pow(0.998, dt);
+      const stuck = el.scrollTop === before; // reached the top or the bottom
+      if (Math.abs(v) > 0.01 && !stuck) momentum.current = requestAnimationFrame(step);
       else momentum.current = null;
     };
     momentum.current = requestAnimationFrame(step);
@@ -133,7 +141,14 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         gestures.navigating = true;
       }
       lastY.current = { y: centroidY(), t: performance.now() };
+      history.current = [lastY.current];
       velocity.current = 0;
+    };
+
+    const flushScroll = () => {
+      scrollFrame.current = null;
+      if (pending.current) el.scrollTop -= pending.current;
+      pending.current = 0;
     };
 
     const onMove = (e: PointerEvent) => {
@@ -148,10 +163,12 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (!gestures.navigating || !lastY.current) return;
       const y = centroidY();
       const now = performance.now();
-      el.scrollTop -= y - lastY.current.y;
-      const dt = Math.max(1, now - lastY.current.t);
-      velocity.current = 0.7 * ((y - lastY.current.y) / dt) + 0.3 * velocity.current;
+      pending.current += y - lastY.current.y;
+      if (scrollFrame.current === null) scrollFrame.current = requestAnimationFrame(flushScroll);
       lastY.current = { y, t: now };
+      const h = history.current;
+      h.push(lastY.current);
+      while (h.length > 2 && now - h[0].t > 80) h.shift();
     };
 
     const onUp = (e: PointerEvent) => {
@@ -160,8 +177,18 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (pointers.current.size > 0) {
         // A finger lifted: continue from the remaining ones without a jump.
         lastY.current = { y: centroidY(), t: performance.now() };
+        history.current = [lastY.current];
         return;
       }
+      if (scrollFrame.current !== null) {
+        cancelAnimationFrame(scrollFrame.current);
+        flushScroll();
+      }
+      // Release velocity over the last ~80 ms (one noisy event cannot fling or stop the page).
+      const h = history.current;
+      const first = h[0], lastH = h[h.length - 1];
+      velocity.current = first && lastH && lastH.t - first.t > 8 ? (lastH.y - first.y) / (lastH.t - first.t) : 0;
+      history.current = [];
       const t = tap.current;
       tap.current = null;
       const wasNavigating = gestures.navigating;
@@ -193,6 +220,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       el.removeEventListener('wheel', noZoom);
       document.removeEventListener('gesturestart', noZoom);
       stopMomentum();
+      if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
     };
   }, [fingersNavigate, gestures]);
 

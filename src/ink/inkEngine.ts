@@ -1,90 +1,185 @@
 import { Point } from '../types';
-import { Bezier, bezierPoint, catmullRomBeziers, XY } from './spline';
+import { XY } from './spline';
 
 /**
- * Handwriting engine: the smart pen's curve engine (PDEDraw) applied to every pen stroke.
+ * Handwriting engine: a TypeScript port of the modelling stage of Google's Ink Stroke Modeler
+ * (github.com/google/ink-stroke-modeler, Apache-2.0), the library behind the handwriting of
+ * Google's own note apps, with its default parameters.
  *
- *  1. Sampling: like PDEDraw's appendCurvePoint, samples closer than `INK_SAMPLING` to the last
- *     kept point are dropped and samples that only extend a straight run replace its end. This
- *     removes the jitter of raw Pencil/finger input instead of smoothing it afterwards.
- *  2. Curve: a centripetal Catmull-Rom spline through the kept points (no overshoot, no cusps),
- *     as cubic Bezier segments, so ink is exactly the same curve the TikZ/SVG exports describe.
- *  3. Width: constant for the ballpoint (and for input without pressure); for the fountain pen the
- *     pressure at each kept point sets the width, interpolated smoothly along the spline. The curve
- *     is drawn as short round-capped pieces grouped by width, which gives a smooth variable-width
- *     line without the outline artefacts of offset polygons at sharp turns.
+ *  1. Wobble smoother: at very low speed the input is replaced by its moving average over the
+ *     last 40 ms (removes the digitiser's jitter when writing slowly); at normal speed the raw
+ *     position is used, with a smooth blend in between.
+ *  2. Up-sampling: inputs are interpolated so that the model advances at least at 180 Hz.
+ *  3. Position modeller: the ink tip is a mass pulled towards the pen by a spring, with drag
+ *     (explicit Euler). This is what makes the line fluid: corners are rounded the way a real nib
+ *     rounds them, and jitter is filtered without the lag of a heavy moving average.
+ *  4. End of stroke: when the pen lifts, the tip is moved on until it reaches the pen.
  *
- * The raw samples stay in the note (pressure, time, tilt); this runs at render time, the same way
- * for the live stroke and the committed one, so nothing jumps when the pen lifts.
+ * The model is causal: every output point depends only on earlier input, so ink that has been
+ * drawn never moves again ("no retracing"). The live stroke and the saved stroke are the same.
+ *
+ * Rendering (strokeRenderer.ts): the dense output is drawn as a polyline (uniform width) or, for
+ * the fountain pen, as the exact union of capsules swept by a circle whose radius follows the
+ * pressure — smooth at any size, with no polygonal facets.
  */
 
-/** Minimum distance between kept samples, in page units (1/96 in). */
-export const INK_SAMPLING = 2.4;
-/** Length of the pieces of a variable-width stroke. */
-const PIECE = 1.6;
-/** Widths are grouped in steps of this many units (one canvas stroke call per group). */
-const WIDTH_STEP = 0.12;
-
-const dist = (a: XY, b: XY) => Math.hypot(a.x - b.x, a.y - b.y);
-
-function project(p: XY, a: XY, b: XY): XY {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const l2 = dx * dx + dy * dy;
-  if (!l2) return a;
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2));
-  return { x: a.x + t * dx, y: a.y + t * dy };
+export interface ModeledPoint {
+  x: number;
+  y: number;
+  /** Normalised pressure 0..1. */
+  p: number;
+  /** ms since the start of the stroke. */
+  t: number;
 }
 
-/** PDEDraw's sample thinning (see smartPen.appendCurvePoint), keeping the last sample. */
-export function inkControlPoints(points: Point[], sampling = INK_SAMPLING): Point[] {
-  if (points.length <= 2) return points;
-  const out: Point[] = [points[0]];
-  for (let i = 1; i < points.length; i++) {
-    const p = points[i];
-    const last = out[out.length - 1];
-    const d = dist(p, last);
-    if (d < sampling) continue;
-    if (out.length >= 2) {
-      const prev = out[out.length - 2];
-      if (dist(p, project(p, prev, last)) < 0.27 * sampling && d < 2.2 * sampling) {
-        out[out.length - 1] = p;
-        continue;
-      }
+// Ink Stroke Modeler defaults, converted to milliseconds and page units (96 px per inch).
+const WOBBLE_TIMEOUT = 40; // ms
+const PX_PER_CM = 96 / 2.54;
+const WOBBLE_SPEED_FLOOR = (1.31 * PX_PER_CM) / 1000; // px/ms
+const WOBBLE_SPEED_CEILING = (1.44 * PX_PER_CM) / 1000;
+const SPRING_MASS = (11 / 32400) * 1e6; // ms^2
+const DRAG = 72 / 1000; // 1/ms
+const MAX_DT = 1000 / 180; // ms (minimum output rate 180 Hz)
+const END_ITERATIONS = 20;
+const END_STOP_DISTANCE = 0.05; // px
+
+interface WobbleSample {
+  x: number;
+  y: number;
+  d: number;
+  dt: number;
+  t: number;
+}
+
+interface TipState {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+}
+
+function step(s: TipState, ax: number, ay: number, dt: number) {
+  const accX = (ax - s.x) / SPRING_MASS - DRAG * s.vx;
+  const accY = (ay - s.y) / SPRING_MASS - DRAG * s.vy;
+  s.vx += dt * accX;
+  s.vy += dt * accY;
+  s.x += dt * s.vx;
+  s.y += dt * s.vy;
+}
+
+/** Streaming stroke model. Feed samples with add(); `points` only ever grows. */
+export class StrokeModeler {
+  readonly points: ModeledPoint[] = [];
+  private window: WobbleSample[] = [];
+  private sumX = 0;
+  private sumY = 0;
+  private sumD = 0;
+  private sumDt = 0;
+  private last: { x: number; y: number; t: number; p: number } | null = null;
+  private tip: TipState = { x: 0, y: 0, vx: 0, vy: 0 };
+
+  private wobble(x: number, y: number, t: number): XY {
+    const prev = this.window[this.window.length - 1];
+    const d = prev ? Math.hypot(x - prev.x, y - prev.y) : 0;
+    const dt = prev ? t - prev.t : 0;
+    this.window.push({ x, y, d, dt, t });
+    this.sumX += x;
+    this.sumY += y;
+    this.sumD += d;
+    this.sumDt += dt;
+    while (this.window.length > 1 && this.window[0].t < t - WOBBLE_TIMEOUT) {
+      const f = this.window.shift()!;
+      this.sumX -= f.x;
+      this.sumY -= f.y;
+      // The next sample's distance/duration were measured from the removed one.
+      const n = this.window[0];
+      this.sumD -= n.d;
+      this.sumDt -= n.dt;
+      n.d = 0;
+      n.dt = 0;
     }
-    out.push(p);
+    if (this.sumDt <= 0) return { x, y };
+    const n = this.window.length;
+    const speed = this.sumD / this.sumDt;
+    const k = Math.max(0, Math.min(1, (speed - WOBBLE_SPEED_FLOOR) / (WOBBLE_SPEED_CEILING - WOBBLE_SPEED_FLOOR)));
+    return { x: this.sumX / n + (x - this.sumX / n) * k, y: this.sumY / n + (y - this.sumY / n) * k };
   }
-  const end = points[points.length - 1];
-  const tail = out[out.length - 1];
-  if (tail !== end) {
-    if (out.length > 1 && dist(end, tail) < sampling * 0.5) out[out.length - 1] = end;
-    else out.push(end);
+
+  add(x: number, y: number, t: number, p: number): void {
+    if (this.last && t <= this.last.t) t = this.last.t + 0.5;
+    const s = this.wobble(x, y, t);
+    const last = this.last;
+    if (!last) {
+      this.tip = { x: s.x, y: s.y, vx: 0, vy: 0 };
+      this.points.push({ x: s.x, y: s.y, p, t });
+      this.last = { x: s.x, y: s.y, t, p };
+      return;
+    }
+    const total = t - last.t;
+    const n = Math.max(1, Math.ceil(total / MAX_DT));
+    const dt = total / n;
+    for (let i = 1; i <= n; i++) {
+      const f = i / n;
+      step(this.tip, last.x + (s.x - last.x) * f, last.y + (s.y - last.y) * f, dt);
+      this.points.push({ x: this.tip.x, y: this.tip.y, p: last.p + (p - last.p) * f, t: last.t + total * f });
+    }
+    this.last = { x: s.x, y: s.y, t, p };
   }
-  return smoothControlPoints(out);
+
+  /**
+   * The rest of the stroke if the pen lifted now (optionally after the predicted samples):
+   * provisional, recomputed every frame, never stored.
+   */
+  tail(predicted: { x: number; y: number; t: number; p: number }[] = []): ModeledPoint[] {
+    if (!this.last) return [];
+    const tip: TipState = { ...this.tip };
+    const out: ModeledPoint[] = [];
+    let last = this.last;
+    for (const q of predicted) {
+      if (q.t <= last.t) continue;
+      const total = q.t - last.t;
+      const n = Math.max(1, Math.ceil(total / MAX_DT));
+      for (let i = 1; i <= n; i++) {
+        const f = i / n;
+        step(tip, last.x + (q.x - last.x) * f, last.y + (q.y - last.y) * f, total / n);
+        out.push({ x: tip.x, y: tip.y, p: last.p + (q.p - last.p) * f, t: last.t + total * f });
+      }
+      last = q;
+    }
+    let t = last.t;
+    for (let i = 0; i < END_ITERATIONS; i++) {
+      if (Math.hypot(tip.x - last.x, tip.y - last.y) < END_STOP_DISTANCE) break;
+      t += MAX_DT;
+      step(tip, last.x, last.y, MAX_DT);
+      out.push({ x: tip.x, y: tip.y, p: last.p, t });
+    }
+    if (Math.hypot(tip.x - last.x, tip.y - last.y) > 0.3) out.push({ x: last.x, y: last.y, p: last.p, t: t + MAX_DT });
+    return out;
+  }
 }
 
-/** cos of the turn above which a kept point is a corner (about 60°) and is not smoothed. */
-const CORNER_COS = 0.5;
-
 /**
- * One 1-2-1 pass over the kept points: removes the residual tremor of hand input (the smart pen
- * hides it by sampling more sparsely, which would round small letters). Ends and sharp corners
- * (tips of v, w, z) are kept exactly.
+ * Sample times of a stroke. Strokes saved before v1.2 have no timestamps: they are synthesised
+ * from the distance at an ordinary writing speed.
  */
-function smoothControlPoints(pts: Point[]): Point[] {
-  if (pts.length < 4) return pts;
-  const out = pts.slice();
-  for (let i = 1; i < pts.length - 1; i++) {
-    const a = pts[i - 1], b = pts[i], c = pts[i + 1];
-    const ux = b.x - a.x, uy = b.y - a.y, vx = c.x - b.x, vy = c.y - b.y;
-    const m = Math.hypot(ux, uy) * Math.hypot(vx, vy);
-    if (m > 0 && (ux * vx + uy * vy) / m < CORNER_COS) continue;
-    out[i] = { ...b, x: 0.25 * a.x + 0.5 * b.x + 0.25 * c.x, y: 0.25 * a.y + 0.5 * b.y + 0.25 * c.y };
+function sampleTimes(points: Point[]): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    if (typeof p.t === 'number' && (i === 0 || typeof points[i - 1].t === 'number')) out.push(p.t);
+    else if (i === 0) out.push(0);
+    else out.push(out[i - 1] + Math.max(4, Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y) / 0.4));
   }
   return out;
 }
 
-export function inkBeziers(ctrl: XY[]): Bezier[] {
-  return catmullRomBeziers(ctrl, false);
+/** The full modelled stroke (as drawn when finished). */
+export function modelStroke(points: Point[]): ModeledPoint[] {
+  if (points.length === 0) return [];
+  const m = new StrokeModeler();
+  const times = sampleTimes(points);
+  points.forEach((p, i) => m.add(p.x, p.y, times[i], p.pressure > 0 ? p.pressure : 0.5));
+  return [...m.points, ...m.tail()];
 }
 
 export function hasRealPressure(points: Point[]): boolean {
@@ -98,49 +193,60 @@ export function pressureWidth(base: number, pressure: number): number {
   return base * (0.38 + 1.24 * p);
 }
 
-export interface WidthGroup {
-  width: number;
-  /** Polyline pieces as flat [x0, y0, x1, y1, ...] runs. */
-  runs: number[][];
+/** Drops modelled points closer than `min` to the previous one (keeps the last). */
+export function thinModeled(pts: ModeledPoint[], min = 0.35): ModeledPoint[] {
+  if (pts.length < 3) return pts;
+  const out = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const l = out[out.length - 1];
+    if (Math.hypot(pts[i].x - l.x, pts[i].y - l.y) >= min) out.push(pts[i]);
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
 }
 
 /**
- * Splits the spline into short pieces and groups them by width. Consecutive pieces of the same
- * width form one run, so most strokes need only a handful of runs.
+ * Appends to `path` the capsule swept by a circle moving from (a, ra) to (b, rb): the two outer
+ * tangents and the two end arcs, always with the same winding so that a nonzero fill of many
+ * capsules is their exact union.
  */
-export function variableWidthGroups(segs: Bezier[], widths: number[]): WidthGroup[] {
-  const groups = new Map<number, WidthGroup>();
-  let current: { key: number; run: number[] } | null = null;
-  const emit = (key: number, w: number, a: XY, b: XY) => {
-    if (current && current.key === key) {
-      current.run.push(b.x, b.y);
-      return;
-    }
-    let g = groups.get(key);
-    if (!g) {
-      g = { width: w, runs: [] };
-      groups.set(key, g);
-    }
-    const run = [a.x, a.y, b.x, b.y];
-    g.runs.push(run);
-    current = { key, run };
-  };
-  segs.forEach((seg, i) => {
-    const w0 = widths[i], w1 = widths[i + 1] ?? w0;
-    const len = dist(seg[0], seg[1]) + dist(seg[1], seg[2]) + dist(seg[2], seg[3]);
-    const n = Math.max(1, Math.ceil(len / PIECE));
-    let prev = seg[0];
-    for (let k = 1; k <= n; k++) {
-      const t = k / n;
-      const q = k === n ? seg[3] : bezierPoint(seg, t);
-      // Smoothstep between the control points' widths.
-      const tm = (k - 0.5) / n;
-      const s = tm * tm * (3 - 2 * tm);
-      const w = w0 + (w1 - w0) * s;
-      const key = Math.max(1, Math.round(w / WIDTH_STEP));
-      emit(key, key * WIDTH_STEP, prev, q);
-      prev = q;
-    }
-  });
-  return [...groups.values()];
+export function addCapsule(path: Path2D | CanvasRenderingContext2D, a: XY, ra: number, b: XY, rb: number): void {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const d = Math.hypot(dx, dy);
+  if (d <= Math.abs(ra - rb) + 1e-6) {
+    // One circle contains the other.
+    const c = ra >= rb ? a : b, r = Math.max(ra, rb);
+    path.moveTo(c.x + r, c.y);
+    path.arc(c.x, c.y, r, 0, Math.PI * 2, true);
+    path.closePath();
+    return;
+  }
+  const th = Math.atan2(dy, dx);
+  const ph = Math.acos((ra - rb) / d);
+  path.moveTo(a.x + ra * Math.cos(th + ph), a.y + ra * Math.sin(th + ph));
+  path.lineTo(b.x + rb * Math.cos(th + ph), b.y + rb * Math.sin(th + ph));
+  path.arc(b.x, b.y, rb, th + ph, th - ph, true);
+  path.lineTo(a.x + ra * Math.cos(th - ph), a.y + ra * Math.sin(th - ph));
+  path.arc(a.x, a.y, ra, th - ph, th + ph - Math.PI * 2, true);
+  path.closePath();
+}
+
+/** SVG path data of the same capsule (for vector export). */
+export function capsuleSvg(a: XY, ra: number, b: XY, rb: number, f: (v: number) => string): string {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const d = Math.hypot(dx, dy);
+  if (d <= Math.abs(ra - rb) + 1e-6) {
+    const c = ra >= rb ? a : b, r = Math.max(ra, rb);
+    return `M${f(c.x + r)} ${f(c.y)}A${f(r)} ${f(r)} 0 1 0 ${f(c.x - r)} ${f(c.y)}A${f(r)} ${f(r)} 0 1 0 ${f(c.x + r)} ${f(c.y)}Z`;
+  }
+  const th = Math.atan2(dy, dx);
+  const ph = Math.acos((ra - rb) / d);
+  const P = (c: XY, r: number, ang: number) => `${f(c.x + r * Math.cos(ang))} ${f(c.y + r * Math.sin(ang))}`;
+  // Front arc spans 2*ph around b, back arc 2*pi - 2*ph around a; both counter-clockwise (sweep 0).
+  return (
+    `M${P(a, ra, th + ph)}L${P(b, rb, th + ph)}` +
+    `A${f(rb)} ${f(rb)} 0 ${2 * ph > Math.PI ? 1 : 0} 0 ${P(b, rb, th - ph)}` +
+    `L${P(a, ra, th - ph)}` +
+    `A${f(ra)} ${f(ra)} 0 ${2 * Math.PI - 2 * ph > Math.PI ? 1 : 0} 0 ${P(a, ra, th + ph)}Z`
+  );
 }

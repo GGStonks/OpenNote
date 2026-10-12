@@ -4,13 +4,16 @@ import {
   EraserMode, FillType, LatexBlock, LineStyle, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
 } from '../types';
-import { drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, strokeHitTest, InkStyle, strokeToSvg, styleOf } from '../ink/strokeRenderer';
+import {
+  capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
+} from '../ink/strokeRenderer';
+import { ModeledPoint, StrokeModeler, pressureWidth } from '../ink/inkEngine';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
   SmartPenOptions, SmartPenState, SnapCache, beginSmartPen, buildSnapCache, findSnapKind, moveSmartPen, smartPenMeasure, smartPenShape, smartPenStroke,
 } from '../editor/smartPen';
-import { ShapeHandle, dragHandle, shapeHandles } from '../editor/shapeEdit';
+import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
 import { Selection, computeBounds, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
@@ -325,11 +328,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     predicted: Point[];
     start: number;
     snapped: { points: Point[]; closed: boolean; kind: Stroke['shapeKind'] } | null;
+    /** After a hold-snap the pen keeps sizing the shape until it lifts. */
+    adjust: SnapAdjust | null;
     holdTimer: ReturnType<typeof setTimeout> | null;
     lastMove: { x: number; y: number };
     smart: SmartPenState | null;
     pressure: number;
+    /** Handwriting model (pen tool): its settled points are drawn once, incrementally. */
+    model: StrokeModeler | null;
+    drawn: number;
+    realPressure: boolean;
+    inkRect: DirtyRect | null;
   } | null>(null);
+  const tailCanvasRef = useRef<HTMLCanvasElement>(null);
   const raf = useRef<number | null>(null);
   const eraserPos = useRef<{ x: number; y: number } | null>(null);
   const toolsRef = useRef(tools);
@@ -356,7 +367,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (!canvas || canvas.width === 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const prev = dirty.current;
+    const prev = unionRect(dirty.current, staleInk.current);
+    staleInk.current = null;
     if (prev) ctx.clearRect(prev.minX - 3, prev.minY - 3, prev.maxX - prev.minX + 6, prev.maxY - prev.minY + 6);
     let next: DirtyRect | null = null;
     const d = drawing.current;
@@ -381,6 +393,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart.snapKind === 'grid', k));
       const m = smartPenMeasure(d.smart);
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
+    } else if (d && d.model && !d.snapped) {
+      drawModeledInk(ctx, d);
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
@@ -392,6 +406,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ctx.strokeStyle = '#3B82F6';
       ctx.lineWidth = 1.5 * k;
       ctx.setLineDash([6 * k, 5 * k]);
+      ctx.lineDashOffset = -((performance.now() / 40) % 11) * k;
+      ctx.lineJoin = 'round';
       ctx.fillStyle = 'rgba(59,130,246,0.07)';
       ctx.beginPath();
       ctx.moveTo(d.points[0].x, d.points[0].y);
@@ -422,6 +438,93 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     dirty.current = next;
   };
+  /** Settled live ink of a finished/cancelled stroke, cleared on the next frame. */
+  const staleInk = useRef<DirtyRect | null>(null);
+
+  const retireInk = (d: NonNullable<typeof drawing.current>) => {
+    staleInk.current = unionRect(staleInk.current, d.inkRect);
+    d.inkRect = null;
+    const tc = tailCanvasRef.current;
+    if (tc) tc.style.display = 'none';
+  };
+
+  /**
+   * Live handwriting: the model's settled points never change, so only the ones that arrived since
+   * the last frame are drawn (no per-frame redraw of the whole stroke). The provisional end —
+   * catch-up to the pen plus the Pencil's predicted samples — is drawn on a small canvas that
+   * follows the pen and is redrawn every frame.
+   */
+  function drawModeledInk(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>) {
+    const m = d.model!;
+    const style = liveStyle('pen');
+    const base = strokeWidth({ ...style, isShape: false });
+    const variable = isVariableWidth(style) && d.realPressure;
+    const widthOf = (q: ModeledPoint) => (variable ? pressureWidth(base, q.p) : base);
+    const pts = m.points;
+    const paint = (c: CanvasRenderingContext2D, seq: ModeledPoint[], from: number) => {
+      if (seq.length === 0) return;
+      c.save();
+      if (variable) {
+        c.fillStyle = style.color;
+        c.fill(capsulePath(seq, seq.map(widthOf), from));
+      } else {
+        c.strokeStyle = style.color;
+        c.lineWidth = base;
+        c.lineCap = 'round';
+        c.lineJoin = 'round';
+        c.beginPath();
+        const s0 = seq[Math.max(0, from - 1)];
+        c.moveTo(s0.x, s0.y);
+        if (seq.length === 1) c.lineTo(s0.x + 0.01, s0.y);
+        for (let i = Math.max(1, from); i < seq.length; i++) c.lineTo(seq[i].x, seq[i].y);
+        c.stroke();
+      }
+      c.restore();
+    };
+    if (d.drawn < pts.length) {
+      const from = Math.max(1, d.drawn);
+      const seg = pts.slice(from - 1);
+      paint(ctx, seg, d.drawn === 0 ? 0 : 1);
+      let r = d.inkRect;
+      const pad = base * 1.7 + 2;
+      for (const q of seg) r = unionRect(r, { minX: q.x - pad, minY: q.y - pad, maxX: q.x + pad, maxY: q.y + pad });
+      d.inkRect = r;
+      d.drawn = pts.length;
+    }
+    // Provisional tail.
+    const tc = tailCanvasRef.current;
+    if (!tc || !pts.length) return;
+    const tail = [pts[pts.length - 1], ...m.tail(d.predicted.map((q) => ({ x: q.x, y: q.y, t: q.t ?? 0, p: q.pressure })))];
+    if (tail.length < 2) {
+      tc.style.display = 'none';
+      return;
+    }
+    const pad = base * 1.7 + 2;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const q of tail) {
+      minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y);
+    }
+    minX = Math.floor(minX - pad); minY = Math.floor(minY - pad);
+    const w = Math.ceil(maxX + pad - minX), h = Math.ceil(maxY + pad - minY);
+    const r = canvasRatio(zoomRef.current);
+    const cw = Math.ceil(w * r), ch = Math.ceil(h * r);
+    if (tc.width < cw || tc.height < ch) {
+      tc.width = Math.max(cw, tc.width, 64);
+      tc.height = Math.max(ch, tc.height, 64);
+    }
+    tc.style.display = 'block';
+    tc.style.left = `${minX}px`;
+    tc.style.top = `${minY}px`;
+    tc.style.width = `${tc.width / r}px`;
+    tc.style.height = `${tc.height / r}px`;
+    const tctx = tc.getContext('2d');
+    if (!tctx) return;
+    tctx.setTransform(1, 0, 0, 1, 0, 0);
+    tctx.clearRect(0, 0, tc.width, tc.height);
+    tctx.setTransform(r, 0, 0, r, -minX * r, -minY * r);
+    paint(tctx, tail, 0);
+  }
+
   const renderRef = useRef(renderActive);
   renderRef.current = renderActive;
 
@@ -430,6 +533,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }, []);
 
   const clearActive = useCallback(() => {
+    if (drawing.current) retireInk(drawing.current);
     drawing.current = null;
     eraserPos.current = null;
     requestRender();
@@ -489,10 +593,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const shape = detectShape(cur.points);
       if (shape) {
         cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind };
+        const pen = cur.points[cur.points.length - 1];
+        cur.adjust = { kind: shape.kind, base: shape.points, closed: shape.closed, pen0: { x: pen.x, y: pen.y } };
+        retireInk(cur);
         haptic('snap');
         requestRender();
       }
-    }, 550);
+    }, 450);
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -505,6 +612,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // Palm rejection: a pencil touching down replaces a finger/palm stroke in progress.
       if (existing.pointerType === 'touch' && e.pointerType === 'pen') {
         if (existing.holdTimer) clearTimeout(existing.holdTimer);
+        retireInk(existing);
         drawing.current = null;
       } else if (existing.pointerId === e.pointerId || e.pointerType === existing.pointerType) {
         // A pointerup was lost (e.g. pointer capture dropped by the system): finish the old stroke
@@ -554,11 +662,17 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       predicted: [],
       start,
       snapped: null,
+      adjust: null,
       holdTimer: null,
       lastMove: { x: pt.x, y: pt.y },
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
+      model: tool === 'pen' ? new StrokeModeler() : null,
+      drawn: 0,
+      realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
+      inkRect: null,
     };
+    drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
     if (drawing.current.smart?.snapDot) haptic('snap');
     if (tool === 'lasso') setSelection(null);
     if (tool === 'eraser') {
@@ -597,6 +711,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
       pt.pressure = d.pressure;
       d.points.push(pt);
+      if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
+      if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       if (d.smart) snapTick = moveSmartPen(d.smart, pt) || snapTick;
       else if (d.tool === 'eraser') {
         eraserPos.current = pt;
@@ -604,6 +720,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
     }
     if (snapTick) haptic('snap');
+    if (d.snapped && d.adjust) {
+      const pen = d.points[d.points.length - 1];
+      d.snapped = { ...d.snapped, points: adjustSnappedShape(d.adjust, pen) };
+    }
     if (!d.smart && (d.tool === 'pen' || d.tool === 'highlighter')) {
       const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
       d.predicted = predicted.slice(0, 2).map((pe) => ({ ...toPoint(pe, d.start), pressure: d.pressure }));
@@ -619,6 +739,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   function finishStroke(d: NonNullable<typeof drawing.current>, cancelled: boolean, pointerType?: string) {
     if (d.holdTimer) clearTimeout(d.holdTimer);
     drawing.current = null;
+    retireInk(d);
 
     if (!cancelled && d.smart) {
       const stroke = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
@@ -644,7 +765,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       editor.endGesture();
       if (pointerType === 'touch') eraserPos.current = null;
     } else if (!cancelled && d.tool === 'lasso') {
-      if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
+      let len = 0;
+      for (let i = 1; i < d.points.length; i++) len += Math.hypot(d.points[i].x - d.points[i - 1].x, d.points[i].y - d.points[i - 1].y);
+      if (len < 12) {
+        // A tap with the lasso selects the stroke under it (topmost first).
+        const at = d.points[0];
+        const pg = pageRef.current;
+        const hit = [...pg.strokes].reverse().find((s) => strokeHitTest(s, at.x, at.y, 6 / Math.max(0.3, zoomRef.current)));
+        if (hit) {
+          const sel = { pageId: pg.id, strokeIds: [hit.id], latexIds: [], textIds: [], imageIds: [] };
+          const bounds = computeBounds(pg, sel);
+          if (bounds) setSelection({ ...sel, bounds });
+        }
+      } else if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
     }
     // The committed canvas paints in the same frame as React's commit (layout effect), so the
     // live layer can be cleared on the next frame without flicker.
@@ -663,6 +796,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         pt.pressure = d.pressure;
         d.points.push(pt);
         if (d.smart) moveSmartPen(d.smart, pt);
+        if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       }
     }
     finishStroke(d, cancelled, e.pointerType);
@@ -734,13 +868,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     setHiddenIds(null);
   };
 
-  // Floating canvas with the selected ink, painted once per drag.
+  // Selection layer: the selected ink drawn again on its own canvas with a blue glow (Notability
+  // style). While dragging, the same canvas carries the ink (hidden on the page canvas) and moves
+  // as a CSS transform, so picking a selection up costs nothing extra.
   const FLOAT_PAD = 24;
-  const dragSel = drag?.sel ?? null;
+  const layerSel = drag?.sel ?? (selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null);
+  const dragging = !!drag;
   useLayoutEffect(() => {
     const c = floatCanvasRef.current;
-    if (!c || !dragSel) return;
-    const b = dragSel.bounds;
+    if (!c || !layerSel) return;
+    const b = layerSel.bounds;
     const w = b.width + FLOAT_PAD * 2, h = b.height + FLOAT_PAD * 2;
     const r = Math.min(ratio, Math.sqrt(MAX_CANVAS_PIXELS / 2 / Math.max(1, w * h)));
     c.width = Math.max(1, Math.round(w * r));
@@ -748,9 +885,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const ctx = c.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
-    const ids = new Set(dragSel.strokeIds);
-    drawStrokes(ctx, pageRef.current.strokes.filter((s) => ids.has(s.id)));
-  }, [dragSel, ratio]);
+    const ids = new Set(layerSel.strokeIds);
+    // Idle: highlighters stay on the page only (drawing them twice would darken them).
+    const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id) && (dragging || s.tool !== 'highlighter'));
+    ctx.save();
+    ctx.shadowColor = 'rgba(37, 99, 235, 0.9)';
+    ctx.shadowBlur = 7 * r;
+    drawStrokes(ctx, strokes);
+    ctx.restore();
+    drawStrokes(ctx, strokes);
+  }, [layerSel, dragging, ratio, page.strokes]);
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
@@ -862,18 +1006,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ) : visible ? (
         <canvas ref={strokeCanvasRef} className="absolute inset-0 pointer-events-none" style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />
       ) : null}
-      {drag && drag.sel.strokeIds.length > 0 && (
+      {layerSel && layerSel.strokeIds.length > 0 && (
         <canvas
           ref={floatCanvasRef}
           className="absolute pointer-events-none"
           style={{
-            left: drag.sel.bounds.x - FLOAT_PAD,
-            top: drag.sel.bounds.y - FLOAT_PAD,
-            width: drag.sel.bounds.width + FLOAT_PAD * 2,
-            height: drag.sel.bounds.height + FLOAT_PAD * 2,
+            left: layerSel.bounds.x - FLOAT_PAD,
+            top: layerSel.bounds.y - FLOAT_PAD,
+            width: layerSel.bounds.width + FLOAT_PAD * 2,
+            height: layerSel.bounds.height + FLOAT_PAD * 2,
             transformOrigin: `${FLOAT_PAD}px ${FLOAT_PAD}px`,
-            transform: `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})`,
-            willChange: 'transform',
+            transform: drag ? `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})` : undefined,
+            willChange: drag ? 'transform' : undefined,
           }}
         />
       )}
@@ -941,6 +1085,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             }
           }}
         />
+      )}
+
+      {visible && !printMode && (
+        <canvas ref={tailCanvasRef} className="absolute z-10 pointer-events-none" style={{ display: 'none', left: 0, top: 0 }} />
       )}
 
       {/* Lasso selection box */}

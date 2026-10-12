@@ -1,6 +1,6 @@
 import { FillType, Point, Stroke, ShapeKind } from '../types';
-import { Bezier, catmullRomBeziers, XY } from '../ink/spline';
-import { inkControlPoints } from '../ink/inkEngine';
+import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
+import { modelStroke } from '../ink/inkEngine';
 import { arrowSize } from '../ink/strokeRenderer';
 import { latexForDocument } from './latexRender';
 
@@ -119,7 +119,8 @@ function detectLine(pts: Point[], len: number): SnappedShape | null {
   for (const p of pts) maxDev = Math.max(maxDev, distToSeg(p, a, b));
   const rel = maxDev / chord;
   const straightness = chord / len;
-  if (rel > 0.08 || straightness < 0.9) return null;
+  // Forgiving: a slightly bowed or wobbly line still becomes a straight one.
+  if (rel > 0.11 || straightness < 0.86) return null;
   // Snap near-horizontal / vertical lines.
   let end = b;
   const ang = Math.atan2(b.y - a.y, b.x - a.x);
@@ -129,7 +130,7 @@ function detectLine(pts: Point[], len: number): SnappedShape | null {
       end = Math.abs(Math.sin(target)) > 0.5 ? P(a.x, b.y) : P(b.x, a.y);
     }
   }
-  return { kind: 'line', points: [P(a.x, a.y), P(end.x, end.y)], closed: false, confidence: 1 - rel / 0.08 * 0.8 };
+  return { kind: 'line', points: [P(a.x, a.y), P(end.x, end.y)], closed: false, confidence: 1 - rel / 0.11 * 0.8 };
 }
 
 function detectArrow(pts: Point[], diag: number): SnappedShape | null {
@@ -361,7 +362,7 @@ const HATCH_CM = 8 / PX_PER_CM;
 /**
  * Converts strokes to a compilable tikzpicture describing exactly what is drawn on the page:
  * shapes become TikZ primitives, smart-pen curves become the very Bezier segments that are
- * rendered (Catmull-Rom converted to `.. controls ..`), handwriting is the ink engine's own spline.
+ * rendered (Catmull-Rom converted to `.. controls ..`), handwriting is the ink engine's modelled line.
  * Fills, hatchings, holes, dashes and arrowheads are kept. Hatchings are drawn as
  * clipped line families (no `patterns` library: identical to the canvas and rendered by TikZJax,
  * whose SVG driver ignores PGF patterns). Coordinates are in cm from the lower-left corner.
@@ -451,8 +452,8 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
         lines.push(`  \\draw${o} ${curve(catmullRomBeziers(pts, closed), closed)};`);
         break;
       default: {
-        // Handwriting: the very spline the ink engine draws (thinned samples, Catmull-Rom).
-        const segs = catmullRomBeziers(inkControlPoints(pts), closed);
+        // Handwriting: the modelled centre line the ink engine draws, as cubic Beziers within 0.08 mm.
+        const segs = fitBeziers(modelStroke(pts), 0.3, closed);
         lines.push(`  \\draw${o} ${segs.length ? curve(segs, closed) : `${c(pts[0])} -- ${c(pts[pts.length - 1])}`};`);
       }
     }

@@ -18,22 +18,22 @@
 - Audio recordings per note (record, list, play, delete).
 
 **Pencil & ink**
-- **Handwriting uses the smart pen's spline engine**: samples are thinned like PDEDraw's curve tool, lightly smoothed (sharp corners kept) and drawn as a centripetal Catmull-Rom curve. The fountain pen turns Pencil pressure into a smoothly varying width; the ballpoint is uniform. Live ink and saved ink are the same curve, and the TikZ / SVG exports describe exactly that curve. Highlighter drawn behind ink, custom colours.
+- **Handwriting engine**: a port of Google's Ink Stroke Modeler (the modelling stage behind Google's own handwriting apps): a 40 ms wobble smoother for slow writing, up-sampling to at least 180 Hz and a spring-mass pen tip with drag. Ink is causal (once drawn it never moves or retraces), live ink is drawn incrementally with the provisional end on a tiny overlay, and the fountain pen is rendered as the exact union of pressure-sized capsules (no polygon facets at any size). Highlighter drawn behind ink, custom colours.
 - Per-point pressure, timestamps, altitude and azimuth are stored — the same per-point channels Notability's `InkObjectEncoder` serialises.
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
 - Stroke eraser and precision (partial) eraser that splits strokes.
 - **Smart pen (PDEDraw engine)**: smooth centripetal Catmull-Rom curves that close themselves when you end near the start ("potatoes", with a snap dot and haptic tick), lines with 15° angle lock, rectangles, ellipses from the centre with circle lock, points. Everything snaps to the key points, edges and crossings of existing shapes (curves and ellipses included) and, on grid / dot paper, to the paper's lattice. Lines, rectangles and ellipses show their live size (cm, angle) next to the pen. Closed shapes take a fill (solid, //// or \\\\ hatching, crosshatch, or a hole that cuts through fills); open lines/curves can get an arrowhead. Fill and arrowheads can also be applied to a lasso selection.
 - **Reshape shapes after drawing**: lasso a single shape to get handles: vertices of lines and polygons, corners of rectangles (right angles kept, also when rotated), centre and axes of ellipses and circles, the shaft of snapped arrows, and up to 12 handles on smart curves that bend the curve smoothly. Handles snap like the pen; each drag is one undo step.
-- **Draw-and-hold shape snapping**: line (axis-snapped), arrow, circle, ellipse, triangle, rectangle, polygon, polyline.
-- Lasso: move, resize, recolour, dashed/dotted, duplicate, delete, snap shapes.
+- **Draw-and-hold shape snapping (Notability style)**: hold the pen still and the stroke becomes a line, arrow, circle, ellipse, triangle, rectangle, polygon or polyline; keep the pen down and move it to size the shape (line end follows the pen with axis lock, circles/ellipses grow from the centre with independent axes, rectangles keep right angles, polygons scale and rotate).
+- Lasso: tap a stroke to select it or circle anything; selected ink glows; move / resize on a GPU layer, recolour, dashed/dotted, duplicate, delete, snap shapes.
 
 **LaTeX / TikZ**
 - Lasso handwriting → **LaTeX** (math), **Notes** (text + inline/display math) or **TikZ** (diagrams), transcribed by your Qwen3-VL server. Results are reviewed/edited in a live-preview sheet, then inserted or used to *replace* the ink; converted math is sized like the handwriting.
 - "Page → LaTeX" transcribes a whole page.
 - Math rendered with bundled KaTeX (works offline); tolerant of `$$…$$`, `\[…\]`, `align*`, `<think>` blocks, markdown fences, full documents.
 - **TikZ rendered by real TeX** (e-TeX + PGF/TikZ compiled to WebAssembly, from TikZJax) inside the app, offline: libraries such as `arrows.meta`, `positioning`, `calc`, `shapes`, `automata`, plus `pgfplots` and `tikz-cd`. A supervised worker restarts after bad input so one broken diagram cannot block the others; an instant built-in preview is shown while TeX runs.
-- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, handwriting the same spline the ink engine draws (no polygons). Fills, hatching, dashes and arrows are kept; text boxes and LaTeX blocks in the selection become `\node`s at their position and size. The code compiles both in the app and in standard LaTeX.
+- "Vector": exact TikZ of the selected ink, offline: shapes become TikZ primitives, smart-pen curves the very Bézier segments that are drawn, handwriting the modelled line the ink engine draws, fitted with cubic Béziers (no polygons). Fills, hatching, dashes and arrows are kept; text boxes and LaTeX blocks in the selection become `\node`s at their position and size. The code compiles both in the app and in standard LaTeX.
 
 **Export**: PDF (system print → Save as PDF / Save to Files, vector ink), SVG, `.tex` (compilable, optionally with remaining ink as TikZ), Markdown, `.opennote` (full-fidelity JSON).
 

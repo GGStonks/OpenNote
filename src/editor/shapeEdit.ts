@@ -74,7 +74,7 @@ export function shapeHandles(s: Stroke): ShapeHandle[] | null {
 
 const P = (p: XY, like?: Point): Point => ({ ...(like ?? { pressure: 0.5 }), x: p.x, y: p.y });
 
-function ellipsePoints(c: XY, a: XY, rb: number, n: number): Point[] {
+export function ellipsePoints(c: XY, a: XY, rb: number, n: number): Point[] {
   // `a` is the first semi-axis as a vector; the second is perpendicular with length rb.
   const ra = Math.hypot(a.x, a.y);
   const ux = ra ? a.x / ra : 1, uy = ra ? a.y / ra : 0;
@@ -183,5 +183,84 @@ export function dragHandle(orig: Stroke, handle: ShapeHandle, to: XY): Stroke {
 
     default:
       return orig;
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Draw-and-hold snapping, Notability style: after the shape snaps, keeping the pen down and moving
+// it sizes the shape. `pen0` is where the pen was when the shape snapped.
+
+export interface SnapAdjust {
+  kind: Stroke['shapeKind'];
+  base: Point[];
+  closed: boolean;
+  pen0: XY;
+}
+
+const AXIS_SNAP = (4 * Math.PI) / 180;
+
+export function adjustSnappedShape(a: SnapAdjust, pen: XY): Point[] {
+  const pts = a.base;
+  const asStroke = (points: Point[]): Stroke => ({ id: '', tool: 'pen', color: '', width: 1, opacity: 1, points, isShape: true, shapeKind: a.kind, closed: a.closed });
+  switch (a.kind) {
+    case 'line': {
+      // The start stays; the end follows the pen, locked to horizontal / vertical when close.
+      const s0 = pts[0];
+      let end = pen;
+      const ang = Math.atan2(pen.y - s0.y, pen.x - s0.x);
+      for (const t of [0, Math.PI / 2, Math.PI, -Math.PI / 2, -Math.PI]) {
+        if (Math.abs(ang - t) < AXIS_SNAP) end = Math.abs(Math.sin(t)) > 0.5 ? { x: s0.x, y: pen.y } : { x: pen.x, y: s0.y };
+      }
+      return [pts[0], P(end, pts[1])];
+    }
+    case 'arrow':
+      return dragHandle(asStroke(pts), { x: pts[1].x, y: pts[1].y, role: 'vertex', index: 1 }, pen).points;
+    case 'circle':
+    case 'ellipse': {
+      // Centre stays; each axis grows with the pen's distance along it ("size and curvature").
+      const c = centroid(pts);
+      const n = pts.length;
+      const ua = { x: pts[0].x - c.x, y: pts[0].y - c.y };
+      const ra = Math.hypot(ua.x, ua.y) || 1;
+      const qb = pts[Math.round(n / 4) % n];
+      const rb = Math.hypot(qb.x - c.x, qb.y - c.y) || 1;
+      const u = { x: ua.x / ra, y: ua.y / ra }, v = { x: -u.y, y: u.x };
+      if (a.kind === 'circle') {
+        const k = Math.hypot(pen.x - c.x, pen.y - c.y) / Math.max(1, Math.hypot(a.pen0.x - c.x, a.pen0.y - c.y));
+        return ellipsePoints(c, { x: ua.x * k, y: ua.y * k }, ra * k, n);
+      }
+      const along = (q: XY, d: XY) => Math.abs((q.x - c.x) * d.x + (q.y - c.y) * d.y);
+      const su = along(pen, u) / Math.max(along(a.pen0, u), 0.35 * ra);
+      const sv = along(pen, v) / Math.max(along(a.pen0, v), 0.35 * rb);
+      const na = Math.max(2, ra * su), nb = Math.max(2, rb * sv);
+      return ellipsePoints(c, { x: u.x * na, y: u.y * na }, nb, n);
+    }
+    case 'rectangle': {
+      // Centre stays; width and height follow the pen independently (right angles kept).
+      const c = centroid(pts);
+      const l = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) || 1;
+      const u = { x: (pts[1].x - pts[0].x) / l, y: (pts[1].y - pts[0].y) / l }, v = { x: -u.y, y: u.x };
+      const loc = (q: XY) => ({ x: (q.x - c.x) * u.x + (q.y - c.y) * u.y, y: (q.x - c.x) * v.x + (q.y - c.y) * v.y });
+      const hw = Math.max(...pts.map((q) => Math.abs(loc(q).x))), hh = Math.max(...pts.map((q) => Math.abs(loc(q).y)));
+      const p0 = loc(a.pen0), p1 = loc(pen);
+      const sx = Math.abs(p1.x) / Math.max(Math.abs(p0.x), 0.35 * hw), sy = Math.abs(p1.y) / Math.max(Math.abs(p0.y), 0.35 * hh);
+      return pts.map((q) => {
+        const L = loc(q);
+        const x = L.x * sx, y = L.y * sy;
+        return P({ x: c.x + x * u.x + y * v.x, y: c.y + x * u.y + y * v.y }, q);
+      });
+    }
+    default: {
+      // Triangles, polygons, polylines: scale and rotate with the pen around the centre
+      // (around the first point for open polylines).
+      const c = a.closed ? centroid(pts) : pts[0];
+      const d0 = { x: a.pen0.x - c.x, y: a.pen0.y - c.y }, d1 = { x: pen.x - c.x, y: pen.y - c.y };
+      const l0 = Math.hypot(d0.x, d0.y);
+      if (l0 < 4) return pts;
+      const k = Math.hypot(d1.x, d1.y) / l0;
+      const rot = Math.atan2(d1.y, d1.x) - Math.atan2(d0.y, d0.x);
+      const cs = Math.cos(rot) * k, sn = Math.sin(rot) * k;
+      return pts.map((q) => P({ x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn, y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs }, q));
+    }
   }
 }
