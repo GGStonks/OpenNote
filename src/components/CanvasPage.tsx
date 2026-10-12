@@ -7,7 +7,7 @@ import {
 import {
   capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
-import { ModeledPoint, StrokeModeler, pressureWidth } from '../ink/inkEngine';
+import { ModeledPoint, StrokeModeler, pressureWidth, trimLiftOff } from '../ink/inkEngine';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -259,6 +259,28 @@ function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
   return { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) };
 }
 
+
+/** Event time on the performance.now() clock (coalesced samples carry their own time). */
+function eventTime(e: { timeStamp?: number }): number {
+  const now = performance.now();
+  const ts = e.timeStamp;
+  return typeof ts === 'number' && ts > 0 && Math.abs(now - ts) < 1000 ? ts : now;
+}
+
+/**
+ * The Pencil's predicted sample, used to hide a frame of latency, only while the pen is not
+ * slowing down and only half way: full predictions shot past the end of every stroke and were
+ * then pulled back.
+ */
+function dampedPrediction(points: Point[], q: Point | null): Point[] {
+  const n = points.length;
+  if (!q || n < 3) return [];
+  const [a, b, c] = [points[n - 3], points[n - 2], points[n - 1]];
+  const speed = (u: Point, v: Point) => Math.hypot(v.x - u.x, v.y - u.y) / Math.max(1, (v.t ?? 0) - (u.t ?? 0));
+  if (speed(b, c) < speed(a, b) * 0.9) return [];
+  return [{ ...q, x: c.x + (q.x - c.x) * 0.5, y: c.y + (q.y - c.y) * 0.5 }];
+}
+
 const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const {
     page, pageIndex, paperStyle, paperColor, tools, zoom, editor, gestures, selection, setSelection,
@@ -366,6 +388,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     lastMove: { x: number; y: number };
     smart: SmartPenState | null;
     pressure: number;
+    /** Raw Pencil force of each sample (lift-off trimming). */
+    force: number[];
     /** Handwriting model (pen tool): its settled points are drawn once, incrementally. */
     model: StrokeModeler | null;
     drawn: number;
@@ -589,13 +613,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const rectCache = useRef<DOMRect | null>(null);
   const canvasRect = () => (rectCache.current ??= inputRef.current!.getBoundingClientRect());
 
-  const toPoint = (e: { clientX: number; clientY: number; pressure: number; pointerType: string }, start: number, angles = {}): Point => {
+  const toPoint = (e: { clientX: number; clientY: number; pressure: number; pointerType: string; timeStamp?: number }, start: number, angles = {}): Point => {
     const rect = canvasRect();
     return {
       x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width,
       y: ((e.clientY - rect.top) * surfHRef.current) / rect.height,
       pressure: e.pointerType === 'pen' ? (e.pressure > 0 ? e.pressure : 0.5) : 0.5,
-      t: Math.round(performance.now() - start),
+      t: Math.round((eventTime(e) - start) * 10) / 10,
       ...angles,
     };
   };
@@ -684,7 +708,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     rectCache.current = null;
     claimLive();
-    const start = performance.now();
+    const start = eventTime(e.nativeEvent);
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
     drawing.current = {
       pointerId: e.pointerId,
@@ -699,6 +723,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       lastMove: { x: pt.x, y: pt.y },
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
+      force: [pt.pressure],
       model: tool === 'pen' ? new StrokeModeler() : null,
       drawn: 0,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -740,6 +765,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
       // outline wobble.
+      d.force.push(pt.pressure);
       d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
       pt.pressure = d.pressure;
       d.points.push(pt);
@@ -758,7 +784,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     if (!d.smart && (d.tool === 'pen' || d.tool === 'highlighter')) {
       const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
-      d.predicted = predicted.slice(0, 2).map((pe) => ({ ...toPoint(pe, d.start), pressure: d.pressure }));
+      d.predicted = dampedPrediction(d.points, predicted[0] ? { ...toPoint(predicted[0], d.start), pressure: d.pressure } : null);
       const last = d.points[d.points.length - 1];
       if (!d.snapped && Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
         d.lastMove = { x: last.x, y: last.y };
@@ -789,7 +815,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         opacity: 1,
         penStyle: style.penStyle,
         lineStyle: 'solid',
-        points: d.snapped ? d.snapped.points : d.points,
+        points: d.snapped ? d.snapped.points : d.realPressure && d.tool === 'pen' ? trimLiftOff(d.points, d.force) : d.points,
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
       };
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
@@ -826,6 +852,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const last = d.points[d.points.length - 1];
       if (Math.hypot(pt.x - last.x, pt.y - last.y) > 0.2) {
         pt.pressure = d.pressure;
+        d.force.push(0); // the pen has left the glass
         d.points.push(pt);
         if (d.smart) moveSmartPen(d.smart, pt);
         if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);

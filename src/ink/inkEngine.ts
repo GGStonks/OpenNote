@@ -53,6 +53,10 @@ const END_ITERATIONS = 60;
 // through, for ~1 px of extra lag: overall 2.8 px lag at 300 px/s (library default: 4.8 px).
 const ARC_WINDOW = 2.5; // px
 const END_STOP_DISTANCE = 0.05; // px
+// Pressure envelope: the width follows a rise of force at once but a drop only with this time
+// constant, so a stroke keeps its body width to the end instead of thinning into a hairline as
+// the Pencil eases off the glass (the "fragile", tapered look).
+const PRESSURE_RELEASE = 60; // ms
 
 interface WobbleSample {
   x: number;
@@ -116,6 +120,12 @@ export class StrokeModeler {
   private last: { x: number; y: number; t: number; p: number } | null = null;
   private tip: TipState = { x: 0, y: 0, vx: 0, vy: 0 };
   private arc = new ArcWindow();
+  private env = -1;
+
+  private envelope(p: number, dt: number): number {
+    this.env = this.env < 0 || p >= this.env ? p : p + (this.env - p) * Math.exp(-dt / PRESSURE_RELEASE);
+    return this.env;
+  }
 
   private wobble(x: number, y: number, t: number): XY {
     const prev = this.window[this.window.length - 1];
@@ -148,6 +158,7 @@ export class StrokeModeler {
     if (this.last && t <= this.last.t) t = this.last.t + 0.5;
     const s = this.wobble(x, y, t);
     const last = this.last;
+    p = this.envelope(p, last ? t - last.t : 0);
     if (!last) {
       this.tip = { x: s.x, y: s.y, vx: 0, vy: 0 };
       this.arc.push(s.x, s.y);
@@ -233,10 +244,38 @@ export function hasRealPressure(points: Point[]): boolean {
   return false;
 }
 
-/** Fountain pen: width for a normalised force (0.5 = the nominal width). */
+/**
+ * Fountain pen: width for a normalised force. Ordinary writing force (Safari reports ~0.15-0.4)
+ * stays close to the nominal width; the range is 0.72x (barely touching) to 1.3x (pressed hard),
+ * like Notability's pen, instead of the old 0.4x-1.6x that made light writing thin and fragile.
+ */
 export function pressureWidth(base: number, pressure: number): number {
-  const p = Math.max(0.05, Math.min(1, pressure || 0.5));
-  return base * (0.38 + 1.24 * p);
+  const p = Math.max(0, Math.min(1, pressure || 0.5));
+  return base * (0.72 + 0.58 * Math.pow(p, 0.7));
+}
+
+/**
+ * Removes the lift-off flick: as the Pencil leaves the glass it keeps moving while its force
+ * falls to zero, which drew a thin hook past the end of every stroke. Trailing samples whose raw
+ * force dropped under half of the stroke's median force are dropped (a real nib stops inking
+ * there), at most the last 30 ms and 10 px.
+ */
+export function trimLiftOff(points: Point[], force: number[]): Point[] {
+  const n = points.length;
+  if (n < 6 || force.length !== n) return points;
+  const median = force.slice().sort((a, b) => a - b)[n >> 1];
+  if (!(median > 0)) return points;
+  const tEnd = points[n - 1].t ?? 0;
+  let k = n;
+  let len = 0;
+  while (k > 4) {
+    const i = k - 1;
+    if (force[i] >= 0.5 * median || tEnd - (points[i].t ?? 0) > 30) break;
+    len += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    if (len > 10) break;
+    k--;
+  }
+  return k === n ? points : points.slice(0, k);
 }
 
 /** Drops modelled points closer than `min` to the previous one (keeps the last). */
