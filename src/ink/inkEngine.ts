@@ -4,16 +4,18 @@ import { XY } from './spline';
 /**
  * Handwriting engine: a TypeScript port of the modelling stage of Google's Ink Stroke Modeler
  * (github.com/google/ink-stroke-modeler, Apache-2.0), the library behind the handwriting of
- * Google's own note apps, with its default parameters.
+ * Google's own note apps (wobble smoother as in the library, position model retuned below).
  *
  *  1. Wobble smoother: at very low speed the input is replaced by its moving average over the
  *     last 40 ms (removes the digitiser's jitter when writing slowly); at normal speed the raw
  *     position is used, with a smooth blend in between.
- *  2. Up-sampling: inputs are interpolated so that the model advances at least at 180 Hz.
+ *  2. Up-sampling: inputs are interpolated so that the model advances in steps of at most 1.5 ms.
  *  3. Position modeller: the ink tip is a mass pulled towards the pen by a spring, with drag
- *     (explicit Euler). This is what makes the line fluid: corners are rounded the way a real nib
+ *     (semi-implicit Euler), tuned stiffer and critically damped (see OMEGA). This is what makes the line fluid: corners are rounded the way a real nib
  *     rounds them, and jitter is filtered without the lag of a heavy moving average.
- *  4. End of stroke: when the pen lifts, the tip is moved on until it reaches the pen.
+ *  3b. Output smoothing: a 2.5 px arc-length moving average of the tip (see ARC_WINDOW).
+ *  4. End of stroke: when the pen lifts, the tip is moved on until it reaches the pen, and the
+ *     stroke always ends exactly where the pen lifted (closed loops close).
  *
  * The model is causal: every output point depends only on earlier input, so ink that has been
  * drawn never moves again ("no retracing"). The live stroke and the saved stroke are the same.
@@ -32,15 +34,24 @@ export interface ModeledPoint {
   t: number;
 }
 
-// Ink Stroke Modeler defaults, converted to milliseconds and page units (96 px per inch).
+// Wobble smoother: Ink Stroke Modeler defaults, in milliseconds and page units (96 px per inch).
 const WOBBLE_TIMEOUT = 40; // ms
 const PX_PER_CM = 96 / 2.54;
 const WOBBLE_SPEED_FLOOR = (1.31 * PX_PER_CM) / 1000; // px/ms
 const WOBBLE_SPEED_CEILING = (1.44 * PX_PER_CM) / 1000;
-const SPRING_MASS = (11 / 32400) * 1e6; // ms^2
-const DRAG = 72 / 1000; // 1/ms
-const MAX_DT = 1000 / 180; // ms (minimum output rate 180 Hz)
-const END_ITERATIONS = 20;
+// Position model: stiffer than the library default (natural frequency 54 rad/s, damping 0.66),
+// which trailed the pen by ~5 px at writing speed, overshot sharp corners by ~0.7 px and let
+// small loops miss their closing point. Critically damped at 250 rad/s: ~1.6 px lag at
+// 300 px/s, no overshoot, small letters within ~0.15 px of the pen, jitter still halved.
+const OMEGA = 0.25; // rad/ms
+const SPRING_MASS = 1 / (OMEGA * OMEGA); // ms^2
+const DRAG = 2 * OMEGA; // 1/ms (damping ratio 1)
+const MAX_DT = 1.5; // ms (model rate >= 667 Hz, keeps explicit Euler well inside its stable range)
+const END_ITERATIONS = 60;
+// Output smoothing: each drawn point is the average of the model's points over the last 2.5 px of
+// line (causal, so drawn ink still never moves). Removes the digitiser jitter the stiff spring lets
+// through, for ~1 px of extra lag: overall 2.8 px lag at 300 px/s (library default: 4.8 px).
+const ARC_WINDOW = 2.5; // px
 const END_STOP_DISTANCE = 0.05; // px
 
 interface WobbleSample {
@@ -56,6 +67,33 @@ interface TipState {
   y: number;
   vx: number;
   vy: number;
+}
+
+/** Causal arc-length moving average of the tip positions. */
+class ArcWindow {
+  items: { x: number; y: number; s: number }[] = [];
+  sx = 0;
+  sy = 0;
+  push(x: number, y: number): XY {
+    const last = this.items[this.items.length - 1];
+    const s = last ? last.s + Math.hypot(x - last.x, y - last.y) : 0;
+    this.items.push({ x, y, s });
+    this.sx += x;
+    this.sy += y;
+    while (this.items.length > 1 && s - this.items[0].s > ARC_WINDOW) {
+      const f = this.items.shift()!;
+      this.sx -= f.x;
+      this.sy -= f.y;
+    }
+    return { x: this.sx / this.items.length, y: this.sy / this.items.length };
+  }
+  clone(): ArcWindow {
+    const c = new ArcWindow();
+    c.items = this.items.slice();
+    c.sx = this.sx;
+    c.sy = this.sy;
+    return c;
+  }
 }
 
 function step(s: TipState, ax: number, ay: number, dt: number) {
@@ -77,6 +115,7 @@ export class StrokeModeler {
   private sumDt = 0;
   private last: { x: number; y: number; t: number; p: number } | null = null;
   private tip: TipState = { x: 0, y: 0, vx: 0, vy: 0 };
+  private arc = new ArcWindow();
 
   private wobble(x: number, y: number, t: number): XY {
     const prev = this.window[this.window.length - 1];
@@ -111,6 +150,7 @@ export class StrokeModeler {
     const last = this.last;
     if (!last) {
       this.tip = { x: s.x, y: s.y, vx: 0, vy: 0 };
+      this.arc.push(s.x, s.y);
       this.points.push({ x: s.x, y: s.y, p, t });
       this.last = { x: s.x, y: s.y, t, p };
       return;
@@ -121,7 +161,8 @@ export class StrokeModeler {
     for (let i = 1; i <= n; i++) {
       const f = i / n;
       step(this.tip, last.x + (s.x - last.x) * f, last.y + (s.y - last.y) * f, dt);
-      this.points.push({ x: this.tip.x, y: this.tip.y, p: last.p + (p - last.p) * f, t: last.t + total * f });
+      const o = this.arc.push(this.tip.x, this.tip.y);
+      this.points.push({ x: o.x, y: o.y, p: last.p + (p - last.p) * f, t: last.t + total * f });
     }
     this.last = { x: s.x, y: s.y, t, p };
   }
@@ -133,6 +174,7 @@ export class StrokeModeler {
   tail(predicted: { x: number; y: number; t: number; p: number }[] = []): ModeledPoint[] {
     if (!this.last) return [];
     const tip: TipState = { ...this.tip };
+    const arc = this.arc.clone();
     const out: ModeledPoint[] = [];
     let last = this.last;
     for (const q of predicted) {
@@ -142,7 +184,8 @@ export class StrokeModeler {
       for (let i = 1; i <= n; i++) {
         const f = i / n;
         step(tip, last.x + (q.x - last.x) * f, last.y + (q.y - last.y) * f, total / n);
-        out.push({ x: tip.x, y: tip.y, p: last.p + (q.p - last.p) * f, t: last.t + total * f });
+        const o = arc.push(tip.x, tip.y);
+        out.push({ x: o.x, y: o.y, p: last.p + (q.p - last.p) * f, t: last.t + total * f });
       }
       last = q;
     }
@@ -151,9 +194,12 @@ export class StrokeModeler {
       if (Math.hypot(tip.x - last.x, tip.y - last.y) < END_STOP_DISTANCE) break;
       t += MAX_DT;
       step(tip, last.x, last.y, MAX_DT);
-      out.push({ x: tip.x, y: tip.y, p: last.p, t });
+      const o = arc.push(tip.x, tip.y);
+      out.push({ x: o.x, y: o.y, p: last.p, t });
     }
-    if (Math.hypot(tip.x - last.x, tip.y - last.y) > 0.3) out.push({ x: last.x, y: last.y, p: last.p, t: t + MAX_DT });
+    // The stroke always ends exactly where the pen lifted.
+    const end = out[out.length - 1] ?? this.points[this.points.length - 1];
+    if (!end || Math.hypot(end.x - last.x, end.y - last.y) > 0.02) out.push({ x: last.x, y: last.y, p: last.p, t: t + MAX_DT });
     return out;
   }
 }

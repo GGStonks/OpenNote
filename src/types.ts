@@ -143,7 +143,8 @@ export interface Rect {
 
 export const PAGE_WIDTH = 816;
 export const PAGE_HEIGHT = 1056;
-export const SCHEMA_VERSION = 2;
+/** 3: a note is one continuous surface (a single NotePage); older notes are merged on load. */
+export const SCHEMA_VERSION = 3;
 
 export function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

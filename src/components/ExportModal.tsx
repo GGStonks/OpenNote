@@ -1,3 +1,4 @@
+import { splitSurface } from '../editor/surface';
 import React, { useState } from 'react';
 import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
 import { NoteDocument, PAGE_HEIGHT, PAGE_WIDTH } from '../types';
@@ -26,7 +27,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
   const libs = new Set<string>(['arrows.meta']);
   const pkgs = new Set<string>();
   const body: string[] = [];
-  doc.pages.forEach((p, i) => {
+  splitSurface(doc.pages[0]).forEach((p, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: t.text.replace(/([#%&_{}$])/g, '\\$1') + '\n', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -72,7 +73,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
 
 function buildMarkdown(doc: NoteDocument): string {
   let md = `# ${doc.title}\n\n`;
-  doc.pages.forEach((p, i) => {
+  splitSurface(doc.pages[0]).forEach((p, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -92,10 +93,11 @@ function buildMarkdown(doc: NoteDocument): string {
 
 function buildSvg(doc: NoteDocument): string {
   const H = PAGE_HEIGHT, W = PAGE_WIDTH, gap = 24;
-  const total = doc.pages.length * (H + gap) - gap;
+  const pages = splitSurface(doc.pages[0]);
+  const total = pages.length * (H + gap) - gap;
   const ink = doc.paperColor === 'dark' ? '#F3F4F6' : '#111827';
   let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;
-  doc.pages.forEach((p, i) => {
+  pages.forEach((p, i) => {
     const dy = i * (H + gap);
     out += `<g id="page-${i + 1}">\n<rect x="0" y="${dy}" width="${W}" height="${H}" fill="${PAPER_COLORS[doc.paperColor]}"/>\n`;
     for (const im of p.imageBlocks ?? []) out += `<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>\n`;

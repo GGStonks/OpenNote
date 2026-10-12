@@ -19,11 +19,10 @@ import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
 import { renderLatexContent } from '../services/latexRender';
 import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
-import { createBlankPage } from '../storage/db';
+import { bandSlice, bandStrokes, deleteBand, duplicateBand, surfacePageCount } from '../editor/surface';
 import { printDocument } from '../platform';
 
 const PAD = 16;
-const GAP = 24;
 const CONTENT_WIDTH = PAGE_WIDTH + PAD * 2;
 
 interface EditorProps {
@@ -91,6 +90,9 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
 export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onSaved, onBack, onOpenSettings }) => {
   const editor = useNoteEditor(note, onSaved);
   const { doc } = editor;
+  /** The note's continuous surface (one NotePage; see editor/surface.ts). */
+  const surface = doc.pages[0];
+  const pageCount = useMemo(() => surfacePageCount(surface), [surface]);
   const gestures = useMemo(() => new GestureBus(), []);
   const [tools, setToolsState] = useState<ToolSettings>(() => loadToolPrefs(settings));
   const toolsRef = useRef(tools);
@@ -230,10 +232,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const el = scrollRef.current, outer = outerRef.current;
     if (!el || !outer) return;
     const y = (el.scrollTop + el.clientHeight / 3 - outer.offsetTop) / zoom - PAD;
-    setCurrentPage(Math.max(0, Math.min(doc.pages.length - 1, Math.floor(y / (PAGE_HEIGHT + GAP)))));
-  }, [zoom, doc.pages.length, scrollRef, outerRef]);
-
-  const pageAt = (i: number) => doc.pages[Math.max(0, Math.min(doc.pages.length - 1, i))];
+    setCurrentPage(Math.max(0, Math.min(pageCount - 1, Math.floor(y / PAGE_HEIGHT))));
+  }, [zoom, pageCount, scrollRef, outerRef]);
 
   // ------------------------------------------------------------------------- selection actions
   const selPage = selection ? doc.pages.find((p) => p.id === selection.pageId) : undefined;
@@ -414,8 +414,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   const convertPage = () => {
-    const page = pageAt(currentPage);
-    const ink = page.strokes.filter((s) => s.tool === 'pen');
+    const page = surface;
+    const ink = bandStrokes(surface, currentPage).filter((s) => s.tool === 'pen');
     const b = boundsOfStrokes(ink);
     if (!b) return showToast('This page has no handwriting to transcribe');
     const image = renderInkImage(ink, b);
@@ -480,57 +480,25 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   }, []);
 
   const insertLatexManually = () => {
-    const page = pageAt(currentPage);
-    setTarget({ kind: 'new', pageId: page.id, at: { x: 96, y: visibleTopOnPage() + 80 } });
+    setTarget({ kind: 'new', pageId: surface.id, at: { x: 96, y: visibleTopOnPage() + 80 } });
     setModal({ latex: '', isTikz: false, origin: 'new', canReplaceInk: false });
   };
 
   // ------------------------------------------------------------------------- pages & media
-  // Like Notability, a note always ends with one blank page: writing on the last page adds the next.
-  const lastPage = doc.pages[doc.pages.length - 1];
-  const lastPageUsed =
-    !!lastPage && (lastPage.strokes.length > 0 || lastPage.latexBlocks.length > 0 || (lastPage.textBlocks ?? []).length > 0 || (lastPage.imageBlocks ?? []).length > 0);
-  useEffect(() => {
-    if (!lastPageUsed) return;
-    editor.silent((d) => ({ ...d, pages: [...d.pages, createBlankPage(d.pages.length + 1)] }));
-  }, [lastPageUsed]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const duplicatePage = () => {
-    const src = pageAt(currentPage);
-    const copy: NotePage = {
-      ...src,
-      id: newId('page'),
-      strokes: src.strokes.map((s) => ({ ...s, id: newId('stroke') })),
-      latexBlocks: src.latexBlocks.map((b) => ({ ...b, id: newId('latex') })),
-      textBlocks: (src.textBlocks ?? []).map((b) => ({ ...b, id: newId('text') })),
-      imageBlocks: (src.imageBlocks ?? []).map((b) => ({ ...b, id: newId('image') })),
-    };
-    editor.commit((d) => {
-      const pages = [...d.pages];
-      pages.splice(currentPage + 1, 0, copy);
-      return { ...d, pages: pages.map((p, i) => ({ ...p, pageNumber: i + 1 })) };
-    });
-  };
+  // Pages are bands of the surface (always one blank page at the end, see surfacePageCount).
+  const duplicatePage = () => editor.commitPage(surface.id, (p) => duplicateBand(p, currentPage));
 
   const deletePage = () => {
-    if (doc.pages.length <= 1) return showToast('A note needs at least one page');
+    if (pageCount <= 1) return showToast('A note needs at least one page');
     if (!window.confirm(`Delete page ${currentPage + 1}? (Undo can bring it back)`)) return;
-    const id = pageAt(currentPage).id;
-    editor.commit((d) => ({ ...d, pages: d.pages.filter((p) => p.id !== id).map((p, i) => ({ ...p, pageNumber: i + 1 })) }));
+    editor.commitPage(surface.id, (p) => deleteBand(p, currentPage));
   };
 
-  /** Page-space y of the top of the viewport on the current page (for placing new content). */
+  /** Surface y of the top of the viewport (for placing new content). */
   const visibleTopOnPage = () => {
     const el = scrollRef.current, outer = outerRef.current;
     if (!el || !outer) return 40;
-    const y = (el.scrollTop - outer.offsetTop) / zoom - PAD - currentPage * (PAGE_HEIGHT + GAP);
-    return Math.max(24, Math.min(PAGE_HEIGHT - 240, y));
-  };
-
-  const scrollToPage = (i: number) => {
-    const el = scrollRef.current, outer = outerRef.current;
-    if (!el || !outer) return;
-    el.scrollTo({ top: outer.offsetTop + (PAD + i * (PAGE_HEIGHT + GAP)) * zoom - 8, behavior: 'smooth' });
+    return Math.max(24, (el.scrollTop - outer.offsetTop) / zoom - PAD);
   };
 
   const insertImage = (file: File) => {
@@ -547,10 +515,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         const dataUrl = c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.88);
         const w = Math.min(PAGE_WIDTH - 160, c.width);
         const h = (w * c.height) / c.width;
-        const page = pageAt(currentPage);
-        editor.commitPage(page.id, (p) => ({
+        editor.commitPage(surface.id, (p) => ({
           ...p,
-          imageBlocks: [...(p.imageBlocks ?? []), { id: newId('image'), x: (PAGE_WIDTH - w) / 2, y: Math.min(PAGE_HEIGHT - h - 20, visibleTopOnPage() + 60), width: w, height: h, dataUrl, createdAt: Date.now() }],
+          imageBlocks: [...(p.imageBlocks ?? []), { id: newId('image'), x: (PAGE_WIDTH - w) / 2, y: visibleTopOnPage() + 60, width: w, height: h, dataUrl, createdAt: Date.now() }],
         }));
         setTools({ tool: 'lasso' });
         showToast('Image inserted — use the lasso to move or resize it');
@@ -576,7 +543,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   // ------------------------------------------------------------------------- render
-  const totalHeight = PAD * 2 + doc.pages.length * (PAGE_HEIGHT + GAP) + 80;
+  const totalHeight = PAD * 2 + pageCount * PAGE_HEIGHT + 80;
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
   return (
@@ -606,7 +573,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onInsertLatex={insertLatexManually}
         onInsertImage={insertImage}
         currentPage={currentPage + 1}
-        totalPages={doc.pages.length}
+        totalPages={pageCount}
         audioSlot={<AudioRecorder noteId={doc.id} onError={(m) => showToast(m, true)} />}
       />
 
@@ -621,11 +588,12 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       >
         <div ref={outerRef} style={{ width: CONTENT_WIDTH * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
           <div style={{ width: CONTENT_WIDTH, transform: `scale(${zoom})`, transformOrigin: '0 0', padding: PAD }}>
-            {doc.pages.map((page, i) => (
-              <div key={page.id} style={{ marginBottom: GAP }}>
+            {[surface].map((page) => (
+              <div key={page.id}>
                 <CanvasPage
                   page={page}
-                  pageIndex={i}
+                  pageIndex={0}
+                  pageCount={pageCount}
                   paperStyle={doc.paperStyle}
                   paperColor={doc.paperColor}
                   tools={tools}
@@ -653,7 +621,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         className="fixed right-4 z-30 pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur"
         style={{ bottom: `calc(${selection ? 96 : 18}px + env(safe-area-inset-bottom))` }}
       >
-        {currentPage + 1} / {doc.pages.length}
+        {currentPage + 1} / {pageCount}
       </div>
 
       {/* Selection action bar */}
@@ -756,11 +724,14 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {printMode &&
         createPortal(
           <div className="on-print-root">
-            {doc.pages.map((page, i) => (
-              <div key={page.id} className="on-print-page">
+            {/* The surface cut into US Letter pages at the page lines (the trailing blank page is not printed). */}
+            {Array.from({ length: Math.max(1, pageCount - 1) }, (_, k) => (
+              <div key={k} className="on-print-page">
+                <div style={{ transform: `translateY(${-k * PAGE_HEIGHT}px)` }}>
                 <CanvasPage
-                  page={page}
-                  pageIndex={i}
+                  page={bandSlice(surface, k)}
+                  pageIndex={k}
+                  pageCount={pageCount}
                   paperStyle={doc.paperStyle}
                   paperColor={doc.paperColor}
                   tools={tools}
@@ -777,6 +748,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                   printMode
                   scrollRoot={null}
                 />
+                </div>
               </div>
             ))}
           </div>,

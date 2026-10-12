@@ -1,3 +1,4 @@
+import { surfacePageCount } from '../editor/surface';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Clock, Settings as SettingsIcon,
@@ -244,7 +245,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                         )}
                         <div className="text-[11px] text-gray-400 mt-0.5 flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {new Date(note.updatedAt).toLocaleDateString()} · {note.pages.length}p
+                          {new Date(note.updatedAt).toLocaleDateString()} · {Math.max(1, surfacePageCount(note.pages[0]) - 1)}p
                         </div>
                       </div>
                       <div className="relative" onClick={(e) => e.stopPropagation()}>
@@ -264,7 +265,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                     <FileText className="w-5 h-5 text-blue-600 flex-shrink-0" />
                     <div className="truncate">
                       <div className="font-semibold text-sm truncate">{note.title}</div>
-                      <div className="text-[11px] text-gray-400">{new Date(note.updatedAt).toLocaleString()} · {note.pages.length} pages</div>
+                      <div className="text-[11px] text-gray-400">{new Date(note.updatedAt).toLocaleString()} · {Math.max(1, surfacePageCount(note.pages[0]) - 1)} pages</div>
                     </div>
                   </div>
                   <div className="relative" onClick={(e) => e.stopPropagation()}>

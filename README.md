@@ -11,14 +11,14 @@
 
 **Note taking (Notability-style)**
 - Library with subjects, search (titles, typed text, LaTeX source), live ink thumbnails, rename / move / duplicate / delete, backup & import.
-- Continuous vertical pages (US Letter, 816×1056 pt @96 dpi) with blank / ruled / grid / dot paper in white, cream, yellow or dark. A new blank page appears automatically once you write on the last one.
+- **One continuous vertical canvas** per note, as wide as the screen in any orientation, with blank / ruled / grid / dot paper in white, cream, yellow or dark. A hairline marks every US Letter page (816×1056 pt @96 dpi); ink and shapes cross it freely, and a new blank page appears as you write. PDF export cuts the canvas into pages at those lines.
 - The page always fills the width of the screen and only scrolls up and down (two fingers, or one finger when "pencil only" is on, with momentum); it never slides sideways or zooms out of place.
 - Two-finger tap = undo, three-finger tap = redo (Notability gestures; can be turned off in Settings).
 - Text boxes, images, add / duplicate / delete pages, undo/redo (whole gestures are one step), keyboard shortcuts (1–6 tools, ⌘Z / ⌘⇧Z).
 - Audio recordings per note (record, list, play, delete).
 
 **Pencil & ink**
-- **Handwriting engine**: a port of Google's Ink Stroke Modeler (the modelling stage behind Google's own handwriting apps): a 40 ms wobble smoother for slow writing, up-sampling to at least 180 Hz and a spring-mass pen tip with drag. Ink is causal (once drawn it never moves or retraces), live ink is drawn incrementally with the provisional end on a tiny overlay, and the fountain pen is rendered as the exact union of pressure-sized capsules (no polygon facets at any size). Highlighter drawn behind ink, custom colours.
+- **Handwriting engine**: built on Google's Ink Stroke Modeler (wobble smoother for slow writing) with a stiffer, critically damped spring-mass pen tip (667 Hz, no overshoot) and a 2.5 px causal arc-length average: ~2.8 px lag at 300 px/s instead of the library's 4.8 px, small loops within ~0.2 px of the pen, and every stroke ends exactly where the pen lifts. Ink is causal (once drawn it never moves or retraces), live ink is drawn incrementally with the provisional end on a tiny overlay, and the fountain pen is rendered as the exact union of pressure-sized capsules (no polygon facets at any size). Highlighter drawn behind ink, custom colours.
 - Per-point pressure, timestamps, altitude and azimuth are stored — the same per-point channels Notability's `InkObjectEncoder` serialises.
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
@@ -93,7 +93,8 @@ src/
     CanvasPage.tsx            ink input (pen/highlighter/eraser/lasso/text), blocks, paper
     Blocks.tsx                LaTeX / TikZ / text / image blocks
     Toolbar.tsx, LibraryView.tsx, LatexModal.tsx, ExportModal.tsx, SettingsModal.tsx, AudioRecorder.tsx
-  editor/                     selection maths, scrolling and tap gestures, smart pen (smartPen.ts), shape handles (shapeEdit.ts)
+  editor/                     continuous surface + page bands (surface.ts), selection maths, scrolling and tap gestures,
+                              smart pen (smartPen.ts), shape handles and snap-and-size (shapeEdit.ts)
   ink/inkEngine.ts            handwriting spline engine (sampling, smoothing, pressure width)
   ink/strokeRenderer.ts       Path2D cache, SVG export, partial eraser
   services/

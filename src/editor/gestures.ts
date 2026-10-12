@@ -8,6 +8,8 @@ export class GestureBus {
   touches = 0;
   /** True while the viewport is panning/zooming. */
   navigating = false;
+  /** True while a selection or shape handle is being dragged: the page must not scroll. */
+  dragging = false;
   private cancelHandlers = new Set<() => void>();
 
   onCancel(fn: () => void): () => void {

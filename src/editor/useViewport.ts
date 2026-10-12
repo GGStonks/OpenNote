@@ -116,7 +116,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
 
     const onDown = (e: PointerEvent) => {
       // The mouse drags the page only where it does not draw (hand tool, gaps between pages).
-      const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && (e.target as HTMLElement).tagName !== 'CANVAS';
+      const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && !(e.target as HTMLElement).closest('[data-ink-input]');
       if (e.pointerType !== 'touch' && !navigateMouse) return;
       // Leave touches on UI controls (selection handles, text boxes) alone.
       if ((e.target as HTMLElement).closest('[data-no-pan], textarea, input, button')) return;
@@ -161,6 +161,12 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         if (o && Math.hypot(p.x - o.x, p.y - o.y) > TAP_SLOP) t.moved = true;
       }
       if (!gestures.navigating || !lastY.current) return;
+      if (gestures.dragging) {
+        // A finger is moving a selection: keep the page still.
+        lastY.current = { y: centroidY(), t: performance.now() };
+        history.current = [lastY.current];
+        return;
+      }
       const y = centroidY();
       const now = performance.now();
       pending.current += y - lastY.current.y;
