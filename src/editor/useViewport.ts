@@ -108,6 +108,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       const r = el.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
+    /** Fingers that came down on a selection / handle (see onDown). */
+    const controlFingers = new Set<number>();
     const centroidY = () => {
       let y = 0;
       for (const p of pointers.current.values()) y += p.y;
@@ -118,8 +120,16 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       // The mouse drags the page only where it does not draw (hand tool, gaps between pages).
       const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && !(e.target as HTMLElement).closest('[data-ink-input]');
       if (e.pointerType !== 'touch' && !navigateMouse) return;
-      // Leave touches on UI controls (selection handles, text boxes) alone.
-      if ((e.target as HTMLElement).closest('[data-no-pan], textarea, input, button')) return;
+      // Leave touches on controls and text boxes alone.
+      const target = e.target as HTMLElement;
+      if (target.closest('textarea, input, button')) return;
+      // A finger on a selection or a shape handle belongs to that control, but it still counts
+      // as a finger: with a second one down, the two scroll the page and the drag is abandoned.
+      // (v1.x ignored such fingers, so a pinch or pan over a selection dragged the selection.)
+      const onControl = !!target.closest('[data-no-pan]');
+      if (onControl && e.pointerType !== 'touch') return;
+      if (onControl && target.closest('[data-no-pan-strict]')) return;
+      if (onControl) controlFingers.add(e.pointerId);
       stopMomentum();
       if (e.pointerType === 'touch') {
         const now = performance.now();
@@ -134,9 +144,12 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       pointers.current.set(e.pointerId, rel(e));
       gestures.touches = pointers.current.size;
       if (pointers.current.size >= 2) {
-        // A second finger always scrolls, and cancels a finger stroke in progress.
+        // A second finger always scrolls, and cancels a finger stroke or a drag in progress.
         if (!gestures.navigating) gestures.cancelStrokes();
+        if (gestures.dragging || controlFingers.size) gestures.cancelDrags();
         gestures.navigating = true;
+      } else if (onControl) {
+        // One finger on a control: the control handles it.
       } else if (fingersNavigate() || navigateMouse) {
         gestures.navigating = true;
       }
@@ -178,6 +191,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     };
 
     const onUp = (e: PointerEvent) => {
+      controlFingers.delete(e.pointerId);
       if (!pointers.current.delete(e.pointerId)) return;
       gestures.touches = pointers.current.size;
       if (pointers.current.size > 0) {

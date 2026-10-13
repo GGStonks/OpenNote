@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Maximize2 } from 'lucide-react';
+import { Maximize2, RotateCw } from 'lucide-react';
 import {
   EraserMode, FillType, LatexBlock, LineStyle, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
@@ -20,12 +20,16 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
-import { Selection, computeBounds, selectInLasso, singleBlockSelection, transformSelection } from '../editor/selection';
+import {
+  Selection, computeBounds, normDeg, resetRotation, selectInLasso, selectionRotation, singleBlockSelection, transformSelection,
+} from '../editor/selection';
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 
 export interface ToolSettings {
   tool: ToolType;
   penColor: string;
+  /** Colour of the Draw tool (smart pen), independent of the pen's. */
+  shapeColor: string;
   penWidth: number;
   penStyle: PenStyle;
   highlighterColor: string;
@@ -107,6 +111,8 @@ export function paperGrid(style: PaperStyle): number | null {
 }
 
 const MAX_CANVAS_PIXELS = 16_000_000;
+/** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
+const ROTATE_SNAP = 3;
 
 /**
  * Backing-store scale of the page canvases. Quantised in half-zoom steps so that zooming does not
@@ -588,7 +594,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const smartOptions = (): SmartPenOptions => {
     const t = toolsRef.current;
     return {
-      mode: t.shapeMode, color: t.penColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap,
+      mode: t.shapeMode, color: t.shapeColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap,
       grid: t.shapeGridSnap ? paperGrid(paperStyleRef.current) : null,
     };
   };
@@ -612,7 +618,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     if (d && d.smart) {
       const opts = smartOptions();
-      const shape = smartPenShape(d.smart, false);
+      const shape = d.snapped ?? smartPenShape(d.smart, false);
       if (shape) {
         next = drawLiveStroke(ctx, shape.points, {
           tool: 'pen', color: opts.color, width: opts.width, penStyle: 'ballpoint', isShape: true, closed: shape.closed, shapeKind: shape.kind,
@@ -621,7 +627,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           arrow: !shape.closed && opts.arrow,
         });
       }
-      const dot = d.smart.snapDot;
+      const dot = d.snapped ? null : d.smart.snapDot;
       if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart.snapKind === 'grid', k));
       const m = smartPenMeasure(d.smart);
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
@@ -738,14 +744,26 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
   };
 
+  /**
+   * Draw & hold: the pen held still at the end of a stroke turns it into the clean shape (circle,
+   * polygon, line...), which the pen then sizes until it lifts. Pen and Draw tool (smart curve):
+   * for the Draw tool the line as drawn is used, already closed when it came back to its start.
+   */
   const armHoldToSnap = () => {
     const d = drawing.current;
-    if (!d || d.tool !== 'pen' || !toolsRef.current.holdToSnap || d.snapped) return;
+    const smartCurve = d?.tool === 'shape' && d.smart?.mode === 'curve';
+    if (!d || (d.tool !== 'pen' && !smartCurve) || !toolsRef.current.holdToSnap || d.snapped) return;
     if (d.holdTimer) clearTimeout(d.holdTimer);
     d.holdTimer = setTimeout(() => {
       const cur = drawing.current;
       if (!cur || cur !== d || cur.points.length < 6) return;
-      const shape = detectShape(cur.points);
+      let source: Point[] = cur.points;
+      if (cur.smart) {
+        const line = smartPenShape(cur.smart, false);
+        if (!line || line.points.length < 3) return;
+        source = line.closed ? [...line.points, line.points[0]] : line.points;
+      }
+      const shape = detectShape(source);
       if (shape) {
         cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind };
         const pen = cur.points[cur.points.length - 1];
@@ -946,7 +964,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
       if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       // The smart curve's ink engine needs to know the pen is in the air (force-less) too.
-      if (d.smart) snapTick = moveSmartPen(d.smart, lifting ? { ...pt, pressure: 0 } : pt) || snapTick;
+      if (d.smart) {
+        if (!d.snapped) snapTick = moveSmartPen(d.smart, lifting ? { ...pt, pressure: 0 } : pt) || snapTick;
+      }
       else if (d.tool === 'eraser') {
         eraserPos.current = pt;
         eraseAt(pt.x, pt.y);
@@ -956,6 +976,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (d.snapped && d.adjust) {
       const pen = d.points[d.points.length - 1];
       d.snapped = { ...d.snapped, points: adjustSnappedShape(d.adjust, pen) };
+    }
+    if (d.smart?.mode === 'curve' && !d.snapped) {
+      const last = d.points[d.points.length - 1];
+      if (Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
+        d.lastMove = { x: last.x, y: last.y };
+        armHoldToSnap();
+      }
     }
     if (!d.smart && (d.tool === 'pen' || d.tool === 'highlighter')) {
       d.predicted = dampedPrediction(d.points, predictedEvent ? { ...toPoint(predictedEvent, d.start), pressure: d.pressure } : null);
@@ -1034,7 +1061,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     gestures.inking = false;
     retireInk(d);
 
-    if (!cancelled && d.smart) {
+    if (!cancelled && d.smart && d.snapped) {
+      // Draw & hold made a clean shape: it keeps the Draw tool's style.
+      const opts = smartOptions();
+      const sh = d.snapped;
+      const stroke: Stroke = {
+        id: newId('stroke'), tool: 'pen', color: opts.color, width: opts.width, opacity: 1, penStyle: 'ballpoint',
+        lineStyle: opts.lineStyle, points: sh.points, isShape: true, closed: sh.closed, shapeKind: sh.kind,
+        ...(sh.closed && opts.fill !== 'none' ? { fill: opts.fill } : {}),
+        ...(!sh.closed && opts.arrow ? { arrow: true } : {}),
+      };
+      editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
+      haptic('success');
+    } else if (!cancelled && d.smart) {
       const stroke = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
       if (stroke) {
         editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
@@ -1133,24 +1172,42 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // committed once, on release, as one undo step. Rewriting the document on every pointermove
   // repainted the whole page, rebuilt the pressure outline of every moved stroke and re-rendered
   // the editor, which made moving anything lag.
-  const transform = useRef<{ mode: 'move' | 'scale'; startX: number; startY: number; sel: Selection; pointerId: number; dx: number; dy: number; f: number } | null>(null);
-  const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; f: number } | null>(null);
+  // Rotation: the rotate handle turns the selection about its centre; the angle is shown, and
+  // snaps to every 15° (0° included) within ROTATE_SNAP. Items remember their total rotation.
+  const transform = useRef<{
+    mode: 'move' | 'scale' | 'rotate'; startX: number; startY: number; sel: Selection; pointerId: number; dx: number; dy: number; f: number;
+    rot: number; startAngle: number; base: number | null;
+  } | null>(null);
+  const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; f: number; rot: number; base: number | null } | null>(null);
   const dragFrame = useRef<number | null>(null);
   const floatCanvasRef = useRef<HTMLCanvasElement>(null);
   const [liveBounds, setLiveBounds] = useState<Selection['bounds'] | null>(null);
   const shownBounds = drag
     ? { x: drag.sel.bounds.x + drag.dx, y: drag.sel.bounds.y + drag.dy, width: drag.sel.bounds.width * drag.f, height: drag.sel.bounds.height * drag.f }
     : liveBounds ?? selection?.bounds ?? null;
+  /** The rotation the selected items share (null: they differ). */
+  const selRotation = useMemo(() => (selection ? selectionRotation(page, selection) : null), [page, selection]);
 
-  const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale') => {
+  const centreOf = (b: Selection['bounds']) => ({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  const angleTo = (e: { clientX: number; clientY: number }, c: { x: number; y: number }) => {
+    const p = pagePoint(e);
+    return (Math.atan2(p.y - c.y, p.x - c.x) * 180) / Math.PI;
+  };
+
+  const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale' | 'rotate') => {
     if (!selection) return;
-    if (e.pointerType === 'touch' && tools.stylusOnly && mode === 'move' && gestures.touches > 1) return;
+    // Another finger is already down: the fingers scroll the page (useViewport), nothing is dragged.
+    if (e.pointerType === 'touch' && gestures.touches > 1) return;
     e.stopPropagation();
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    transform.current = { mode, startX: e.clientX, startY: e.clientY, sel: selection, pointerId: e.pointerId, dx: 0, dy: 0, f: 1 };
+    const base = selRotation;
+    transform.current = {
+      mode, startX: e.clientX, startY: e.clientY, sel: selection, pointerId: e.pointerId, dx: 0, dy: 0, f: 1,
+      rot: 0, startAngle: mode === 'rotate' ? angleTo(e, centreOf(selection.bounds)) : 0, base,
+    };
     gestures.dragging = true;
-    setDrag({ sel: selection, dx: 0, dy: 0, f: 1 });
+    setDrag({ sel: selection, dx: 0, dy: 0, f: 1, rot: 0, base });
     if (selection.strokeIds.length) setHiddenIds(new Set(selection.strokeIds));
   };
 
@@ -1167,15 +1224,22 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // (Never pulled back from where it already is: the bounds carry a margin.)
       t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_WIDTH - b.x - b.width), dx));
       t.dy = Math.max(Math.min(0, -b.y), dy);
-    } else {
+    } else if (t.mode === 'scale') {
       t.f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
+    } else {
+      let rot = normDeg(angleTo(e, centreOf(b)) - t.startAngle);
+      // Snap the resulting orientation (or, for items turned differently, the turn) to 15° steps.
+      const total = (t.base ?? 0) + rot;
+      const near = Math.round(total / 15) * 15;
+      if (Math.abs(total - near) < ROTATE_SNAP) rot = near - (t.base ?? 0);
+      t.rot = normDeg(rot);
     }
     // One React update per frame, however many pointer events arrive.
     if (dragFrame.current === null) {
       dragFrame.current = requestAnimationFrame(() => {
         dragFrame.current = null;
         const cur = transform.current;
-        if (cur) setDrag({ sel: cur.sel, dx: cur.dx, dy: cur.dy, f: cur.f });
+        if (cur) setDrag({ sel: cur.sel, dx: cur.dx, dy: cur.dy, f: cur.f, rot: cur.rot, base: cur.base });
       });
     }
   };
@@ -1187,15 +1251,51 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     gestures.dragging = false;
     if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
     dragFrame.current = null;
-    const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.f - 1) > 1e-4;
+    const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.f - 1) > 1e-4 || Math.abs(t.rot) > 1e-3;
     if (moved && !cancelled) {
-      editor.commitPage(page.id, (p) => transformSelection(p, t.sel, t.dx, t.dy, t.f));
-      const b = t.sel.bounds;
-      setSelection({ ...t.sel, bounds: { x: b.x + t.dx, y: b.y + t.dy, width: b.width * t.f, height: b.height * t.f } });
+      const next = transformSelection(pageRef.current, t.sel, t.dx, t.dy, t.f, t.rot);
+      editor.commitPage(page.id, (p) => transformSelection(p, t.sel, t.dx, t.dy, t.f, t.rot));
+      const b = t.rot ? computeBounds(next, t.sel) : null;
+      const o = t.sel.bounds;
+      setSelection({ ...t.sel, bounds: b ?? { x: o.x + t.dx, y: o.y + t.dy, width: o.width * t.f, height: o.height * t.f } });
     }
     setDrag(null);
     setHiddenIds(null);
   };
+
+  /** Turns the selection back to its original orientation (0°). */
+  const resetSelectionRotation = () => {
+    if (!selection) return;
+    const sel = selection;
+    const next = resetRotation(pageRef.current, sel);
+    if (next === pageRef.current) return;
+    editor.commitPage(page.id, (p) => resetRotation(p, sel));
+    const b = computeBounds(next, sel);
+    if (b) setSelection({ ...sel, bounds: b });
+  };
+
+  // Two fingers came down (useViewport): a drag in progress is dropped, nothing is committed, and
+  // everything stays where it was before the drag.
+  useEffect(
+    () =>
+      gestures.onDragCancel(() => {
+        if (transform.current) {
+          transform.current = null;
+          if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
+          dragFrame.current = null;
+          setDrag(null);
+          setHiddenIds(null);
+        }
+        if (handleDrag.current) {
+          handleDrag.current = null;
+          setHiddenIds(null);
+          setEditHandles(null);
+          setLiveBounds(null);
+          requestRender();
+        }
+      }),
+    [gestures, requestRender]
+  );
 
   // Selection layer: the selected ink drawn again on its own canvas with a blue glow (Notability
   // style). While dragging, the same canvas carries the ink (hidden on the page canvas) and moves
@@ -1227,7 +1327,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
-    () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.f) : page),
+    () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.f, drag.rot) : page),
     [drag, page]
   );
 
@@ -1355,8 +1455,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             top: layerSel.bounds.y - FLOAT_PAD,
             width: layerSel.bounds.width + FLOAT_PAD * 2,
             height: layerSel.bounds.height + FLOAT_PAD * 2,
-            transformOrigin: `${FLOAT_PAD}px ${FLOAT_PAD}px`,
-            transform: drag ? `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})` : undefined,
+            transformOrigin: drag?.rot ? 'center' : `${FLOAT_PAD}px ${FLOAT_PAD}px`,
+            transform: drag ? (drag.rot ? `rotate(${drag.rot}deg)` : `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})`) : undefined,
             willChange: drag ? 'transform' : undefined,
           }}
         />
@@ -1392,8 +1492,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           onCommit={(text) => {
             setEditingTextId(null);
             const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
+            if (!cur) return;
             if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
-            else if (cur && text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
+            else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
           }}
           onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
           onSilentUpdate={() => undefined}
@@ -1430,12 +1531,60 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         <div
           data-no-pan
           className="absolute z-20 border-2 border-dashed border-blue-500 bg-blue-500/5 rounded-lg cursor-move"
-          style={{ left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none' }}
+          style={{
+            left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none',
+            transform: drag?.rot ? `rotate(${drag.rot}deg)` : undefined,
+          }}
           onPointerDown={(e) => startTransform(e, 'move')}
           onPointerMove={moveTransform}
           onPointerUp={(e) => endTransform(e)}
           onPointerCancel={(e) => endTransform(e, true)}
         >
+          {/* Rotate handle, and the rotation from the original orientation (with a reset to 0°). */}
+          <div
+            className={`absolute left-1/2 flex items-center pointer-events-none ${shownBounds.y < 80 ? 'top-full flex-col-reverse' : 'bottom-full flex-col'}`}
+            style={{
+              transform: `translateX(-50%) scale(${Math.max(1, 1 / zoom)})`,
+              transformOrigin: shownBounds.y < 80 ? 'top center' : 'bottom center',
+              ...(shownBounds.y < 80 ? { paddingTop: 6 } : { paddingBottom: 6 }),
+            }}
+          >
+            <div className="flex items-center gap-1 my-1 pointer-events-auto" onPointerDown={(e) => e.stopPropagation()}>
+              {drag && transform.current?.mode === 'rotate' ? (
+                <span className="px-2 py-0.5 rounded-full bg-gray-900/85 text-white text-[11px] font-semibold tabular-nums">
+                  {drag.base !== null ? `${normDeg(drag.base + drag.rot)}°` : `${drag.rot > 0 ? '+' : ''}${drag.rot}°`}
+                </span>
+              ) : (
+                !drag && selRotation !== 0 && (
+                  <>
+                    <span className="px-2 py-0.5 rounded-full bg-gray-900/85 text-white text-[11px] font-semibold tabular-nums" title="Rotation from the original orientation">
+                      {selRotation === null ? 'mixed' : `${selRotation}°`}
+                    </span>
+                    <button
+                      className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-semibold"
+                      title="Back to the original orientation (0°)"
+                      onClick={resetSelectionRotation}
+                    >
+                      ↺ 0°
+                    </button>
+                  </>
+                )
+              )}
+            </div>
+            <div
+              data-no-pan
+              className="w-7 h-7 bg-white text-blue-600 border-2 border-blue-600 rounded-full flex items-center justify-center shadow-md cursor-grab pointer-events-auto"
+              style={{ touchAction: 'none' }}
+              title="Rotate (snaps every 15°)"
+              onPointerDown={(e) => startTransform(e, 'rotate')}
+              onPointerMove={moveTransform}
+              onPointerUp={(e) => endTransform(e)}
+              onPointerCancel={(e) => endTransform(e, true)}
+            >
+              <RotateCw className="w-3.5 h-3.5" />
+            </div>
+            <div className="w-px h-3 bg-blue-500" />
+          </div>
           <div
             data-no-pan
             className="absolute -right-3 -bottom-3 w-7 h-7 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md cursor-nwse-resize"

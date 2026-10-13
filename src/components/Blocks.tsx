@@ -12,6 +12,11 @@ const BASE_MATH_PX = 22;
  * the page per block on every stroke. Callbacks are not compared: the page passes handlers that
  * read the current page and tool through refs.
  */
+/** CSS for a block turned by `deg` degrees about its centre. */
+export function rotationStyle(deg?: number): React.CSSProperties {
+  return deg ? { transform: `rotate(${deg}deg)`, transformOrigin: '50% 50%' } : {};
+}
+
 function sameData<P extends object>(a: P, b: P): boolean {
   for (const k of Object.keys(b) as (keyof P)[]) {
     if (typeof b[k] === 'function') continue;
@@ -88,7 +93,7 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   return (
     <div
       className={`absolute ${interactive ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'} ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4 rounded' : ''}`}
-      style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? inkColor }}
+      style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? inkColor, ...rotationStyle(block.rotation) }}
       onPointerDown={(e) => {
         if (!interactive) return;
         e.stopPropagation();
@@ -170,7 +175,7 @@ const TikzBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, darkPap
   return (
     <div
       className={`absolute ${interactive ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'} ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4 rounded' : ''}`}
-      style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? inkColor }}
+      style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? inkColor, ...rotationStyle(block.rotation) }}
       onPointerDown={(e) => {
         if (!interactive) return;
         e.stopPropagation();
@@ -212,6 +217,19 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
   const [draft, setDraft] = useState(block.text);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => setDraft(block.text), [block.text]);
+  // Leaving the editor saves what was typed. A tap on the page ends editing without a blur
+  // event (the page's pointerdown prevents the focus change and the textarea is just removed),
+  // and v1.x then dropped the text: the box was left empty and disappeared. The page keeps the
+  // box unless its text is empty.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const commitRef = useRef(onCommit);
+  commitRef.current = onCommit;
+  const wasEditing = useRef(editing);
+  useEffect(() => {
+    if (wasEditing.current && !editing) commitRef.current(draftRef.current);
+    wasEditing.current = editing;
+  }, [editing]);
   useLayoutEffect(() => {
     const el = areaRef.current;
     if (!el) return;
@@ -226,7 +244,7 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     }
   }, [editing]);
   const color = darkPaper && block.color === '#111827' ? '#F3F4F6' : block.color;
-  const style: React.CSSProperties = { left: block.x, top: block.y, width: block.width, fontSize: block.fontSize, color, lineHeight: 1.35 };
+  const style: React.CSSProperties = { left: block.x, top: block.y, width: block.width, fontSize: block.fontSize, color, lineHeight: 1.35, ...rotationStyle(block.rotation) };
 
   if (editing) {
     return (
@@ -265,6 +283,6 @@ export const ImageBlockView = React.memo<{ block: ImageBlock; selected: boolean 
     alt=""
     draggable={false}
     className={`absolute pointer-events-none select-none ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4' : ''}`}
-    style={{ left: block.x, top: block.y, width: block.width, height: block.height }}
+    style={{ left: block.x, top: block.y, width: block.width, height: block.height, ...rotationStyle(block.rotation) }}
   />
 ));

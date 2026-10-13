@@ -58,6 +58,8 @@ export interface Stroke {
    * fountain-pen width from the pressure; 'uniform': constant width. Missing: raw pen samples.
    */
   modeled?: 'variable' | 'uniform';
+  /** Degrees this item has been rotated from how it was made (0 = original orientation). */
+  rotation?: number;
 }
 
 /**
@@ -81,6 +83,8 @@ export interface LatexBlock {
   tikzSvg?: string;
   tikzSvgSource?: string;
   color?: string;
+  /** Degrees, clockwise about the block's centre (see Stroke.rotation). */
+  rotation?: number;
   createdAt: number;
 }
 
@@ -92,6 +96,8 @@ export interface TextBlock {
   text: string;
   fontSize: number;
   color: string;
+  /** Degrees, clockwise about the block's centre. */
+  rotation?: number;
   createdAt: number;
 }
 
@@ -102,6 +108,8 @@ export interface ImageBlock {
   width: number;
   height: number;
   dataUrl: string;
+  /** Degrees, clockwise about the block's centre. */
+  rotation?: number;
   createdAt: number;
 }
 

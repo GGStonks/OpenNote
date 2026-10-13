@@ -35,7 +35,8 @@ export function cleanModelOutput(raw: string): string {
 /** KaTeX compatibility fixes for constructs it does not implement. */
 export function katexCompat(src: string): string {
   return src
-    .replace(/\\label\{[^}]*\}/g, '')
+    // Colours: xcolor's \textcolor[HTML]{FF1010} is \textcolor{#FF1010} in KaTeX.
+    .replace(/\\(textcolor|color)\s*\[HTML\]\s*\{([0-9A-Fa-f]{6})\}/g, '\\$1{#$2}')
     .replace(/\\(nonumber|notag)\b/g, '')
     .replace(/\\intertext\{([^}]*)\}/g, '\\text{$1}\\\\')
     .replace(/\\mathbbm\b/g, '\\mathbb')
@@ -110,6 +111,8 @@ export function looksLikeBareMath(src: string): boolean {
 
 function formatInline(text: string): string {
   return escapeHtml(text)
+    // Coloured words of the notes (math inside $...$ is coloured by KaTeX itself).
+    .replace(/\\textcolor\s*(?:\[HTML\])?\s*\{#?([0-9A-Fa-f]{6})\}\{([^{}]*)\}/g, '<span style="color:#$1">$2</span>')
     .replace(/\\textbf\{([^}]*)\}/g, '<b>$1</b>')
     .replace(/\\(textit|emph)\{([^}]*)\}/g, '<i>$2</i>')
     .replace(/\\underline\{([^}]*)\}/g, '<u>$1</u>')
@@ -189,7 +192,8 @@ export function renderLatexContent(src: string): MathRenderResult {
 
 /** For .tex / .md export: returns content suitable for a LaTeX document body. */
 export function latexForDocument(src: string): string {
-  const cleaned = cleanModelOutput(src);
+  // KaTeX's \textcolor{#RRGGBB} is written for xcolor as \textcolor[HTML]{RRGGBB}.
+  const cleaned = cleanModelOutput(src).replace(/\\(textcolor|color)\{#([0-9A-Fa-f]{6})\}/g, '\\$1[HTML]{$2}');
   const segments = segmentLatex(cleaned);
   if (!segments.some((s) => s.kind !== 'text') && looksLikeBareMath(cleaned)) return `\\[\n${cleaned}\n\\]`;
   return cleaned;

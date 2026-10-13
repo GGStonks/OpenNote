@@ -13,6 +13,7 @@ export class GestureBus {
   /** True while a pen / highlighter / shape / eraser stroke is in progress (autosave waits). */
   inking = false;
   private cancelHandlers = new Set<() => void>();
+  private dragCancelHandlers = new Set<() => void>();
 
   onCancel(fn: () => void): () => void {
     this.cancelHandlers.add(fn);
@@ -21,5 +22,17 @@ export class GestureBus {
 
   cancelStrokes(): void {
     this.cancelHandlers.forEach((fn) => fn());
+  }
+
+  /** Registers what aborts a selection / handle drag (it goes back to where it started). */
+  onDragCancel(fn: () => void): () => void {
+    this.dragCancelHandlers.add(fn);
+    return () => this.dragCancelHandlers.delete(fn);
+  }
+
+  /** Two fingers are down: any drag of a selection or shape handle is abandoned for scrolling. */
+  cancelDrags(): void {
+    this.dragCancelHandlers.forEach((fn) => fn());
+    this.dragging = false;
   }
 }

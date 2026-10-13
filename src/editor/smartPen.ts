@@ -56,6 +56,8 @@ export interface SnapCache {
 }
 
 export type SnapKind = 'shape' | 'grid';
+/** What a shape snap landed on: a key point / crossing, or the closest point of an edge. */
+export type SnapVia = 'point' | 'edge' | 'grid';
 
 export const PX_PER_CM = 96 / 2.54;
 
@@ -64,6 +66,12 @@ const EDGE_SNAP = 16;
 const CLOSE_DISTANCE = 18;
 const CIRCLE_LOCK = 30;
 const GRID_SNAP = 12;
+/**
+ * After snapping to a vertex, edges are not snapped to within this distance (screen px) of it:
+ * leaving a vertex along one of its own edges used to catch that edge for a moment and leave a
+ * tiny overlapping piece of line.
+ */
+const VERTEX_RELEASE = 40;
 
 const dist = (a: XY, b: XY) => Math.hypot(a.x - b.x, a.y - b.y);
 const mid = (a: XY, b: XY): XY => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
@@ -171,32 +179,35 @@ export function buildSnapCache(strokes: Stroke[], grid: number | null = null): S
 /**
  * PDEDraw's findSnapPoint: intersections first, then key points (slight preference), then edges.
  * Without a shape target nearby, the paper's grid points (grid / dot paper) are used.
+ * `avoid`: a vertex just snapped to; edge points within VERTEX_RELEASE of it are not taken.
  */
-export function findSnapKind(cache: SnapCache, p: XY, zoom: number): { at: XY; kind: SnapKind } | null {
+export function findSnapKind(cache: SnapCache, p: XY, zoom: number, avoid: XY | null = null): { at: XY; kind: SnapKind; via: SnapVia } | null {
   const k = 1 / Math.max(0.3, zoom);
-  const pointThr = POINT_SNAP * k, edgeThr = EDGE_SNAP * k;
+  const pointThr = POINT_SNAP * k, edgeThr = EDGE_SNAP * k, release = VERTEX_RELEASE * k;
   let best: XY | null = null;
+  let via: SnapVia = 'point';
   let score = Infinity;
   for (const q of cache.intersections) {
     const d = dist(p, q);
-    if (d < pointThr && d < score) { best = q; score = d; }
+    if (d < pointThr && d < score) { best = q; score = d; via = 'point'; }
   }
   for (const q of cache.points) {
     const d = dist(p, q);
-    if (d < pointThr && d - 0.8 * k < score) { best = q; score = d - 0.8 * k; }
+    if (d < pointThr && d - 0.8 * k < score) { best = q; score = d - 0.8 * k; via = 'point'; }
   }
   for (const e of cache.edges) {
     if (p.x < Math.min(e.a.x, e.b.x) - edgeThr || p.x > Math.max(e.a.x, e.b.x) + edgeThr) continue;
     if (p.y < Math.min(e.a.y, e.b.y) - edgeThr || p.y > Math.max(e.a.y, e.b.y) + edgeThr) continue;
     const q = project(p, e.a, e.b);
+    if (avoid && dist(q, avoid) < release) continue;
     const d = dist(p, q);
-    if (d < edgeThr && d + 0.5 * k < score) { best = q; score = d + 0.5 * k; }
+    if (d < edgeThr && d + 0.5 * k < score) { best = q; score = d + 0.5 * k; via = 'edge'; }
   }
-  if (best) return { at: { x: best.x, y: best.y }, kind: 'shape' };
+  if (best) return { at: { x: best.x, y: best.y }, kind: 'shape', via };
   if (cache.grid) {
     const g = cache.grid;
     const q = { x: Math.round(p.x / g) * g, y: Math.round(p.y / g) * g };
-    if (dist(p, q) < Math.min(g * 0.3, GRID_SNAP * k)) return { at: q, kind: 'grid' };
+    if (dist(p, q) < Math.min(g * 0.3, GRID_SNAP * k)) return { at: q, kind: 'grid', via: 'grid' };
   }
   return null;
 }
@@ -231,6 +242,8 @@ export interface SmartPenState {
   settledNear: (Near | null)[];
   /** Time (ms) of the last snap haptic. */
   lastTickT: number;
+  /** The vertex last snapped to (see VERTEX_RELEASE), until the pen is far enough from it. */
+  vertex: XY | null;
 }
 
 /** A pen sample for the smart pen: page px, ms since the stroke started, force (0 = lifting). */
@@ -265,7 +278,7 @@ export function beginSmartPen(raw: PenSample, opts: SmartPenOptions, strokes: St
   const cache = snapCacheFor(strokes, opts.snap, opts.grid);
   const st: SmartPenState = {
     mode: opts.mode, zoom, cache, start: null, end: null, snapDot: null, snapKind: null, closing: false, snapping: false,
-    ink: null, length: 0, lastRaw: null, lastT: 0, settled: [], settledNear: [], lastTickT: -Infinity,
+    ink: null, length: 0, lastRaw: null, lastT: 0, settled: [], settledNear: [], lastTickT: -Infinity, vertex: null,
   };
   const p = snapAt(st, raw);
   st.start = p;
@@ -286,8 +299,18 @@ function feedInk(st: SmartPenState, raw: PenSample) {
   st.lastRaw = { x: raw.x, y: raw.y };
 }
 
+/** Snap lookup that remembers the vertex snapped to, and keeps off its edges while near it. */
+function snapLookup(st: SmartPenState, raw: XY) {
+  if (!st.cache) return null;
+  const k = 1 / Math.max(0.3, st.zoom);
+  if (st.vertex && dist(raw, st.vertex) > VERTEX_RELEASE * k) st.vertex = null;
+  const s = findSnapKind(st.cache, raw, st.zoom, st.vertex);
+  if (s?.via === 'point') st.vertex = s.at;
+  return s;
+}
+
 function snapAt(st: SmartPenState, raw: XY): XY {
-  const s = st.cache ? findSnapKind(st.cache, raw, st.zoom) : null;
+  const s = snapLookup(st, raw);
   st.snapDot = s?.at ?? null;
   st.snapKind = s?.kind ?? null;
   return s?.at ?? { x: raw.x, y: raw.y };
@@ -311,17 +334,18 @@ export function moveSmartPen(st: SmartPenState, raw: PenSample): boolean {
         st.snapDot = start;
         st.snapKind = 'shape';
       } else {
-        // Shown only (the ends snap, and the line follows an outline it retraces).
+        // Shown only (the ends snap, and the line follows an outline it retraces). The curve's own
+        // line counts as a target too (self-snapping).
         st.closing = false;
-        const s = st.cache ? findSnapKind(st.cache, raw, st.zoom) : null;
-        st.snapDot = s?.kind === 'shape' ? s.at : null;
+        const s = snapLookup(st, raw);
+        st.snapDot = s?.kind === 'shape' ? s.at : st.cache ? ownSnap(st, raw, k)?.at ?? null : null;
         st.snapKind = st.snapDot ? 'shape' : null;
       }
       break;
     }
     case 'line': {
       const s = st.start!;
-      const snapped = st.cache ? findSnapKind(st.cache, raw, st.zoom) : null;
+      const snapped = snapLookup(st, raw);
       st.snapDot = snapped?.at ?? null;
       st.snapKind = snapped?.kind ?? null;
       if (snapped) st.end = snapped.at;
@@ -435,9 +459,12 @@ export function smartPenMeasure(st: SmartPenState): { text: string; at: XY } | n
     case 'line': {
       const l = dist(s, e);
       if (l < 4) return null;
+      // Tilt from the horizontal, -90°..90° (positive: rising to the right, as on paper).
       let deg = (-Math.atan2(e.y - s.y, e.x - s.x) * 180) / Math.PI;
-      if (deg < 0) deg += 360;
-      return { text: `${cm(l)} cm · ${deg.toFixed(deg % 1 ? 1 : 0)}°`, at: e };
+      if (deg > 90) deg -= 180;
+      else if (deg <= -90) deg += 180;
+      const r = Math.round(deg * 10) / 10;
+      return { text: `${r % 1 ? r.toFixed(1) : r.toFixed(0)}° · ${cm(l)} cm`, at: e };
     }
     case 'rectangle': {
       const w = Math.abs(e.x - s.x), h = Math.abs(e.y - s.y);
@@ -508,8 +535,11 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
     // The ends snap to shape points nearby (the start was looked up when the pen came down).
     if (st.start && dist(st.start, pts[0]) > 0.01) pts = ease(pts, st.start, BLEND * k, false);
     if (final && !closed) {
-      const end = findSnapKind(st.cache, pts[pts.length - 1], st.zoom);
-      if (end?.kind === 'shape') pts = ease(pts, end.at, BLEND * k, true);
+      const tip = pts[pts.length - 1];
+      const end = findSnapKind(st.cache, tip, st.zoom, st.vertex && dist(tip, st.vertex) <= VERTEX_RELEASE * k ? st.vertex : null);
+      const own = end?.kind === 'shape' ? null : ownSnap(st, tip, k, pts);
+      const to = end?.kind === 'shape' ? end.at : own?.at;
+      if (to) pts = ease(pts, to, BLEND * k, true);
     }
   }
 
@@ -518,6 +548,41 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
   const ctrl = simplify(pts, SIMPLIFY, closed);
   if (ctrl.length === 2 && !closed) return { points: ctrl.map(P), kind: 'line', closed: false };
   return { points: ctrl.map(P), kind: 'curve', closed };
+}
+
+/** Line drawn more than this (screen px) before the pen counts as a target for self-snapping. */
+const OWN_GAP = 60;
+
+/**
+ * Self-snapping: the curve's own line, except its last OWN_GAP px (where the pen is), as a target:
+ * its corners first (points where it turns sharply), then the closest point on it.
+ */
+function ownSnap(st: SmartPenState, p: XY, k: number, line: XY[] = st.settled): { at: XY } | null {
+  if (line.length < 3) return null;
+  let i = line.length - 1, back = 0;
+  while (i > 0 && back < OWN_GAP * k) {
+    back += dist(line[i], line[i - 1]);
+    i--;
+  }
+  if (i < 1) return null;
+  const pointThr = POINT_SNAP * k, edgeThr = EDGE_SNAP * k;
+  // Corners: turning by more than 50° over ~6 px each way.
+  const span = Math.max(2, Math.round(6 * k / 0.5));
+  let best: XY | null = null, bd = Infinity;
+  for (let j = span; j <= i - span; j += 2) {
+    const d = dist(p, line[j]);
+    if (d >= pointThr || d >= bd) continue;
+    const a = line[j - span], b = line[j], c = line[j + span];
+    const t1 = Math.atan2(b.y - a.y, b.x - a.x), t2 = Math.atan2(c.y - b.y, c.x - b.x);
+    if (Math.abs(Math.atan2(Math.sin(t2 - t1), Math.cos(t2 - t1))) > (50 * Math.PI) / 180) { best = b; bd = d; }
+  }
+  if (best) return { at: { x: best.x, y: best.y } };
+  for (let j = 1; j <= i; j++) {
+    const q = project(p, line[j - 1], line[j]);
+    const d = dist(p, q);
+    if (d < edgeThr && d < bd) { best = q; bd = d; }
+  }
+  return best ? { at: best } : null;
 }
 
 function pathLength(pts: XY[]): number {

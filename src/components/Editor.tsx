@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
-  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight,
+  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy,
+  ClipboardPaste, CopyPlus,
 } from 'lucide-react';
+import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
 import { FillType, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, Rect, Stroke, newId, LineStyle } from '../types';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings } from './CanvasPage';
@@ -16,6 +18,7 @@ import { Selection, computeBounds, isEmptySelection, removeSelection } from '../
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
+import { DEFAULT_INKS, InkColorInfo, colorHint, enforceColors, inkColors } from '../services/inkColors';
 import { renderLatexContent } from '../services/latexRender';
 import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
@@ -35,7 +38,11 @@ interface EditorProps {
 }
 
 type ConvTarget =
-  | { kind: 'insert'; pageId: string; bounds: Rect; strokeIds: string[]; textIds: string[]; latexIds?: string[]; mode: ConversionMode; image: string; hint?: string }
+  | {
+      kind: 'insert'; pageId: string; bounds: Rect; strokeIds: string[]; textIds: string[]; latexIds?: string[]; mode: ConversionMode; image: string; hint?: string;
+      /** Ink colours of the handwriting (math / notes): kept in the LaTeX (inkColors.ts). */
+      colors?: InkColorInfo;
+    }
   | { kind: 'edit'; pageId: string; blockId: string }
   | { kind: 'new'; pageId: string; at: { x: number; y: number } };
 
@@ -63,6 +70,7 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
   const base: ToolSettings = {
     tool: 'pen',
     penColor: '#111827',
+    shapeColor: '#111827',
     penWidth: 2,
     penStyle: settings.penStyle,
     highlighterColor: '#FDE047',
@@ -80,7 +88,12 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
   };
   try {
     const raw = localStorage.getItem(TOOL_KEY);
-    if (raw) return { ...base, ...JSON.parse(raw), stylusOnly: settings.stylusOnly, holdToSnap: settings.holdToSnap, penStyle: settings.penStyle, eraserMode: settings.eraserMode };
+    if (raw) {
+      const saved = JSON.parse(raw);
+      // Before v1.11 the Draw tool used the pen's colour: it starts from that colour.
+      if (!saved.shapeColor && saved.penColor) saved.shapeColor = saved.penColor;
+      return { ...base, ...saved, stylusOnly: settings.stylusOnly, holdToSnap: settings.holdToSnap, penStyle: settings.penStyle, eraserMode: settings.eraserMode };
+    }
   } catch {
     /* ignore */
   }
@@ -225,6 +238,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault();
         editor.redo();
+      } else if (mod && e.key.toLowerCase() === 'c' && selection) {
+        e.preventDefault();
+        copySelectionToClipboard();
+      } else if (mod && e.key.toLowerCase() === 'x' && selection) {
+        e.preventDefault();
+        cutSelection();
+      } else if (mod && e.key.toLowerCase() === 'v' && clipboard) {
+        e.preventDefault();
+        paste();
       } else if (!mod) {
         const map: Record<string, ToolSettings['tool']> = { '1': 'pen', '2': 'highlighter', '3': 'eraser', '4': 'lasso', '5': 'text', '6': 'hand', '7': 'shape' };
         if (map[e.key]) setTools({ tool: map[e.key] });
@@ -283,6 +305,38 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       imageIds: images.map((b) => b.id),
       bounds: { ...sel.bounds, x: sel.bounds.x + off, y: sel.bounds.y + off },
     });
+  };
+
+  // Clipboard (editor/clipboard.ts): copy keeps the selection without placing anything, cut also
+  // removes it, paste places a copy where the screen is looking, on any page of any note.
+  const clipboard = useClipboard();
+
+  const copySelectionToClipboard = () => {
+    if (!selection || !selPage) return;
+    const n = copySelection(selPage, selection);
+    if (n) showToast(`Copied ${n} item${n > 1 ? 's' : ''} — Paste puts them on any page`);
+  };
+
+  const cutSelection = () => {
+    if (!selection || !selPage) return;
+    const sel = selection;
+    const n = copySelection(selPage, sel);
+    if (!n) return;
+    editor.commitPage(sel.pageId, (p) => removeSelection(p, sel));
+    setSelectionState(null);
+    showToast(`Cut ${n} item${n > 1 ? 's' : ''} — Paste puts them back on any page`);
+  };
+
+  const paste = () => {
+    const el = scrollRef.current;
+    const viewH = el ? el.clientHeight / zoom : PAGE_HEIGHT / 2;
+    const res = pasteClipboard(surface, { x: PAGE_WIDTH / 2, y: visibleTopOnPage() + viewH / 2 }, PAGE_WIDTH);
+    if (!res) return;
+    editor.commitPage(surface.id, () => res.page);
+    const bounds = computeBounds(res.page, res.sel);
+    setTools({ tool: 'lasso' });
+    // After the tool change (which clears the selection), select what was pasted so it can be moved.
+    setTimeout(() => bounds && setSelectionState({ ...res.sel, bounds }), 0);
   };
 
   const recolorSelection = (color: string) => {
@@ -389,7 +443,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         if (token !== busyToken.current) return;
         setTarget(t);
         setModal({
-          latex: res.latex,
+          latex: t.colors && t.mode !== 'tikz' ? enforceColors(res.latex, t.colors) : res.latex,
           isTikz: t.mode === 'tikz',
           origin: 'vlm',
           subtitle: `${res.model} · ${(res.elapsedMs / 1000).toFixed(1)} s — review and edit before inserting`,
@@ -413,7 +467,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const ink = selStrokes.filter((s) => s.tool === 'pen');
     const b = boundsOfStrokes(ink, texts);
     if (!b) return showToast('The selection contains no handwriting to transcribe');
-    const image = renderInkImage(ink, b, texts);
+    // Colours: the exact ink colours go into the prompt and the reply keeps them (inkColors.ts).
+    const colors = mode === 'tikz' ? undefined : inkColors(ink, b);
+    const image = renderInkImage(ink, b, texts, colors && colors.colors.length > 1 ? new Map(colors.colors.map((c) => [c.hex, c.imageColor])) : undefined);
     // TikZ: the exact geometry of drawn shapes helps the model, but handwriting as Bezier
     // coordinates is thousands of tokens (a 14k-token prompt took minutes and timed out), so only
     // shapes go in, and only while the hint stays small.
@@ -422,8 +478,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const hint =
       geometry && geometry.length <= MAX_TIKZ_HINT
         ? `For reference, the exact geometry of the drawn shapes (coordinates in cm from the lower-left corner of the shapes; freehand lines, labels and text are NOT included — read them from the image):\n${geometry}`
-        : undefined;
-    void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint });
+        : colors
+          ? colorHint(colors, mode === 'text' ? 'text' : 'math') || undefined
+          : undefined;
+    void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint, colors });
   };
 
   const convertPage = () => {
@@ -431,8 +489,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const ink = bandStrokes(surface, currentPage).filter((s) => s.tool === 'pen');
     const b = boundsOfStrokes(ink);
     if (!b) return showToast('This page has no handwriting to transcribe');
-    const image = renderInkImage(ink, b);
-    void runConversion({ kind: 'insert', pageId: page.id, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'text', image });
+    const colors = inkColors(ink, b);
+    const image = renderInkImage(ink, b, [], colors.colors.length > 1 ? new Map(colors.colors.map((c) => [c.hex, c.imageColor])) : undefined);
+    void runConversion({ kind: 'insert', pageId: page.id, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'text', image, hint: colorHint(colors, 'text') || undefined, colors });
   };
 
   const onModalInsert = (code: string, isTikz: boolean, replaceInk: boolean) => {
@@ -465,6 +524,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       height: t.kind === 'insert' ? t.bounds.height : 80,
       latexCode: code,
       isTikz,
+      // The handwriting's main colour (other colours are in the LaTeX); the default ink follows the paper.
+      ...(t.kind === 'insert' && t.colors && !isTikz && !DEFAULT_INKS.includes(t.colors.base) ? { color: t.colors.base } : {}),
       createdAt: Date.now(),
     };
     if (t.kind === 'insert' && t.mode === 'math' && !isTikz) {
@@ -585,6 +646,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onDeletePage={deletePage}
         onInsertLatex={insertLatexManually}
         onInsertImage={insertImage}
+        onPaste={clipboard ? paste : undefined}
         currentPage={currentPage + 1}
         totalPages={pageCount}
         audioSlot={<AudioRecorder noteId={doc.id} onError={(m) => showToast(m, true)} />}
@@ -637,6 +699,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         {currentPage + 1} / {pageCount}
       </div>
 
+      {/* Paste (lasso tool, something copied, nothing selected) */}
+      {!selection && clipboard && tools.tool === 'lasso' && (
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
+          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
+            <ClipboardPaste className="w-5 h-5" /> Paste
+          </button>
+        </div>
+      )}
+
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + env(safe-area-inset-bottom))` }} data-no-pan>
@@ -685,7 +756,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                 <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
               </>
             )}
-            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><Copy className="w-5 h-5" /></button>
+            <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" /></button>
+            <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" /></button>
+            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" /></button>
             <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
             <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
           </div>

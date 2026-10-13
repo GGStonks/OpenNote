@@ -2,10 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
-  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff,
+  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste,
 } from 'lucide-react';
 import { EraserMode, FillType, LineStyle, PaperColor, PaperStyle, PenStyle, ShapeMode, ToolType } from '../types';
 import { ToolSettings } from './CanvasPage';
+import { ColorPicker } from './ColorPicker';
 
 const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
@@ -76,6 +77,8 @@ interface ToolbarProps {
   onDeletePage: () => void;
   onInsertLatex: () => void;
   onInsertImage: (file: File) => void;
+  /** Paste the clipboard (undefined: nothing copied). */
+  onPaste?: () => void;
   currentPage: number;
   totalPages: number;
   audioSlot: React.ReactNode;
@@ -111,7 +114,7 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
 
 const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
   <div
-    className={`absolute top-14 z-50 bg-white/95 dark:bg-[#2C2C2E]/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] ${
+    className={`absolute top-14 z-50 bg-white/95 dark:bg-[#2C2C2E]/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto ${
       align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
     }`}
   >
@@ -162,15 +165,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               ))}
             </div>
             <Label>Colour</Label>
-            <div className="grid grid-cols-5 gap-3 items-center justify-items-center">
-              {PEN_COLORS.map((c) => (
-                <button key={c} onClick={() => setTools({ penColor: c })} className={`w-10 h-10 rounded-full border-2 shadow-sm transition ${tools.penColor === c ? 'border-blue-500 scale-110 ring-2 ring-blue-500/30' : 'border-black/10 dark:border-white/20'}`} style={{ backgroundColor: c }} />
-              ))}
-              <label className="relative w-10 h-10 rounded-full border-2 border-dashed border-gray-300 flex items-center justify-center cursor-pointer overflow-hidden" title="Custom colour">
-                <Plus className="w-4 h-4 text-gray-400" />
-                <input type="color" className="opacity-0 absolute w-0 h-0" value={tools.penColor} onChange={(e) => setTools({ penColor: e.target.value })} />
-              </label>
-            </div>
+            <ColorPicker value={tools.penColor} onChange={(c) => setTools({ penColor: c })} presets={PEN_COLORS} />
             <label className="flex items-center justify-between gap-3 py-1 mt-3 text-sm text-gray-700 dark:text-gray-300">
               Draw &amp; hold to snap shapes
               <input type="checkbox" checked={tools.holdToSnap} onChange={(e) => setTools({ holdToSnap: e.target.checked })} />
@@ -182,6 +177,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
       <div className="relative">
         <ToolButton active={tools.tool === 'shape'} title="Smart pen: smooth curves that close themselves, lines, rectangles, ellipses, fills (tap again for options)" onClick={() => selectTool('shape', 'shape')}>
           {SHAPE_MODES.find((m) => m.id === tools.shapeMode)?.icon ?? <Spline className="w-6 h-6" />}
+          <span className="hidden sm:block w-4 h-4 rounded-full ring-2 ring-white/90 dark:ring-black/40 shadow-sm" style={{ backgroundColor: tools.shapeColor }} title="Draw colour" />
         </ToolButton>
         {pop.open === 'shape' && (
           <Popover>
@@ -197,7 +193,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <div className="grid grid-cols-6 gap-1 mb-2">
               {FILL_OPTIONS.map((f) => (
                 <button key={f.id} onClick={() => setTools({ shapeFill: f.id })} title={f.label} className={`h-11 rounded-xl border flex items-center justify-center ${tools.shapeFill === f.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600'}`}>
-                  <FillSwatch fill={f.id} color={tools.penColor === '#FFFFFF' ? '#9CA3AF' : tools.penColor} />
+                  <FillSwatch fill={f.id} color={tools.shapeColor.toUpperCase() === '#FFFFFF' ? '#9CA3AF' : tools.shapeColor} />
                 </button>
               ))}
             </div>
@@ -217,12 +213,14 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                 </button>
               ))}
             </div>
-            <Label>Colour</Label>
-            <div className="grid grid-cols-9 gap-1.5 mb-2">
-              {PEN_COLORS.map((c) => (
-                <button key={c} onClick={() => setTools({ penColor: c })} className={`w-7 h-7 rounded-full border-2 shadow-sm ${tools.penColor === c ? 'border-blue-500 scale-110 ring-2 ring-blue-500/30' : 'border-black/10 dark:border-white/20'}`} style={{ backgroundColor: c }} />
-              ))}
+            <Label>Colour (independent of the pen)</Label>
+            <div className="mb-2">
+              <ColorPicker value={tools.shapeColor} onChange={(c) => setTools({ shapeColor: c })} presets={PEN_COLORS} size="sm" />
             </div>
+            <label className="flex items-center justify-between gap-3 py-1 mt-1 text-sm text-gray-700 dark:text-gray-300">
+              Draw &amp; hold to make a clean shape
+              <input type="checkbox" checked={tools.holdToSnap} onChange={(e) => setTools({ holdToSnap: e.target.checked })} />
+            </label>
             <label className="flex items-center justify-between gap-3 py-1 mt-1 text-sm text-gray-700 dark:text-gray-300">
               Arrowhead on open lines
               <input type="checkbox" checked={tools.shapeArrow} onChange={(e) => setTools({ shapeArrow: e.target.checked })} />
@@ -248,10 +246,8 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         {pop.open === 'hl' && (
           <Popover>
             <Label>Colour</Label>
-            <div className="grid grid-cols-6 gap-2 mb-2 justify-items-center">
-              {HIGHLIGHTER_COLORS.map((c) => (
-                <button key={c} onClick={() => setTools({ highlighterColor: c })} className={`w-10 h-10 rounded-full border-2 shadow-sm ${tools.highlighterColor === c ? 'border-blue-500 scale-110 ring-2 ring-blue-500/30' : 'border-black/5'}`} style={{ backgroundColor: c }} />
-              ))}
+            <div className="mb-2">
+              <ColorPicker value={tools.highlighterColor} onChange={(c) => setTools({ highlighterColor: c })} presets={HIGHLIGHTER_COLORS} />
             </div>
             <Label>Width</Label>
             <input type="range" min={2} max={8} step={0.5} value={tools.highlighterWidth} onChange={(e) => setTools({ highlighterWidth: +e.target.value })} className="w-full" />
@@ -372,6 +368,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                   { icon: <Sparkles className="w-5 h-5" />, label: 'Transcribe page → LaTeX', fn: p.onConvertPage, cls: 'sm:hidden' },
                   { icon: <Sigma className="w-5 h-5" />, label: 'Insert LaTeX / TikZ', fn: p.onInsertLatex },
                   { icon: <ImageIcon className="w-5 h-5" />, label: 'Insert image', fn: () => fileRef.current?.click() },
+                  ...(p.onPaste ? [{ icon: <ClipboardPaste className="w-5 h-5" />, label: 'Paste copied items', fn: p.onPaste }] : []),
                   { icon: <Copy className="w-5 h-5" />, label: 'Duplicate current page', fn: p.onDuplicatePage },
                   { icon: <Trash2 className="w-5 h-5" />, label: 'Delete current page', fn: p.onDeletePage, danger: true },
                 ].map((it) => (

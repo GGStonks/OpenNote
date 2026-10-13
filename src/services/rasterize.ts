@@ -41,7 +41,11 @@ function wrapText(ctx: CanvasRenderingContext2D, text: string, maxWidth: number)
   return lines;
 }
 
-export function renderInkImage(strokes: Stroke[], bounds: Rect, textBlocks: TextBlock[] = []): string {
+/**
+ * `inkColors`: several ink colours to keep apart (inkColors.ts): each ink is drawn in its own
+ * colour (light ones darkened, keeping their hue) instead of all light inks becoming black.
+ */
+export function renderInkImage(strokes: Stroke[], bounds: Rect, textBlocks: TextBlock[] = [], inkColors?: Map<string, string>): string {
   const longSide = Math.max(bounds.width, bounds.height, 1);
   const scale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, TARGET_LONG_SIDE / longSide));
   const w = Math.max(64, Math.round(bounds.width * scale + MARGIN * 2));
@@ -65,7 +69,7 @@ export function renderInkImage(strokes: Stroke[], bounds: Rect, textBlocks: Text
   // Highlighters carry no content for transcription; ink is drawn dark and fully opaque.
   const ink = strokes
     .filter((s) => s.tool === 'pen')
-    .map((s) => ({ ...s, color: readableInk(s.color), opacity: 1, width: Math.max(s.width, 2) }));
+    .map((s) => ({ ...s, color: inkColors?.get(s.color.toUpperCase()) ?? readableInk(s.color), opacity: 1, width: Math.max(s.width, 2) }));
   drawStrokes(ctx, ink);
   return canvas.toDataURL('image/png');
 }

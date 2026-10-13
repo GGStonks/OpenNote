@@ -4,6 +4,7 @@ import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
 import { paperBackground } from './CanvasPage';
+import { rotationStyle } from './Blocks';
 
 /**
  * Library thumbnail: the first page of the note, drawn with the same content as the editor:
@@ -56,7 +57,7 @@ const ThumbMath: React.FC<{ block: LatexBlock; color: string }> = ({ block, colo
   const html = useMemo(() => renderLatexContent(block.latexCode).html, [block.latexCode]);
   const textual = html.includes('<p>') || html.includes('on-h');
   return (
-    <div className="absolute" style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? color }}>
+    <div className="absolute" style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? color, ...rotationStyle(block.rotation) }}>
       <div
         className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
         style={{ fontSize: BASE_MATH_PX * (block.scale ?? 1) }}
@@ -71,7 +72,7 @@ const ThumbTikz: React.FC<{ block: LatexBlock; color: string; darkPaper: boolean
   const cached = !!block.tikzSvg && block.tikzSvgSource === block.latexCode;
   const svg = useMemo(() => (cached ? block.tikzSvg! : renderTikzPreview(block.latexCode).svg), [cached, block.tikzSvg, block.latexCode]);
   return (
-    <div className="absolute" style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? color }}>
+    <div className="absolute" style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? color, ...rotationStyle(block.rotation) }}>
       <div className={`on-tikz w-full h-full ${cached && darkPaper ? 'on-tikz-dark' : ''}`} dangerouslySetInnerHTML={{ __html: svg }} />
     </div>
   );
@@ -101,7 +102,7 @@ const ThumbContent: React.FC<{ note: NoteDocument; scale: number }> = ({ note, s
   return (
     <>
       {(page.imageBlocks ?? []).map((im) => (
-        <ThumbImage key={im.id} src={im.dataUrl} style={{ left: im.x, top: im.y, width: im.width, height: im.height }} />
+        <ThumbImage key={im.id} src={im.dataUrl} style={{ left: im.x, top: im.y, width: im.width, height: im.height, ...rotationStyle(im.rotation) }} />
       ))}
       <ThumbInk strokes={strokes} scale={scale} />
       {page.latexBlocks.map((b) => (b.isTikz ? <ThumbTikz key={b.id} block={b} color={ink} darkPaper={dark} /> : <ThumbMath key={b.id} block={b} color={ink} />))}
@@ -109,7 +110,7 @@ const ThumbContent: React.FC<{ note: NoteDocument; scale: number }> = ({ note, s
         <div
           key={t.id}
           className="absolute whitespace-pre-wrap break-words"
-          style={{ left: t.x, top: t.y, width: t.width, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color }}
+          style={{ left: t.x, top: t.y, width: t.width, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...rotationStyle(t.rotation) }}
         >
           {t.text}
         </div>

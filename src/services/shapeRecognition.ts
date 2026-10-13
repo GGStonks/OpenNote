@@ -211,18 +211,65 @@ function detectEllipse(pts: Point[], diag: number): SnappedShape | null {
   return { kind, points: out, closed: true, confidence: 1 - err / 0.16 };
 }
 
+/** A corner flatter than this (degrees) is not a corner: the side was just drawn a little bowed. */
+const STRAIGHT_CORNER = 150;
+/** A side shorter than this share of the outline is a slip of the pen (e.g. at the closing point). */
+const MIN_SIDE = 0.07;
+
+/**
+ * Removes vertices that do not make a shape: corners on a nearly straight run (a bowed side
+ * came out as two sides) and very short sides (the pen ending a little past or short of the start
+ * left a tiny extra side there).
+ */
+function cleanVertices(v: Point[], closed: boolean): Point[] {
+  let out = v.slice();
+  const flat = (STRAIGHT_CORNER * Math.PI) / 180;
+  for (let changed = true; changed && out.length > (closed ? 3 : 2); ) {
+    changed = false;
+    const n = out.length;
+    let perim = 0;
+    for (let i = closed ? 0 : 1; i < n; i++) perim += Math.hypot(out[i].x - out[(i - 1 + n) % n].x, out[i].y - out[(i - 1 + n) % n].y);
+    // Flattest corner first.
+    let worst = -1, worstAng = flat;
+    for (let i = closed ? 0 : 1; i < (closed ? n : n - 1); i++) {
+      const a = angleAt(out[(i - 1 + n) % n], out[i], out[(i + 1) % n]);
+      if (a > worstAng) { worstAng = a; worst = i; }
+    }
+    if (worst >= 0) {
+      out.splice(worst, 1);
+      changed = true;
+      continue;
+    }
+    // Shortest side next: its two ends become one vertex.
+    let short = -1, shortLen = MIN_SIDE * perim;
+    for (let i = 0; i < (closed ? n : n - 1); i++) {
+      const a = out[i], b = out[(i + 1) % n];
+      const l = Math.hypot(b.x - a.x, b.y - a.y);
+      if (l < shortLen) { shortLen = l; short = i; }
+    }
+    if (short >= 0) {
+      const j = (short + 1) % n;
+      if (!closed && short === 0) out.splice(1, 1);
+      else if (!closed && j === n - 1) out.splice(short, 1);
+      else {
+        out[short] = P((out[short].x + out[j].x) / 2, (out[short].y + out[j].y) / 2);
+        out.splice(j, 1);
+      }
+      changed = true;
+    }
+  }
+  return out;
+}
+
 function detectPolygon(pts: Point[], diag: number, closed: boolean): SnappedShape | null {
   const ring = closed ? [...pts, pts[0]] : pts;
-  let v = rdp(ring, Math.max(4, diag * 0.06));
-  if (closed) {
-    v = v.slice(0, -1);
-    // Merge the start vertex if it lies on a straight run.
-    if (v.length > 3 && angleAt(v[v.length - 1], v[0], v[1]) > (155 * Math.PI) / 180) v = v.slice(1);
-  }
+  let v = rdp(ring, Math.max(5, diag * 0.085));
+  if (closed) v = v.slice(0, -1);
+  v = cleanVertices(v, closed);
   if (closed && (v.length < 3 || v.length > 8)) return null;
   if (!closed && (v.length < 3 || v.length > 6)) return null;
   const err = polylineError(pts, v, closed) / diag;
-  if (err > (closed ? 0.035 : 0.025)) return null;
+  if (err > (closed ? 0.05 : 0.035)) return null;
 
   let kind: ShapeKind = closed ? (v.length === 3 ? 'triangle' : 'polygon') : 'polyline';
   let out = v.map((p) => P(p.x, p.y));
@@ -254,7 +301,7 @@ function detectPolygon(pts: Point[], diag: number, closed: boolean): SnappedShap
       out = [back(minU, minW), back(maxU, minW), back(maxU, maxW), back(minU, maxW)];
     }
   }
-  return { kind, points: out, closed, confidence: 1 - err / 0.035 };
+  return { kind, points: out, closed, confidence: 1 - err / 0.05 };
 }
 
 /** Runs all detectors on one stroke and returns the best accepted shape, or null. */
@@ -262,10 +309,18 @@ export function detectShape(points: Point[]): SnappedShape | null {
   if (points.length < 3) return null;
   const len = pathLength(points);
   if (len < 16) return null;
-  const pts = resample(points, 96);
+  let pts = resample(points, 96);
   const box = bbox(pts);
-  const gap = Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y);
-  const closed = gap < Math.max(14, 0.2 * box.diag) && len > 2.2 * box.diag * 0.5;
+  // Closed when the pen comes back near the start, a little short of it or past it.
+  const start = pts[0];
+  let near = pts.length - 1;
+  for (let i = Math.floor(pts.length * 0.6); i < pts.length; i++) {
+    if (Math.hypot(pts[i].x - start.x, pts[i].y - start.y) < Math.hypot(pts[near].x - start.x, pts[near].y - start.y)) near = i;
+  }
+  const gap = Math.hypot(start.x - pts[near].x, start.y - pts[near].y);
+  const closed = gap < Math.max(24, 0.28 * box.diag) && len > 2.2 * box.diag * 0.5;
+  // An overshoot past the start is cut off, so it cannot become an extra side.
+  if (closed && near < pts.length - 1) pts = resample(pts.slice(0, near + 1), 96);
 
   const candidates: SnappedShape[] = [];
   if (!closed) {

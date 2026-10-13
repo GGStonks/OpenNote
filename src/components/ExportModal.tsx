@@ -7,6 +7,7 @@ import { latexForDocument, renderLatexContent, escapeHtml } from '../services/la
 import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { PAPER_COLORS } from './CanvasPage';
+import { textHeight } from '../editor/selection';
 import { shareFile } from '../platform';
 
 interface ExportModalProps {
@@ -56,7 +57,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
     '\\documentclass[11pt]{article}',
     '\\usepackage[utf8]{inputenc}',
     '\\usepackage[margin=2.5cm]{geometry}',
-    '\\usepackage{amsmath,amssymb,amsfonts,amsthm,graphicx}',
+    '\\usepackage{amsmath,amssymb,amsfonts,amsthm,graphicx,xcolor}',
     '\\usepackage{tikz}',
     ...[...pkgs].map((p) => `\\usepackage{${p}}`),
     pkgs.has('pgfplots') ? '\\pgfplotsset{compat=1.18}' : '',
@@ -91,6 +92,9 @@ function buildMarkdown(doc: NoteDocument): string {
   return md;
 }
 
+/** Wraps an SVG element in a rotation about (cx, cy) when the item is turned. */
+const turn = (el: string, deg: number | undefined, cx: number, cy: number) => (deg ? `<g transform="rotate(${deg} ${cx.toFixed(2)} ${cy.toFixed(2)})">${el}</g>` : el);
+
 function buildSvg(doc: NoteDocument): string {
   const H = PAGE_HEIGHT, W = PAGE_WIDTH, gap = 24;
   const pages = splitSurface(doc.pages[0]);
@@ -100,21 +104,21 @@ function buildSvg(doc: NoteDocument): string {
   pages.forEach((p, i) => {
     const dy = i * (H + gap);
     out += `<g id="page-${i + 1}">\n<rect x="0" y="${dy}" width="${W}" height="${H}" fill="${PAPER_COLORS[doc.paperColor]}"/>\n`;
-    for (const im of p.imageBlocks ?? []) out += `<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>\n`;
+    for (const im of p.imageBlocks ?? []) out += turn(`<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>`, im.rotation, im.x + im.width / 2, im.y + dy + im.height / 2) + '\n';
     const order = [...p.strokes.filter((s) => s.tool === 'highlighter'), ...p.strokes.filter((s) => s.tool !== 'highlighter')];
     for (const s of order) out += strokeToSvg(s, dy, PAPER_COLORS[doc.paperColor]) + '\n';
     for (const b of p.latexBlocks) {
       if (b.isTikz) {
         const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;
         const inner = svg.replace(/<svg\b/, `<svg x="${b.x}" y="${b.y + dy}" width="${b.width}" height="${b.height}"`).replace(/currentColor/g, b.color ?? ink);
-        out += inner + '\n';
+        out += turn(inner, b.rotation, b.x + b.width / 2, b.y + dy + b.height / 2) + '\n';
       } else {
         const html = renderLatexContent(b.latexCode).html;
-        out += `<foreignObject x="${b.x}" y="${b.y + dy}" width="${Math.max(b.width, 40) + 20}" height="${Math.max(b.height, 30) + 10}"><xhtml:div style="font-size:${22 * (b.scale ?? 1)}px;color:${b.color ?? ink}">${html}</xhtml:div></foreignObject>\n`;
+        out += turn(`<foreignObject x="${b.x}" y="${b.y + dy}" width="${Math.max(b.width, 40) + 20}" height="${Math.max(b.height, 30) + 10}"><xhtml:div style="font-size:${22 * (b.scale ?? 1)}px;color:${b.color ?? ink}">${html}</xhtml:div></foreignObject>`, b.rotation, b.x + b.width / 2, b.y + dy + b.height / 2) + '\n';
       }
     }
     for (const t of p.textBlocks ?? []) {
-      out += `<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>\n`;
+      out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
     }
     out += '</g>\n';
   });
