@@ -158,6 +158,8 @@ static NSString *ONMimeType(NSString *ext) {
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
+/** In-flight bridge HTTP requests by the page's request id (main thread only), for httpCancel. */
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionTask *> *httpTasks;
 @end
 
 @implementation ONViewController
@@ -204,6 +206,7 @@ static NSString *ONMimeType(NSString *ext) {
     sc.timeoutIntervalForResource = 900;
     sc.waitsForConnectivity = NO;
     self.session = [NSURLSession sessionWithConfiguration:sc];
+    self.httpTasks = [NSMutableDictionary dictionary];
 }
 
 - (void)viewDidLoad {
@@ -225,6 +228,11 @@ static NSString *ONMimeType(NSString *ext) {
     NSString *cmd = msg[@"cmd"];
     if ([cmd isEqualToString:@"http"]) {
         [self handleHttp:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"httpCancel"]) {
+        // Closing the connection makes llama-server stop generating (the reply was streamed).
+        NSString *rid = [msg[@"id"] description];
+        if (rid) [self.httpTasks[rid] cancel];
+        replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"share"]) {
         [self handleShare:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"print"]) {
@@ -262,8 +270,10 @@ static NSString *ONMimeType(NSString *ext) {
     id body = msg[@"body"];
     if ([body isKindOfClass:[NSString class]]) req.HTTPBody = [(NSString *)body dataUsingEncoding:NSUTF8StringEncoding];
 
+    NSString *rid = [msg[@"id"] isKindOfClass:[NSString class]] ? msg[@"id"] : nil;
     NSURLSessionDataTask *task = [self.session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (rid) [self.httpTasks removeObjectForKey:rid];
             if (error) {
                 reply(@{@"error": error.localizedDescription ?: @"Network error"}, nil);
                 return;
@@ -273,6 +283,7 @@ static NSString *ONMimeType(NSString *ext) {
             reply(@{@"status": @(status), @"body": text ?: @""}, nil);
         });
     }];
+    if (rid) self.httpTasks[rid] = task;
     [task resume];
 }
 

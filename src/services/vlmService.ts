@@ -1,4 +1,4 @@
-import { httpRequest, HttpError } from '../platform';
+import { httpRequest, HttpAbortError, HttpError } from '../platform';
 import { AppSettings, resolveChatUrl, resolveModelsUrl } from '../settings';
 import { cleanModelOutput } from './latexRender';
 import { prepareTikz } from './tikzEngine';
@@ -61,6 +61,34 @@ function describeError(err: unknown, url: string): string {
   return msg;
 }
 
+/**
+ * Joins a streamed (server-sent events) chat-completions reply into one completion object, so
+ * extractContent() handles streamed and plain JSON replies alike. Returns null if `text` is not SSE.
+ */
+function joinEventStream(text: string): any | null {
+  if (!/^\s*data:/.test(text)) return null;
+  let content = '';
+  let finish: string | null = null;
+  let model: string | undefined;
+  for (const line of text.split('\n')) {
+    const m = /^data:\s?(.*)$/.exec(line.trim());
+    if (!m || m[1] === '[DONE]') continue;
+    let ev: any;
+    try {
+      ev = JSON.parse(m[1]);
+    } catch {
+      continue;
+    }
+    if (ev?.error) return ev;
+    model ??= ev?.model;
+    const choice = ev?.choices?.[0];
+    if (!choice) continue;
+    content += choice.delta?.content ?? choice.text ?? '';
+    finish = choice.finish_reason ?? finish;
+  }
+  return { model, choices: [{ message: { content }, finish_reason: finish }] };
+}
+
 function extractContent(data: any): { text: string; truncated: boolean } {
   const choice = data?.choices?.[0];
   if (!choice) {
@@ -96,7 +124,8 @@ export async function convertImage(
   imageDataUrl: string,
   mode: ConversionMode,
   settings: AppSettings,
-  hint?: string
+  hint?: string,
+  signal?: AbortSignal
 ): Promise<ConversionResult> {
   const url = resolveChatUrl(settings.vlmEndpoint);
   const base64 = imageDataUrl.includes(',') ? imageDataUrl.split(',')[1] : imageDataUrl;
@@ -113,6 +142,7 @@ export async function convertImage(
       method: 'POST',
       headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
       timeoutMs: settings.vlmTimeoutSec * 1000,
+      signal,
       body: {
         model: settings.modelName,
         temperature: 0,
@@ -124,7 +154,10 @@ export async function convertImage(
         dry_multiplier: 0.8,
         dry_base: 1.75,
         dry_allowed_length: 8,
-        stream: false,
+        // Streamed so that a cancelled request stops the generation: llama-server only notices a
+        // closed connection when it writes to it, and a non-streamed reply writes nothing until
+        // the very end. The events are joined after the reply completes (joinEventStream).
+        stream: true,
         messages: [
           {
             role: 'user',
@@ -137,6 +170,7 @@ export async function convertImage(
       },
     });
   } catch (err) {
+    if (err instanceof HttpAbortError) throw err;
     throw new Error(describeError(err, url));
   }
 
@@ -145,15 +179,16 @@ export async function convertImage(
     const detail = typeof res.data === 'object' ? res.data?.error?.message ?? JSON.stringify(res.data).slice(0, 300) : res.text.slice(0, 300);
     throw new HttpError(`VLM server returned HTTP ${res.status}: ${detail}`, res.status, res.text);
   }
-  if (typeof res.data !== 'object') throw new Error(`Unexpected (non-JSON) reply from ${url}: ${res.text.slice(0, 200)}`);
+  const data = typeof res.data === 'object' ? res.data : joinEventStream(res.text);
+  if (!data) throw new Error(`Unexpected (non-JSON) reply from ${url}: ${res.text.slice(0, 200)}`);
 
-  const { text, truncated } = extractContent(res.data);
+  const { text, truncated } = extractContent(data);
   const latex = normaliseReply(text, mode);
   if (!latex.trim()) throw new Error('The model returned an empty transcription.');
   return {
     latex,
     mode,
-    model: res.data?.model ?? settings.modelName,
+    model: data.model ?? settings.modelName,
     elapsedMs: performance.now() - started,
     truncated,
   };

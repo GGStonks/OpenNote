@@ -151,6 +151,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [target, setTarget] = useState<ConvTarget | null>(null);
   const [busy, setBusy] = useState<{ label: string; detail?: string } | null>(null);
   const busyToken = useRef(0);
+  /** Aborts the conversion in flight (Cancel, a newer conversion, or leaving the note). */
+  const conversionAbort = useRef<AbortController | null>(null);
+  const cancelConversion = useCallback(() => {
+    busyToken.current++;
+    conversionAbort.current?.abort();
+    conversionAbort.current = null;
+    setBusy(null);
+  }, []);
+  useEffect(() => () => conversionAbort.current?.abort(), []);
   const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [printMode, setPrintMode] = useState(false);
@@ -369,11 +378,14 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   // ------------------------------------------------------------------------- VLM conversion
   const runConversion = useCallback(
     async (t: Extract<ConvTarget, { kind: 'insert' }>) => {
+      conversionAbort.current?.abort();
+      const abort = new AbortController();
+      conversionAbort.current = abort;
       const token = ++busyToken.current;
       const label = t.mode === 'tikz' ? 'Drawing → TikZ' : t.mode === 'text' ? 'Notes → LaTeX' : 'Handwriting → LaTeX';
       setBusy({ label, detail: `${settings.modelName} · up to ${settings.vlmTimeoutSec}s` });
       try {
-        const res = await convertImage(t.image, t.mode, settings, t.hint);
+        const res = await convertImage(t.image, t.mode, settings, t.hint, abort.signal);
         if (token !== busyToken.current) return;
         setTarget(t);
         setModal({
@@ -388,6 +400,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         if (token !== busyToken.current) return;
         showToast(err instanceof Error ? err.message : String(err), true);
       } finally {
+        if (conversionAbort.current === abort) conversionAbort.current = null;
         if (token === busyToken.current) setBusy(null);
       }
     },
@@ -687,10 +700,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             {busy.detail && <div className="text-xs text-gray-400 mt-1">{busy.detail}</div>}
             <button
               className="mt-3 text-xs text-blue-600"
-              onClick={() => {
-                busyToken.current++;
-                setBusy(null);
-              }}
+              onClick={cancelConversion}
             >
               Cancel
             </button>

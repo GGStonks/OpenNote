@@ -54,12 +54,44 @@ function parseBody(text: string): any {
   }
 }
 
+/** Rejection of an httpRequest whose signal was aborted (e.g. the user tapped Cancel). */
+export class HttpAbortError extends HttpError {
+  constructor() {
+    super('Cancelled');
+    this.name = 'AbortError';
+  }
+}
+
+let iosRequestSeq = 0;
+
+/**
+ * Rejects as soon as `signal` aborts, running `onAbort` to stop the underlying request. Closing
+ * the connection is what makes llama-server stop generating; just ignoring the reply would leave
+ * the GPU busy (and the next conversion queued) for up to the whole timeout.
+ */
+function abortable<T>(signal: AbortSignal | undefined, run: Promise<T>, onAbort: () => void): Promise<T> {
+  if (!signal) return run;
+  if (signal.aborted) {
+    onAbort();
+    return Promise.reject(new HttpAbortError());
+  }
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      onAbort();
+      reject(new HttpAbortError());
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    run.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+  });
+}
+
 export async function httpRequest(opts: {
   url: string;
   method?: 'GET' | 'POST';
   headers?: Record<string, string>;
   body?: unknown;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }): Promise<HttpResponse> {
   const method = opts.method ?? 'GET';
   const headers: Record<string, string> = { Accept: 'application/json', ...(opts.headers ?? {}) };
@@ -70,14 +102,18 @@ export async function httpRequest(opts: {
   const kind = platformKind();
 
   if (kind === 'ios') {
-    const res = await window.webkit!.messageHandlers!.opennote!.postMessage({
+    const bridge = window.webkit!.messageHandlers!.opennote!;
+    const id = `req${++iosRequestSeq}`;
+    const sent = bridge.postMessage({
       cmd: 'http',
+      id,
       url: opts.url,
       method,
       headers,
       body: bodyText ?? null,
       timeout: timeoutMs / 1000,
     });
+    const res = await abortable(opts.signal, sent, () => void bridge.postMessage({ cmd: 'httpCancel', id }).catch(() => undefined));
     if (res?.error) throw new HttpError(String(res.error));
     const text = String(res?.body ?? '');
     return { status: Number(res?.status ?? 0), text, data: parseBody(text) };
@@ -85,7 +121,8 @@ export async function httpRequest(opts: {
 
   if (kind === 'capacitor') {
     try {
-      const res = await CapacitorHttp.request({
+      // CapacitorHttp cannot cancel a request: the reply is dropped, the request runs to the end.
+      const res = await abortable(opts.signal, CapacitorHttp.request({
         url: opts.url,
         method,
         headers,
@@ -93,25 +130,31 @@ export async function httpRequest(opts: {
         connectTimeout: Math.min(timeoutMs, 20000),
         readTimeout: timeoutMs,
         responseType: 'text',
-      });
+      }), () => undefined);
       const text = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
       return { status: res.status, text, data: parseBody(text) };
     } catch (err: any) {
+      if (err instanceof HttpAbortError) throw err;
       throw new HttpError(err?.message ?? String(err));
     }
   }
 
+  if (opts.signal?.aborted) throw new HttpAbortError();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const cancel = () => controller.abort();
+  opts.signal?.addEventListener('abort', cancel, { once: true });
   try {
     const res = await fetch(opts.url, { method, headers, body: bodyText, signal: controller.signal });
     const text = await res.text();
     return { status: res.status, text, data: parseBody(text) };
   } catch (err: any) {
+    if (opts.signal?.aborted) throw new HttpAbortError();
     if (err?.name === 'AbortError') throw new HttpError(`Timed out after ${Math.round(timeoutMs / 1000)} s`);
     throw new HttpError(err?.message ?? String(err));
   } finally {
     clearTimeout(timer);
+    opts.signal?.removeEventListener('abort', cancel);
   }
 }
 
