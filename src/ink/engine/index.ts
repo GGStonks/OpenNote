@@ -1,4 +1,9 @@
 /**
+ * FROZEN — Nib v1 (OpenNote 1.8.5, git tag nib-engine-v1). The owner's decision: this engine is
+ * final and must not be changed. `npm run test:engine` (run by every build) compares its output
+ * with bench/engine-golden.json and fails on any difference. New features (shape tools, other
+ * platforms) use the engine through this API; they never edit src/ink/engine.
+ *
  * OpenNote's ink engine (Nib): handwriting model, ink geometry and the live stroke painter.
  *
  * Self-contained: nothing in src/ink/engine imports from the rest of the app. Input is raw pen
