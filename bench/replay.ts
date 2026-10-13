@@ -19,7 +19,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { ModeledPoint } from '../src/ink/inkEngine';
+import { ModeledPoint, pressureWidth } from '../src/ink/inkEngine';
 import { NIB } from '../src/ink/nib';
 import type { PenRecording, RecordedStroke } from '../src/ink/penRecorder';
 import { Engine, Sample, nib, spring } from './engines';
@@ -83,7 +83,55 @@ function jaggedness(ink: ModeledPoint[]): number {
   return n ? Math.sqrt(sum / n) : 0;
 }
 
-interface Row { follow: number; followMax: number; jag: number; lag: number; lagP95: number; over: number }
+interface Row { follow: number; followMax: number; jag: number; lag: number; lagP95: number; over: number; wiggle: number; width: number; shimmer: number }
+
+/** Resamples a polyline every `step` px. */
+function resample(ink: XY[], step: number): XY[] {
+  const out: XY[] = [ink[0]];
+  let carry = 0;
+  for (let i = 1; i < ink.length; i++) {
+    const a = ink[i - 1], b = ink[i];
+    const d = Math.hypot(b.x - a.x, b.y - a.y);
+    let s = step - carry;
+    while (s <= d) {
+      out.push({ x: a.x + ((b.x - a.x) * s) / d, y: a.y + ((b.y - a.y) * s) / d });
+      s += step;
+    }
+    carry = d - (s - step);
+  }
+  return out;
+}
+
+/**
+ * Wiggle: RMS change of curvature between neighbouring 1 px steps (rad/px^2). Real letters bend
+ * smoothly (curvature changes slowly); digitiser noise flips it from step to step.
+ */
+function wiggle(ink: XY[]): number {
+  const r = resample(ink, 1);
+  const turn: number[] = [];
+  for (let i = 2; i < r.length; i++) {
+    let d = Math.atan2(r[i].y - r[i - 1].y, r[i].x - r[i - 1].x) - Math.atan2(r[i - 1].y - r[i - 2].y, r[i - 1].x - r[i - 2].x);
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    turn.push(d);
+  }
+  let sum = 0, n = 0;
+  for (let i = 1; i < turn.length; i++) if (Math.abs(turn[i]) < 1 && Math.abs(turn[i - 1]) < 1) { sum += (turn[i] - turn[i - 1]) ** 2; n++; }
+  return n ? Math.sqrt(sum / n) : 0;
+}
+
+/** Fountain-pen width wobble: RMS relative width change per px of line. */
+function widthWobble(ink: ModeledPoint[]): number {
+  let sum = 0, len = 0;
+  for (let i = 1; i < ink.length; i++) {
+    const d = Math.hypot(ink[i].x - ink[i - 1].x, ink[i].y - ink[i - 1].y);
+    if (d < 1e-6) continue;
+    const w0 = pressureWidth(1, ink[i - 1].p), w1 = pressureWidth(1, ink[i].p);
+    sum += ((w1 - w0) / w0) ** 2 / d;
+    len += d;
+  }
+  return len ? Math.sqrt(sum / len) : 0;
+}
 
 function evaluate(e: Engine, st: RecordedStroke, noise: number): Row & { ink: ModeledPoint[] } {
   const raw: Sample[] = st.samples.map(([x, y, t, f]) => ({ x, y, t, p: f }));
@@ -93,6 +141,9 @@ function evaluate(e: Engine, st: RecordedStroke, noise: number): Row & { ink: Mo
   const lags: number[] = [];
   let over = 0;
   const end = raw[raw.length - 1].t;
+  // Tip shimmer: how far the displayed ink near the tip moves from one frame to the next.
+  let prevShown: XY[] | null = null;
+  let shimSum = 0, shimN = 0;
   for (let f = (arrival[0] ?? 0) + FRAME; k < raw.length || f < (arrival[arrival.length - 1] ?? 0) + 2 * FRAME; f += FRAME) {
     while (k < raw.length && arrival[k] <= f) live.add(raw[k++]);
     if (!k) continue;
@@ -104,6 +155,17 @@ function evaluate(e: Engine, st: RecordedStroke, noise: number): Row & { ink: Mo
       lags.push(Math.hypot(tip.x - pen.x, tip.y - pen.y));
     }
     for (const q of tail) over = Math.max(over, distToPolyline(q, raw) - 2 * noise - 0.3);
+    // Ink shown in this frame vs the last: last 12 px of the previous frame's ink, distance to this frame's.
+    const shown = [...settled.slice(-600), ...tail];
+    if (prevShown && shown.length > 1) {
+      let acc = 0;
+      for (let j = prevShown.length - 1; j > 0 && acc < 12; j--) {
+        acc += Math.hypot(prevShown[j].x - prevShown[j - 1].x, prevShown[j].y - prevShown[j - 1].y);
+        shimSum += distToPolyline(prevShown[j], shown);
+        shimN++;
+      }
+    }
+    prevShown = shown;
     if (k >= raw.length && f > (arrival[arrival.length - 1] ?? 0) + 2 * FRAME) break;
   }
   const ink = e.final(raw);
@@ -113,6 +175,9 @@ function evaluate(e: Engine, st: RecordedStroke, noise: number): Row & { ink: Mo
     follow: d.reduce((a, b) => a + b, 0) / Math.max(1, d.length),
     followMax: Math.max(0, ...d),
     jag: jaggedness(ink),
+    wiggle: wiggle(ink),
+    width: widthWobble(ink),
+    shimmer: shimN ? shimSum / shimN : 0,
     lag: lags.length ? lags.reduce((a, b) => a + b, 0) / lags.length : 0,
     lagP95: pct(lags, 0.95) || 0,
     over: Math.max(0, over),
@@ -197,7 +262,7 @@ for (const file of files) {
   console.log(`\n=== ${basename(file)} — app ${rec.app}, ${rec.platform}, dpr ${rec.devicePixelRatio}, ${rec.userAgent.slice(0, 80)}`);
   const noise = inputReport(strokes);
   const results: Map<string, ModeledPoint[]>[] = strokes.map(() => new Map());
-  console.log('\nengine          follow  max    jag(rad/px)  lag   lag95  over');
+  console.log('\nengine          follow  max    jag(rad/px)  lag   lag95  over   wiggle  width  shimmer');
   for (const e of ENGINES) {
     const rows = strokes.map((st, i) => {
       const r = evaluate(e, st, noise);
@@ -205,10 +270,10 @@ for (const file of files) {
       return r;
     });
     const avg = (f: (r: Row) => number) => rows.reduce((a, r) => a + f(r), 0) / Math.max(1, rows.length);
-    console.log(e.name.padEnd(14) + [avg((r) => r.follow), Math.max(...rows.map((r) => r.followMax)), avg((r) => r.jag), avg((r) => r.lag), avg((r) => r.lagP95), Math.max(...rows.map((r) => r.over))].map((v) => v.toFixed(3).padStart(7)).join(' '));
+    console.log(e.name.padEnd(14) + [avg((r) => r.follow), Math.max(...rows.map((r) => r.followMax)), avg((r) => r.jag), avg((r) => r.lag), avg((r) => r.lagP95), Math.max(...rows.map((r) => r.over)), avg((r) => r.wiggle), avg((r) => r.width), avg((r) => r.shimmer)].map((v) => v.toFixed(3).padStart(7)).join(' '));
   }
   // Contact sheets: 16 strokes per image.
-  for (let i = 0; i < strokes.length; i += 16) {
+  for (let i = 0; !process.env.NO_PNG && i < strokes.length; i += 16) {
     const svg = svgSheet(strokes.slice(i, i + 16), results.slice(i, i + 16), `${basename(file)} strokes ${i}-${Math.min(strokes.length, i + 16) - 1}`);
     const out = join('bench/out', `${basename(file, '.json')}-${i / 16}`);
     writeFileSync(out + '.svg', svg);

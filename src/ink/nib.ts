@@ -17,8 +17,9 @@ import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
  *  2. Settling: an anchor is final once the samples its window needs have arrived; from then on
  *     the ink up to it never changes. Until then it is provisional (fitted with the samples that
  *     exist) and drawn on the tail.
- *  3. Curve: centripetal Catmull-Rom through the anchors (no cusps or overshooting loops between
- *     samples), emitted as dense points every STEP px.
+ *  3. Curve: the same fit evaluated continuously between samples, every STEP px (weights that
+ *     fade out smoothly in time and in distance make it a smooth curve; a spline through one
+ *     point per sample would bend at every sample).
  *  4. Pressure: the Pencil's force smoothed the same way (zero phase); the first ATTACK ms take at
  *     least the force the pen settles at, because the first samples' force is an under-read
  *     estimate and real nibs ink at full width as they land; a drop of force is followed with
@@ -37,18 +38,16 @@ import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
 
 export const NIB = {
   /** Half window, in px of line, of the anchor fit. */
-  ARC: 1.6,
+  ARC: 5,
   /** Half window limits in ms. */
-  MIN_HALF: 6,
+  MIN_HALF: 14,
   MAX_HALF: 70,
   /**
    * The window also stops at samples farther than this from the centre sample: where the pen
    * slows down into a corner the time window grows, and without this it would reach round the
    * corner and cut it.
    */
-  CHORD: 2,
-  /** Windows spanning less than this (px) are fitted with a line: lower noise, no curvature to lose. */
-  LINEAR_BELOW: 1.2,
+  CHORD: 6,
   /** Speed estimate: displacement over +/- this many ms. */
   SPEED_WIN: 8,
   /** Half window of the pressure smoothing (ms). */
@@ -60,6 +59,8 @@ export const NIB = {
   PREDICT_WIN: 20,
   /** Share of the fitted acceleration used (it is the noisiest term). */
   ACCEL: 1,
+  /** Prediction never reaches further than this (px): a pen can lift at any moment. */
+  PREDICT_MAX_PX: 3,
   /** No prediction below this speed (px/ms). */
   PREDICT_MIN_SPEED: 0.12,
   /** Lift-off trimming: force fraction of the stroke median, and the most that is trimmed. */
@@ -85,6 +86,10 @@ interface Anchor {
   y: number;
   t: number;
   p: number;
+  /** Half window (ms) of the fit at this sample. */
+  h: number;
+  /** Distance limit (px) of the fit at this sample. */
+  cr: number;
 }
 
 const tricube = (u: number) => {
@@ -140,10 +145,16 @@ export class NibModeler {
    */
   private inkEnd(): number {
     const r = this.raw, n = r.length, fs = this.forces;
-    if (n < 6 || !fs.length) return n;
+    if (!fs.length) return n;
+    // A sample without force is the pen in the air: never ink, however far away it is. (At speed
+    // the Pencil can lift with its force still high and report the lift 15-25 ms later, tens of
+    // px further on: that drew a straight line out to the pen in the air.)
+    let k = n;
+    while (k > 1 && !(r[k - 1].f > 0)) k--;
+    if (k < 6) return k;
     const limit = NIB.LIFT_FORCE * fs[fs.length >> 1];
-    const tEnd = r[n - 1].t;
-    let k = n, len = 0;
+    const tEnd = r[k - 1].t;
+    let len = 0;
     while (k > 4) {
       const i = k - 1;
       if (r[i].f >= limit || tEnd - r[i].t > NIB.LIFT_MS) break;
@@ -164,14 +175,16 @@ export class NibModeler {
     const n = this.inkEnd();
     const provisional: Anchor[] = [];
     let env = this.env;
+    const latest = this.raw[this.raw.length - 1].t;
     for (let i = this.anchors.length; i < n; i++) {
       const a = this.fitAnchor(i, provisional, env);
       env = a.p;
-      provisional.push(a);
+      const q = this.provisional(a.x, a.y, this.raw[i].x, this.raw[i].y, a.t, a.h, latest);
+      provisional.push({ ...a, x: q.x, y: q.y });
     }
     const all = provisional.length ? this.anchors.concat(provisional) : this.anchors;
     const out: ModeledPoint[] = [];
-    for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out);
+    for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out, i >= this.anchors.length - 1 ? latest : null);
     if (this.emitted === 0 && all.length) out.unshift(this.point(all[0]));
     if (predict && n === this.raw.length && all.length) out.push(...this.predict(all[all.length - 1]));
     return out;
@@ -218,11 +231,10 @@ export class NibModeler {
     const r = this.raw;
     const ti = r[i].t;
     const h = this.halfWindow(i);
-    const near = (j: number) => Math.hypot(r[j].x - r[i].x, r[j].y - r[i].y) <= NIB.CHORD;
-    let a = i, b = i;
-    while (a > 0 && ti - r[a - 1].t < h && near(a - 1)) a--;
-    while (b < r.length - 1 && r[b + 1].t - ti < h && near(b + 1)) b++;
-    const pos = fitAt(r, a, b, ti, h);
+    // The distance limit guards corners, where the pen slows down and the time window grows; at
+    // speed it must not shrink the window below its time span.
+    const cr = Math.max(NIB.CHORD, 1.2 * this.speedAt(i) * h);
+    const pos = this.smoothAt(ti, r[i].x, r[i].y, i, h, cr);
 
     // Pressure: zero-phase weighted mean of the known forces.
     let pa = i, pb = i;
@@ -242,7 +254,22 @@ export class NibModeler {
       const dt = i > 0 ? ti - r[i - 1].t : 0;
       p = p + (prevEnv - p) * Math.exp(-dt / NIB.RELEASE);
     }
-    return { x: pos.x, y: pos.y, t: ti, p };
+    return { x: pos.x, y: pos.y, t: ti, p, h, cr };
+  }
+
+  /**
+   * The smoothed pen position at time t: a local fit around sample `c` (the sample nearest t),
+   * weighted by time (half width h) and by distance from (cx, cy), the raw pen position at t.
+   * Both weights fade to zero at the edge of the window, so the curve is continuous and smooth
+   * in t: samples never switch on or off abruptly.
+   */
+  private smoothAt(t: number, cx: number, cy: number, c: number, h: number, cr: number): { x: number; y: number } {
+    const r = this.raw;
+    const near = (j: number) => Math.hypot(r[j].x - cx, r[j].y - cy) < cr;
+    let a = c, b = c;
+    while (a > 0 && t - r[a - 1].t < h && near(a - 1)) a--;
+    while (b < r.length - 1 && r[b + 1].t - t < h && near(b + 1)) b++;
+    return fitAt(r, a, b, t, h, cx, cy, cr);
   }
 
   /** Median known force of the first ATTACK ms (the force the pen settles at after landing). */
@@ -281,30 +308,38 @@ export class NibModeler {
     }
   }
 
-  /** Centripetal Catmull-Rom from A[i-1] to A[i], appended without its first point. */
-  private segment(A: Anchor[], i: number, _last: boolean, out: ModeledPoint[]) {
+  /**
+   * The curve from A[i-1] to A[i] (one sample interval), appended without its first point: the
+   * smoothed position evaluated every STEP px along the way, not a spline through the anchors
+   * (a spline through one point per sample bends at every point: visible as a fine wiggle).
+   */
+  private segment(A: Anchor[], i: number, _last: boolean, out: ModeledPoint[], latest: number | null = null) {
     const p1 = A[i - 1], p2 = A[i];
-    const p0 = A[i - 2] ?? reflect(p2, p1);
-    const p3 = A[i + 1] ?? reflect(p1, p2);
+    const r = this.raw;
     const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
     const n = Math.max(1, Math.ceil(len / NIB.STEP));
-    if (len < 1e-6) {
-      out.push(this.point(p2));
-      return;
-    }
-    const k = (a: Anchor, b: Anchor) => Math.max(1e-4, Math.sqrt(Math.hypot(b.x - a.x, b.y - a.y)));
-    const t1 = k(p0, p1), t2 = t1 + k(p1, p2), t3 = t2 + k(p2, p3);
-    for (let s = 1; s <= n; s++) {
+    for (let s = 1; s < n; s++) {
       const f = s / n;
-      if (s === n) {
-        out.push(this.point(p2));
-        break;
-      }
-      const u = t1 + (t2 - t1) * f;
-      const x = cr(p0.x, p1.x, p2.x, p3.x, 0, t1, t2, t3, u);
-      const y = cr(p0.y, p1.y, p2.y, p3.y, 0, t1, t2, t3, u);
-      out.push({ x, y, p: p1.p + (p2.p - p1.p) * f, t: p1.t + (p2.t - p1.t) * f });
+      const t = p1.t + (p2.t - p1.t) * f;
+      const cx = r[i - 1].x + (r[i].x - r[i - 1].x) * f, cy = r[i - 1].y + (r[i].y - r[i - 1].y) * f;
+      const h = p1.h + (p2.h - p1.h) * f;
+      let q = this.smoothAt(t, cx, cy, f < 0.5 ? i - 1 : i, h, p1.cr + (p2.cr - p1.cr) * f);
+      if (latest !== null) q = this.provisional(q.x, q.y, cx, cy, t, h, latest);
+      out.push({ x: q.x, y: q.y, p: p1.p + (p2.p - p1.p) * f, t });
     }
+    out.push(this.point(p2));
+  }
+
+  /**
+   * Unsettled ink near the pen: the fit at time t is still missing its future samples and would
+   * swing from frame to frame (the tip wagging on fast strokes). It is shown as a blend from the
+   * raw pen position (which never moves) towards the fit, by how much of its window has arrived,
+   * so the ink settles into its final shape gradually instead of jumping.
+   */
+  private provisional(fx: number, fy: number, rx: number, ry: number, t: number, h: number, latest: number): { x: number; y: number } {
+    const c = Math.max(0, Math.min(1, (latest - t) / Math.max(1e-6, h)));
+    const k = c * c * (3 - 2 * c);
+    return { x: rx + (fx - rx) * k, y: ry + (fy - ry) * k };
   }
 
   // ----------------------------------------------------------------------------------- prediction
@@ -332,7 +367,7 @@ export class NibModeler {
     let horizon = NIB.HORIZON;
     if (along < 0) horizon = Math.min(horizon, (0.5 * speed) / -along);
     // Never further than the pen went in the same time just before (a bound on the acceleration).
-    const reach = travelled * horizon * 1.25;
+    const reach = Math.min(NIB.PREDICT_MAX_PX, travelled * horizon * 1.25);
     const out: ModeledPoint[] = [];
     const steps = Math.max(1, Math.ceil(horizon / 2));
     for (let s = 1; s <= steps; s++) {
@@ -346,36 +381,20 @@ export class NibModeler {
   }
 }
 
-function reflect(a: Anchor, b: Anchor): Anchor {
-  return { x: 2 * b.x - a.x, y: 2 * b.y - a.y, t: 2 * b.t - a.t, p: b.p };
-}
-
-/** Barry-Goldman evaluation of a non-uniform Catmull-Rom segment. */
-function cr(P0: number, P1: number, P2: number, P3: number, t0: number, t1: number, t2: number, t3: number, t: number): number {
-  const A1 = ((t1 - t) * P0 + (t - t0) * P1) / (t1 - t0);
-  const A2 = ((t2 - t) * P1 + (t - t1) * P2) / (t2 - t1);
-  const A3 = ((t3 - t) * P2 + (t - t2) * P3) / (t3 - t2);
-  const B1 = ((t2 - t) * A1 + (t - t0) * A2) / (t2 - t0);
-  const B2 = ((t3 - t) * A2 + (t - t1) * A3) / (t3 - t1);
-  return ((t2 - t) * B1 + (t - t1) * B2) / (t2 - t1);
-}
-
 /**
  * Weighted local polynomial fit of samples a..b around time tc (tricube weights, half width h):
  * quadratic when there are samples on both sides, linear at the ends of the data (lower variance
  * where the window is one-sided), the sample itself when nothing else is near.
  */
-function fitAt(r: Raw[], a: number, b: number, tc: number, h: number): { x: number; y: number } {
+function fitAt(r: Raw[], a: number, b: number, tc: number, h: number, cx: number, cy: number, cr: number): { x: number; y: number } {
   if (a === b) return { x: r[a].x, y: r[a].y };
   let before = 0, after = 0;
   for (let j = a; j <= b; j++) {
     if (r[j].t < tc - 1e-6) before++;
     else if (r[j].t > tc + 1e-6) after++;
   }
-  let span = 0;
-  for (let j = a + 1; j <= b; j++) span = Math.max(span, Math.hypot(r[j].x - r[a].x, r[j].y - r[a].y));
-  const degree = before >= 2 && after >= 2 && span >= NIB.LINEAR_BELOW ? 2 : 1;
-  const c = polyFit(r, a, b, tc, h, degree);
+  const degree = before >= 2 && after >= 2 ? 2 : 1;
+  const c = polyFit(r, a, b, tc, h, degree, { x: cx, y: cy, r: cr });
   return { x: c.x[0], y: c.y[0] };
 }
 
@@ -387,13 +406,15 @@ export function motionAt(r: Raw[], a: number, b: number, tc: number, h: number) 
   return { vx: c.x[1] / sh, vy: c.y[1] / sh, ax: (2 * (c.x[2] ?? 0)) / (sh * sh), ay: (2 * (c.y[2] ?? 0)) / (sh * sh) };
 }
 
-export function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2) {
+export function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, near?: { x: number; y: number; r: number }) {
   const m = degree + 1;
   const S = new Float64Array(2 * m - 1);
   const X = new Float64Array(m), Y = new Float64Array(m);
   for (let j = a; j <= b; j++) {
     const u = (r[j].t - tc) / h;
-    const w = tricube(u * 0.999) + 1e-9;
+    let w = tricube(u * 0.999);
+    if (near) w *= tricube((0.999 * Math.hypot(r[j].x - near.x, r[j].y - near.y)) / near.r);
+    w += 1e-9;
     let pw = w;
     for (let k = 0; k < 2 * m - 1; k++) {
       S[k] += pw;
