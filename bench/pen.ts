@@ -13,8 +13,9 @@
  *
  * Run: npm run bench:pen
  */
-import { ModeledPoint, StrokeModeler as SpringModeler, modelStroke as springStroke, pressureWidth } from '../src/ink/inkEngine';
-import { NIB, NibModeler, nibStroke } from '../src/ink/nib';
+import { pressureWidth } from '../src/ink/inkEngine';
+import { NIB } from '../src/ink/nib';
+import { Engine, Sample, nib, spring } from './engines';
 
 // Tuning: NIB='{"HORIZON":8}' npm run bench:pen ; SUMMARY=1 prints only the averages.
 Object.assign(NIB, JSON.parse(process.env.NIB ?? '{}'));
@@ -89,7 +90,6 @@ let seed = 1;
 const rand = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
 const gauss = () => Math.sqrt(-2 * Math.log(rand() + 1e-12)) * Math.cos(2 * Math.PI * rand());
 
-interface Sample { x: number; y: number; t: number; p: number }
 
 /** 240 Hz Pencil samples: white noise, slow digitiser wobble, timestamp jitter, estimated force. */
 function sense(tr: Truth, noise: number): Sample[] {
@@ -110,54 +110,6 @@ function sense(tr: Truth, noise: number): Sample[] {
   }
   return out;
 }
-
-// ------------------------------------------------------------------------------------------- engines
-interface Engine {
-  name: string;
-  live(): { add(s: Sample): void; settled(): ModeledPoint[]; tail(): ModeledPoint[] };
-  final(samples: Sample[]): ModeledPoint[];
-}
-
-/** v1.7 engine as CanvasPage drives it (pressure EMA, 0.2 px de-dup); no prediction. */
-const spring: Engine = {
-  name: 'v1.7 spring',
-  live() {
-    const m = new SpringModeler();
-    let pe = -1;
-    let last: Sample | null = null;
-    return {
-      add(s) {
-        if (last && Math.abs(s.x - last.x) < 0.2 && Math.abs(s.y - last.y) < 0.2) return;
-        last = s;
-        pe = pe < 0 ? s.p : pe * 0.55 + s.p * 0.45;
-        m.add(s.x, s.y, s.t, pe);
-      },
-      settled: () => m.points,
-      tail: () => m.tail(),
-    };
-  },
-  final(samples) {
-    let pe = -1;
-    let last: Sample | null = null;
-    const pts = [];
-    for (const s of samples) {
-      if (last && Math.abs(s.x - last.x) < 0.2 && Math.abs(s.y - last.y) < 0.2) continue;
-      last = s;
-      pe = pe < 0 ? s.p : pe * 0.55 + s.p * 0.45;
-      pts.push({ x: s.x, y: s.y, t: s.t, pressure: pe });
-    }
-    return springStroke(pts);
-  },
-};
-
-const nib: Engine = {
-  name: 'nib',
-  live() {
-    const m = new NibModeler();
-    return { add: (s) => m.add(s.x, s.y, s.t, s.p), settled: () => m.points, tail: () => m.tail(true) };
-  },
-  final: (samples) => nibStroke(samples.map((s) => ({ x: s.x, y: s.y, t: s.t, pressure: s.p }))),
-};
 
 // ------------------------------------------------------------------------------------------- metrics
 function distToPolyline(p: XY, poly: XY[]): number {

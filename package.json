@@ -9,7 +9,8 @@
     "build": "npm run copy-tikzjax && tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "bench:pen": "esbuild bench/pen.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/pen-bench.mjs && node node_modules/.cache/pen-bench.mjs"
+    "bench:pen": "esbuild bench/pen.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/pen-bench.mjs && node node_modules/.cache/pen-bench.mjs",
+    "bench:replay": "esbuild bench/replay.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/pen-replay.mjs && node node_modules/.cache/pen-replay.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

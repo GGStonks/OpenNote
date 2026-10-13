@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { X, Server, Check, Loader2, Wifi, AlertCircle } from 'lucide-react';
+import { penRecorder } from '../ink/penRecorder';
 import { AppSettings, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
-import { platformKind } from '../platform';
+import { platformKind, shareFile } from '../platform';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -14,11 +15,15 @@ interface SettingsModalProps {
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, settings, onSave }) => {
   const [draft, setDraft] = useState(settings);
   const [test, setTest] = useState<{ state: 'idle' | 'busy' | 'ok' | 'error'; msg?: string }>({ state: 'idle' });
+  const [rec, setRec] = useState({ on: penRecorder.enabled, count: penRecorder.count });
+  const [recMsg, setRecMsg] = useState<{ ok: boolean; msg: string } | null>(null);
+  useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
 
   useEffect(() => {
     if (isOpen) {
       setDraft(settings);
       setTest({ state: 'idle' });
+      setRecMsg(null);
     }
   }, [isOpen, settings]);
 
@@ -31,6 +36,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
       setTest({ state: 'ok', msg: await testConnection(draft) });
     } catch (err) {
       setTest({ state: 'error', msg: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const sendRecording = async () => {
+    setRecMsg({ ok: true, msg: 'Sending…' });
+    try {
+      setRecMsg({ ok: true, msg: `Saved on the PC: ${await penRecorder.sendToPc(draft, platformKind())}` });
+    } catch (err) {
+      setRecMsg({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const shareRecording = async () => {
+    try {
+      const data = JSON.stringify(penRecorder.snapshot(platformKind()));
+      await shareFile(`pen-recording-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, new Blob([data], { type: 'application/json' }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) setRecMsg({ ok: false, msg });
     }
   };
 
@@ -103,6 +127,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
             <Toggle checked={draft.holdToSnap} onChange={(v) => set({ holdToSnap: v })} title="Draw and hold to snap shapes" sub="Lines, arrows, circles, ellipses, rectangles, triangles, polygons" />
             <Toggle checked={draft.pencilDoubleTapEraser} onChange={(v) => set({ pencilDoubleTapEraser: v })} title="Apple Pencil double-tap switches to eraser" />
             <Toggle checked={draft.fingerTapUndo} onChange={(v) => set({ fingerTapUndo: v })} title="Two-finger tap to undo" sub="Three-finger tap redoes" />
+          </section>
+
+          <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
+            <div className={label}>Diagnostics</div>
+            <Toggle
+              checked={rec.on}
+              onChange={(v) => penRecorder.setEnabled(v)}
+              title="Record pen strokes"
+              sub={`Raw Pencil samples of pen strokes, to tune the ink engine. ${rec.count} stroke${rec.count === 1 ? '' : 's'} recorded (kept until the app closes).`}
+            />
+            {rec.count > 0 && (
+              <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
+                <button onClick={sendRecording}>Send to PC</button>
+                <button onClick={shareRecording}>Share file</button>
+                <button onClick={() => penRecorder.clear()} className="text-red-500">Clear</button>
+              </div>
+            )}
+            {recMsg && <p className={`text-xs mt-2 break-all ${recMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{recMsg.msg}</p>}
           </section>
         </div>
 

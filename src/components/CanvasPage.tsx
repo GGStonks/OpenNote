@@ -9,6 +9,7 @@ import {
 } from '../ink/strokeRenderer';
 import { ModeledPoint, pressureWidth, trimLiftOff } from '../ink/inkEngine';
 import { NibModeler } from '../ink/nib';
+import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
@@ -267,6 +268,12 @@ const NATIVE_GRACE_MS = 120;
 /** Longest wait for the shell's final samples after the web pointerup. */
 const NATIVE_END_WAIT_MS = 80;
 
+/** A raw sample for the pen recorder; `arrival` is when the app got it, on the stroke's clock. */
+function recSample(pt: Point, force: number, start: number): RecordedSample {
+  const r = (v: number, k = 100) => Math.round(v * k) / k;
+  return [r(pt.x), r(pt.y), pt.t ?? 0, r(force > 0 ? force : 0, 10000), r(performance.now() - start, 10), r(pt.alt ?? 0, 1000), r(pt.az ?? 0, 1000)];
+}
+
 /** Event time on the performance.now() clock (coalesced samples carry their own time). */
 function eventTime(e: { timeStamp?: number }): number {
   const now = performance.now();
@@ -409,6 +416,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     nativeEnded: boolean;
     /** Web samples held back while waiting for the shell's first samples (replayed on fallback). */
     webBuffer: PointerEvent[];
+    /** Raw input of the stroke for the pen recorder (Settings > Diagnostics); null when off. */
+    rec: RecordedSample[] | null;
     /** The pen lifted before the shell's last samples arrived: finish when they do. */
     finishPending: { cancelled: boolean; pointerType: string; timer: ReturnType<typeof setTimeout> } | null;
   } | null>(null);
@@ -753,6 +762,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       nativeEnded: false,
       webBuffer: [],
       finishPending: null,
+      rec: tool === 'pen' && penRecorder.enabled ? [recSample(pt, e.pointerType === 'pen' ? e.pressure : 0.5, start)] : null,
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
     if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
@@ -810,6 +820,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     let snapTick = false;
     for (const ce of events) {
       const pt = toPoint(ce, d.start, stylusAngles(ce as PointerEvent));
+      if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
       const last = d.points[d.points.length - 1];
       if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
@@ -871,6 +882,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
       d.model = new NibModeler();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+      if (d.rec) d.rec = [recSample(pt, first.pressure, d.start)];
       samples = samples.slice(1);
     }
     d.nativeSeen = true;
@@ -898,6 +910,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
     } else if (!cancelled && (d.tool === 'pen' || d.tool === 'highlighter')) {
       const style = liveStyle(d.tool);
+      if (d.rec) {
+        penRecorder.add({
+          tool: d.tool, penStyle: style.penStyle, width: style.width, source: d.nativeSeen ? 'native' : 'web',
+          pointerType: d.pointerType, zoom: zoomRef.current, recordedAt: Date.now(), samples: d.rec,
+        });
+      }
       const stroke: Stroke = {
         id: newId('stroke'),
         tool: d.tool,
@@ -953,6 +971,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const last = d.points[d.points.length - 1];
       if (Math.hypot(pt.x - last.x, pt.y - last.y) > 0.2) {
         pt.pressure = d.model ? 0 : d.pressure;
+        if (d.rec) d.rec.push(recSample(pt, 0, d.start));
         d.force.push(0); // the pen has left the glass
         d.points.push(pt);
         if (d.smart) moveSmartPen(d.smart, pt);

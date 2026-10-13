@@ -44,3 +44,7 @@ public/tikzjax/
 # Synced web assets inside native projects
 android/app/src/main/assets/public/
 ios/App/App/public/
+
+# Raw pen recordings (your handwriting), see bench/pen.ts
+bench/recordings/
+bench/out/
