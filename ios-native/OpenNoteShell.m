@@ -13,16 +13,89 @@
 //      print  prints the web view (print layout) -> "Save to Files" gives a PDF.
 //      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
+//  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
+//    getCoalescedEvents, so a passive gesture recognizer (never cancels or delays the web view's
+//    touches) forwards every coalesced UITouch sample (precise location, force, altitude, azimuth,
+//    timestamp) plus UIKit's predicted touches to window.__opennotePencil (src/ink/nativePencil.ts).
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <UIKit/UIGestureRecognizerSubclass.h>
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"1.2.0";
+static NSString *const kVersion = @"1.7.0";
+
+#pragma mark - 240 Hz Apple Pencil samples
+
+@interface ONPencilRecognizer : UIGestureRecognizer
+@property (nonatomic, weak) WKWebView *webView;
+@end
+
+@implementation ONPencilRecognizer
+
+- (instancetype)initWithWebView:(WKWebView *)webView {
+    self = [super initWithTarget:nil action:nil];
+    if (self) {
+        _webView = webView;
+        self.cancelsTouchesInView = NO;
+        self.delaysTouchesBegan = NO;
+        self.delaysTouchesEnded = NO;
+        self.allowedTouchTypes = @[ @(UITouchTypePencil) ];
+    }
+    return self;
+}
+
+static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
+    CGPoint p = [t preciseLocationInView:view];
+    CGFloat maxForce = t.maximumPossibleForce > 0 ? t.maximumPossibleForce : 1;
+    [js appendFormat:@"%.3f,%.3f,%.4f,%.5f,%.4f,%.4f,", p.x, p.y, t.force / maxForce, t.timestamp,
+                     t.altitudeAngle, [t azimuthAngleInView:view]];
+}
+
+// phase: 0 began, 1 moved, 2 ended, 3 cancelled. Samples: x, y, force 0..1, time (s), altitude, azimuth.
+- (void)forward:(NSSet<UITouch *> *)touches event:(UIEvent *)event phase:(int)phase {
+    UITouch *touch = touches.anyObject;
+    WKWebView *view = self.webView;
+    if (!touch || !view) return;
+    NSMutableString *js = [NSMutableString stringWithFormat:@"window.__opennotePencil&&window.__opennotePencil(%d,%.5f,[",
+                                                            phase, [NSProcessInfo processInfo].systemUptime];
+    NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
+    if (!samples.count) samples = @[ touch ];
+    for (UITouch *t in samples) ONAppendTouch(js, t, view);
+    [js appendString:@"],["];
+    if (phase == 1)
+        for (UITouch *t in [event predictedTouchesForTouch:touch]) ONAppendTouch(js, t, view);
+    [js appendString:@"])"];
+    [view evaluateJavaScript:js completionHandler:nil];
+}
+
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesBegan:touches withEvent:event];
+    [self forward:touches event:event phase:0];
+}
+
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesMoved:touches withEvent:event];
+    [self forward:touches event:event phase:1];
+}
+
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesEnded:touches withEvent:event];
+    [self forward:touches event:event phase:2];
+    self.state = UIGestureRecognizerStateFailed;
+}
+
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    [super touchesCancelled:touches withEvent:event];
+    [self forward:touches event:event phase:3];
+    self.state = UIGestureRecognizerStateFailed;
+}
+
+@end
 
 #pragma mark - Bundled web app over opennote://app/
 
@@ -81,7 +154,7 @@ static NSString *ONMimeType(NSString *ext) {
 
 #pragma mark - View controller
 
-@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
+@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIGestureRecognizerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
@@ -121,6 +194,10 @@ static NSString *ONMimeType(NSString *ext) {
     UIPencilInteraction *pencil = [[UIPencilInteraction alloc] init];
     pencil.delegate = self;
     [self.webView addInteraction:pencil];
+
+    ONPencilRecognizer *samples = [[ONPencilRecognizer alloc] initWithWebView:self.webView];
+    samples.delegate = self;
+    [self.webView addGestureRecognizer:samples];
 
     NSURLSessionConfiguration *sc = [NSURLSessionConfiguration defaultSessionConfiguration];
     sc.timeoutIntervalForRequest = 300;
@@ -258,6 +335,11 @@ static void ONRemoveScribble(UIView *view) {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     ONRemoveScribble(webView);
+}
+
+// The sample recognizer only observes: it must never compete with the web view's own recognizers.
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
+    return YES;
 }
 
 - (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction {

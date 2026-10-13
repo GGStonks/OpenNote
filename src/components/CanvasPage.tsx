@@ -8,6 +8,7 @@ import {
   capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
 import { ModeledPoint, StrokeModeler, pressureWidth, trimLiftOff } from '../ink/inkEngine';
+import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -260,6 +261,11 @@ function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
 }
 
 
+/** Time to wait for the iOS shell's first Pencil samples before using the web events. */
+const NATIVE_GRACE_MS = 120;
+/** Longest wait for the shell's final samples after the web pointerup. */
+const NATIVE_END_WAIT_MS = 80;
+
 /** Event time on the performance.now() clock (coalesced samples carry their own time). */
 function eventTime(e: { timeStamp?: number }): number {
   const now = performance.now();
@@ -395,6 +401,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawn: number;
     realPressure: boolean;
     inkRect: DirtyRect | null;
+    /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
+    native: PencilListener | null;
+    nativeSeen: boolean;
+    /** Web samples held back while waiting for the shell's first samples (replayed on fallback). */
+    webBuffer: PointerEvent[];
+    /** The pen lifted before the shell's last samples arrived: finish when they do. */
+    finishPending: { cancelled: boolean; pointerType: string; timer: ReturnType<typeof setTimeout> } | null;
   } | null>(null);
   const tailCanvasRef = useRef<HTMLCanvasElement>(null);
   const raf = useRef<number | null>(null);
@@ -728,8 +741,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       drawn: 0,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       inkRect: null,
+      native: null,
+      nativeSeen: false,
+      webBuffer: [],
+      finishPending: null,
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+    if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
+      const d = drawing.current;
+      const listener: PencilListener = (samples, predicted, ended) => nativeInputRef.current(d, samples, predicted, ended);
+      d.native = listener;
+      const queued = nativePencil.attach(listener);
+      if (queued.length) nativeInputRef.current(d, queued, [], nativePencil.ended);
+    }
     if (drawing.current.smart?.snapDot) haptic('snap');
     if (tool === 'lasso') setSelection(null);
     if (tool === 'eraser') {
@@ -758,15 +782,34 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const native = e.nativeEvent;
     const coalesced: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [];
     const events = coalesced.length ? coalesced : [native];
+    if (d.native) {
+      // The shell's 240 Hz samples drive the stroke; fall back to the web events if none arrive.
+      if (d.nativeSeen) return;
+      d.webBuffer.push(...events);
+      if (performance.now() - d.start < NATIVE_GRACE_MS) return;
+      nativePencil.detach(d.native);
+      d.native = null;
+      events.splice(0, events.length, ...d.webBuffer);
+      d.webBuffer = [];
+    }
+    const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
+    ingestSamples(d, events, predicted[0] ?? null);
+    requestRender();
+  };
+
+  /** Adds pen samples (web pointer events or the shell's 240 Hz Pencil samples) to the stroke. */
+  function ingestSamples(d: NonNullable<typeof drawing.current>, events: (PointerEvent | PencilSample)[], predictedEvent: PointerEvent | PencilSample | null) {
     let snapTick = false;
     for (const ce of events) {
-      const pt = toPoint(ce, d.start, stylusAngles(ce));
+      const pt = toPoint(ce, d.start, stylusAngles(ce as PointerEvent));
       const last = d.points[d.points.length - 1];
       if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
+      // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
+      const lifting = ce.pointerType === 'pen' && !(ce.pressure > 0);
+      d.force.push(lifting ? 0 : pt.pressure);
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
       // outline wobble.
-      d.force.push(pt.pressure);
-      d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
+      if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
       pt.pressure = d.pressure;
       d.points.push(pt);
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
@@ -783,8 +826,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.snapped = { ...d.snapped, points: adjustSnappedShape(d.adjust, pen) };
     }
     if (!d.smart && (d.tool === 'pen' || d.tool === 'highlighter')) {
-      const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
-      d.predicted = dampedPrediction(d.points, predicted[0] ? { ...toPoint(predicted[0], d.start), pressure: d.pressure } : null);
+      d.predicted = dampedPrediction(d.points, predictedEvent ? { ...toPoint(predictedEvent, d.start), pressure: d.pressure } : null);
       const last = d.points[d.points.length - 1];
       if (!d.snapped && Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
         d.lastMove = { x: last.x, y: last.y };
@@ -792,10 +834,25 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
     }
     requestRender();
+  }
+
+  const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
+  nativeInputRef.current = (d, samples, predicted, ended) => {
+    if (drawing.current !== d) return;
+    d.nativeSeen = true;
+    rectCache.current = null;
+    ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
+    if (ended && d.finishPending) {
+      clearTimeout(d.finishPending.timer);
+      finishStroke(d, d.finishPending.cancelled, d.finishPending.pointerType);
+    }
   };
 
   function finishStroke(d: NonNullable<typeof drawing.current>, cancelled: boolean, pointerType?: string) {
     if (d.holdTimer) clearTimeout(d.holdTimer);
+    if (d.finishPending) clearTimeout(d.finishPending.timer);
+    if (d.native) nativePencil.detach(d.native);
+    if (drawing.current !== d) return;
     drawing.current = null;
     retireInk(d);
 
@@ -846,6 +903,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const d = drawing.current;
     if (!d || e.pointerId !== d.pointerId) return;
     rectCache.current = null;
+    if (d.native && d.nativeSeen) {
+      // The shell's final samples (the true lift-off point) may still be on their way.
+      if (cancelled || !nativePencil.touching) finishStroke(d, cancelled, e.pointerType);
+      else if (!d.finishPending) d.finishPending = { cancelled, pointerType: e.pointerType, timer: setTimeout(() => finishStroke(d, cancelled, e.pointerType), NATIVE_END_WAIT_MS) };
+      return;
+    }
+    if (d.webBuffer.length) {
+      ingestSamples(d, d.webBuffer, null);
+      d.webBuffer = [];
+    }
     if (!cancelled && d.tool !== 'eraser' && d.tool !== 'lasso') {
       // Include the final sample of the stroke.
       const pt = toPoint(e, d.start, stylusAngles(e.nativeEvent));
