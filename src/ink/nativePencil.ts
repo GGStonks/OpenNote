@@ -29,14 +29,22 @@ const STRIDE = 6;
 
 /** performance.now() minus the native clock, in ms: the smallest value seen (least IPC delay). */
 let offset = Infinity;
+/**
+ * The offset used for the current touch, fixed when it begins. Refining the estimate mid-stroke
+ * shifted the following samples' times by the IPC jitter (a few ms back or forth at 4 ms per
+ * sample), which the time-based stroke model turned into kinks.
+ */
+let touchOffset = Infinity;
 let listener: PencilListener | null = null;
+/** The attached listener has received its touch's end: it must not get the next touch. */
+let listenerEnded = false;
 /** Samples of the current touch that arrived before the canvas attached (pointerdown races them). */
 let queue: PencilSample[] = [];
 let touchActive = false;
 let touchEnded = false;
 let seen = false;
 
-function decode(data: number[]): PencilSample[] {
+function decode(data: number[], offset: number): PencilSample[] {
   const out: PencilSample[] = [];
   for (let i = 0; i + STRIDE <= data.length; i += STRIDE) {
     out.push({
@@ -55,21 +63,31 @@ function decode(data: number[]): PencilSample[] {
 }
 
 function receive(phase: number, nativeNow: number, data: number[], predicted: number[]) {
-  offset = Math.min(offset, performance.now() - nativeNow * 1000);
+  const measured = performance.now() - nativeNow * 1000;
+  // A delivery delay is a few ms; a much larger gap means the clocks moved apart (e.g. sleep).
+  offset = measured < offset || measured - offset > 1000 ? measured : offset;
   seen = true;
   if (phase === 0) {
     queue = [];
     touchActive = true;
     touchEnded = false;
+    touchOffset = offset;
+    // Quick strokes (dotting an i): the previous stroke may still be waiting for its web
+    // pointerup. Its listener must not take this touch's samples, which drew a line from the end of
+    // the last stroke to the start of the new one.
+    if (listener && listenerEnded) listener = null;
   }
-  const samples = decode(data);
+  const o = Number.isFinite(touchOffset) ? touchOffset : offset;
+  const samples = decode(data, o);
   const ended = phase >= 2;
   if (ended) {
     touchActive = false;
     touchEnded = true;
   }
-  if (listener) listener(samples, decode(predicted), ended);
-  else queue.push(...samples);
+  if (listener) {
+    if (ended) listenerEnded = true;
+    listener(samples, decode(predicted, o), ended);
+  } else queue.push(...samples);
 }
 
 if (typeof window !== 'undefined') {
@@ -91,12 +109,16 @@ export const nativePencil = {
   /** Starts delivering samples to `fn`; samples queued since the touch began come first. */
   attach(fn: PencilListener): PencilSample[] {
     listener = fn;
+    listenerEnded = touchEnded;
     const q = queue;
     queue = [];
     return q;
   },
   detach(fn: PencilListener): void {
-    if (listener === fn) listener = null;
+    // Only the attached listener clears the queue: a stale one being detached must not discard
+    // the samples of the touch that has just begun.
+    if (listener !== fn) return;
+    listener = null;
     queue = [];
   },
 };

@@ -404,6 +404,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
     native: PencilListener | null;
     nativeSeen: boolean;
+    /** The shell delivered this touch's final samples. */
+    nativeEnded: boolean;
     /** Web samples held back while waiting for the shell's first samples (replayed on fallback). */
     webBuffer: PointerEvent[];
     /** The pen lifted before the shell's last samples arrived: finish when they do. */
@@ -743,6 +745,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       inkRect: null,
       native: null,
       nativeSeen: false,
+      nativeEnded: false,
       webBuffer: [],
       finishPending: null,
     };
@@ -838,9 +841,29 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
   nativeInputRef.current = (d, samples, predicted, ended) => {
-    if (drawing.current !== d) return;
-    d.nativeSeen = true;
+    if (drawing.current !== d || d.nativeEnded) return;
     rectCache.current = null;
+    if (!d.nativeSeen && samples.length && d.model && d.points.length === 1) {
+      // Restart the stroke on the shell's first sample. The pointerdown point is a different
+      // reading of the same touch: a less precise position and a time on another clock. Native
+      // samples stamped before it all had their times clamped to +0.5 ms steps by the model, so
+      // the first milliseconds of every stroke were squeezed together and the start was bent.
+      const first = samples[0];
+      d.start = first.timeStamp;
+      const pt = toPoint(first, d.start, stylusAngles(first as unknown as PointerEvent));
+      retireInk(d);
+      d.drawn = 0;
+      d.points = [pt];
+      d.pressure = pt.pressure;
+      d.force = [first.pressure > 0 ? pt.pressure : 0];
+      d.lastMove = { x: pt.x, y: pt.y };
+      d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
+      d.model = new StrokeModeler();
+      d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+      samples = samples.slice(1);
+    }
+    d.nativeSeen = true;
+    if (ended) d.nativeEnded = true;
     ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
     if (ended && d.finishPending) {
       clearTimeout(d.finishPending.timer);
@@ -905,7 +928,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     rectCache.current = null;
     if (d.native && d.nativeSeen) {
       // The shell's final samples (the true lift-off point) may still be on their way.
-      if (cancelled || !nativePencil.touching) finishStroke(d, cancelled, e.pointerType);
+      if (cancelled || d.nativeEnded) finishStroke(d, cancelled, e.pointerType);
       else if (!d.finishPending) d.finishPending = { cancelled, pointerType: e.pointerType, timer: setTimeout(() => finishStroke(d, cancelled, e.pointerType), NATIVE_END_WAIT_MS) };
       return;
     }
