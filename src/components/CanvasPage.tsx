@@ -5,10 +5,9 @@ import {
   TextBlock, ToolType, newId,
 } from '../types';
 import {
-  capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
+  drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
-import { ModeledPoint, pressureWidth } from '../ink/inkEngine';
-import { NibModeler } from '../ink/nib';
+import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { detectShape } from '../services/shapeRecognition';
@@ -220,9 +219,6 @@ function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
 
 type DirtyRect = { minX: number; minY: number; maxX: number; maxY: number };
 
-const intersects = (a: DirtyRect, b: DirtyRect) => a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
-/** Settled live ink is kept in path chunks of this many points (repainting stays local on long strokes). */
-const LIVE_CHUNK = 64;
 
 /** Snap indicator: orange for shapes (PDEDraw), a small blue dot for grid points. */
 function drawSnapDot(ctx: CanvasRenderingContext2D, dot: { x: number; y: number }, grid: boolean, k: number): DirtyRect {
@@ -271,6 +267,8 @@ function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
 const NATIVE_GRACE_MS = 120;
 /** The shell's samples stopped while web pointer events keep coming: switch to the web events. */
 const NATIVE_STALL_MS = 60;
+/** ... and only once the web events show the pen this far (px) from the last native sample. */
+const NATIVE_STALL_PX = 2;
 /** Longest wait for the shell's final samples after the web pointerup. */
 const NATIVE_END_WAIT_MS = 80;
 
@@ -410,14 +408,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     pressure: number;
     /** Raw Pencil force of each sample (lift-off trimming). */
     force: number[];
-    /** Handwriting model (pen tool): its settled points are drawn once, incrementally. */
-    model: NibModeler | null;
-    drawn: number;
+    /** Pen tool: the stroke being written (Nib model + live painter, src/ink/engine). */
+    model: LiveStroke | null;
     realPressure: boolean;
-    inkRect: DirtyRect | null;
-    /** Live pen ink: the settled part in chunks of path with their bounds, and the last frame's tail region. */
-    liveChunks: { path: Path2D; rect: DirtyRect | null; n: number }[];
-    tailRect: DirtyRect | null;
     /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
     native: PencilListener | null;
     nativeSeen: boolean;
@@ -487,7 +480,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
-      drawModeledInk(ctx, d);
+      const style = liveStyle('pen');
+      d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
@@ -535,87 +529,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const staleInk = useRef<DirtyRect | null>(null);
 
   const retireInk = (d: NonNullable<typeof drawing.current>) => {
-    staleInk.current = unionRect(unionRect(staleInk.current, d.inkRect), d.tailRect);
-    d.inkRect = null;
-    d.tailRect = null;
-    d.liveChunks = [];
+    staleInk.current = unionRect(staleInk.current, d.model?.bounds ?? null);
   };
-
-  /**
-   * Live handwriting: the model's settled points never change and are appended to one path; the
-   * provisional end (the ink still settling near the pen, plus Nib's prediction) is recomputed
-   * every frame. Each frame only the region that changed is repainted.
-   */
-  function drawModeledInk(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>) {
-    const m = d.model!;
-    const style = liveStyle('pen');
-    const base = strokeWidth({ ...style, isShape: false });
-    const variable = isVariableWidth(style) && d.realPressure;
-    const widthOf = (q: ModeledPoint) => (variable ? pressureWidth(base, q.p) : base);
-    const pad = base * 1.7 + 2;
-    const grow = (r: DirtyRect | null, seq: ModeledPoint[]) => {
-      for (const q of seq) r = unionRect(r, { minX: q.x - pad, minY: q.y - pad, maxX: q.x + pad, maxY: q.y + pad });
-      return r;
-    };
-    /** Appends seq (its first point already on the path when from = 1) to a path. */
-    const append = (path: Path2D, seq: ModeledPoint[], from: number) => {
-      if (!seq.length) return;
-      if (variable) capsulePath(seq, seq.map(widthOf), from, path);
-      else {
-        if (from === 0) path.moveTo(seq[0].x, seq[0].y);
-        if (seq.length === 1) path.lineTo(seq[0].x + 0.01, seq[0].y);
-        for (let i = 1; i < seq.length; i++) path.lineTo(seq[i].x, seq[i].y);
-      }
-    };
-    // Settled ink: appended to one path that only grows.
-    const pts = m.points;
-    let changed = d.tailRect;
-    if (d.drawn < pts.length) {
-      const seg = pts.slice(Math.max(0, d.drawn - 1));
-      let chunk = d.liveChunks[d.liveChunks.length - 1];
-      const fresh = !chunk || chunk.n >= LIVE_CHUNK;
-      if (fresh) d.liveChunks.push((chunk = { path: new Path2D(), rect: null, n: 0 }));
-      // A new chunk starts at the last drawn point, so the line continues across chunks.
-      append(chunk.path, seg, d.drawn === 0 || fresh ? 0 : 1);
-      chunk.rect = grow(chunk.rect, seg);
-      chunk.n += seg.length;
-      d.inkRect = grow(d.inkRect, seg);
-      changed = grow(changed, seg);
-      d.drawn = pts.length;
-    }
-    // Provisional end (redrawn every frame), with the engine's own prediction.
-    const tailPts = m.tail(true);
-    const tail = pts.length ? [pts[pts.length - 1], ...tailPts] : tailPts;
-    const tailPath = new Path2D();
-    append(tailPath, tail, pts.length ? 1 : 0);
-    d.tailRect = tail.length ? grow(null, tail) : null;
-    changed = unionRect(changed, d.tailRect);
-    if (!changed) return;
-    // The stroke is filled as ONE path, settled ink and tail together, in the region that changed:
-    // separate fills (one per frame, and a tail layer on top) painted the antialiased edge pixels
-    // where they overlap twice, a faint beading along the live line; and a single canvas needs no
-    // per-frame DOM changes (the moving tail canvas did).
-    // Only the chunks of settled ink that reach into the region (near the pen, or a loop crossing it).
-    const all = new Path2D();
-    for (const c of d.liveChunks) if (c.rect && intersects(c.rect, changed)) all.addPath(c.path);
-    all.addPath(tailPath);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(changed.minX, changed.minY, changed.maxX - changed.minX, changed.maxY - changed.minY);
-    ctx.clip();
-    ctx.clearRect(changed.minX, changed.minY, changed.maxX - changed.minX, changed.maxY - changed.minY);
-    if (variable) {
-      ctx.fillStyle = style.color;
-      ctx.fill(all);
-    } else {
-      ctx.strokeStyle = style.color;
-      ctx.lineWidth = base;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      ctx.stroke(all);
-    }
-    ctx.restore();
-  }
 
   const renderRef = useRef(renderActive);
   renderRef.current = renderActive;
@@ -762,12 +677,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
       force: [pt.pressure],
-      model: tool === 'pen' ? new NibModeler() : null,
-      drawn: 0,
+      model: tool === 'pen' ? new LiveStroke() : null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
-      inkRect: null,
-      liveChunks: [],
-      tailRect: null,
       native: null,
       nativeSeen: false,
       nativeEnded: false,
@@ -820,6 +731,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.webBuffer.push(...events);
       const now = performance.now();
       if (d.nativeSeen ? d.nativeEnded || now - d.lastNativeAt < NATIVE_STALL_MS : now - d.start < NATIVE_GRACE_MS) return;
+      // A Pencil held still can go quiet: only a pen that has moved away means the samples stopped.
+      if (d.nativeSeen) {
+        const at = toPoint(native, d.start), last = d.points[d.points.length - 1];
+        if (Math.hypot(at.x - last.x, at.y - last.y) < NATIVE_STALL_PX) return;
+      }
       nativePencil.detach(d.native);
       d.native = null;
       const lastT = d.points[d.points.length - 1].t ?? 0;
@@ -893,13 +809,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const pt = toPoint(first, d.start, stylusAngles(first as unknown as PointerEvent));
       if (!(first.pressure > 0)) pt.pressure = 0;
       retireInk(d);
-      d.drawn = 0;
       d.points = [pt];
       d.pressure = pt.pressure;
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
-      d.model = new NibModeler();
+      d.model = new LiveStroke();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       if (d.rec) d.rec = [recSample(pt, first.pressure, d.start)];
       samples = samples.slice(1);

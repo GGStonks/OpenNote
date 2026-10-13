@@ -1,42 +1,10 @@
-import { Point } from '../types';
-import { XY } from './spline';
-
 /**
- * Shared ink geometry (pressure width, capsules, lift-off trimming, sample times) and the v1.7
- * handwriting engine, kept as the baseline of the pen benchmark (bench/pen.ts). The app draws
- * handwriting with its own engine, Nib (nib.ts).
- *
- * v1.7 engine: a TypeScript port of the modelling stage of Google's Ink Stroke Modeler
- * (github.com/google/ink-stroke-modeler, Apache-2.0), the library behind the handwriting of
- * Google's own note apps (wobble smoother as in the library, position model retuned below).
- *
- *  1. Wobble smoother: at very low speed the input is replaced by its moving average over the
- *     last 40 ms (removes the digitiser's jitter when writing slowly); at normal speed the raw
- *     position is used, with a smooth blend in between.
- *  2. Up-sampling: inputs are interpolated so that the model advances in steps of at most 1.5 ms.
- *  3. Position modeller: the ink tip is a mass pulled towards the pen by a spring, with drag
- *     (semi-implicit Euler), tuned stiffer and critically damped (see OMEGA). This is what makes the line fluid: corners are rounded the way a real nib
- *     rounds them, and jitter is filtered without the lag of a heavy moving average.
- *  3b. Output smoothing: a 2.5 px arc-length moving average of the tip (see ARC_WINDOW).
- *  4. End of stroke: when the pen lifts, the tip is moved on until it reaches the pen, and the
- *     stroke always ends exactly where the pen lifted (closed loops close).
- *
- * The model is causal: every output point depends only on earlier input, so ink that has been
- * drawn never moves again ("no retracing"). The live stroke and the saved stroke are the same.
- *
- * Rendering (strokeRenderer.ts): the dense output is drawn as a polyline (uniform width) or, for
- * the fountain pen, as the exact union of capsules swept by a circle whose radius follows the
- * pressure — smooth at any size, with no polygonal facets.
+ * The v1.7 handwriting engine, kept as the baseline of the pen benchmarks: a TypeScript port of
+ * the modelling stage of Google's Ink Stroke Modeler (github.com/google/ink-stroke-modeler,
+ * Apache-2.0) with a stiffer, critically damped spring and a 2.5 px arc-length average. The app
+ * draws with Nib (src/ink/engine).
  */
-
-export interface ModeledPoint {
-  x: number;
-  y: number;
-  /** Normalised pressure 0..1. */
-  p: number;
-  /** ms since the start of the stroke. */
-  t: number;
-}
+import { InkPoint, ModeledPoint, XY, sampleTimes } from '../src/ink/engine';
 
 // Wobble smoother: Ink Stroke Modeler defaults, in milliseconds and page units (96 px per inch).
 const WOBBLE_TIMEOUT = 40; // ms
@@ -219,43 +187,13 @@ export class StrokeModeler {
   }
 }
 
-/**
- * Sample times of a stroke. Strokes saved before v1.2 have no timestamps: they are synthesised
- * from the distance at an ordinary writing speed.
- */
-export function sampleTimes(points: Point[]): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i];
-    if (typeof p.t === 'number' && (i === 0 || typeof points[i - 1].t === 'number')) out.push(p.t);
-    else if (i === 0) out.push(0);
-    else out.push(out[i - 1] + Math.max(4, Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y) / 0.4));
-  }
-  return out;
-}
-
 /** The full modelled stroke (as drawn when finished). */
-export function modelStroke(points: Point[]): ModeledPoint[] {
+export function modelStroke(points: InkPoint[]): ModeledPoint[] {
   if (points.length === 0) return [];
   const m = new StrokeModeler();
   const times = sampleTimes(points);
   points.forEach((p, i) => m.add(p.x, p.y, times[i], p.pressure > 0 ? p.pressure : 0.5));
   return [...m.points, ...m.tail()];
-}
-
-export function hasRealPressure(points: Point[]): boolean {
-  for (const p of points) if (p.pressure !== 0.5 && p.pressure > 0) return true;
-  return false;
-}
-
-/**
- * Fountain pen: width for a normalised force. Ordinary writing force (Safari reports ~0.15-0.4)
- * stays close to the nominal width; the range is 0.72x (barely touching) to 1.3x (pressed hard),
- * like Notability's pen, instead of the old 0.4x-1.6x that made light writing thin and fragile.
- */
-export function pressureWidth(base: number, pressure: number): number {
-  const p = Math.max(0, Math.min(1, pressure || 0.5));
-  return base * (0.72 + 0.58 * Math.pow(p, 0.7));
 }
 
 /**
@@ -264,7 +202,7 @@ export function pressureWidth(base: number, pressure: number): number {
  * force dropped under half of the stroke's median force are dropped (a real nib stops inking
  * there), at most the last 30 ms and 10 px.
  */
-export function trimLiftOff(points: Point[], force: number[]): Point[] {
+export function trimLiftOff(points: InkPoint[], force: number[]): InkPoint[] {
   const n = points.length;
   if (n < 6 || force.length !== n) return points;
   const median = force.slice().sort((a, b) => a - b)[n >> 1];
@@ -280,62 +218,4 @@ export function trimLiftOff(points: Point[], force: number[]): Point[] {
     k--;
   }
   return k === n ? points : points.slice(0, k);
-}
-
-/** Drops modelled points closer than `min` to the previous one (keeps the last). */
-export function thinModeled(pts: ModeledPoint[], min = 0.35): ModeledPoint[] {
-  if (pts.length < 3) return pts;
-  const out = [pts[0]];
-  for (let i = 1; i < pts.length - 1; i++) {
-    const l = out[out.length - 1];
-    if (Math.hypot(pts[i].x - l.x, pts[i].y - l.y) >= min) out.push(pts[i]);
-  }
-  out.push(pts[pts.length - 1]);
-  return out;
-}
-
-/**
- * Appends to `path` the capsule swept by a circle moving from (a, ra) to (b, rb): the two outer
- * tangents and the two end arcs, always with the same winding so that a nonzero fill of many
- * capsules is their exact union.
- */
-export function addCapsule(path: Path2D | CanvasRenderingContext2D, a: XY, ra: number, b: XY, rb: number): void {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const d = Math.hypot(dx, dy);
-  if (d <= Math.abs(ra - rb) + 1e-6) {
-    // One circle contains the other.
-    const c = ra >= rb ? a : b, r = Math.max(ra, rb);
-    path.moveTo(c.x + r, c.y);
-    path.arc(c.x, c.y, r, 0, Math.PI * 2, true);
-    path.closePath();
-    return;
-  }
-  const th = Math.atan2(dy, dx);
-  const ph = Math.acos((ra - rb) / d);
-  path.moveTo(a.x + ra * Math.cos(th + ph), a.y + ra * Math.sin(th + ph));
-  path.lineTo(b.x + rb * Math.cos(th + ph), b.y + rb * Math.sin(th + ph));
-  path.arc(b.x, b.y, rb, th + ph, th - ph, true);
-  path.lineTo(a.x + ra * Math.cos(th - ph), a.y + ra * Math.sin(th - ph));
-  path.arc(a.x, a.y, ra, th - ph, th + ph - Math.PI * 2, true);
-  path.closePath();
-}
-
-/** SVG path data of the same capsule (for vector export). */
-export function capsuleSvg(a: XY, ra: number, b: XY, rb: number, f: (v: number) => string): string {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const d = Math.hypot(dx, dy);
-  if (d <= Math.abs(ra - rb) + 1e-6) {
-    const c = ra >= rb ? a : b, r = Math.max(ra, rb);
-    return `M${f(c.x + r)} ${f(c.y)}A${f(r)} ${f(r)} 0 1 0 ${f(c.x - r)} ${f(c.y)}A${f(r)} ${f(r)} 0 1 0 ${f(c.x + r)} ${f(c.y)}Z`;
-  }
-  const th = Math.atan2(dy, dx);
-  const ph = Math.acos((ra - rb) / d);
-  const P = (c: XY, r: number, ang: number) => `${f(c.x + r * Math.cos(ang))} ${f(c.y + r * Math.sin(ang))}`;
-  // Front arc spans 2*ph around b, back arc 2*pi - 2*ph around a; both counter-clockwise (sweep 0).
-  return (
-    `M${P(a, ra, th + ph)}L${P(b, rb, th + ph)}` +
-    `A${f(rb)} ${f(rb)} 0 ${2 * ph > Math.PI ? 1 : 0} 0 ${P(b, rb, th - ph)}` +
-    `L${P(a, ra, th - ph)}` +
-    `A${f(ra)} ${f(ra)} 0 ${2 * Math.PI - 2 * ph > Math.PI ? 1 : 0} 0 ${P(a, ra, th + ph)}Z`
-  );
 }

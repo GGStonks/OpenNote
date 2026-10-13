@@ -1,7 +1,6 @@
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
-import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, pressureWidth, thinModeled } from './inkEngine';
-import { nibStroke } from './nib';
+import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, pressureWidth, thinModeled } from './engine';
 
 /**
  * Ink renderer.
@@ -78,13 +77,6 @@ export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoi
   const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
   const widths = isVariableWidth(style) && hasRealPressure(points) ? pts.map((p) => pressureWidth(width, p.p)) : null;
   return { pts, widths, width };
-}
-
-/** Variable-width ink as the union of capsules between consecutive points (fill, nonzero). */
-export function capsulePath(pts: XY[], widths: number[], from = 0, path: Path2D = new Path2D()): Path2D {
-  for (let i = Math.max(1, from); i < pts.length; i++) addCapsule(path, pts[i - 1], widths[i - 1] / 2, pts[i], widths[i] / 2);
-  if (pts.length === 1) addCapsule(path, pts[0], widths[0] / 2, pts[0], widths[0] / 2);
-  return path;
 }
 
 function polylinePath(pts: XY[], closed = false): Path2D {

@@ -13,8 +13,7 @@
  *
  * Run: npm run bench:pen
  */
-import { pressureWidth } from '../src/ink/inkEngine';
-import { NIB } from '../src/ink/nib';
+import { NIB, pressureWidth } from '../src/ink/engine';
 import { Engine, Sample, nib, spring } from './engines';
 
 // Tuning: NIB='{"HORIZON":8}' npm run bench:pen ; SUMMARY=1 prints only the averages.

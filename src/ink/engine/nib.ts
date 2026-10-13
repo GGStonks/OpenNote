@@ -1,5 +1,4 @@
-import { Point } from '../types';
-import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
+import { InkPoint, ModeledPoint, hasRealPressure, sampleTimes } from './geometry';
 
 /**
  * Nib: OpenNote's own handwriting engine.
@@ -29,9 +28,8 @@ import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
  *     under LIFT_FORCE of the force before it (the last LIFT_MS / LIFT_PX at most) are not ink: they
  *     are held back while drawing (neither settled nor on the tail, since they may turn out to be
  *     the lift) and dropped when the stroke ends, so the ink stops where the pen stopped inking.
- *  5. Prediction (tail only, never stored): constant-acceleration extrapolation of the last
- *     PREDICT_WIN ms over HORIZON ms, stopped where the pen would come to rest and only at
- *     writing speed, so it covers the display latency without shooting past the end of a stroke.
+ *  5. No prediction: the ink ends at the last sample. Extrapolating the pen (to hide a frame of
+ *     latency) drew ink past where the pen stopped and made the tip twitch from frame to frame.
  *
  * Input times are ms on any clock; output `t` is relative to the first sample.
  */
@@ -54,21 +52,10 @@ export const NIB = {
   PRESS_HALF: 14,
   ATTACK: 24,
   RELEASE: 60,
-  /** Prediction horizon and the history it is fitted to (ms). */
-  HORIZON: 9,
-  PREDICT_WIN: 20,
-  /** Share of the fitted acceleration used (it is the noisiest term). */
-  ACCEL: 1,
-  /** Prediction never reaches further than this (px): a pen can lift at any moment. */
-  PREDICT_MAX_PX: 3,
-  /** No prediction below this speed (px/ms). */
-  PREDICT_MIN_SPEED: 0.12,
   /** Lift-off: ink ends where the fading force drops under this share of its level before the fade. */
   LIFT_FORCE: 0.6,
   LIFT_MS: 40,
   LIFT_PX: 18,
-  /** No prediction once the force falls under this share of its recent peak (the pen is lifting). */
-  PREDICT_FORCE_DROP: 0.85,
   /** Output spacing (px). */
   STEP: 0.5,
 };
@@ -173,10 +160,10 @@ export class NibModeler {
   }
 
   /**
-   * The provisional rest of the stroke after `points`: the unsettled anchors and, with `predict`,
-   * the predicted continuation. Recomputed every frame, never stored.
+   * The provisional rest of the stroke after `points`: the ink still settling near the pen, up to
+   * the last sample. Recomputed every frame, never stored.
    */
-  tail(predict = false): ModeledPoint[] {
+  tail(): ModeledPoint[] {
     if (!this.raw.length) return [];
     // Possible lift-off samples are not drawn.
     const n = this.inkEnd();
@@ -193,7 +180,6 @@ export class NibModeler {
     const out: ModeledPoint[] = [];
     for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out, i >= this.anchors.length - 1 ? latest : null);
     if (this.emitted === 0 && all.length) out.unshift(this.point(all[0]));
-    if (predict && n === this.raw.length && all.length) out.push(...this.predict(all[all.length - 1]));
     return out;
   }
 
@@ -348,44 +334,6 @@ export class NibModeler {
     const k = c * c * (3 - 2 * c);
     return { x: rx + (fx - rx) * k, y: ry + (fy - ry) * k };
   }
-
-  // ----------------------------------------------------------------------------------- prediction
-  private predict(from: Anchor): ModeledPoint[] {
-    const r = this.raw;
-    const n = r.length;
-    // At least ~25 ms of stroke: the first samples alone are too few to extrapolate from.
-    if (n < 7) return [];
-    const tl = r[n - 1].t;
-    let a = n - 1;
-    while (a > 0 && tl - r[a - 1].t <= NIB.PREDICT_WIN) a--;
-    if (n - a < 4) return [];
-    // The force is falling: the pen may be lifting, and ink must not run on past the lift.
-    let peak = 0;
-    for (let j = a; j < n; j++) peak = Math.max(peak, r[j].f);
-    if (peak > 0 && r[n - 1].f < NIB.PREDICT_FORCE_DROP * peak) return [];
-    // The pen must really be moving: the end-point derivative alone can be made of noise (a dot).
-    const travelled = Math.hypot(r[n - 1].x - r[a].x, r[n - 1].y - r[a].y) / Math.max(1e-6, tl - r[a].t);
-    if (travelled < NIB.PREDICT_MIN_SPEED) return [];
-    const m = motionAt(r, a, n - 1, tl, NIB.PREDICT_WIN);
-    const speed = Math.hypot(m.vx, m.vy);
-    if (speed < NIB.PREDICT_MIN_SPEED) return [];
-    // Stop where the velocity along the current direction would reach zero (the pen slowing down).
-    const along = (m.vx * m.ax + m.vy * m.ay) / speed;
-    let horizon = NIB.HORIZON;
-    if (along < 0) horizon = Math.min(horizon, (0.5 * speed) / -along);
-    // Never further than the pen went in the same time just before (a bound on the acceleration).
-    const reach = Math.min(NIB.PREDICT_MAX_PX, travelled * horizon * 1.25);
-    const out: ModeledPoint[] = [];
-    const steps = Math.max(1, Math.ceil(horizon / 2));
-    for (let s = 1; s <= steps; s++) {
-      const tau = (horizon * s) / steps;
-      const k = 0.5 * NIB.ACCEL * tau * tau;
-      const q = { x: from.x + m.vx * tau + k * m.ax, y: from.y + m.vy * tau + k * m.ay, p: from.p, t: from.t + tau };
-      if (Math.hypot(q.x - from.x, q.y - from.y) > reach) break;
-      out.push(q);
-    }
-    return out;
-  }
 }
 
 /**
@@ -405,15 +353,7 @@ function fitAt(r: Raw[], a: number, b: number, tc: number, h: number, cx: number
   return { x: c.x[0], y: c.y[0] };
 }
 
-/** Velocity and acceleration at tc from a one-sided quadratic fit over a..b. */
-export function motionAt(r: Raw[], a: number, b: number, tc: number, h: number) {
-  const c = polyFit(r, a, b, tc, h * 1.2, b - a >= 3 ? 2 : 1);
-  // Coefficients are in u = (t - tc) / h.
-  const sh = h * 1.2;
-  return { vx: c.x[1] / sh, vy: c.y[1] / sh, ax: (2 * (c.x[2] ?? 0)) / (sh * sh), ay: (2 * (c.y[2] ?? 0)) / (sh * sh) };
-}
-
-export function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, near?: { x: number; y: number; r: number }) {
+function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, near?: { x: number; y: number; r: number }) {
   const m = degree + 1;
   const S = new Float64Array(2 * m - 1);
   const X = new Float64Array(m), Y = new Float64Array(m);
@@ -460,7 +400,7 @@ function solve(M: number[][], v: number[]): number[] | null {
 }
 
 /** The full stroke as drawn when finished. */
-export function nibStroke(points: Point[]): ModeledPoint[] {
+export function nibStroke(points: InkPoint[]): ModeledPoint[] {
   if (!points.length) return [];
   const m = new NibModeler();
   const times = sampleTimes(points);

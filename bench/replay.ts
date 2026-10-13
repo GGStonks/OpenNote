@@ -19,8 +19,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
-import { ModeledPoint, pressureWidth } from '../src/ink/inkEngine';
-import { NIB } from '../src/ink/nib';
+import { ModeledPoint, NIB, pressureWidth } from '../src/ink/engine';
 import type { PenRecording, RecordedStroke } from '../src/ink/penRecorder';
 import { Engine, Sample, nib, spring } from './engines';
 

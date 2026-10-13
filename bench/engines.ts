@@ -1,5 +1,5 @@
-import { ModeledPoint, StrokeModeler as SpringModeler, modelStroke as springStroke, trimLiftOff } from '../src/ink/inkEngine';
-import { NibModeler, nibStroke } from '../src/ink/nib';
+import { ModeledPoint, NibModeler, nibStroke } from '../src/ink/engine';
+import { StrokeModeler as SpringModeler, modelStroke as springStroke, trimLiftOff } from './springEngine';
 
 /** A raw pen sample: page px, ms, force 0..1 (0 = lifting). */
 export interface Sample { x: number; y: number; t: number; p: number }
@@ -49,7 +49,7 @@ export const nib: Engine = {
   name: 'nib',
   live() {
     const m = new NibModeler();
-    return { add: (s) => m.add(s.x, s.y, s.t, s.p), settled: () => m.points, tail: () => m.tail(true) };
+    return { add: (s) => m.add(s.x, s.y, s.t, s.p), settled: () => m.points, tail: () => m.tail() };
   },
   final: (samples) => nibStroke(samples.map((s) => ({ x: s.x, y: s.y, t: s.t, pressure: s.p }))),
 };

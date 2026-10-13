@@ -18,7 +18,7 @@
 - Audio recordings per note (record, list, play, delete).
 
 **Pencil & ink**
-- **Handwriting engine (Nib, OpenNote's own, `src/ink/nib.ts`)**: every Pencil sample is smoothed with the samples on *both* sides of it (a speed-adaptive local quadratic fit, zero phase), so the line has none of the lag distortion of causal filters: corners stay sharp and small loops keep their size. The window spans about ±5 px of line (14–70 ms) and fades out smoothly in time and distance, and the curve is that fit evaluated continuously (no spline kinks at the samples). Settled ink never moves; near the pen the ink blends from the raw Pencil position into its final shape, plus at most 3 px of Nib's own prediction (none while the force falls). **The ink stops where the pencil lifts:** samples without force (the pen in the air) are never ink, and trailing samples whose force fades under half the stroke's median are held back while drawing and dropped at the end. Strokes land at full width (the Pencil under-reads force on its first samples) and keep their body width as the pen eases off; the fountain pen's width spans 0.72×–1.3× of nominal and is rendered as the exact union of pressure-sized capsules. Tuned on real Pencil recordings (`npm run bench:replay`, Settings → Diagnostics → Record pen strokes) and synthetic handwriting with ground truth (`npm run bench:pen`). Highlighter drawn behind ink, custom colours.
+- **Handwriting engine (Nib, OpenNote's own, `src/ink/nib.ts`)**: every Pencil sample is smoothed with the samples on *both* sides of it (a speed-adaptive local quadratic fit, zero phase), so the line has none of the lag distortion of causal filters: corners stay sharp and small loops keep their size. The window spans about ±5 px of line (14–70 ms) and fades out smoothly in time and distance, and the curve is that fit evaluated continuously (no spline kinks at the samples). Settled ink never moves; near the pen the ink blends from the raw Pencil position into its final shape. There is no prediction: the ink never runs past where the pen is. The live stroke is painted as one fill (settled ink and the settling end together) in the region that changed, so it looks exactly like the finished stroke. **The ink stops where the pencil lifts:** samples without force (the pen in the air) are never ink, and trailing samples whose force fades under half the stroke's median are held back while drawing and dropped at the end. Strokes land at full width (the Pencil under-reads force on its first samples) and keep their body width as the pen eases off; the fountain pen's width spans 0.72×–1.3× of nominal and is rendered as the exact union of pressure-sized capsules. Tuned on real Pencil recordings (`npm run bench:replay`, Settings → Diagnostics → Record pen strokes) and synthetic handwriting with ground truth (`npm run bench:pen`). Highlighter drawn behind ink, custom colours.
 - **240 Hz Apple Pencil capture on iPad**: WKWebView only delivers pointer events once per display frame (60/120 Hz) and has no `getCoalescedEvents`, so the iOS shell reads the Pencil natively (a passive gesture recognizer, `coalescedTouchesForTouch:` + `predictedTouchesForTouch:`) and streams every sample — precise location, force, altitude, azimuth and its own timestamp — to the ink engine (no platform prediction: Nib predicts the pen itself). Strokes end on the Pencil's real lift-off samples, and a force-less sample is treated as lift-off instead of being drawn at medium pressure. Android (Chromium) already gets every sample through coalesced pointer events.
 - Per-point pressure, timestamps, altitude and azimuth are stored — the same per-point channels Notability's `InkObjectEncoder` serialises.
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
@@ -96,7 +96,12 @@ src/
     Toolbar.tsx, LibraryView.tsx, LatexModal.tsx, ExportModal.tsx, SettingsModal.tsx, AudioRecorder.tsx
   editor/                     continuous surface + page bands (surface.ts), selection maths, scrolling and tap gestures,
                               smart pen (smartPen.ts), shape handles and snap-and-size (shapeEdit.ts)
-  ink/inkEngine.ts            handwriting spline engine (sampling, smoothing, pressure width)
+  ink/engine/                 the ink engine (Nib), self-contained: no imports from the rest of the app
+    nib.ts                    handwriting model: zero-phase smoothing, lift-off, pressure
+    liveStroke.ts             the stroke being written, painted incrementally on a canvas
+    geometry.ts               point types, pressure width, capsule paths (canvas and SVG)
+  ink/nativePencil.ts         240 Hz Apple Pencil samples from the iOS shell
+  ink/penRecorder.ts          pen recording (Settings > Diagnostics) for the benchmarks
   ink/strokeRenderer.ts       Path2D cache, SVG export, partial eraser
   services/
     vlmService.ts             Qwen3-VL client + prompts
@@ -109,6 +114,8 @@ src/
   storage/db.ts               IndexedDB (notes, subjects, audio), migration, backup
   platform.ts                 native HTTP / share / print bridges
 ios-native/                   native iOS shell + Info.plist
+bench/                        pen benchmarks: pen.ts (synthetic, ground truth), replay.ts (real recordings),
+                              springEngine.ts (the v1.7 engine, as the baseline)
 scripts/                      copy-tikzjax.mjs, build-ios.sh
 android/, ios/                Capacitor projects
 ```

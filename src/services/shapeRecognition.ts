@@ -1,6 +1,6 @@
 import { FillType, Point, Stroke, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
-import { nibStroke } from '../ink/nib';
+import { nibStroke } from '../ink/engine';
 import { arrowSize } from '../ink/strokeRenderer';
 import { latexForDocument } from './latexRender';
 
