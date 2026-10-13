@@ -1,12 +1,16 @@
 import { FillType, LineStyle, Point, ShapeKind, ShapeMode, Stroke } from '../types';
 import { curveSegments } from '../ink/strokeRenderer';
 import { flattenBeziers, XY } from '../ink/spline';
+import { NibModeler } from '../ink/engine';
 
 /**
  * Smart pen: PDEDraw's drawing engine (CanvasViewModel+Gestures / +Snapping) on OpenNote pages.
  *
- *  - curve: smooth centripetal Catmull-Rom curve; ending near the start closes it ("potato"),
- *    shown by a snap dot at the start point. Every sample snaps to nearby shape points/edges.
+ *  - curve: drawn by the ink engine (Nib, src/ink/engine) exactly like the pen, at uniform width.
+ *    Ending near the start closes it ("potato"), shown by a snap dot at the start point. Its two
+ *    ends snap to nearby shape points; in between it is never snapped sample by sample (that
+ *    zig-zagged between the pen and the targets). Retracing: where it runs along the outline of
+ *    an existing shape, it lies exactly on that outline.
  *  - line (angle lock every 15°), rectangle, ellipse from the centre (circle lock), point.
  *  - Snapping targets: key points of existing shapes (vertices, midpoints, centres, quadrant
  *    points), the closest point on their edges, and intersections of straight segments.
@@ -31,11 +35,18 @@ interface Segment {
   b: XY;
 }
 
+export interface Edge extends Segment {
+  /** Index of the stroke the edge belongs to. */
+  owner: number;
+}
+
 export interface SnapCache {
   points: XY[];
   intersections: XY[];
-  edges: Segment[];
+  edges: Edge[];
   grid: number | null;
+  /** Spatial index of the edges (cells of EDGE_CELL px), built on first use. */
+  edgeIndex?: Map<string, number[]>;
 }
 
 export type SnapKind = 'shape' | 'grid';
@@ -45,7 +56,6 @@ export const PX_PER_CM = 96 / 2.54;
 const POINT_SNAP = 20;
 const EDGE_SNAP = 16;
 const CLOSE_DISTANCE = 18;
-const CURVE_SAMPLING = 4.5;
 const CIRCLE_LOCK = 30;
 const GRID_SNAP = 12;
 
@@ -149,7 +159,7 @@ export function buildSnapCache(strokes: Stroke[], grid: number | null = null): S
       if (intersections.length >= MAX_INTERSECTIONS) break outer;
     }
   }
-  return { points, intersections, edges: owned.map(({ a, b }) => ({ a, b })), grid };
+  return { points, intersections, edges: owned.map(({ a, b, owner }) => ({ a, b, owner })), grid };
 }
 
 /**
@@ -196,8 +206,6 @@ export interface SmartPenState {
   mode: ShapeMode;
   zoom: number;
   cache: SnapCache | null;
-  /** Curve control points / shape anchor. */
-  points: XY[];
   start: XY | null;
   end: XY | null;
   /** Orange snap indicator. */
@@ -205,16 +213,43 @@ export interface SmartPenState {
   snapKind: SnapKind | null;
   closing: boolean;
   snapping: boolean;
+  /** Curve mode: the ink engine modelling the stroke. */
+  ink: NibModeler | null;
+  /** Curve mode: length of the pen's path so far (px). */
+  length: number;
+  lastRaw: XY | null;
+  lastT: number;
 }
 
-export function beginSmartPen(raw: XY, opts: SmartPenOptions, strokes: Stroke[], zoom: number): SmartPenState {
+/** A pen sample for the smart pen: page px, ms since the stroke started, force (0 = lifting). */
+export interface PenSample extends XY {
+  t?: number;
+  pressure?: number;
+}
+
+export function beginSmartPen(raw: PenSample, opts: SmartPenOptions, strokes: Stroke[], zoom: number): SmartPenState {
   const cache = opts.snap || opts.grid ? buildSnapCache(opts.snap ? strokes : [], opts.grid) : null;
-  const st: SmartPenState = { mode: opts.mode, zoom, cache, points: [], start: null, end: null, snapDot: null, snapKind: null, closing: false, snapping: false };
+  const st: SmartPenState = {
+    mode: opts.mode, zoom, cache, start: null, end: null, snapDot: null, snapKind: null, closing: false, snapping: false,
+    ink: null, length: 0, lastRaw: null, lastT: 0,
+  };
   const p = snapAt(st, raw);
   st.start = p;
   st.end = p;
-  if (opts.mode === 'curve') st.points = [p];
+  if (opts.mode === 'curve') {
+    st.ink = new NibModeler();
+    feedInk(st, raw);
+  }
   return st;
+}
+
+/** Curve mode: one sample into the ink engine (uniform width; a force-less sample is the pen in the air). */
+function feedInk(st: SmartPenState, raw: PenSample) {
+  const t = raw.t ?? st.lastT + 1000 / 240;
+  st.lastT = t;
+  st.ink!.add(raw.x, raw.y, t, raw.pressure === 0 ? 0 : 0.5);
+  if (st.lastRaw) st.length += dist(raw, st.lastRaw);
+  st.lastRaw = { x: raw.x, y: raw.y };
 }
 
 function snapAt(st: SmartPenState, raw: XY): XY {
@@ -224,40 +259,29 @@ function snapAt(st: SmartPenState, raw: XY): XY {
   return s?.at ?? { x: raw.x, y: raw.y };
 }
 
-/** PDEDraw's appendCurvePoint: drops samples that only extend a straight run. */
-function appendCurvePoint(pts: XY[], p: XY, sampling: number) {
-  const last = pts[pts.length - 1];
-  if (dist(p, last) < sampling) return;
-  if (pts.length >= 2) {
-    const prev = pts[pts.length - 2];
-    const deviation = dist(p, project(p, prev, last));
-    if (deviation < 0.27 * sampling && dist(p, last) < 2.2 * sampling) {
-      pts[pts.length - 1] = p;
-      return;
-    }
-  }
-  pts.push(p);
-}
-
 /**
  * Feeds one input sample. Returns true when a shape snap just engaged (haptic tick; grid points
  * are passed too often to tick on each).
  */
-export function moveSmartPen(st: SmartPenState, raw: XY): boolean {
+export function moveSmartPen(st: SmartPenState, raw: PenSample): boolean {
   const k = 1 / Math.max(0.3, st.zoom);
   const wasSnapping = st.snapDot !== null && st.snapKind !== 'grid';
   switch (st.mode) {
     case 'curve': {
-      const first = st.points[0];
-      const last = st.points[st.points.length - 1];
-      if (dist(raw, last) <= CURVE_SAMPLING * k) break;
-      if (dist(raw, first) < CLOSE_DISTANCE * k && st.points.length > 5) {
+      feedInk(st, raw as PenSample);
+      const start = st.start!;
+      // Back at the start closes the curve; drawing on a little past it (an overshoot) keeps it closing.
+      const d0 = dist(raw, start);
+      if (st.length > CLOSE_MIN_LENGTH * k && (d0 < CLOSE_DISTANCE * k || (st.closing && d0 < CLOSE_KEEP * CLOSE_DISTANCE * k))) {
         st.closing = true;
-        st.snapDot = first;
+        st.snapDot = start;
         st.snapKind = 'shape';
       } else {
+        // Shown only (the ends snap, and the line follows an outline it retraces).
         st.closing = false;
-        appendCurvePoint(st.points, snapAt(st, raw), CURVE_SAMPLING * k);
+        const s = st.cache ? findSnapKind(st.cache, raw, st.zoom) : null;
+        st.snapDot = s?.kind === 'shape' ? s.at : null;
+        st.snapKind = st.snapDot ? 'shape' : null;
       }
       break;
     }
@@ -308,15 +332,8 @@ export interface SmartShape {
 export function smartPenShape(st: SmartPenState, final: boolean): SmartShape | null {
   const k = 1 / Math.max(0.3, st.zoom);
   switch (st.mode) {
-    case 'curve': {
-      const pts = st.points;
-      if (pts.length < 2) return null;
-      const first = pts[0], last = pts[pts.length - 1];
-      const closed = pts.length > 2 && (st.closing || (final && dist(first, last) < CLOSE_DISTANCE * k));
-      if (pts.length === 2) return { points: pts.map(P), kind: 'line', closed: false };
-      const ctrl = closed && dist(first, last) < CURVE_SAMPLING * k ? pts.slice(0, -1) : pts;
-      return { points: ctrl.map(P), kind: 'curve', closed };
-    }
+    case 'curve':
+      return curveShape(st, final, k);
     case 'line': {
       if (!st.start || !st.end || dist(st.start, st.end) < 2 * k) return null;
       return { points: [P(st.start), P(st.end)], kind: 'line', closed: false };
@@ -393,4 +410,170 @@ export function smartPenMeasure(st: SmartPenState): { text: string; at: XY } | n
     default:
       return null;
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Curve mode: the ink engine's line, auto-closing, end snapping and retracing
+
+/** A curve that comes back within CLOSE_DISTANCE of its start after this much line closes. */
+const CLOSE_MIN_LENGTH = 4 * CLOSE_DISTANCE;
+/** Once closing, the pen may go on this many CLOSE_DISTANCEs past the start (an overshoot) and it still closes. */
+const CLOSE_KEEP = 3;
+/** Retracing: line within this distance (screen px) of a shape's outline, for at least TRACE_MIN px, lies on it. */
+const TRACE_DIST = 8;
+const TRACE_MIN = 20;
+/** Length (screen px) over which the line eases onto and off an outline, and onto snapped ends. */
+const BLEND = 6;
+/** Stored control points: the line simplified to this tolerance (px). */
+const SIMPLIFY = 0.12;
+const EDGE_CELL = 24;
+
+function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | null {
+  const ink = st.ink;
+  if (!ink) return null;
+  const model = final ? ink.finish() : [...ink.points, ...ink.tail()];
+  let pts: XY[] = model.map((q) => ({ x: q.x, y: q.y }));
+  if (pts.length < 2 || pathLength(pts) < 2 * k) return null;
+
+  // Auto-close: back near the start after enough line. Cut where the line passes closest to the
+  // start (it may overshoot it or stop short), and let the closed curve join the ends smoothly.
+  const start = pts[0];
+  let closed = false;
+  if (st.length > CLOSE_MIN_LENGTH * k && (st.closing || dist(pts[pts.length - 1], start) < CLOSE_DISTANCE * k)) {
+    let best = pts.length - 1;
+    for (let i = Math.floor(pts.length * 0.7); i < pts.length; i++) if (dist(pts[i], start) < dist(pts[best], start)) best = i;
+    pts = pts.slice(0, best + 1);
+    if (pts.length > 2 && dist(pts[pts.length - 1], start) < 1) pts.pop();
+    closed = pts.length > 2;
+  }
+
+  if (st.cache) {
+    pts = retrace(pts, st.cache, k, closed);
+    // The ends snap to shape points nearby (the start was looked up when the pen came down).
+    if (st.start && dist(st.start, pts[0]) > 0.01) pts = ease(pts, st.start, BLEND * k, false);
+    if (final && !closed) {
+      const end = findSnapKind(st.cache, pts[pts.length - 1], st.zoom);
+      if (end?.kind === 'shape') pts = ease(pts, end.at, BLEND * k, true);
+    }
+  }
+
+  const ctrl = simplify(pts, SIMPLIFY, closed);
+  if (ctrl.length === 2 && !closed) return { points: ctrl.map(P), kind: 'line', closed: false };
+  return { points: ctrl.map(P), kind: 'curve', closed };
+}
+
+function pathLength(pts: XY[]): number {
+  let l = 0;
+  for (let i = 1; i < pts.length; i++) l += dist(pts[i], pts[i - 1]);
+  return l;
+}
+
+const smooth = (u: number) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
+
+/** Moves one end of the line onto `target`, easing the shift out over `len` px of line. */
+function ease(pts: XY[], target: XY, len: number, atEnd: boolean): XY[] {
+  const out = pts.slice();
+  const n = out.length;
+  const i0 = atEnd ? n - 1 : 0, step = atEnd ? -1 : 1;
+  const dx = target.x - out[i0].x, dy = target.y - out[i0].y;
+  let s = 0;
+  for (let i = i0; i >= 0 && i < n; i += step) {
+    if (i !== i0) s += dist(pts[i], pts[i - step]);
+    const w = 1 - smooth(s / len);
+    if (w <= 0) break;
+    out[i] = { x: out[i].x + dx * w, y: out[i].y + dy * w };
+  }
+  return out;
+}
+
+function edgeIndex(cache: SnapCache): Map<string, number[]> {
+  if (cache.edgeIndex) return cache.edgeIndex;
+  const idx = new Map<string, number[]>();
+  cache.edges.forEach((e, i) => {
+    const x0 = Math.floor(Math.min(e.a.x, e.b.x) / EDGE_CELL), x1 = Math.floor(Math.max(e.a.x, e.b.x) / EDGE_CELL);
+    const y0 = Math.floor(Math.min(e.a.y, e.b.y) / EDGE_CELL), y1 = Math.floor(Math.max(e.a.y, e.b.y) / EDGE_CELL);
+    for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
+      const key = `${cx},${cy}`;
+      const list = idx.get(key);
+      if (list) list.push(i);
+      else idx.set(key, [i]);
+    }
+  });
+  cache.edgeIndex = idx;
+  return idx;
+}
+
+/** The closest point on any shape outline within `thr` of p. */
+function nearestOutline(cache: SnapCache, p: XY, thr: number): { at: XY; d: number; owner: number } | null {
+  const idx = edgeIndex(cache);
+  let best: { at: XY; d: number; owner: number } | null = null;
+  const x0 = Math.floor((p.x - thr) / EDGE_CELL), x1 = Math.floor((p.x + thr) / EDGE_CELL);
+  const y0 = Math.floor((p.y - thr) / EDGE_CELL), y1 = Math.floor((p.y + thr) / EDGE_CELL);
+  for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
+    for (const i of idx.get(`${cx},${cy}`) ?? []) {
+      const e = cache.edges[i];
+      const q = project(p, e.a, e.b);
+      const d = dist(p, q);
+      if (d < thr && (!best || d < best.d)) best = { at: q, d, owner: e.owner };
+    }
+  }
+  return best;
+}
+
+/**
+ * Retracing: stretches of the line that follow one shape's outline (within TRACE_DIST, for at
+ * least TRACE_MIN of line) are put exactly on that outline, easing on and off over BLEND.
+ */
+function retrace(pts: XY[], cache: SnapCache, k: number, closed: boolean): XY[] {
+  if (!cache.edges.length) return pts;
+  const thr = TRACE_DIST * k, minLen = TRACE_MIN * k, blend = BLEND * k;
+  const near = pts.map((p) => nearestOutline(cache, p, thr));
+  const out = pts.slice();
+  let i = 0;
+  while (i < pts.length) {
+    if (!near[i]) { i++; continue; }
+    const owner = near[i]!.owner;
+    let j = i;
+    while (j + 1 < pts.length && near[j + 1] && near[j + 1]!.owner === owner) j++;
+    const len = pathLength(pts.slice(i, j + 1));
+    if (len >= minLen) {
+      // Arc length from each end of the run, for the easing (none where the run is a stroke end,
+      // or wraps round a closed curve).
+      const fromStart: number[] = [], fromEnd: number[] = [];
+      let s = 0;
+      for (let m = i; m <= j; m++) { if (m > i) s += dist(pts[m], pts[m - 1]); fromStart.push(s); }
+      for (let m = i; m <= j; m++) fromEnd.push(len - fromStart[m - i]);
+      const easeIn = !(i === 0 && !closed), easeOut = !(j === pts.length - 1 && !closed);
+      for (let m = i; m <= j; m++) {
+        const w = Math.min(easeIn ? smooth(fromStart[m - i] / blend) : 1, easeOut ? smooth(fromEnd[m - i] / blend) : 1);
+        const q = near[m]!.at;
+        out[m] = { x: pts[m].x + (q.x - pts[m].x) * w, y: pts[m].y + (q.y - pts[m].y) * w };
+      }
+    }
+    i = j + 1;
+  }
+  return out;
+}
+
+/** Ramer-Douglas-Peucker: the fewest points that keep the line within `tol`. */
+function simplify(pts: XY[], tol: number, closed: boolean): XY[] {
+  if (pts.length <= 2) return pts;
+  const keep = new Uint8Array(pts.length);
+  keep[0] = keep[pts.length - 1] = 1;
+  const stack: [number, number][] = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop()!;
+    let far = -1, fd = tol;
+    for (let i = a + 1; i < b; i++) {
+      const d = dist(pts[i], project(pts[i], pts[a], pts[b]));
+      if (d > fd) { fd = d; far = i; }
+    }
+    if (far >= 0) {
+      keep[far] = 1;
+      stack.push([a, far], [far, b]);
+    }
+  }
+  const out = pts.filter((_, i) => keep[i]);
+  // A closed curve needs its shape even when it is drawn as a near-straight there-and-back.
+  return closed && out.length < 3 ? pts.filter((_, i) => i % Math.max(1, Math.floor(pts.length / 3)) === 0) : out;
 }

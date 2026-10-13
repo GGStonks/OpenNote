@@ -265,6 +265,8 @@ function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
 
 /** Time to wait for the iOS shell's first Pencil samples before using the web events. */
 const NATIVE_GRACE_MS = 120;
+/** Web samples closer together in time than this (ms) have unreliable timestamps (retimeWebSamples). */
+const MIN_SAMPLE_DT = 1;
 /** The shell's samples stopped while web pointer events keep coming: switch to the web events. */
 const NATIVE_STALL_MS = 60;
 /** ... and only once the web events show the pen this far (px) from the last native sample. */
@@ -743,9 +745,36 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.webBuffer = [];
     }
     const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
-    ingestSamples(d, events, predicted[0] ?? null);
+    ingestSamples(d, retimeWebSamples(d, events), predicted[0] ?? null);
     requestRender();
   };
+
+  /**
+   * Web pointer events (Android, browsers): the samples' own timestamps drive the ink engine, so
+   * they must be real sample times. Chromium gives every coalesced event its hardware time, but
+   * some WebViews stamp a whole batch (or a burst of events) with nearly the same time: the engine
+   * then reads tens of px in a fraction of a millisecond as a huge speed, and its fit at the start
+   * of a stroke flung the ink far off. Bunched timestamps are spread evenly over the time since the
+   * previous sample, and times always increase.
+   */
+  function retimeWebSamples(d: NonNullable<typeof drawing.current>, events: PointerEvent[]): (PointerEvent | PencilSample)[] {
+    if (!events.length) return events;
+    const times = events.map((e) => eventTime(e));
+    const prev = d.start + (d.points[d.points.length - 1].t ?? 0);
+    const end = Math.max(times[times.length - 1], prev + events.length * MIN_SAMPLE_DT);
+    let bunched = false;
+    for (let i = 0; i < times.length; i++) if (times[i] - (i ? times[i - 1] : prev) < MIN_SAMPLE_DT) bunched = true;
+    if (!bunched) return events;
+    return events.map((e, i) => {
+      const anyE = e as PointerEvent & { altitudeAngle?: number; azimuthAngle?: number };
+      return {
+        clientX: e.clientX, clientY: e.clientY, pressure: e.pressure, pointerType: 'pen' as const,
+        timeStamp: prev + ((end - prev) * (i + 1)) / events.length,
+        altitudeAngle: anyE.altitudeAngle ?? 0, azimuthAngle: anyE.azimuthAngle ?? 0, tiltX: e.tiltX, tiltY: e.tiltY,
+        ...(e.pointerType !== 'pen' ? { pointerType: e.pointerType as 'pen' } : {}),
+      };
+    });
+  }
 
   /** Adds pen samples (web pointer events or the shell's 240 Hz Pencil samples) to the stroke. */
   function ingestSamples(d: NonNullable<typeof drawing.current>, events: (PointerEvent | PencilSample)[], predictedEvent: PointerEvent | PencilSample | null) {
@@ -770,7 +799,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.points.push(pt);
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
       if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
-      if (d.smart) snapTick = moveSmartPen(d.smart, pt) || snapTick;
+      // The smart curve's ink engine needs to know the pen is in the air (force-less) too.
+      if (d.smart) snapTick = moveSmartPen(d.smart, lifting ? { ...pt, pressure: 0 } : pt) || snapTick;
       else if (d.tool === 'eraser') {
         eraserPos.current = pt;
         eraseAt(pt.x, pt.y);
@@ -817,6 +847,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.model = new LiveStroke();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       if (d.rec) d.rec = [recSample(pt, first.pressure, d.start)];
+      samples = samples.slice(1);
+    }
+    if (!d.nativeSeen && samples.length && d.smart?.mode === 'curve' && d.points.length === 1) {
+      // The smart curve is drawn by the ink engine too: it also starts on the shell's first sample.
+      const first = samples[0];
+      d.start = first.timeStamp;
+      const pt = toPoint(first, d.start, stylusAngles(first as unknown as PointerEvent));
+      retireInk(d);
+      d.points = [pt];
+      d.force = [first.pressure > 0 ? pt.pressure : 0];
+      d.lastMove = { x: pt.x, y: pt.y };
+      d.smart = beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current);
       samples = samples.slice(1);
     }
     d.nativeSeen = true;
@@ -932,7 +974,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         if (d.rec) d.rec.push(recSample(pt, 0, d.start));
         d.force.push(0); // the pen has left the glass
         d.points.push(pt);
-        if (d.smart) moveSmartPen(d.smart, pt);
+        if (d.smart) moveSmartPen(d.smart, { ...pt, pressure: 0 });
         if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       }
     }

@@ -28,7 +28,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"1.8.5";
+static NSString *const kVersion = @"1.9.0";
 
 #pragma mark - 240 Hz Apple Pencil samples
 
