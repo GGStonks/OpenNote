@@ -1,4 +1,4 @@
-import { ModeledPoint, StrokeModeler as SpringModeler, modelStroke as springStroke } from '../src/ink/inkEngine';
+import { ModeledPoint, StrokeModeler as SpringModeler, modelStroke as springStroke, trimLiftOff } from '../src/ink/inkEngine';
 import { NibModeler, nibStroke } from '../src/ink/nib';
 
 /** A raw pen sample: page px, ms, force 0..1 (0 = lifting). */
@@ -32,13 +32,16 @@ export const spring: Engine = {
     let pe = -1;
     let last: Sample | null = null;
     const pts = [];
+    const force: number[] = [];
     for (const s of samples) {
       if (last && Math.abs(s.x - last.x) < 0.2 && Math.abs(s.y - last.y) < 0.2) continue;
       last = s;
       pe = pe < 0 ? s.p : pe * 0.55 + s.p * 0.45;
       pts.push({ x: s.x, y: s.y, t: s.t, pressure: pe });
+      force.push(s.p);
     }
-    return springStroke(pts);
+    // As v1.7's canvas did: the lift-off flick trimmed from the saved stroke.
+    return springStroke(trimLiftOff(pts, force));
   },
 };
 

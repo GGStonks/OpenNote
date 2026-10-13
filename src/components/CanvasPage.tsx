@@ -7,7 +7,7 @@ import {
 import {
   capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
-import { ModeledPoint, pressureWidth, trimLiftOff } from '../ink/inkEngine';
+import { ModeledPoint, pressureWidth } from '../ink/inkEngine';
 import { NibModeler } from '../ink/nib';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
@@ -945,7 +945,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         opacity: 1,
         penStyle: style.penStyle,
         lineStyle: 'solid',
-        points: d.snapped ? d.snapped.points : d.realPressure && d.tool === 'pen' ? trimLiftOff(d.points, d.force) : d.points,
+        // Pen strokes keep their lift-off samples: Nib leaves them out of the ink (nib.ts, 4b), the
+        // same way live and when the stroke is drawn later.
+        points: d.snapped ? d.snapped.points : d.points,
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
       };
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));

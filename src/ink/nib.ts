@@ -23,6 +23,11 @@ import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
  *     least the force the pen settles at, because the first samples' force is an under-read
  *     estimate and real nibs ink at full width as they land; a drop of force is followed with
  *     the RELEASE time constant so strokes keep their body width as the pen eases off.
+ *  4b. Lift-off: as the Pencil leaves the glass it keeps reporting samples, still moving, while its
+ *     force fades to zero; a nib stops inking there. Trailing samples whose force is under
+ *     LIFT_FORCE of the stroke's median (the last LIFT_MS / LIFT_PX at most) are not ink: they
+ *     are held back while drawing (neither settled nor on the tail, since they may turn out to be
+ *     the lift) and dropped when the stroke ends, so the ink stops where the pen stopped inking.
  *  5. Prediction (tail only, never stored): constant-acceleration extrapolation of the last
  *     PREDICT_WIN ms over HORIZON ms, stopped where the pen would come to rest and only at
  *     writing speed, so it covers the display latency without shooting past the end of a stroke.
@@ -57,6 +62,12 @@ export const NIB = {
   ACCEL: 1,
   /** No prediction below this speed (px/ms). */
   PREDICT_MIN_SPEED: 0.12,
+  /** Lift-off trimming: force fraction of the stroke median, and the most that is trimmed. */
+  LIFT_FORCE: 0.5,
+  LIFT_MS: 30,
+  LIFT_PX: 18,
+  /** No prediction once the force falls under this share of its recent peak (the pen is lifting). */
+  PREDICT_FORCE_DROP: 0.85,
   /** Output spacing (px). */
   STEP: 0.5,
 };
@@ -91,21 +102,56 @@ export class NibModeler {
   private t0 = NaN;
   private env = -1;
   private attackForce = -1;
+  /** Known forces, sorted (median of the stroke's force). */
+  private forces: number[] = [];
 
   add(x: number, y: number, t: number, p: number): void {
     if (Number.isNaN(this.t0)) this.t0 = t;
     let tt = t - this.t0;
     const last = this.raw[this.raw.length - 1];
     if (last && tt <= last.t) tt = last.t + 0.25;
-    this.raw.push({ x, y, t: tt, f: p > 0 ? Math.min(1, p) : 0 });
+    const f = p > 0 ? Math.min(1, p) : 0;
+    this.raw.push({ x, y, t: tt, f });
+    if (f > 0) {
+      const fs = this.forces;
+      let lo = 0, hi = fs.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (fs[mid] < f) lo = mid + 1;
+        else hi = mid;
+      }
+      fs.splice(lo, 0, f);
+    }
     this.settle(false);
   }
 
-  /** Settles everything (the pen has lifted). */
+  /** Settles everything (the pen has lifted); the lift-off samples are dropped. */
   finish(): ModeledPoint[] {
+    // Settled ink stays (it is already drawn); everything after the ink end goes.
+    this.raw.length = Math.max(this.inkEnd(), this.anchors.length, 1);
     this.settle(true);
     this.emit(true);
     return this.points;
+  }
+
+  /**
+   * Number of samples that are ink: the trailing samples after it are the lift-off (force under
+   * LIFT_FORCE of the median, within the last LIFT_MS and LIFT_PX) and may be dropped.
+   */
+  private inkEnd(): number {
+    const r = this.raw, n = r.length, fs = this.forces;
+    if (n < 6 || !fs.length) return n;
+    const limit = NIB.LIFT_FORCE * fs[fs.length >> 1];
+    const tEnd = r[n - 1].t;
+    let k = n, len = 0;
+    while (k > 4) {
+      const i = k - 1;
+      if (r[i].f >= limit || tEnd - r[i].t > NIB.LIFT_MS) break;
+      len += Math.hypot(r[i].x - r[i - 1].x, r[i].y - r[i - 1].y);
+      if (len > NIB.LIFT_PX) break;
+      k--;
+    }
+    return k;
   }
 
   /**
@@ -113,8 +159,9 @@ export class NibModeler {
    * the predicted continuation. Recomputed every frame, never stored.
    */
   tail(predict = false): ModeledPoint[] {
-    const n = this.raw.length;
-    if (!n) return [];
+    if (!this.raw.length) return [];
+    // Possible lift-off samples are not drawn.
+    const n = this.inkEnd();
     const provisional: Anchor[] = [];
     let env = this.env;
     for (let i = this.anchors.length; i < n; i++) {
@@ -126,7 +173,7 @@ export class NibModeler {
     const out: ModeledPoint[] = [];
     for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out);
     if (this.emitted === 0 && all.length) out.unshift(this.point(all[0]));
-    if (predict) out.push(...this.predict(all[all.length - 1]));
+    if (predict && n === this.raw.length && all.length) out.push(...this.predict(all[all.length - 1]));
     return out;
   }
 
@@ -149,7 +196,9 @@ export class NibModeler {
   private settle(final: boolean) {
     const r = this.raw;
     const latest = r[r.length - 1].t;
-    while (this.anchors.length < r.length) {
+    // Samples that may be the lift-off wait: once ink, they settle; if the pen lifts, they go.
+    const end = final ? r.length : this.inkEnd();
+    while (this.anchors.length < end) {
       const i = this.anchors.length;
       if (!final) {
         const ti = r[i].t;
@@ -268,6 +317,10 @@ export class NibModeler {
     let a = n - 1;
     while (a > 0 && tl - r[a - 1].t <= NIB.PREDICT_WIN) a--;
     if (n - a < 4) return [];
+    // The force is falling: the pen may be lifting, and ink must not run on past the lift.
+    let peak = 0;
+    for (let j = a; j < n; j++) peak = Math.max(peak, r[j].f);
+    if (peak > 0 && r[n - 1].f < NIB.PREDICT_FORCE_DROP * peak) return [];
     // The pen must really be moving: the end-point derivative alone can be made of noise (a dot).
     const travelled = Math.hypot(r[n - 1].x - r[a].x, r[n - 1].y - r[a].y) / Math.max(1e-6, tl - r[a].t);
     if (travelled < NIB.PREDICT_MIN_SPEED) return [];

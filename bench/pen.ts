@@ -29,6 +29,8 @@ interface Truth {
   force: (t: number) => number;
   duration: number;
   slow?: boolean;
+  /** Lift-off strokes: the pen keeps moving while its force fades; the ink must end here (ms). */
+  inkEnd?: number;
 }
 
 // ---------------------------------------------------------------------------------------------- truth
@@ -83,7 +85,30 @@ const TRUTHS: Truth[] = [
   eased('slow line (25 px/s)', (u) => ({ x: 20 + 30 * u, y: 80 + 6 * u }), 1500, true),
   eased('slow arc', (u) => ({ x: 60 + 25 * Math.cos(u * 2), y: 60 + 25 * Math.sin(u * 2) }), 1800, true),
   { name: 'dot', duration: 30, at: () => ({ x: 50, y: 50 }), force: bodyForce(30) },
+  lifting('lift while moving', (t) => ({ x: 20 + 0.3 * t, y: 50 + 0.05 * t }), 180),
+  lifting('lift on a curve', (t) => ({ x: 80 + 40 * Math.cos(t / 130), y: 80 + 40 * Math.sin(t / 130) }), 220),
+  lifting('fast lift (900 px/s)', (t) => ({ x: 20 + 0.9 * t, y: 60 - 0.2 * t }), 120),
 ];
+
+/**
+ * The pen leaves the glass while still moving at writing speed (no slowing down): over the last
+ * 25 ms the force fades to zero and the Pencil keeps reporting samples in the air. A nib stops
+ * inking when the force is gone: the ink must end where it falls below half.
+ */
+function lifting(name: string, at: (t: number) => XY, duration: number): Truth {
+  const fadeFrom = duration - 25, fadeTo = duration - 5;
+  return {
+    name,
+    duration,
+    at: (t) => at(Math.min(t, duration)),
+    force: (t) => {
+      const body = Math.min(1, t / 14) * 0.7 + 0.3;
+      const f = 0.33 * Math.min(body, 1);
+      return t <= fadeFrom ? f : Math.max(0, 0.33 * (1 - (t - fadeFrom) / (fadeTo - fadeFrom)));
+    },
+    inkEnd: (fadeFrom + fadeTo) / 2,
+  };
+}
 
 // -------------------------------------------------------------------------------------------- sensor
 let seed = 1;
@@ -128,13 +153,17 @@ function distToPolyline(p: XY, poly: XY[]): number {
 /** Display pipeline: a frame shows the samples up to DELIVERY ms before it, on screen LATENCY ms later. */
 const FRAME = 1000 / 120, DELIVERY = 4, LATENCY = 9;
 
-interface Score { mean: number; max: number; noise: number; lag: number; lagMax: number; over: number; overAvg: number; startW: number }
+interface Score { mean: number; max: number; noise: number; lag: number; lagMax: number; over: number; overAvg: number; startW: number; lift: number }
 
 function score(engine: Engine, tr: Truth, noise: number): Score {
   const samples = sense(tr, noise);
   const truth: XY[] = [];
-  for (let t = 0; t <= tr.duration; t += 0.5) truth.push(tr.at(t));
-  truth.push(tr.at(tr.duration));
+  const inkEnd = tr.inkEnd ?? tr.duration;
+  for (let t = 0; t <= inkEnd; t += 0.5) truth.push(tr.at(t));
+  truth.push(tr.at(inkEnd));
+  /** Ink past where the nib stopped inking, beyond sensor noise. */
+  const beyond = (q: XY) => (tr.inkEnd === undefined ? 0 : distToPolyline(q, truth) - 2 * noise - 0.3);
+  let lift = 0;
 
   // Live: frame by frame.
   const live = engine.live();
@@ -157,12 +186,15 @@ function score(engine: Engine, tr: Truth, noise: number): Score {
     // Provisional ink where the pen never goes (past the stop, off a curve), beyond sensor noise.
     let fo = 0;
     for (const q of tail) fo = Math.max(fo, distToPolyline(q, truth) - 1.5 * noise - 0.5);
+    for (const q of tail) lift = Math.max(lift, beyond(q));
+    for (const q of settled) lift = Math.max(lift, beyond(q));
     over = Math.max(over, fo);
     overSum += Math.max(0, fo);
     frames++;
   }
 
   const ink = engine.final(samples);
+  for (const q of ink) lift = Math.max(lift, beyond(q));
   let sum = 0, max = 0;
   for (const q of ink) {
     const d = distToPolyline(q, truth);
@@ -189,6 +221,7 @@ function score(engine: Engine, tr: Truth, noise: number): Score {
     over: Math.max(0, over),
     overAvg: frames ? overSum / frames : 0,
     startW: Number.isFinite(wmin) ? wmin / med : 1,
+    lift: Math.max(0, lift),
   };
 }
 
@@ -199,10 +232,10 @@ const engines = [spring, nib];
 const f = (v: number, d = 2) => (Number.isNaN(v) ? '   -' : v.toFixed(d).padStart(5));
 const totals = new Map<string, Score & { n: number; nn: number }>();
 if (!SUMMARY) console.log(`${RUNS} runs per stroke, noise ${NOISE} px. Lower is better except startW (1 = full width).\n`);
-if (!SUMMARY) console.log('stroke'.padEnd(24) + 'engine'.padEnd(13) + ' mean   max  noise   lag lagMax  over overAv startW');
-for (const tr of TRUTHS) {
+if (!SUMMARY) console.log('stroke'.padEnd(24) + 'engine'.padEnd(13) + ' mean   max  noise   lag lagMax  over overAv startW  lift');
+for (const tr of TRUTHS.filter((t) => !process.env.ONLY || t.name.includes(process.env.ONLY))) {
   for (const e of engines) {
-    const acc: Score = { mean: 0, max: 0, noise: 0, lag: 0, lagMax: 0, over: 0, overAvg: 0, startW: 0 };
+    const acc: Score = { mean: 0, max: 0, noise: 0, lag: 0, lagMax: 0, over: 0, overAvg: 0, startW: 0, lift: 0 };
     seed = 7;
     for (let r = 0; r < RUNS; r++) {
       const s = score(e, tr, NOISE);
@@ -213,10 +246,12 @@ for (const tr of TRUTHS) {
       acc.lagMax = Math.max(acc.lagMax, s.lagMax);
       acc.over = Math.max(acc.over, s.over);
       acc.overAvg += s.overAvg / RUNS;
+      acc.lift = Math.max(acc.lift, s.lift);
       acc.startW += s.startW / RUNS;
     }
-    if (!SUMMARY) console.log(tr.name.padEnd(24) + e.name.padEnd(13) + [acc.mean, acc.max, acc.noise, acc.lag, acc.lagMax, acc.over, acc.overAvg, acc.startW].map((v) => f(v)).join(' '));
-    const t = totals.get(e.name) ?? { mean: 0, max: 0, noise: 0, lag: 0, lagMax: 0, over: 0, overAvg: 0, startW: 0, n: 0, nn: 0 };
+    if (!SUMMARY) console.log(tr.name.padEnd(24) + e.name.padEnd(13) + [acc.mean, acc.max, acc.noise, acc.lag, acc.lagMax, acc.over, acc.overAvg, acc.startW, acc.lift].map((v) => f(v)).join(' '));
+    const t = totals.get(e.name) ?? { mean: 0, max: 0, noise: 0, lag: 0, lagMax: 0, over: 0, overAvg: 0, startW: 0, lift: 0, n: 0, nn: 0 };
+    t.lift = Math.max(t.lift, acc.lift);
     t.overAvg += acc.overAvg;
     t.mean += acc.mean; t.max += acc.max; t.lag += acc.lag; t.lagMax = Math.max(t.lagMax, acc.lagMax); t.over = Math.max(t.over, acc.over); t.startW += acc.startW; t.n++;
     if (!Number.isNaN(acc.noise)) { t.noise += acc.noise; t.nn++; }
@@ -225,5 +260,5 @@ for (const tr of TRUTHS) {
 }
 if (!SUMMARY) console.log('\naverage');
 for (const [name, t] of totals) {
-  console.log(''.padEnd(24) + name.padEnd(13) + [t.mean / t.n, t.max / t.n, t.noise / t.nn, t.lag / t.n, t.lagMax, t.over, t.overAvg / t.n, t.startW / t.n].map((v) => f(v)).join(' '));
+  console.log(''.padEnd(24) + name.padEnd(13) + [t.mean / t.n, t.max / t.n, t.noise / t.nn, t.lag / t.n, t.lagMax, t.over, t.overAvg / t.n, t.startW / t.n, t.lift].map((v) => f(v)).join(' '));
 }
