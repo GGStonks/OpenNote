@@ -265,6 +265,8 @@ function unionRect(a: DirtyRect | null, b: DirtyRect | null): DirtyRect | null {
 
 /** Time to wait for the iOS shell's first Pencil samples before using the web events. */
 const NATIVE_GRACE_MS = 120;
+/** The shell's samples stopped while web pointer events keep coming: switch to the web events. */
+const NATIVE_STALL_MS = 60;
 /** Longest wait for the shell's final samples after the web pointerup. */
 const NATIVE_END_WAIT_MS = 80;
 
@@ -414,6 +416,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     nativeSeen: boolean;
     /** The shell delivered this touch's final samples. */
     nativeEnded: boolean;
+    /** performance.now() of the last delivery from the shell (stall detection). */
+    lastNativeAt: number;
     /** Web samples held back while waiting for the shell's first samples (replayed on fallback). */
     webBuffer: PointerEvent[];
     /** Raw input of the stroke for the pen recorder (Settings > Diagnostics); null when off. */
@@ -760,6 +764,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       native: null,
       nativeSeen: false,
       nativeEnded: false,
+      lastNativeAt: 0,
       webBuffer: [],
       finishPending: null,
       rec: tool === 'pen' && penRecorder.enabled ? [recSample(pt, e.pointerType === 'pen' ? e.pressure : 0.5, start)] : null,
@@ -801,13 +806,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const coalesced: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [];
     const events = coalesced.length ? coalesced : [native];
     if (d.native) {
-      // The shell's 240 Hz samples drive the stroke; fall back to the web events if none arrive.
-      if (d.nativeSeen) return;
+      // The shell's 240 Hz samples drive the stroke; the web events are held back and take over if
+      // the shell's samples do not arrive or stop arriving while the pen is still moving, so a
+      // stroke is never cut short.
       d.webBuffer.push(...events);
-      if (performance.now() - d.start < NATIVE_GRACE_MS) return;
+      const now = performance.now();
+      if (d.nativeSeen ? d.nativeEnded || now - d.lastNativeAt < NATIVE_STALL_MS : now - d.start < NATIVE_GRACE_MS) return;
       nativePencil.detach(d.native);
       d.native = null;
-      events.splice(0, events.length, ...d.webBuffer);
+      const lastT = d.points[d.points.length - 1].t ?? 0;
+      events.splice(0, events.length, ...d.webBuffer.filter((w) => eventTime(w) - d.start > lastT));
       d.webBuffer = [];
     }
     const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
@@ -864,6 +872,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   nativeInputRef.current = (d, samples, predicted, ended) => {
     if (drawing.current !== d || d.nativeEnded) return;
     rectCache.current = null;
+    d.lastNativeAt = performance.now();
+    // Web events up to here are covered by these samples.
+    d.webBuffer = [];
     if (!d.nativeSeen && samples.length && d.model && d.points.length === 1) {
       // Restart the stroke on the shell's first sample. The pointerdown point is a different
       // reading of the same touch: a less precise position and a time on another clock. Native
@@ -893,6 +904,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       finishStroke(d, d.finishPending.cancelled, d.finishPending.pointerType);
     }
   };
+
+  /** The shell's samples stopped: the web events held back since its last delivery continue the stroke. */
+  function ingestWebAfterNative(d: NonNullable<typeof drawing.current>) {
+    if (d.native) nativePencil.detach(d.native);
+    d.native = null;
+    const lastT = d.points[d.points.length - 1].t ?? 0;
+    const rest = d.webBuffer.filter((w) => eventTime(w) - d.start > lastT);
+    d.webBuffer = [];
+    if (rest.length) ingestSamples(d, rest, null);
+  }
 
   function finishStroke(d: NonNullable<typeof drawing.current>, cancelled: boolean, pointerType?: string) {
     if (d.holdTimer) clearTimeout(d.holdTimer);
@@ -956,10 +977,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (!d || e.pointerId !== d.pointerId) return;
     rectCache.current = null;
     if (d.native && d.nativeSeen) {
-      // The shell's final samples (the true lift-off point) may still be on their way.
-      if (cancelled || d.nativeEnded) finishStroke(d, cancelled, e.pointerType);
-      else if (!d.finishPending) d.finishPending = { cancelled, pointerType: e.pointerType, timer: setTimeout(() => finishStroke(d, cancelled, e.pointerType), NATIVE_END_WAIT_MS) };
-      return;
+      const stalled = !d.nativeEnded && performance.now() - d.lastNativeAt >= NATIVE_STALL_MS;
+      if (!stalled) {
+        // The shell's final samples (the true lift-off point) may still be on their way; if they
+        // never come, the web events held back since its last samples finish the stroke.
+        if (cancelled || d.nativeEnded) finishStroke(d, cancelled, e.pointerType);
+        else if (!d.finishPending) {
+          const timer = setTimeout(() => {
+            if (drawing.current === d && !d.nativeEnded) ingestWebAfterNative(d);
+            finishStroke(d, cancelled, e.pointerType);
+          }, NATIVE_END_WAIT_MS);
+          d.finishPending = { cancelled, pointerType: e.pointerType, timer };
+        }
+        return;
+      }
+      ingestWebAfterNative(d);
     }
     if (d.webBuffer.length) {
       ingestSamples(d, d.webBuffer, null);

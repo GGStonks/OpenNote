@@ -262,7 +262,8 @@ export class NibModeler {
   private predict(from: Anchor): ModeledPoint[] {
     const r = this.raw;
     const n = r.length;
-    if (n < 4) return [];
+    // At least ~25 ms of stroke: the first samples alone are too few to extrapolate from.
+    if (n < 7) return [];
     const tl = r[n - 1].t;
     let a = n - 1;
     while (a > 0 && tl - r[a - 1].t <= NIB.PREDICT_WIN) a--;
@@ -277,12 +278,16 @@ export class NibModeler {
     const along = (m.vx * m.ax + m.vy * m.ay) / speed;
     let horizon = NIB.HORIZON;
     if (along < 0) horizon = Math.min(horizon, (0.5 * speed) / -along);
+    // Never further than the pen went in the same time just before (a bound on the acceleration).
+    const reach = travelled * horizon * 1.25;
     const out: ModeledPoint[] = [];
     const steps = Math.max(1, Math.ceil(horizon / 2));
     for (let s = 1; s <= steps; s++) {
       const tau = (horizon * s) / steps;
       const k = 0.5 * NIB.ACCEL * tau * tau;
-      out.push({ x: from.x + m.vx * tau + k * m.ax, y: from.y + m.vy * tau + k * m.ay, p: from.p, t: from.t + tau });
+      const q = { x: from.x + m.vx * tau + k * m.ax, y: from.y + m.vy * tau + k * m.ay, p: from.p, t: from.t + tau };
+      if (Math.hypot(q.x - from.x, q.y - from.y) > reach) break;
+      out.push(q);
     }
     return out;
   }

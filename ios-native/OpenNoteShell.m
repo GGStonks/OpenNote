@@ -14,8 +14,8 @@
 //      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
 //  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
-//    getCoalescedEvents, so a passive gesture recognizer (never cancels or delays the web view's
-//    touches) forwards every coalesced UITouch sample (precise location, force, altitude, azimuth,
+//    getCoalescedEvents, so the window (ONWindow sendEvent:, ahead of all gesture recognizers and
+//    without changing the event) forwards every coalesced UITouch sample (precise location, force, altitude, azimuth,
 //    timestamp) to window.__opennotePencil (src/ink/nativePencil.ts); the app models and predicts
 //    the ink itself.
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
@@ -24,30 +24,24 @@
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
-#import <UIKit/UIGestureRecognizerSubclass.h>
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"1.8.0";
+static NSString *const kVersion = @"1.8.1";
 
 #pragma mark - 240 Hz Apple Pencil samples
 
-@interface ONPencilRecognizer : UIGestureRecognizer
+// The samples are taken in the window's sendEvent:, which every touch event passes through before
+// any gesture recognizer. v1.7 used a passive gesture recognizer on the web view instead, but
+// WebKit fails the web view's other recognizers once the page handles the touch (preventDefault on
+// pointerdown, ~10 ms later): the recognizer stopped receiving samples and every stroke was cut
+// off after its first few milliseconds.
+@interface ONWindow : UIWindow
 @property (nonatomic, weak) WKWebView *webView;
 @end
 
-@implementation ONPencilRecognizer
-
-- (instancetype)initWithWebView:(WKWebView *)webView {
-    self = [super initWithTarget:nil action:nil];
-    if (self) {
-        _webView = webView;
-        self.cancelsTouchesInView = NO;
-        self.delaysTouchesBegan = NO;
-        self.delaysTouchesEnded = NO;
-        self.allowedTouchTypes = @[ @(UITouchTypePencil) ];
-    }
-    return self;
+@implementation ONWindow {
+    __weak UITouch *_pencil;
 }
 
 static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
@@ -57,41 +51,42 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
                      t.altitudeAngle, [t azimuthAngleInView:view]];
 }
 
+- (void)sendEvent:(UIEvent *)event {
+    if (event.type == UIEventTypeTouches && self.webView) [self forwardPencil:event];
+    [super sendEvent:event];
+}
+
 // phase: 0 began, 1 moved, 2 ended, 3 cancelled. Samples: x, y, force 0..1, time (s), altitude, azimuth.
-- (void)forward:(NSSet<UITouch *> *)touches event:(UIEvent *)event phase:(int)phase {
-    UITouch *touch = touches.anyObject;
+- (void)forwardPencil:(UIEvent *)event {
     WKWebView *view = self.webView;
-    if (!touch || !view) return;
-    NSMutableString *js = [NSMutableString stringWithFormat:@"window.__opennotePencil&&window.__opennotePencil(%d,%.5f,[",
-                                                            phase, [NSProcessInfo processInfo].systemUptime];
-    NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
-    if (!samples.count) samples = @[ touch ];
-    for (UITouch *t in samples) ONAppendTouch(js, t, view);
-    // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
-    [js appendString:@"],[])"];
-    [view evaluateJavaScript:js completionHandler:nil];
-}
-
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesBegan:touches withEvent:event];
-    [self forward:touches event:event phase:0];
-}
-
-- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesMoved:touches withEvent:event];
-    [self forward:touches event:event phase:1];
-}
-
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesEnded:touches withEvent:event];
-    [self forward:touches event:event phase:2];
-    self.state = UIGestureRecognizerStateFailed;
-}
-
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [super touchesCancelled:touches withEvent:event];
-    [self forward:touches event:event phase:3];
-    self.state = UIGestureRecognizerStateFailed;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.type != UITouchTypePencil) continue;
+        int phase;
+        switch (touch.phase) {
+            case UITouchPhaseBegan: phase = 0; break;
+            case UITouchPhaseMoved: phase = 1; break;
+            case UITouchPhaseEnded: phase = 2; break;
+            case UITouchPhaseCancelled: phase = 3; break;
+            default: continue; // stationary, hover
+        }
+        if (phase == 0) {
+            // Only touches on the web content (not on a share sheet or an alert over it).
+            UIView *hit = touch.view ?: [self hitTest:[touch locationInView:self] withEvent:event];
+            if (![hit isDescendantOfView:view]) continue;
+            _pencil = touch;
+        } else if (touch != _pencil) {
+            continue;
+        }
+        NSMutableString *js = [NSMutableString stringWithFormat:@"window.__opennotePencil&&window.__opennotePencil(%d,%.5f,[",
+                                                                phase, [NSProcessInfo processInfo].systemUptime];
+        NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
+        if (!samples.count) samples = @[ touch ];
+        for (UITouch *t in samples) ONAppendTouch(js, t, view);
+        // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
+        [js appendString:@"],[])"];
+        [view evaluateJavaScript:js completionHandler:nil];
+        if (phase >= 2) _pencil = nil;
+    }
 }
 
 @end
@@ -153,7 +148,7 @@ static NSString *ONMimeType(NSString *ext) {
 
 #pragma mark - View controller
 
-@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIGestureRecognizerDelegate>
+@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
@@ -195,10 +190,6 @@ static NSString *ONMimeType(NSString *ext) {
     UIPencilInteraction *pencil = [[UIPencilInteraction alloc] init];
     pencil.delegate = self;
     [self.webView addInteraction:pencil];
-
-    ONPencilRecognizer *samples = [[ONPencilRecognizer alloc] initWithWebView:self.webView];
-    samples.delegate = self;
-    [self.webView addGestureRecognizer:samples];
 
     NSURLSessionConfiguration *sc = [NSURLSessionConfiguration defaultSessionConfiguration];
     sc.timeoutIntervalForRequest = 300;
@@ -347,11 +338,6 @@ static void ONRemoveScribble(UIView *view) {
     ONRemoveScribble(webView);
 }
 
-// The sample recognizer only observes: it must never compete with the web view's own recognizers.
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)g shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)other {
-    return YES;
-}
-
 - (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction {
     [self.webView evaluateJavaScript:@"window.dispatchEvent(new CustomEvent('opennote:pencilDoubleTap'))" completionHandler:nil];
 }
@@ -412,9 +398,12 @@ static void ONRemoveScribble(UIView *view) {
 @implementation ONAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
-    self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    self.window.backgroundColor = [UIColor systemGroupedBackgroundColor];
-    self.window.rootViewController = [[ONViewController alloc] init];
+    ONWindow *window = [[ONWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    window.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    ONViewController *vc = [[ONViewController alloc] init];
+    window.rootViewController = vc;
+    window.webView = vc.webView ?: (WKWebView *)vc.view;
+    self.window = window;
     [self.window makeKeyAndVisible];
     return YES;
 }
