@@ -10,7 +10,7 @@
 ## Features
 
 **Note taking (Notability-style)**
-- Library with subjects, search (titles, typed text, LaTeX source), live ink thumbnails, rename / move / duplicate / delete, backup & import.
+- Library with subjects, search (titles, typed text, LaTeX source), thumbnails of the first page (ink, images, math, TikZ, text), rename / move / duplicate / delete, backup & import. Android's cloud auto-backup is off (it restored stale notes on reinstall): use Backup to keep or move notes.
 - **One continuous vertical canvas** per note, as wide as the screen in any orientation, with blank / ruled / grid / dot paper in white, cream, yellow or dark. A hairline marks every US Letter page (816×1056 pt @96 dpi); ink and shapes cross it freely, and a new blank page appears as you write. PDF export cuts the canvas into pages at those lines.
 - The page always fills the width of the screen and only scrolls up and down (two fingers, or one finger when "pencil only" is on, with momentum); it never slides sideways or zooms out of place.
 - Two-finger tap = undo, three-finger tap = redo (Notability gestures; can be turned off in Settings).
@@ -23,7 +23,8 @@
 - Per-point pressure, timestamps, altitude and azimuth are stored — the same per-point channels Notability's `InkObjectEncoder` serialises.
 - Palm rejection: in "pencil only" mode fingers navigate; a pencil touching down cancels a palm stroke in progress.
 - Coalesced + predicted pointer events for low-latency ink; Apple Pencil double-tap toggles the eraser (iOS shell).
-- Stroke eraser and precision (partial) eraser that splits strokes.
+- Stroke eraser and precision (partial) eraser that splits strokes; the pieces keep the exact ink (width, pressure) up to the cut.
+- Immersive fullscreen on Android and iOS (no status / navigation bar).
 - **Smart pen**: the smart curve is drawn by the same ink engine as the pen (Nib), at uniform width — smooth, never snapped sample by sample. Its ends snap to nearby shape points; coming back to the start (or a little past it) **closes it automatically** (snap dot and haptic tick), cut where it meets its start. **Retracing:** where the smart curve runs along the outline of an existing shape (within 8 px, for 20 px or more), it lies exactly on that outline, easing on and off it. Also lines with 15° angle lock, rectangles, ellipses from the centre with circle lock, points; lines, rectangles and ellipses snap to the key points, edges and crossings of existing shapes and, on grid / dot paper, to the paper's lattice, and show their live size (cm, angle). Closed shapes take a fill (solid, //// or \\\\ hatching, crosshatch, or a hole that cuts through fills); open lines/curves can get an arrowhead. Fill and arrowheads can also be applied to a lasso selection.
 - **Reshape shapes after drawing**: lasso a single shape to get handles: vertices of lines and polygons, corners of rectangles (right angles kept, also when rotated), centre and axes of ellipses and circles, the shaft of snapped arrows, and up to 12 handles on smart curves that bend the curve smoothly. Handles snap like the pen; each drag is one undo step.
 - **Draw-and-hold shape snapping (Notability style)**: hold the pen still and the stroke becomes a line, arrow, circle, ellipse, triangle, rectangle, polygon or polyline; keep the pen down and move it to size the shape (line end follows the pen with axis lock, circles/ellipses grow from the centre with independent axes, rectangles keep right angles, polygons scale and rotate).
