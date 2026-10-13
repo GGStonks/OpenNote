@@ -16,6 +16,12 @@ import { NibModeler } from '../ink/engine';
  *    points), the closest point on their edges, and intersections of straight segments.
  *
  * Distances are given in screen pixels (as PDEDraw's) and divided by the zoom.
+ *
+ * While the pen is down the curve is shown as the ink engine's line itself (settled ink never
+ * moves, as with the pen); the simplified spline it is stored as is made once, at lift-off, and
+ * stays within SIMPLIFY px of that line. v1.9 re-simplified and re-splined the whole curve on every
+ * frame, so the control points were picked again each frame and the line already drawn shifted
+ * ("jitter"), and the cost grew with the curve's length.
  */
 
 export interface SmartPenOptions {
@@ -219,6 +225,12 @@ export interface SmartPenState {
   length: number;
   lastRaw: XY | null;
   lastT: number;
+  /** Curve mode: the engine's settled line so far (it never changes once settled). */
+  settled: XY[];
+  /** Curve mode: the outline next to each settled point (retracing), looked up once per point. */
+  settledNear: (Near | null)[];
+  /** Time (ms) of the last snap haptic. */
+  lastTickT: number;
 }
 
 /** A pen sample for the smart pen: page px, ms since the stroke started, force (0 = lifting). */
@@ -227,11 +239,33 @@ export interface PenSample extends XY {
   pressure?: number;
 }
 
+/** Snap caches by page content (the strokes array changes identity on every edit). */
+const snapCaches = new WeakMap<Stroke[], Map<string, SnapCache>>();
+
+/**
+ * The snap targets of a page, built once per page content and reused by every stroke until the
+ * page changes: building them (crossings included) at pen-down delayed the first ink of each shape
+ * on full pages. CanvasPage also builds them ahead of time when the shape tool is picked.
+ */
+export function snapCacheFor(strokes: Stroke[], snap: boolean, grid: number | null): SnapCache | null {
+  if (!snap && !grid) return null;
+  let byKey = snapCaches.get(strokes);
+  if (!byKey) snapCaches.set(strokes, (byKey = new Map()));
+  const key = `${snap}|${grid}`;
+  let c = byKey.get(key);
+  if (!c) {
+    c = buildSnapCache(snap ? strokes : [], grid);
+    edgeIndex(c);
+    byKey.set(key, c);
+  }
+  return c;
+}
+
 export function beginSmartPen(raw: PenSample, opts: SmartPenOptions, strokes: Stroke[], zoom: number): SmartPenState {
-  const cache = opts.snap || opts.grid ? buildSnapCache(opts.snap ? strokes : [], opts.grid) : null;
+  const cache = snapCacheFor(strokes, opts.snap, opts.grid);
   const st: SmartPenState = {
     mode: opts.mode, zoom, cache, start: null, end: null, snapDot: null, snapKind: null, closing: false, snapping: false,
-    ink: null, length: 0, lastRaw: null, lastT: 0,
+    ink: null, length: 0, lastRaw: null, lastT: 0, settled: [], settledNear: [], lastTickT: -Infinity,
   };
   const p = snapAt(st, raw);
   st.start = p;
@@ -312,8 +346,16 @@ export function moveSmartPen(st: SmartPenState, raw: PenSample): boolean {
     default:
       st.end = snapAt(st, raw);
   }
-  return st.snapDot !== null && st.snapKind !== 'grid' && !wasSnapping;
+  // One tick per snap, not a buzz while the pen runs along the edge of the snap distance.
+  const tick = st.snapDot !== null && st.snapKind !== 'grid' && !wasSnapping;
+  const t = raw.t ?? st.lastT;
+  if (tick && t - st.lastTickT < SNAP_TICK_MS) return false;
+  if (tick) st.lastTickT = t;
+  return tick;
 }
+
+/** Shortest time between two snap haptics (ms). */
+const SNAP_TICK_MS = 250;
 
 export function isCircle(st: SmartPenState): boolean {
   if (!st.start || !st.end) return false;
@@ -431,8 +473,21 @@ const EDGE_CELL = 24;
 function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | null {
   const ink = st.ink;
   if (!ink) return null;
-  const model = final ? ink.finish() : [...ink.points, ...ink.tail()];
-  let pts: XY[] = model.map((q) => ({ x: q.x, y: q.y }));
+  let pts: XY[];
+  let near: (Near | null)[] | null = null;
+  if (final) pts = ink.finish().map((q) => ({ x: q.x, y: q.y }));
+  else {
+    // Live: the settled line is kept (and its outline lookups) and only the settling end is new.
+    const settled = ink.points;
+    for (let i = st.settled.length; i < settled.length; i++) st.settled.push({ x: settled[i].x, y: settled[i].y });
+    pts = st.settled.concat(ink.tail().map((q) => ({ x: q.x, y: q.y })));
+    if (st.cache?.edges.length) {
+      const thr = TRACE_DIST * k;
+      for (let i = st.settledNear.length; i < st.settled.length; i++) st.settledNear.push(nearestOutline(st.cache, st.settled[i], thr));
+      near = st.settledNear.slice();
+      for (let i = st.settled.length; i < pts.length; i++) near.push(nearestOutline(st.cache, pts[i], thr));
+    }
+  }
   if (pts.length < 2 || pathLength(pts) < 2 * k) return null;
 
   // Auto-close: back near the start after enough line. Cut where the line passes closest to the
@@ -444,11 +499,12 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
     for (let i = Math.floor(pts.length * 0.7); i < pts.length; i++) if (dist(pts[i], start) < dist(pts[best], start)) best = i;
     pts = pts.slice(0, best + 1);
     if (pts.length > 2 && dist(pts[pts.length - 1], start) < 1) pts.pop();
+    if (near) near = near.slice(0, pts.length);
     closed = pts.length > 2;
   }
 
   if (st.cache) {
-    pts = retrace(pts, st.cache, k, closed);
+    pts = retrace(pts, st.cache, k, closed, near);
     // The ends snap to shape points nearby (the start was looked up when the pen came down).
     if (st.start && dist(st.start, pts[0]) > 0.01) pts = ease(pts, st.start, BLEND * k, false);
     if (final && !closed) {
@@ -457,6 +513,8 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
     }
   }
 
+  // Live: the line as drawn (a polyline of the engine's 0.5 px steps).
+  if (!final) return { points: pts.map(P), kind: 'polyline', closed };
   const ctrl = simplify(pts, SIMPLIFY, closed);
   if (ctrl.length === 2 && !closed) return { points: ctrl.map(P), kind: 'line', closed: false };
   return { points: ctrl.map(P), kind: 'curve', closed };
@@ -503,10 +561,16 @@ function edgeIndex(cache: SnapCache): Map<string, number[]> {
   return idx;
 }
 
+interface Near {
+  at: XY;
+  d: number;
+  owner: number;
+}
+
 /** The closest point on any shape outline within `thr` of p. */
-function nearestOutline(cache: SnapCache, p: XY, thr: number): { at: XY; d: number; owner: number } | null {
+function nearestOutline(cache: SnapCache, p: XY, thr: number): Near | null {
   const idx = edgeIndex(cache);
-  let best: { at: XY; d: number; owner: number } | null = null;
+  let best: Near | null = null;
   const x0 = Math.floor((p.x - thr) / EDGE_CELL), x1 = Math.floor((p.x + thr) / EDGE_CELL);
   const y0 = Math.floor((p.y - thr) / EDGE_CELL), y1 = Math.floor((p.y + thr) / EDGE_CELL);
   for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) {
@@ -524,10 +588,10 @@ function nearestOutline(cache: SnapCache, p: XY, thr: number): { at: XY; d: numb
  * Retracing: stretches of the line that follow one shape's outline (within TRACE_DIST, for at
  * least TRACE_MIN of line) are put exactly on that outline, easing on and off over BLEND.
  */
-function retrace(pts: XY[], cache: SnapCache, k: number, closed: boolean): XY[] {
+function retrace(pts: XY[], cache: SnapCache, k: number, closed: boolean, known: (Near | null)[] | null = null): XY[] {
   if (!cache.edges.length) return pts;
   const thr = TRACE_DIST * k, minLen = TRACE_MIN * k, blend = BLEND * k;
-  const near = pts.map((p) => nearestOutline(cache, p, thr));
+  const near = known && known.length === pts.length ? known : pts.map((p) => nearestOutline(cache, p, thr));
   const out = pts.slice();
   let i = 0;
   while (i < pts.length) {

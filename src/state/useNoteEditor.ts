@@ -10,6 +10,10 @@ import { saveNote } from '../storage/db';
 
 const HISTORY_LIMIT = 200;
 const SAVE_DELAY_MS = 700;
+/** While the pen is on the page the save waits (copying a long note into IndexedDB takes a frame or more). */
+const BUSY_RETRY_MS = 250;
+/** ... but never longer than this after the first unsaved change. */
+const MAX_SAVE_DELAY_MS = 5000;
 
 export type PageUpdater = (page: NotePage) => NotePage;
 
@@ -54,7 +58,7 @@ function mapPage(d: NoteDocument, pageId: string, updater: PageUpdater): NoteDoc
   return changed ? { ...d, pages } : d;
 }
 
-export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) => void): NoteEditor {
+export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) => void, isBusy?: () => boolean): NoteEditor {
   const [doc, setDocState] = useState(initial);
   const docRef = useRef(initial);
   const undoStack = useRef<NoteDocument[]>([]);
@@ -66,26 +70,46 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
   const onSavedRef = useRef(onSaved);
   onSavedRef.current = onSaved;
 
+  /** Saves run one after another, so an older version can never be written after a newer one. */
+  const saving = useRef<Promise<void>>(Promise.resolve());
+  const dirtySince = useRef(0);
+  const isBusyRef = useRef(isBusy);
+  isBusyRef.current = isBusy;
+
   const flush = useCallback(async () => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    if (!dirty.current) return;
-    dirty.current = false;
-    try {
-      const saved = await saveNote(docRef.current);
-      onSavedRef.current(saved);
-    } catch (err) {
-      dirty.current = true;
-      console.error('OpenNote: saving failed', err);
-    }
+    const run = saving.current.then(async () => {
+      if (!dirty.current) return;
+      dirty.current = false;
+      const snapshot = docRef.current;
+      try {
+        const saved = await saveNote(snapshot);
+        onSavedRef.current(saved);
+      } catch (err) {
+        dirty.current = true;
+        console.error('OpenNote: saving failed', err);
+      }
+    });
+    saving.current = run;
+    await run;
   }, []);
 
   const scheduleSave = useCallback(() => {
+    if (!dirty.current) dirtySince.current = performance.now();
     dirty.current = true;
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => void flush(), SAVE_DELAY_MS);
+    const tick = () => {
+      saveTimer.current = null;
+      if (isBusyRef.current?.() && performance.now() - dirtySince.current < MAX_SAVE_DELAY_MS) {
+        saveTimer.current = setTimeout(tick, BUSY_RETRY_MS);
+        return;
+      }
+      void flush();
+    };
+    saveTimer.current = setTimeout(tick, SAVE_DELAY_MS);
   }, [flush]);
 
   const setDoc = useCallback((next: NoteDocument) => {

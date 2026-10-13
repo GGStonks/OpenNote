@@ -52,6 +52,12 @@ export interface Stroke {
   fill?: FillType;
   /** Arrowhead at the end of an open stroke. */
   arrow?: boolean;
+  /**
+   * Handwriting whose points are already the ink engine's modelled centre line (pressure = the
+   * modelled pressure), drawn as they are: the pieces left by the precision eraser. 'variable':
+   * fountain-pen width from the pressure; 'uniform': constant width. Missing: raw pen samples.
+   */
+  modeled?: 'variable' | 'uniform';
 }
 
 /**

@@ -5,7 +5,8 @@ import {
   TextBlock, ToolType, newId,
 } from '../types';
 import {
-  drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
+  drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
+  strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
 import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
@@ -13,8 +14,9 @@ import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil'
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
-  SmartPenOptions, SmartPenState, SnapCache, beginSmartPen, buildSnapCache, findSnapKind, moveSmartPen, smartPenMeasure, smartPenShape, smartPenStroke,
+  SmartPenOptions, SmartPenState, SnapCache, beginSmartPen, findSnapKind, moveSmartPen, smartPenMeasure, smartPenShape, smartPenStroke, snapCacheFor,
 } from '../editor/smartPen';
+import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
@@ -146,62 +148,158 @@ function strokeYRange(s: Stroke) {
   return r;
 }
 
+/** Painting a tile that is not on screen yet is spread over frames, this many ms per frame. */
+const TILE_SLICE_MS = 6;
+/** A change covering more than this share of a tile repaints the whole tile. */
+const TILE_FULL_REPAINT = 0.5;
+
+type TilePaint = { strokes: Stroke[]; ratio: number; complete: boolean };
+
 /**
- * Committed ink of one page-high band of the surface. Tiles exist only near the viewport (a
- * canvas is up to 16 Mpx and WebKit has a tight total canvas budget). Strokes appended on top (the
- * common case while writing) are painted incrementally; anything else repaints the tile. Strokes
- * crossing a page line are painted by both tiles.
+ * Committed ink of one page-high band of the surface. Tiles exist only near the viewport (a canvas
+ * is up to 16 Mpx and WebKit has a tight total canvas budget), and each one is the cached bitmap of
+ * its band: it is painted once and then only where something changed.
+ *
+ *  - Strokes appended on top (the common case while writing) are painted on top.
+ *  - Any other change (erasing, undo, moving, restyling) repaints only the area of the strokes that
+ *    were removed or added, clipped to it, instead of the whole band: the precision eraser on a
+ *    full page repainted hundreds of strokes for every eraser sample.
+ *  - A tile is created when it comes within a screen of the viewport and kept until it is more
+ *    than 2.5 screens away (scrolling back and forth does not repaint), and a tile that is still
+ *    off screen is painted a few ms per frame, so scrolling a dense note does not stall on it.
+ *
+ * Strokes crossing a page line are painted by both tiles.
  */
 const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
   const { band, strokes, ratio, scrollRoot } = props;
   const holderRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [visible, setVisible] = useState(band < 2);
+  const [alive, setAlive] = useState(band < 2);
+  const onScreen = useRef(band < 1);
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
-    const io = new IntersectionObserver((entries) => setVisible(entries.some((en) => en.isIntersecting)), { root: scrollRoot, rootMargin: '100% 0px' });
-    io.observe(el);
-    return () => io.disconnect();
+    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '100% 0px' });
+    const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '250% 0px' });
+    const view = new IntersectionObserver((en) => (onScreen.current = en.some((e) => e.isIntersecting)), { root: scrollRoot, rootMargin: '0px' });
+    near.observe(el);
+    far.observe(el);
+    view.observe(el);
+    return () => {
+      near.disconnect();
+      far.disconnect();
+      view.disconnect();
+    };
   }, [scrollRoot]);
   const top = band * PAGE_HEIGHT;
   const mine = useMemo(() => strokes.filter((s) => {
     const r = strokeYRange(s);
     return r.maxY >= top && r.minY <= top + PAGE_HEIGHT;
   }), [strokes, top]);
-  const painted = useRef<{ strokes: Stroke[]; ratio: number } | null>(null);
+  const painted = useRef<TilePaint | null>(null);
+  const slicing = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (slicing.current !== null) cancelAnimationFrame(slicing.current);
+  }, []);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !visible) {
+    if (slicing.current !== null) {
+      cancelAnimationFrame(slicing.current);
+      slicing.current = null;
+    }
+    if (!canvas || !alive) {
       painted.current = null;
       return;
     }
-    const prev = painted.current;
-    const appendOnly =
-      prev &&
-      prev.ratio === ratio &&
-      mine.length > prev.strokes.length &&
-      prev.strokes.every((s, i) => mine[i] === s) &&
-      mine.slice(prev.strokes.length).every((s) => s.tool !== 'highlighter' && (!s.fill || s.fill === 'none'));
     const w = Math.round(PAGE_WIDTH * ratio), h = Math.round(PAGE_HEIGHT * ratio);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
+      painted.current = null;
     }
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
-    if (appendOnly) {
-      for (const s of mine.slice(prev!.strokes.length)) drawStroke(ctx, s);
-    } else {
-      ctx.clearRect(0, top, PAGE_WIDTH, PAGE_HEIGHT);
-      drawStrokes(ctx, mine);
+    const prev = painted.current && painted.current.complete && painted.current.ratio === ratio ? painted.current : null;
+    painted.current = { strokes: mine, ratio, complete: true };
+    if (prev && prev.strokes === mine) return;
+
+    if (prev) {
+      // Appended pen strokes: painted on top.
+      const n = prev.strokes.length;
+      if (mine.length > n && prev.strokes.every((s, i) => mine[i] === s) && mine.slice(n).every((s) => s.tool !== 'highlighter' && (!s.fill || s.fill === 'none'))) {
+        for (const s of mine.slice(n)) drawStroke(ctx, s);
+        return;
+      }
+      // Anything else: repaint the area of what changed.
+      const before = new Set(prev.strokes), after = new Set(mine);
+      let area: DirtyRect | null = null;
+      for (const s of prev.strokes) if (!after.has(s)) area = unionRect(area, strokePaintBounds(s));
+      for (const s of mine) if (!before.has(s)) area = unionRect(area, strokePaintBounds(s));
+      if (!area) {
+        // Same strokes in another order: repaint all of them.
+        area = { minX: 0, minY: top, maxX: PAGE_WIDTH, maxY: top + PAGE_HEIGHT };
+      }
+      const x0 = Math.max(0, Math.floor(area.minX * ratio) / ratio), y0 = Math.max(top, Math.floor(area.minY * ratio) / ratio);
+      const x1 = Math.min(PAGE_WIDTH, Math.ceil(area.maxX * ratio) / ratio), y1 = Math.min(top + PAGE_HEIGHT, Math.ceil(area.maxY * ratio) / ratio);
+      if (x1 <= x0 || y1 <= y0) return;
+      if ((x1 - x0) * (y1 - y0) < TILE_FULL_REPAINT * PAGE_WIDTH * PAGE_HEIGHT) {
+        const hit = mine.filter((s) => {
+          const b = strokePaintBounds(s);
+          return b.maxX >= x0 && b.minX <= x1 && b.maxY >= y0 && b.minY <= y1;
+        });
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x0, y0, x1 - x0, y1 - y0);
+        ctx.clip();
+        ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+        drawStrokes(ctx, hit);
+        ctx.restore();
+        return;
+      }
     }
-    painted.current = { strokes: mine, ratio };
-  }, [mine, ratio, visible, top]);
+
+    ctx.clearRect(0, top, PAGE_WIDTH, PAGE_HEIGHT);
+    if (onScreen.current || mine.length < 40) {
+      drawStrokes(ctx, mine);
+      return;
+    }
+    // Off screen (scrolling towards it): paint in slices, in the order drawStrokes uses
+    // (highlighters, then fills, then ink), and take the tile as painted only at the end.
+    painted.current = { strokes: mine, ratio, complete: false };
+    const passes: ((s: Stroke) => boolean)[] = [
+      (s) => s.tool === 'highlighter',
+      (s) => s.tool !== 'highlighter' && !!s.fill && s.fill !== 'none',
+      (s) => s.tool !== 'highlighter',
+    ];
+    let pass = 0, i = 0;
+    const job = mine;
+    const step = () => {
+      slicing.current = null;
+      if (painted.current?.strokes !== job) return;
+      const until = performance.now() + TILE_SLICE_MS;
+      while (pass < passes.length) {
+        for (; i < job.length; i++) {
+          if (performance.now() > until && !onScreen.current) {
+            slicing.current = requestAnimationFrame(step);
+            return;
+          }
+          const s = job[i];
+          if (!passes[pass](s) || !s.points.length) continue;
+          if (pass === 0) drawStrokes(ctx, [s]);
+          else if (pass === 1) paintStrokeFill(ctx, s);
+          else paintStrokeInk(ctx, s);
+        }
+        pass++;
+        i = 0;
+      }
+      painted.current = { strokes: job, ratio, complete: true };
+    };
+    step();
+  }, [mine, ratio, alive, top]);
   return (
     <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: PAGE_WIDTH, height: PAGE_HEIGHT }}>
-      {visible && <canvas ref={canvasRef} style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />}
+      {alive && <canvas ref={canvasRef} style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />}
     </div>
   );
 });
@@ -331,12 +429,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // ------------------------------------------------------------------ live layer
   const dirty = useRef<DirtyRect | null>(null);
-  /** Bands of the surface the live canvas currently covers. */
-  const live = useRef<{ band: number; count: number; ratio: number } | null>(null);
+  /** Part of the surface the live canvas covers (surface px) and its backing scale. */
+  const live = useRef<{ top: number; height: number; ratio: number } | null>(null);
 
   /**
-   * The live canvas covers only the page bands visible on screen (2–3 at most), placed when a
-   * stroke starts; ink drawn on it uses surface coordinates.
+   * The live canvas covers the visible part of the surface plus a margin (not whole page bands),
+   * so it stays small, and it is placed ahead of time, when scrolling stops (see below): a stroke
+   * starting after a scroll used to allocate and clear a canvas of up to 16 Mpx on pen-down. When
+   * the view moved but the size did not, the canvas is only moved and cleared. Ink drawn on it
+   * uses surface coordinates.
    */
   const claimLive = useCallback((): CanvasRenderingContext2D | null => {
     const canvas = activeCanvasRef.current, cont = containerRef.current;
@@ -346,27 +447,29 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const root = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
     const scale = c.height / H || 1;
     const v0 = Math.max(0, (root.top - c.top) / scale), v1 = Math.min(H, (root.bottom - c.top) / scale);
-    const pages = Math.max(1, Math.round(H / PAGE_HEIGHT));
-    const b0 = Math.min(pages - 1, Math.floor(v0 / PAGE_HEIGHT));
-    const b1 = Math.max(b0, Math.min(pages - 1, Math.floor((v1 - 0.01) / PAGE_HEIGHT)));
-    const r = Math.min(canvasRatio(zoomRef.current), Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * PAGE_HEIGHT * (b1 - b0 + 1))));
+    const view = Math.max(1, (root.bottom - root.top) / scale);
+    const height = Math.min(H, Math.ceil(view * 1.5));
+    const r = Math.min(canvasRatio(zoomRef.current), Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * height)));
     const cur = live.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    if (cur && canvas.width > 0 && cur.band <= b0 && cur.band + cur.count - 1 >= b1 && Math.abs(cur.ratio - r) < 1e-6) return ctx;
-    const count = b1 - b0 + 1;
-    canvas.width = Math.round(PAGE_WIDTH * r);
-    canvas.height = Math.round(PAGE_HEIGHT * count * r);
-    canvas.style.top = `${b0 * PAGE_HEIGHT}px`;
-    canvas.style.height = `${PAGE_HEIGHT * count}px`;
-    ctx.setTransform(r, 0, 0, r, 0, -b0 * PAGE_HEIGHT * r);
-    ctx.clearRect(0, b0 * PAGE_HEIGHT, PAGE_WIDTH, PAGE_HEIGHT * count);
-    live.current = { band: b0, count, ratio: r };
+    if (cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.height === height && Math.abs(cur.ratio - r) < 1e-6) return ctx;
+    const top = Math.max(0, Math.min(H - height, (v0 + v1) / 2 - height / 2));
+    const w = Math.round(PAGE_WIDTH * r), h = Math.round(height * r);
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      canvas.style.height = `${height}px`;
+    }
+    canvas.style.top = `${top}px`;
+    ctx.setTransform(r, 0, 0, r, 0, -top * r);
+    ctx.clearRect(0, top, PAGE_WIDTH, height);
+    live.current = { top, height, ratio: r };
     dirty.current = null;
     return ctx;
   }, [scrollRoot]);
 
-  // Zoom changed (rotation): the live canvas is re-created at the next stroke.
+  // Zoom changed (rotation): the live canvas is re-created.
   useLayoutEffect(() => {
     const c = activeCanvasRef.current;
     if (c && !drawing.current) {
@@ -376,6 +479,48 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       dirty.current = null;
     }
   }, [ratio]);
+
+  // The pen's page position is measured once per stroke (getBoundingClientRect forces a layout):
+  // only scrolling, zooming or resizing moves the page under the pen. When scrolling stops the live
+  // canvas is placed for the next stroke.
+  useEffect(() => {
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    const place = () => {
+      idle = null;
+      if (!drawing.current && !handleDrag.current) claimLive();
+    };
+    const onMove = () => {
+      rectCache.current = null;
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(place, 140);
+    };
+    const target: HTMLElement | Window = scrollRoot ?? window;
+    target.addEventListener('scroll', onMove, { passive: true });
+    window.addEventListener('resize', onMove);
+    onMove();
+    return () => {
+      if (idle) clearTimeout(idle);
+      target.removeEventListener('scroll', onMove);
+      window.removeEventListener('resize', onMove);
+    };
+  }, [scrollRoot, claimLive, ratio, pageCount]);
+
+  // First-stroke lag: every tool's code is run once in idle time after the note opens (prewarm.ts).
+  // The rect is re-measured after a zoom.
+  useEffect(() => {
+    if (!printMode) prewarmTools();
+  }, [printMode]);
+  useEffect(() => {
+    rectCache.current = null;
+  }, [zoom]);
+  // Shape tool: the page's snap targets are built ahead of the first shape, and again after edits.
+  useEffect(() => {
+    if (printMode || tools.tool !== 'shape') return;
+    const grid = tools.shapeGridSnap ? paperGrid(paperStyle) : null;
+    const strokes = page.strokes;
+    const id = setTimeout(() => snapCacheFor(strokes, tools.shapeSnap, grid), 50);
+    return () => clearTimeout(id);
+  }, [printMode, tools.tool, tools.shapeSnap, tools.shapeGridSnap, paperStyle, page.strokes]);
 
   // iPadOS Scribble / system gestures: Pencil strokes on the canvas must never be interpreted as
   // handwriting input or scrolling, which delays and drops strokes.
@@ -544,6 +689,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const clearActive = useCallback(() => {
     if (drawing.current) retireInk(drawing.current);
     drawing.current = null;
+    gestures.inking = false;
     eraserPos.current = null;
     requestRender();
   }, [requestRender]);
@@ -562,7 +708,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     [gestures, clearActive, editor]
   );
 
-  // getBoundingClientRect forces layout: measure once per input event, not per coalesced sample.
+  // getBoundingClientRect forces a layout: measured at pen-down and again only after the page moved.
   const rectCache = useRef<DOMRect | null>(null);
   const canvasRect = () => (rectCache.current ??= inputRef.current!.getBoundingClientRect());
 
@@ -691,6 +837,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       recFrames: [],
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+    gestures.inking = true;
     if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
       const d = drawing.current;
       const listener: PencilListener = (samples, predicted, ended) => nativeInputRef.current(d, samples, predicted, ended);
@@ -722,7 +869,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       return;
     }
     if (e.pointerId !== d.pointerId) return;
-    rectCache.current = null;
     const native = e.nativeEvent;
     const coalesced: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [];
     const events = coalesced.length ? coalesced : [native];
@@ -825,7 +971,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
   nativeInputRef.current = (d, samples, predicted, ended) => {
     if (drawing.current !== d || d.nativeEnded) return;
-    rectCache.current = null;
     d.lastNativeAt = performance.now();
     // Web events up to here are covered by these samples.
     d.webBuffer = [];
@@ -886,6 +1031,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (d.native) nativePencil.detach(d.native);
     if (drawing.current !== d) return;
     drawing.current = null;
+    gestures.inking = false;
     retireInk(d);
 
     if (!cancelled && d.smart) {
@@ -943,7 +1089,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const finish = (e: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
     const d = drawing.current;
     if (!d || e.pointerId !== d.pointerId) return;
-    rectCache.current = null;
     if (d.native && d.nativeSeen) {
       const stalled = !d.nativeEnded && performance.now() - d.lastNativeAt >= NATIVE_STALL_MS;
       if (!stalled) {
@@ -1017,8 +1162,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const dy = (e.clientY - t.startY) / zoom;
     const b = t.sel.bounds;
     if (t.mode === 'move') {
-      t.dx = dx;
-      t.dy = dy;
+      // The surface is one continuous sheet (every page band of it): a selection may move to any
+      // page, but not off the sheet, where the page clips it and it could not be picked up again.
+      // (Never pulled back from where it already is: the bounds carry a margin.)
+      t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_WIDTH - b.x - b.width), dx));
+      t.dy = Math.max(Math.min(0, -b.y), dy);
     } else {
       t.f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
     }
@@ -1108,7 +1256,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const others = page.strokes.filter((s) => s.id !== editShape.id);
     const grid = tools.shapeGridSnap ? paperGrid(paperStyle) : null;
-    const cache = tools.shapeSnap || grid ? buildSnapCache(tools.shapeSnap ? others : [], grid) : null;
+    const cache = snapCacheFor(others, tools.shapeSnap, grid);
     if (!claimLive()) return;
     handleDrag.current = { pointerId: e.pointerId, orig: editShape, handle: h, cache, sel: selection, last: editShape, snapped: false, snapDot: null };
     gestures.dragging = true;
@@ -1157,10 +1305,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     ...paperBackground(paperStyle, paperColor),
   };
 
+  // Block views are memoised and keep their first handlers: these read the current tool and page.
   const latexHandlers = (b: LatexBlock) => ({
     onSelect: () => {
-      if (tools.tool === 'lasso') {
-        setSelection(singleBlockSelection(page, 'latex', b.id));
+      if (toolsRef.current.tool === 'lasso') {
+        setSelection(singleBlockSelection(pageRef.current, 'latex', b.id));
         setSelectedBlockId(null);
       } else setSelectedBlockId(b.id);
     },
@@ -1180,6 +1329,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       style={pageStyle}
       data-page-index={pageIndex}
     >
+      {/*
+        Stacking, bottom to top: the paper (this element's background), images, ink, the
+        selection being moved, typed / converted content, the input layer. Images were drawn after
+        the ink and covered whatever was written on them.
+      */}
+      {(blockPage.imageBlocks ?? []).map((im) => (
+        <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
+      ))}
       {printMode ? (
         <svg className="absolute inset-0" width={PAGE_WIDTH} height={SURF_H} viewBox={`0 0 ${PAGE_WIDTH} ${SURF_H}`}
           dangerouslySetInnerHTML={{
@@ -1192,7 +1349,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       {layerSel && layerSel.strokeIds.length > 0 && (
         <canvas
           ref={floatCanvasRef}
-          className="absolute pointer-events-none"
+          className="absolute pointer-events-none z-[5]"
           style={{
             left: layerSel.bounds.x - FLOAT_PAD,
             top: layerSel.bounds.y - FLOAT_PAD,
@@ -1206,9 +1363,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       )}
 
       {/* Typed / converted content */}
-      {(blockPage.imageBlocks ?? []).map((im) => (
-        <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
-      ))}
       {blockPage.latexBlocks.map((b) => (
         <LatexBlockView
           key={b.id}
@@ -1232,13 +1386,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           zoom={zoom}
           darkPaper={darkPaper}
           onStartEdit={() => {
-            if (tools.tool === 'lasso') setSelection(singleBlockSelection(page, 'text', t.id));
+            if (toolsRef.current.tool === 'lasso') setSelection(singleBlockSelection(pageRef.current, 'text', t.id));
             else setEditingTextId(t.id);
           }}
           onCommit={(text) => {
             setEditingTextId(null);
+            const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
             if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
-            else if (text !== t.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
+            else if (cur && text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
           }}
           onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
           onSilentUpdate={() => undefined}

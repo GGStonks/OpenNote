@@ -10,6 +10,8 @@ export class GestureBus {
   navigating = false;
   /** True while a selection or shape handle is being dragged: the page must not scroll. */
   dragging = false;
+  /** True while a pen / highlighter / shape / eraser stroke is in progress (autosave waits). */
+  inking = false;
   private cancelHandlers = new Set<() => void>();
 
   onCancel(fn: () => void): () => void {

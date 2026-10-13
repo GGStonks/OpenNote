@@ -15,6 +15,8 @@ const config: CapacitorConfig = {
   plugins: {
     // Native HTTP is called explicitly (src/platform.ts); fetch/XHR are not patched globally.
     CapacitorHttp: { enabled: false },
+    // Immersive fullscreen (MainActivity hides the bars too, and again whenever the app regains focus).
+    SystemBars: { hidden: true, initialViewportFitValueHint: 'cover' },
   },
 };
 

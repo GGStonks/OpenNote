@@ -26,6 +26,8 @@ export interface InkStyle {
   shapeKind?: ShapeKind;
   fill?: FillType;
   arrow?: boolean;
+  /** The points are already the modelled centre line (Stroke.modeled). */
+  modeled?: 'variable' | 'uniform';
 }
 
 interface Built {
@@ -71,11 +73,18 @@ function bezierPath(segs: Bezier[], closed: boolean): Path2D {
   return path;
 }
 
+/** The ink engine's centre line of handwriting (stored modelled points are used as they are). */
+export function modeledLine(points: Point[], modeled?: InkStyle['modeled']): ModeledPoint[] {
+  if (modeled) return points.map((q) => ({ x: q.x, y: q.y, p: q.pressure, t: q.t ?? 0 }));
+  return nibStroke(points);
+}
+
 /** Modelled centre line and per-point widths of a handwritten stroke (canvas, SVG and TikZ). */
 export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoint[]; widths: number[] | null; width: number } {
-  const pts = thinModeled(nibStroke(points));
+  const pts = thinModeled(modeledLine(points, style.modeled));
   const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
-  const widths = isVariableWidth(style) && hasRealPressure(points) ? pts.map((p) => pressureWidth(width, p.p)) : null;
+  const pressured = style.modeled ? style.modeled === 'variable' : hasRealPressure(points);
+  const widths = isVariableWidth(style) && pressured ? pts.map((p) => pressureWidth(width, p.p)) : null;
   return { pts, widths, width };
 }
 
@@ -275,6 +284,7 @@ export function styleOf(s: Stroke): InkStyle {
     shapeKind: s.shapeKind,
     fill: s.fill,
     arrow: s.arrow,
+    modeled: s.modeled,
   };
 }
 
@@ -285,6 +295,21 @@ function built(s: Stroke): Built {
     cache.set(s, b);
   }
   return b;
+}
+
+/** drawStrokes' fill pass for one stroke (to paint a list of strokes in slices). */
+export function paintStrokeFill(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
+  if (s.points.length) paintFill(ctx, built(s), styleOf(s), opts);
+}
+
+/** drawStrokes' ink pass for one stroke. */
+export function paintStrokeInk(ctx: CanvasRenderingContext2D, s: Stroke) {
+  if (s.points.length) paintInk(ctx, built(s), styleOf(s), s.opacity ?? 1);
+}
+
+/** The area a committed stroke paints (ink, fill, arrowhead), from its cached geometry. */
+export function strokePaintBounds(s: Stroke): Built['bounds'] {
+  return built(s).bounds;
 }
 
 export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
@@ -451,6 +476,23 @@ export function strokeHitTest(s: Stroke, x: number, y: number, radius: number): 
   return false;
 }
 
+function lerpPoint(a: Point, b: Point, t: number): Point {
+  const q: Point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t };
+  if (typeof a.t === 'number' && typeof b.t === 'number') q.t = a.t + (b.t - a.t) * t;
+  return q;
+}
+
+/** Where the segment from `a` (outside) to `b` crosses the circle (c, r): the point at the boundary. */
+function circleCrossing(a: Point, b: Point, cx: number, cy: number, r: number): Point {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const fx = a.x - cx, fy = a.y - cy;
+  const A = dx * dx + dy * dy, B = 2 * (fx * dx + fy * dy), C = fx * fx + fy * fy - r * r;
+  if (A < 1e-12) return a;
+  const disc = Math.max(0, B * B - 4 * A * C);
+  const t = (-B - Math.sqrt(disc)) / (2 * A);
+  return lerpPoint(a, b, Math.max(0, Math.min(1, t)));
+}
+
 /** Inserts samples so no two consecutive points are further apart than `step` (needed for partial erasing of shapes). */
 function densify(points: Point[], closed: boolean, step: number): Point[] {
   const src = closed && points.length > 2 ? [...points, points[0]] : points;
@@ -463,7 +505,7 @@ function densify(points: Point[], closed: boolean, step: number): Point[] {
       const n = Math.floor(d / step);
       for (let k = 1; k < n; k++) {
         const t = k / n;
-        out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t });
+        out.push(lerpPoint(a, b, t));
       }
     }
     out.push(src[i]);
@@ -487,6 +529,13 @@ function thin(points: Point[], spacing: number): Point[] {
  * Precision eraser (Notability's partial eraser): removes only the part of each stroke under the
  * eraser and splits the remainder into separate strokes. Smart-pen curves are cut along the
  * drawn spline and stay curves; other shapes become open polylines.
+ *
+ * Handwriting is cut along the line the ink engine drew, not its raw samples: the pieces keep
+ * that modelled line and its pressure (Stroke.modeled) and are drawn as they are. Running the
+ * engine again on a piece of the raw samples changed the ink: every cut end got the engine's
+ * pen-down and lift-off treatment (a tapered or swollen end), a piece without real pressure
+ * switched to the uniform width, and the fitted line moved near the cut. The cut is placed exactly
+ * where the line crosses the eraser circle.
  */
 export function eraseStrokesPartial(
   strokes: Stroke[],
@@ -502,14 +551,29 @@ export function eraseStrokesPartial(
       out.push(s);
       continue;
     }
-    changed = true;
-    if (s.shapeKind === 'point') continue;
+    if (s.shapeKind === 'point') {
+      changed = true;
+      continue;
+    }
     const r = radius + s.width * 0.6;
     const curve = s.shapeKind === 'curve';
+    const ink = !s.isShape;
     const closed = !!s.closed && s.points.length > 2;
-    const pts: Point[] = curve
-      ? flattenBeziers(curveSegments(s.points, closed), 1.5).map((p) => ({ x: p.x, y: p.y, pressure: 0.5 }))
-      : densify(s.points, closed, Math.max(1.5, radius / 3));
+    let pts: Point[];
+    let modeled: Stroke['modeled'];
+    if (curve) pts = flattenBeziers(curveSegments(s.points, closed), 1.5).map((p) => ({ x: p.x, y: p.y, pressure: 0.5 }));
+    else if (ink) {
+      const g = inkGeometry(s.points, styleOf(s));
+      modeled = g.widths ? 'variable' : 'uniform';
+      pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
+    } else pts = densify(s.points, closed, Math.max(1.5, radius / 3));
+    const inside = (p: Point) => Math.hypot(p.x - x, p.y - y) <= r;
+    if (!pts.some(inside)) {
+      // Touched the outline's padding only: nothing of the line is under the eraser.
+      out.push(s);
+      continue;
+    }
+    changed = true;
     const lastIndex = pts.length - 1;
     let run: Point[] = [];
     let runEnd = -1;
@@ -523,14 +587,21 @@ export function eraseStrokesPartial(
           closed: false,
           fill: undefined,
           arrow: keepsEnd ? s.arrow : undefined,
+          ...(modeled ? { modeled } : {}),
           ...(s.isShape && !curve ? { shapeKind: 'polyline' as ShapeKind } : {}),
         });
       }
       run = [];
     };
     pts.forEach((p, i) => {
-      if (Math.hypot(p.x - x, p.y - y) <= r) flush();
-      else {
+      const prev = i > 0 ? pts[i - 1] : null;
+      if (inside(p)) {
+        // Leaving the kept line: end it exactly on the eraser's edge.
+        if (prev && !inside(prev) && run.length) run.push(circleCrossing(prev, p, x, y, r));
+        flush();
+      } else {
+        // Coming out from under the eraser: start exactly on its edge.
+        if (prev && inside(prev)) run.push(circleCrossing(p, prev, x, y, r));
         run.push(p);
         runEnd = i;
       }

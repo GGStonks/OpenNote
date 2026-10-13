@@ -6,6 +6,20 @@ import { renderTikzPreview, renderTikzWithTeX } from '../services/tikzEngine';
 
 const BASE_MATH_PX = 22;
 
+/**
+ * Block views re-render only when their data changes, not on every edit of the page (each pen
+ * stroke): a math block measures its rendered size after every render, which forced a layout of
+ * the page per block on every stroke. Callbacks are not compared: the page passes handlers that
+ * read the current page and tool through refs.
+ */
+function sameData<P extends object>(a: P, b: P): boolean {
+  for (const k of Object.keys(b) as (keyof P)[]) {
+    if (typeof b[k] === 'function') continue;
+    if (a[k] !== b[k]) return false;
+  }
+  return Object.keys(a).length === Object.keys(b).length;
+}
+
 interface ActionPillProps {
   zoom: number;
   onEdit?: () => void;
@@ -50,8 +64,10 @@ interface LatexBlockViewProps {
   measure?: boolean;
 }
 
-export const LatexBlockView: React.FC<LatexBlockViewProps> = (props) =>
-  props.block.isTikz ? <TikzBlockView {...props} /> : <MathBlockView {...props} />;
+export const LatexBlockView = React.memo<LatexBlockViewProps>(
+  (props) => (props.block.isTikz ? <TikzBlockView {...props} /> : <MathBlockView {...props} />),
+  sameData
+);
 
 const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interactive, selected, zoom, onSelect, onEdit, onDelete, onSilentUpdate, measure = true }) => {
   const rendered = useMemo(() => renderLatexContent(block.latexCode), [block.latexCode]);
@@ -192,7 +208,7 @@ interface TextBlockViewProps {
   onSilentUpdate: (patch: Partial<TextBlock>) => void;
 }
 
-export const TextBlockView: React.FC<TextBlockViewProps> = ({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete }) => {
+export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete }) {
   const [draft, setDraft] = useState(block.text);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => setDraft(block.text), [block.text]);
@@ -241,9 +257,9 @@ export const TextBlockView: React.FC<TextBlockViewProps> = ({ block, interactive
       {block.text}
     </div>
   );
-};
+}, sameData);
 
-export const ImageBlockView: React.FC<{ block: ImageBlock; selected: boolean }> = ({ block, selected }) => (
+export const ImageBlockView = React.memo<{ block: ImageBlock; selected: boolean }>(({ block, selected }) => (
   <img
     src={block.dataUrl}
     alt=""
@@ -251,4 +267,4 @@ export const ImageBlockView: React.FC<{ block: ImageBlock; selected: boolean }> 
     className={`absolute pointer-events-none select-none ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4' : ''}`}
     style={{ left: block.x, top: block.y, width: block.width, height: block.height }}
   />
-);
+));

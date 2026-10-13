@@ -4,9 +4,8 @@ import {
   FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Clock, Settings as SettingsIcon,
   Grid as GridIcon, List as ListIcon, Copy, Menu, X, FolderInput, Upload, Download,
 } from 'lucide-react';
-import { NoteDocument, PAGE_HEIGHT, PAGE_WIDTH, Subject } from '../types';
-import { drawStrokes } from '../ink/strokeRenderer';
-import { paperBackground } from './CanvasPage';
+import { NoteDocument, Subject } from '../types';
+import { NoteThumb } from './NoteThumb';
 
 interface LibraryViewProps {
   notes: NoteDocument[];
@@ -25,50 +24,6 @@ interface LibraryViewProps {
   onBackup: () => void;
   onImport: (file: File) => void;
 }
-
-const NoteThumb: React.FC<{ note: NoteDocument }> = ({ note }) => {
-  const wrapRef = useRef<HTMLDivElement>(null);
-  const ref = useRef<HTMLCanvasElement>(null);
-  const [scale, setScale] = useState(0.2);
-  const page = note.pages[0];
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setScale(el.clientWidth / PAGE_WIDTH));
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-  useEffect(() => {
-    const c = ref.current;
-    if (!c || !page) return;
-    const r = Math.min(2, window.devicePixelRatio || 1) * scale;
-    c.width = Math.round(PAGE_WIDTH * r);
-    c.height = Math.round(PAGE_HEIGHT * r);
-    const ctx = c.getContext('2d')!;
-    ctx.setTransform(r, 0, 0, r, 0, 0);
-    for (const t of page.textBlocks ?? []) {
-      ctx.fillStyle = note.paperColor === 'dark' ? '#e5e7eb' : '#374151';
-      ctx.font = `${t.fontSize}px sans-serif`;
-      ctx.fillText(t.text.slice(0, 80), t.x, t.y + t.fontSize, t.width);
-    }
-    for (const b of page.latexBlocks) {
-      ctx.fillStyle = 'rgba(37,99,235,0.14)';
-      ctx.fillRect(b.x, b.y, b.width, b.height);
-    }
-    for (const im of page.imageBlocks ?? []) {
-      ctx.fillStyle = 'rgba(107,114,128,0.2)';
-      ctx.fillRect(im.x, im.y, im.width, im.height);
-    }
-    drawStrokes(ctx, page.strokes);
-  }, [page, note.paperColor, scale]);
-  return (
-    <div ref={wrapRef} className="w-full overflow-hidden relative" style={{ height: Math.min(192, PAGE_HEIGHT * scale) }}>
-      <div style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(note.paperStyle, note.paperColor) }}>
-        <canvas ref={ref} style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />
-      </div>
-    </div>
-  );
-};
 
 export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   const { notes, subjects, selectedSubjectId } = p;

@@ -88,12 +88,12 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
 }
 
 export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onSaved, onBack, onOpenSettings }) => {
-  const editor = useNoteEditor(note, onSaved);
+  const gestures = useMemo(() => new GestureBus(), []);
+  const editor = useNoteEditor(note, onSaved, () => gestures.inking);
   const { doc } = editor;
   /** The note's continuous surface (one NotePage; see editor/surface.ts). */
   const surface = doc.pages[0];
   const pageCount = useMemo(() => surfacePageCount(surface), [surface]);
-  const gestures = useMemo(() => new GestureBus(), []);
   const [tools, setToolsState] = useState<ToolSettings>(() => loadToolPrefs(settings));
   const toolsRef = useRef(tools);
   toolsRef.current = tools;

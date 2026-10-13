@@ -123,6 +123,13 @@ function openDb(): Promise<IDBDatabase> {
   return dbPromise;
 }
 
+/**
+ * Writes are committed to disk before they resolve ('strict' durability; browsers default to a
+ * relaxed commit that can be lost when the app is killed right after a save). Each note is one
+ * record written in one transaction, so a save is all or nothing.
+ */
+const STRICT: IDBTransactionOptions = { durability: 'strict' };
+
 function txDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -161,7 +168,7 @@ export async function getAllNotes(): Promise<NoteDocument[]> {
 export async function saveNote(note: NoteDocument, touch = true): Promise<NoteDocument> {
   const updated = touch ? { ...note, updatedAt: Date.now() } : note;
   const db = await openDb();
-  const tx = db.transaction(STORE_NOTES, 'readwrite');
+  const tx = db.transaction(STORE_NOTES, 'readwrite', STRICT);
   tx.objectStore(STORE_NOTES).put(updated);
   await txDone(tx);
   return updated;
@@ -169,7 +176,7 @@ export async function saveNote(note: NoteDocument, touch = true): Promise<NoteDo
 
 export async function deleteNote(id: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([STORE_NOTES, STORE_AUDIO], 'readwrite');
+  const tx = db.transaction([STORE_NOTES, STORE_AUDIO], 'readwrite', STRICT);
   tx.objectStore(STORE_NOTES).delete(id);
   const audio = tx.objectStore(STORE_AUDIO);
   const keys = await req(audio.index('noteId').getAllKeys(id));
@@ -189,7 +196,7 @@ export async function getAllSubjects(): Promise<Subject[]> {
 
 export async function saveSubjects(subjects: Subject[]): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction(STORE_SUBJECTS, 'readwrite');
+  const tx = db.transaction(STORE_SUBJECTS, 'readwrite', STRICT);
   const store = tx.objectStore(STORE_SUBJECTS);
   store.clear();
   for (const s of subjects) store.put(s);
@@ -204,7 +211,7 @@ interface StoredAudio extends AudioRecording {
 
 export async function saveRecording(rec: AudioRecording, blob: Blob): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction(STORE_AUDIO, 'readwrite');
+  const tx = db.transaction(STORE_AUDIO, 'readwrite', STRICT);
   tx.objectStore(STORE_AUDIO).put({ ...rec, blob } satisfies StoredAudio);
   await txDone(tx);
 }

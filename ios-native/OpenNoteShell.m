@@ -247,6 +247,20 @@ static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
     return UIStatusBarStyleDefault;
 }
 
+// Immersive fullscreen: no status bar, the home indicator fades out, and a swipe from a screen
+// edge (often the Pencil or the palm while writing) must be repeated before the system acts on it.
+- (BOOL)prefersStatusBarHidden {
+    return YES;
+}
+
+- (BOOL)prefersHomeIndicatorAutoHidden {
+    return YES;
+}
+
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures {
+    return UIRectEdgeAll;
+}
+
 #pragma mark Bridge
 
 - (void)userContentController:(WKUserContentController *)ucc
