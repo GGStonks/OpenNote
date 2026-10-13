@@ -220,6 +220,10 @@ function stylusAngles(e: PointerEvent): { alt?: number; az?: number } {
 
 type DirtyRect = { minX: number; minY: number; maxX: number; maxY: number };
 
+const intersects = (a: DirtyRect, b: DirtyRect) => a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
+/** Settled live ink is kept in path chunks of this many points (repainting stays local on long strokes). */
+const LIVE_CHUNK = 64;
+
 /** Snap indicator: orange for shapes (PDEDraw), a small blue dot for grid points. */
 function drawSnapDot(ctx: CanvasRenderingContext2D, dot: { x: number; y: number }, grid: boolean, k: number): DirtyRect {
   const r = (grid ? 4 : 6) * k;
@@ -411,6 +415,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawn: number;
     realPressure: boolean;
     inkRect: DirtyRect | null;
+    /** Live pen ink: the settled part in chunks of path with their bounds, and the last frame's tail region. */
+    liveChunks: { path: Path2D; rect: DirtyRect | null; n: number }[];
+    tailRect: DirtyRect | null;
     /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
     native: PencilListener | null;
     nativeSeen: boolean;
@@ -422,10 +429,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     webBuffer: PointerEvent[];
     /** Raw input of the stroke for the pen recorder (Settings > Diagnostics); null when off. */
     rec: RecordedSample[] | null;
+    recFrames: number[];
     /** The pen lifted before the shell's last samples arrived: finish when they do. */
     finishPending: { cancelled: boolean; pointerType: string; timer: ReturnType<typeof setTimeout> } | null;
   } | null>(null);
-  const tailCanvasRef = useRef<HTMLCanvasElement>(null);
   const raf = useRef<number | null>(null);
   const eraserPos = useRef<{ x: number; y: number } | null>(null);
   const toolsRef = useRef(tools);
@@ -479,6 +486,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const m = smartPenMeasure(d.smart);
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
     } else if (d && d.model && !d.snapped) {
+      if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
       drawModeledInk(ctx, d);
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
@@ -527,17 +535,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const staleInk = useRef<DirtyRect | null>(null);
 
   const retireInk = (d: NonNullable<typeof drawing.current>) => {
-    staleInk.current = unionRect(staleInk.current, d.inkRect);
+    staleInk.current = unionRect(unionRect(staleInk.current, d.inkRect), d.tailRect);
     d.inkRect = null;
-    const tc = tailCanvasRef.current;
-    if (tc) tc.style.display = 'none';
+    d.tailRect = null;
+    d.liveChunks = [];
   };
 
   /**
-   * Live handwriting: the model's settled points never change, so only the ones that arrived since
-   * the last frame are drawn (no per-frame redraw of the whole stroke). The provisional end —
-   * catch-up to the pen plus the Pencil's predicted samples — is drawn on a small canvas that
-   * follows the pen and is redrawn every frame.
+   * Live handwriting: the model's settled points never change and are appended to one path; the
+   * provisional end (the ink still settling near the pen, plus Nib's prediction) is recomputed
+   * every frame. Each frame only the region that changed is repainted.
    */
   function drawModeledInk(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>) {
     const m = d.model!;
@@ -545,71 +552,69 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const base = strokeWidth({ ...style, isShape: false });
     const variable = isVariableWidth(style) && d.realPressure;
     const widthOf = (q: ModeledPoint) => (variable ? pressureWidth(base, q.p) : base);
-    const pts = m.points;
-    const paint = (c: CanvasRenderingContext2D, seq: ModeledPoint[], from: number) => {
-      if (seq.length === 0) return;
-      c.save();
-      if (variable) {
-        c.fillStyle = style.color;
-        c.fill(capsulePath(seq, seq.map(widthOf), from));
-      } else {
-        c.strokeStyle = style.color;
-        c.lineWidth = base;
-        c.lineCap = 'round';
-        c.lineJoin = 'round';
-        c.beginPath();
-        const s0 = seq[Math.max(0, from - 1)];
-        c.moveTo(s0.x, s0.y);
-        if (seq.length === 1) c.lineTo(s0.x + 0.01, s0.y);
-        for (let i = Math.max(1, from); i < seq.length; i++) c.lineTo(seq[i].x, seq[i].y);
-        c.stroke();
-      }
-      c.restore();
+    const pad = base * 1.7 + 2;
+    const grow = (r: DirtyRect | null, seq: ModeledPoint[]) => {
+      for (const q of seq) r = unionRect(r, { minX: q.x - pad, minY: q.y - pad, maxX: q.x + pad, maxY: q.y + pad });
+      return r;
     };
+    /** Appends seq (its first point already on the path when from = 1) to a path. */
+    const append = (path: Path2D, seq: ModeledPoint[], from: number) => {
+      if (!seq.length) return;
+      if (variable) capsulePath(seq, seq.map(widthOf), from, path);
+      else {
+        if (from === 0) path.moveTo(seq[0].x, seq[0].y);
+        if (seq.length === 1) path.lineTo(seq[0].x + 0.01, seq[0].y);
+        for (let i = 1; i < seq.length; i++) path.lineTo(seq[i].x, seq[i].y);
+      }
+    };
+    // Settled ink: appended to one path that only grows.
+    const pts = m.points;
+    let changed = d.tailRect;
     if (d.drawn < pts.length) {
-      const from = Math.max(1, d.drawn);
-      const seg = pts.slice(from - 1);
-      paint(ctx, seg, d.drawn === 0 ? 0 : 1);
-      let r = d.inkRect;
-      const pad = base * 1.7 + 2;
-      for (const q of seg) r = unionRect(r, { minX: q.x - pad, minY: q.y - pad, maxX: q.x + pad, maxY: q.y + pad });
-      d.inkRect = r;
+      const seg = pts.slice(Math.max(0, d.drawn - 1));
+      let chunk = d.liveChunks[d.liveChunks.length - 1];
+      const fresh = !chunk || chunk.n >= LIVE_CHUNK;
+      if (fresh) d.liveChunks.push((chunk = { path: new Path2D(), rect: null, n: 0 }));
+      // A new chunk starts at the last drawn point, so the line continues across chunks.
+      append(chunk.path, seg, d.drawn === 0 || fresh ? 0 : 1);
+      chunk.rect = grow(chunk.rect, seg);
+      chunk.n += seg.length;
+      d.inkRect = grow(d.inkRect, seg);
+      changed = grow(changed, seg);
       d.drawn = pts.length;
     }
-    // Provisional tail.
-    const tc = tailCanvasRef.current;
-    if (!tc) return;
-    // The engine's own prediction (nib.ts), not the platform's predicted touches. Nothing may be
-    // settled yet in the first milliseconds: then the tail is the whole stroke (or a dot).
-    const tail = pts.length ? [pts[pts.length - 1], ...m.tail(true)] : m.tail(true);
-    if (tail.length < (pts.length ? 2 : 1)) {
-      tc.style.display = 'none';
-      return;
+    // Provisional end (redrawn every frame), with the engine's own prediction.
+    const tailPts = m.tail(true);
+    const tail = pts.length ? [pts[pts.length - 1], ...tailPts] : tailPts;
+    const tailPath = new Path2D();
+    append(tailPath, tail, pts.length ? 1 : 0);
+    d.tailRect = tail.length ? grow(null, tail) : null;
+    changed = unionRect(changed, d.tailRect);
+    if (!changed) return;
+    // The stroke is filled as ONE path, settled ink and tail together, in the region that changed:
+    // separate fills (one per frame, and a tail layer on top) painted the antialiased edge pixels
+    // where they overlap twice, a faint beading along the live line; and a single canvas needs no
+    // per-frame DOM changes (the moving tail canvas did).
+    // Only the chunks of settled ink that reach into the region (near the pen, or a loop crossing it).
+    const all = new Path2D();
+    for (const c of d.liveChunks) if (c.rect && intersects(c.rect, changed)) all.addPath(c.path);
+    all.addPath(tailPath);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(changed.minX, changed.minY, changed.maxX - changed.minX, changed.maxY - changed.minY);
+    ctx.clip();
+    ctx.clearRect(changed.minX, changed.minY, changed.maxX - changed.minX, changed.maxY - changed.minY);
+    if (variable) {
+      ctx.fillStyle = style.color;
+      ctx.fill(all);
+    } else {
+      ctx.strokeStyle = style.color;
+      ctx.lineWidth = base;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.stroke(all);
     }
-    const pad = base * 1.7 + 2;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const q of tail) {
-      minX = Math.min(minX, q.x); minY = Math.min(minY, q.y); maxX = Math.max(maxX, q.x); maxY = Math.max(maxY, q.y);
-    }
-    minX = Math.floor(minX - pad); minY = Math.floor(minY - pad);
-    const w = Math.ceil(maxX + pad - minX), h = Math.ceil(maxY + pad - minY);
-    const r = canvasRatio(zoomRef.current);
-    const cw = Math.ceil(w * r), ch = Math.ceil(h * r);
-    if (tc.width < cw || tc.height < ch) {
-      tc.width = Math.max(cw, tc.width, 64);
-      tc.height = Math.max(ch, tc.height, 64);
-    }
-    tc.style.display = 'block';
-    tc.style.left = `${minX}px`;
-    tc.style.top = `${minY}px`;
-    tc.style.width = `${tc.width / r}px`;
-    tc.style.height = `${tc.height / r}px`;
-    const tctx = tc.getContext('2d');
-    if (!tctx) return;
-    tctx.setTransform(1, 0, 0, 1, 0, 0);
-    tctx.clearRect(0, 0, tc.width, tc.height);
-    tctx.setTransform(r, 0, 0, r, -minX * r, -minY * r);
-    paint(tctx, tail, 0);
+    ctx.restore();
   }
 
   const renderRef = useRef(renderActive);
@@ -761,6 +766,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       drawn: 0,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       inkRect: null,
+      liveChunks: [],
+      tailRect: null,
       native: null,
       nativeSeen: false,
       nativeEnded: false,
@@ -768,6 +775,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       webBuffer: [],
       finishPending: null,
       rec: tool === 'pen' && penRecorder.enabled ? [recSample(pt, e.pointerType === 'pen' ? e.pressure : 0.5, start)] : null,
+      recFrames: [],
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
     if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
@@ -935,6 +943,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         penRecorder.add({
           tool: d.tool, penStyle: style.penStyle, width: style.width, source: d.nativeSeen ? 'native' : 'web',
           pointerType: d.pointerType, zoom: zoomRef.current, recordedAt: Date.now(), samples: d.rec,
+          frames: d.recFrames,
         });
       }
       const stroke: Stroke = {
@@ -1302,10 +1311,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             }
           }}
         />
-      )}
-
-      {visible && !printMode && (
-        <canvas ref={tailCanvasRef} className="absolute z-10 pointer-events-none" style={{ display: 'none', left: 0, top: 0 }} />
       )}
 
       {/* Lasso selection box */}

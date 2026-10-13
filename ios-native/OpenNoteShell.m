@@ -24,10 +24,11 @@
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <objc/message.h>
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"1.8.3";
+static NSString *const kVersion = @"1.8.4";
 
 #pragma mark - 240 Hz Apple Pencil samples
 
@@ -146,6 +147,40 @@ static NSString *ONMimeType(NSString *ext) {
 
 @end
 
+#pragma mark - 120 Hz
+
+// WebKit runs requestAnimationFrame, and with it the app's scrolling, momentum and live ink, at
+// 60 fps even on a 120 Hz ProMotion display: the internal feature "Prefer Page Rendering Updates
+// near 60fps" (Safari > Feature Flags) is on by default. It is switched off through WebKit's
+// feature-flag SPI, whose spelling changed between iOS versions; each form is tried and checked at
+// runtime. Returns YES if the flag was found and turned off.
+static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
+    NSString *const key = @"PreferPageRenderingUpdatesNear60FPSEnabled";
+    NSArray<NSArray<NSString *> *> *spis = @[
+        @[ @"_features", @"_setEnabled:forFeature:" ],
+        @[ @"_internalDebugFeatures", @"_setEnabled:forInternalDebugFeature:" ],
+        @[ @"_experimentalFeatures", @"_setEnabled:forExperimentalFeature:" ],
+    ];
+    for (NSArray<NSString *> *spi in spis) {
+        SEL list = NSSelectorFromString(spi[0]), set = NSSelectorFromString(spi[1]);
+        if (![WKPreferences respondsToSelector:list] || ![prefs respondsToSelector:set]) continue;
+        NSArray *features = ((NSArray * (*)(id, SEL))objc_msgSend)([WKPreferences class], list);
+        for (id feature in features) {
+            NSString *featureKey = nil;
+            @try {
+                featureKey = [feature valueForKey:@"key"];
+            } @catch (NSException *e) {
+                continue;
+            }
+            if ([featureKey isEqualToString:key]) {
+                ((void (*)(id, SEL, BOOL, id))objc_msgSend)(prefs, set, NO, feature);
+                return YES;
+            }
+        }
+    }
+    return NO;
+}
+
 #pragma mark - View controller
 
 @interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
@@ -167,8 +202,11 @@ static NSString *ONMimeType(NSString *ext) {
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
+    BOOL fullFrameRate = ONEnableFullFrameRate(config.preferences);
+
     WKUserContentController *ucc = config.userContentController;
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@' };", kVersion];
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@ };",
+                                                     kVersion, fullFrameRate ? @"true" : @"false"];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
 

@@ -22,6 +22,8 @@ export interface RecordedStroke {
   zoom: number;
   recordedAt: number;
   samples: RecordedSample[];
+  /** When the live ink was repainted (ms on the stroke's clock): the real display rate. */
+  frames?: number[];
 }
 
 export interface PenRecording {
@@ -31,6 +33,8 @@ export interface PenRecording {
   platform: string;
   userAgent: string;
   devicePixelRatio: number;
+  /** iOS shell: WebKit's 60 fps cap for page rendering was switched off. */
+  fullFrameRate?: boolean;
   screen: { width: number; height: number };
   exportedAt: number;
   strokes: RecordedStroke[];
@@ -88,6 +92,7 @@ export const penRecorder = {
       platform,
       userAgent: navigator.userAgent,
       devicePixelRatio: window.devicePixelRatio,
+      fullFrameRate: (window.OpenNoteNative as { fullFrameRate?: boolean } | undefined)?.fullFrameRate,
       screen: { width: screen.width, height: screen.height },
       exportedAt: Date.now(),
       strokes: strokes.slice(),

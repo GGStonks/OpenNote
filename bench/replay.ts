@@ -226,6 +226,9 @@ function inputReport(strokes: RecordedStroke[]) {
   console.log(`  pen speed        median ${(median(speeds) * 1000).toFixed(0)} px/s, p95 ${(pct(speeds, 0.95) * 1000).toFixed(0)} px/s`);
   console.log(`  force at landing first 3 samples = ${landing.length ? (median(landing) * 100).toFixed(0) : '-'}% of the stroke's median force`);
   console.log(`  digitiser noise  ~${noises.length ? median(noises).toFixed(3) : '-'} px RMS (slow parts)`);
+  const fi: number[] = [];
+  for (const st of strokes) for (let i = 1; i < (st.frames?.length ?? 0); i++) fi.push(st.frames![i] - st.frames![i - 1]);
+  if (fi.length) console.log(`  ink repaint      median every ${median(fi).toFixed(1)} ms (${(1000 / median(fi)).toFixed(0)} Hz), p95 ${pct(fi, 0.95).toFixed(1)} ms`);
   return noises.length ? median(noises) : 0.12;
 }
 
@@ -259,7 +262,7 @@ mkdirSync('bench/out', { recursive: true });
 for (const file of files) {
   const rec = JSON.parse(readFileSync(file, 'utf8')) as PenRecording;
   const strokes = rec.strokes.filter((s) => s.samples.length >= 2);
-  console.log(`\n=== ${basename(file)} — app ${rec.app}, ${rec.platform}, dpr ${rec.devicePixelRatio}, ${rec.userAgent.slice(0, 80)}`);
+  console.log(`\n=== ${basename(file)} — app ${rec.app}, ${rec.platform}, dpr ${rec.devicePixelRatio}, 60 fps cap off: ${rec.fullFrameRate ?? '-'}, ${rec.userAgent.slice(0, 60)}`);
   const noise = inputReport(strokes);
   const results: Map<string, ModeledPoint[]>[] = strokes.map(() => new Map());
   console.log('\nengine          follow  max    jag(rad/px)  lag   lag95  over   wiggle  width  shimmer');

@@ -58,6 +58,8 @@
 	<string>iphoneos16.5</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
 	<key>MinimumOSVersion</key>
 	<string>15.0</string>
 	<key>UIDeviceFamily</key>

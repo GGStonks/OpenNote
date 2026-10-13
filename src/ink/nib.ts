@@ -25,8 +25,8 @@ import { ModeledPoint, hasRealPressure, sampleTimes } from './inkEngine';
  *     estimate and real nibs ink at full width as they land; a drop of force is followed with
  *     the RELEASE time constant so strokes keep their body width as the pen eases off.
  *  4b. Lift-off: as the Pencil leaves the glass it keeps reporting samples, still moving, while its
- *     force fades to zero; a nib stops inking there. Trailing samples whose force is under
- *     LIFT_FORCE of the stroke's median (the last LIFT_MS / LIFT_PX at most) are not ink: they
+ *     force fades to zero; a nib stops inking there. Trailing samples of that fade whose force is
+ *     under LIFT_FORCE of the force before it (the last LIFT_MS / LIFT_PX at most) are not ink: they
  *     are held back while drawing (neither settled nor on the tail, since they may turn out to be
  *     the lift) and dropped when the stroke ends, so the ink stops where the pen stopped inking.
  *  5. Prediction (tail only, never stored): constant-acceleration extrapolation of the last
@@ -63,9 +63,9 @@ export const NIB = {
   PREDICT_MAX_PX: 3,
   /** No prediction below this speed (px/ms). */
   PREDICT_MIN_SPEED: 0.12,
-  /** Lift-off trimming: force fraction of the stroke median, and the most that is trimmed. */
-  LIFT_FORCE: 0.5,
-  LIFT_MS: 30,
+  /** Lift-off: ink ends where the fading force drops under this share of its level before the fade. */
+  LIFT_FORCE: 0.6,
+  LIFT_MS: 40,
   LIFT_PX: 18,
   /** No prediction once the force falls under this share of its recent peak (the pen is lifting). */
   PREDICT_FORCE_DROP: 0.85,
@@ -151,13 +151,20 @@ export class NibModeler {
     // px further on: that drew a straight line out to the pen in the air.)
     let k = n;
     while (k > 1 && !(r[k - 1].f > 0)) k--;
-    if (k < 6) return k;
-    const limit = NIB.LIFT_FORCE * fs[fs.length >> 1];
+    if (k < 4) return k;
+    // The lift: the force falls steadily from where it was just before. Find that run (a few
+    // percent of noise allowed) and its starting force F0; the ink ends where the force drops
+    // under LIFT_FORCE of F0. (Relative to the stroke's median, as before, the threshold was too
+    // low: the placeholder force the Pencil reports at touch-down pulls the median down, and the
+    // fading samples were drawn as a small extra point after the pen had lifted.)
     const tEnd = r[k - 1].t;
+    let s = k - 1;
+    while (s > 0 && r[s - 1].f > 0 && r[s - 1].f >= r[s].f * 0.97 && tEnd - r[s - 1].t <= NIB.LIFT_MS) s--;
+    const limit = NIB.LIFT_FORCE * r[s].f;
     let len = 0;
-    while (k > 4) {
+    while (k > Math.max(s + 1, 2)) {
       const i = k - 1;
-      if (r[i].f >= limit || tEnd - r[i].t > NIB.LIFT_MS) break;
+      if (r[i].f >= limit) break;
       len += Math.hypot(r[i].x - r[i - 1].x, r[i].y - r[i - 1].y);
       if (len > NIB.LIFT_PX) break;
       k--;
