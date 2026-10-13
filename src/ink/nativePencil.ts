@@ -5,7 +5,7 @@
  * implement getCoalescedEvents, so a web page sees at most half of the Pencil's 240 samples per
  * second: fast handwriting turned into visible chords. The shell (ios-native/OpenNoteShell.m)
  * forwards every coalesced UITouch sample — precise location, force, altitude, azimuth and its own
- * timestamp — plus UIKit's predicted touches to window.__opennotePencil. While a Pencil stroke is
+ * timestamp — to window.__opennotePencil. While a Pencil stroke is
  * drawn, the canvas takes its samples from here and ignores the web events' positions.
  */
 

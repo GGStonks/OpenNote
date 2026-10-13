@@ -2,7 +2,11 @@ import { Point } from '../types';
 import { XY } from './spline';
 
 /**
- * Handwriting engine: a TypeScript port of the modelling stage of Google's Ink Stroke Modeler
+ * Shared ink geometry (pressure width, capsules, lift-off trimming, sample times) and the v1.7
+ * handwriting engine, kept as the baseline of the pen benchmark (bench/pen.ts). The app draws
+ * handwriting with its own engine, Nib (nib.ts).
+ *
+ * v1.7 engine: a TypeScript port of the modelling stage of Google's Ink Stroke Modeler
  * (github.com/google/ink-stroke-modeler, Apache-2.0), the library behind the handwriting of
  * Google's own note apps (wobble smoother as in the library, position model retuned below).
  *
@@ -219,7 +223,7 @@ export class StrokeModeler {
  * Sample times of a stroke. Strokes saved before v1.2 have no timestamps: they are synthesised
  * from the distance at an ordinary writing speed.
  */
-function sampleTimes(points: Point[]): number[] {
+export function sampleTimes(points: Point[]): number[] {
   const out: number[] = [];
   for (let i = 0; i < points.length; i++) {
     const p = points[i];

@@ -16,7 +16,8 @@
 //  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
 //    getCoalescedEvents, so a passive gesture recognizer (never cancels or delays the web view's
 //    touches) forwards every coalesced UITouch sample (precise location, force, altitude, azimuth,
-//    timestamp) plus UIKit's predicted touches to window.__opennotePencil (src/ink/nativePencil.ts).
+//    timestamp) to window.__opennotePencil (src/ink/nativePencil.ts); the app models and predicts
+//    the ink itself.
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
@@ -66,10 +67,8 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
     NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
     if (!samples.count) samples = @[ touch ];
     for (UITouch *t in samples) ONAppendTouch(js, t, view);
-    [js appendString:@"],["];
-    if (phase == 1)
-        for (UITouch *t in [event predictedTouchesForTouch:touch]) ONAppendTouch(js, t, view);
-    [js appendString:@"])"];
+    // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
+    [js appendString:@"],[])"];
     [view evaluateJavaScript:js completionHandler:nil];
 }
 

@@ -7,7 +7,8 @@ import {
 import {
   capsulePath, drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, strokeHitTest, strokeWidth, InkStyle, strokeToSvg, styleOf,
 } from '../ink/strokeRenderer';
-import { ModeledPoint, StrokeModeler, pressureWidth, trimLiftOff } from '../ink/inkEngine';
+import { ModeledPoint, pressureWidth, trimLiftOff } from '../ink/inkEngine';
+import { NibModeler } from '../ink/nib';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
@@ -397,7 +398,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** Raw Pencil force of each sample (lift-off trimming). */
     force: number[];
     /** Handwriting model (pen tool): its settled points are drawn once, incrementally. */
-    model: StrokeModeler | null;
+    model: NibModeler | null;
     drawn: number;
     realPressure: boolean;
     inkRect: DirtyRect | null;
@@ -564,9 +565,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     // Provisional tail.
     const tc = tailCanvasRef.current;
-    if (!tc || !pts.length) return;
-    const tail = [pts[pts.length - 1], ...m.tail(d.predicted.map((q) => ({ x: q.x, y: q.y, t: q.t ?? 0, p: q.pressure })))];
-    if (tail.length < 2) {
+    if (!tc) return;
+    // The engine's own prediction (nib.ts), not the platform's predicted touches. Nothing may be
+    // settled yet in the first milliseconds: then the tail is the whole stroke (or a dot).
+    const tail = pts.length ? [pts[pts.length - 1], ...m.tail(true)] : m.tail(true);
+    if (tail.length < (pts.length ? 2 : 1)) {
       tc.style.display = 'none';
       return;
     }
@@ -725,6 +728,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     claimLive();
     const start = eventTime(e.nativeEvent);
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
+    // The pen engine takes a force-less pen sample as unknown, not as the 0.5 fallback.
+    if (tool === 'pen' && e.pointerType === 'pen' && !(e.pressure > 0)) pt.pressure = 0;
     drawing.current = {
       pointerId: e.pointerId,
       pointerType: e.pointerType,
@@ -739,7 +744,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
       force: [pt.pressure],
-      model: tool === 'pen' ? new StrokeModeler() : null,
+      model: tool === 'pen' ? new NibModeler() : null,
       drawn: 0,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       inkRect: null,
@@ -812,8 +817,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.force.push(lifting ? 0 : pt.pressure);
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
       // outline wobble.
-      if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
-      pt.pressure = d.pressure;
+      // pen: the raw force (the engine smooths it with no lag; 0 = lifting, force unknown);
+      // highlighter / shapes: light smoothing, raw values jitter.
+      if (d.model) pt.pressure = lifting ? 0 : pt.pressure;
+      else {
+        if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
+        pt.pressure = d.pressure;
+      }
       d.points.push(pt);
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
       if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
@@ -851,6 +861,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const first = samples[0];
       d.start = first.timeStamp;
       const pt = toPoint(first, d.start, stylusAngles(first as unknown as PointerEvent));
+      if (!(first.pressure > 0)) pt.pressure = 0;
       retireInk(d);
       d.drawn = 0;
       d.points = [pt];
@@ -858,7 +869,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
-      d.model = new StrokeModeler();
+      d.model = new NibModeler();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       samples = samples.slice(1);
     }
@@ -941,7 +952,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const pt = toPoint(e, d.start, stylusAngles(e.nativeEvent));
       const last = d.points[d.points.length - 1];
       if (Math.hypot(pt.x - last.x, pt.y - last.y) > 0.2) {
-        pt.pressure = d.pressure;
+        pt.pressure = d.model ? 0 : d.pressure;
         d.force.push(0); // the pen has left the glass
         d.points.push(pt);
         if (d.smart) moveSmartPen(d.smart, pt);

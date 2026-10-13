@@ -1,6 +1,7 @@
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
-import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, modelStroke, pressureWidth, thinModeled } from './inkEngine';
+import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, pressureWidth, thinModeled } from './inkEngine';
+import { nibStroke } from './nib';
 
 /**
  * Ink renderer.
@@ -73,7 +74,7 @@ function bezierPath(segs: Bezier[], closed: boolean): Path2D {
 
 /** Modelled centre line and per-point widths of a handwritten stroke (canvas, SVG and TikZ). */
 export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoint[]; widths: number[] | null; width: number } {
-  const pts = thinModeled(modelStroke(points));
+  const pts = thinModeled(nibStroke(points));
   const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
   const widths = isVariableWidth(style) && hasRealPressure(points) ? pts.map((p) => pressureWidth(width, p.p)) : null;
   return { pts, widths, width };
