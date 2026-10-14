@@ -122,7 +122,7 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
         </button>
       )}
       {open && (
-        <div className="absolute top-11 right-0 z-50 bg-white dark:bg-[#2C2C2E] rounded-2xl p-2 shadow-xl border border-gray-200 dark:border-gray-700 w-64">
+        <div className="absolute top-11 right-0 z-50 bg-white dark:bg-ui-raised rounded-2xl p-2 shadow-xl border border-gray-200 dark:border-gray-700 w-64">
           {list.map((r) => (
             <div key={r.id} className="flex items-center gap-2 px-2 py-1.5 text-xs text-gray-700 dark:text-gray-200">
               <button onClick={() => play(r)} className="p-1.5 rounded-full bg-blue-50 dark:bg-blue-900/40 text-blue-600">

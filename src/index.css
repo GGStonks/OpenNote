@@ -87,3 +87,19 @@
     print-color-adjust: exact;
   }
 }
+
+/* UI theme variables (src/theme.ts sets them at start-up; these are the Light theme). */
+:root {
+  --g-50: 249 250 251; --g-100: 243 244 246; --g-200: 229 231 235; --g-300: 209 213 219;
+  --g-400: 156 163 175; --g-500: 107 114 128; --g-600: 75 85 99; --g-700: 55 65 81;
+  --g-800: 31 41 55; --g-900: 17 24 39; --g-950: 3 7 18;
+  --ui-app: 242 242 247; --ui-desk: 229 229 234; --ui-card: 249 249 251; --ui-side: 236 236 241;
+  --ui-panel: 255 255 255; --ui-raised: 243 244 246; --ui-high: 229 231 235; --ui-bar: 28 28 30;
+  --ui-white: 255 255 255;
+}
+
+/* Note pages are never themed: their paper is the page's own colour (inline style). */
+.on-page {
+  color-scheme: light;
+  color: #111827;
+}

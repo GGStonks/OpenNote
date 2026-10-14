@@ -1,5 +1,6 @@
 import { platformKind } from './platform';
 import { PenStyle, EraserMode } from './types';
+import { UiTheme } from './theme';
 
 export interface AppSettings {
   /** Server base URL or full chat-completions URL; normalised by resolveChatUrl(). */
@@ -17,6 +18,8 @@ export interface AppSettings {
   pencilDoubleTapEraser: boolean;
   /** Notability gestures: two-finger tap undoes, three-finger tap redoes. */
   fingerTapUndo: boolean;
+  /** Theme of the interface (never of the note pages, see theme.ts). */
+  theme: UiTheme;
 }
 
 const KEY = 'opennote_settings_v2';
@@ -39,6 +42,7 @@ export function defaultSettings(): AppSettings {
     holdToSnap: true,
     pencilDoubleTapEraser: true,
     fingerTapUndo: true,
+    theme: 'light',
   };
 }
 

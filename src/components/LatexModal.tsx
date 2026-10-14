@@ -94,7 +94,7 @@ export const LatexModal: React.FC<LatexModalProps> = ({ state, onClose, onInsert
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-[#1C1C1E] w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <div className={`p-2 rounded-xl ${isTikz ? 'bg-green-50 text-green-600 dark:bg-green-900/40' : 'bg-blue-50 text-blue-600 dark:bg-blue-900/40'}`}>
@@ -127,7 +127,7 @@ export const LatexModal: React.FC<LatexModalProps> = ({ state, onClose, onInsert
               <span>{state.warning}</span>
             </div>
           )}
-          <div className="p-4 bg-gray-50 dark:bg-[#2C2C2E] rounded-2xl border border-gray-200 dark:border-gray-700 overflow-auto">
+          <div className="p-4 bg-gray-50 dark:bg-ui-raised rounded-2xl border border-gray-200 dark:border-gray-700 overflow-auto">
             {isTikz ? (
               <TikzLivePreview code={debounced} />
             ) : (
@@ -153,13 +153,13 @@ export const LatexModal: React.FC<LatexModalProps> = ({ state, onClose, onInsert
               spellCheck={false}
               autoCapitalize="off"
               autoCorrect="off"
-              className="w-full p-3 bg-gray-50 dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none text-gray-800 dark:text-gray-200 select-text"
+              className="w-full p-3 bg-gray-50 dark:bg-ui-raised border border-gray-200 dark:border-gray-700 rounded-xl font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none text-gray-800 dark:text-gray-200 select-text"
               style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
             />
           </div>
         </div>
 
-        <div className="px-5 py-3.5 bg-gray-50 dark:bg-[#2C2C2E]/50 border-t border-gray-100 dark:border-gray-800 flex flex-wrap justify-end gap-2">
+        <div className="px-5 py-3.5 bg-gray-50 dark:bg-ui-raised/50 border-t border-gray-100 dark:border-gray-800 flex flex-wrap justify-end gap-2">
           {onRetry && state.origin === 'vlm' && (
             <button onClick={onRetry} className="mr-auto px-3 py-2 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-200/60 rounded-xl flex items-center gap-1.5">
               <RotateCcw className="w-4 h-4" /> Retry

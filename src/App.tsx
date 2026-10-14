@@ -1,30 +1,59 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { LibraryView } from './components/LibraryView';
 import { Editor } from './components/Editor';
 import { SettingsModal } from './components/SettingsModal';
-import { NoteDocument, SCHEMA_VERSION, Subject, newId } from './types';
+import { Folder, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, SCHEMA_VERSION, Tag, newId } from './types';
 import {
-  DEFAULT_SUBJECTS, createBlankPage, deleteNote, exportLibrary, getAllNotes, getAllSubjects, importBackup,
-  requestPersistentStorage, saveNote, saveSubjects,
+  createBlankPage, deleteNote, exportLibrary, getAllFolders, getAllNotes, getAllTags, importBackup,
+  requestPersistentStorage, saveFolders, saveNote, saveTags,
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { shareFile } from './platform';
+import { applyTheme } from './theme';
+import { folderAndDescendants } from './library';
+
+/** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
+function readImage(file: File): Promise<{ dataUrl: string; w: number; h: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error(`${file.name} is not a readable image`));
+      img.onload = () => {
+        const s = Math.min(1, 1600 / Math.max(img.width, img.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(img.width * s);
+        c.height = Math.round(img.height * s);
+        c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
+        resolve({ dataUrl: c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.88), w: c.width, h: c.height });
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 export const App: React.FC = () => {
   const [notes, setNotes] = useState<NoteDocument[] | null>(null);
-  const [subjects, setSubjects] = useState<Subject[]>(DEFAULT_SUBJECTS);
-  const [selectedSubjectId, setSelectedSubjectId] = useState<string | null>(null);
+  const [folders, setFolders] = useState<Folder[]>([]);
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [openNoteId, setOpenNoteId] = useState<string | null>(null);
   const [settings, setSettingsState] = useState<AppSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** The latest notes, also between renders (several quick edits of one note must build on each other). */
+  const notesRef = useRef(notes);
+  notesRef.current = notes;
 
   const reload = useCallback(async () => {
     try {
-      const [n, s] = await Promise.all([getAllNotes(), getAllSubjects()]);
-      setNotes(n);
-      setSubjects(s);
+      const [f, t] = await Promise.all([getAllFolders(), getAllTags()]);
+      setFolders(f);
+      setTags(t);
+      setNotes(await getAllNotes());
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : String(err));
       setNotes([]);
@@ -41,6 +70,8 @@ export const App: React.FC = () => {
     setSettingsState(s);
   }, []);
 
+  useEffect(() => applyTheme(settings.theme), [settings.theme]);
+
   const upsertLocal = useCallback((n: NoteDocument) => {
     setNotes((prev) => {
       const list = prev ?? [];
@@ -49,28 +80,37 @@ export const App: React.FC = () => {
     });
   }, []);
 
-  const createNote = async (subjectId?: string) => {
+  const blankNote = (title: string, page?: Partial<NotePage>): NoteDocument => {
     const now = Date.now();
-    const note: NoteDocument = {
+    return {
       id: newId('note'),
-      title: `Note ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
-      subjectId: subjectId ?? selectedSubjectId ?? undefined,
+      title,
+      folderId: selectedFolderId ?? undefined,
+      tagIds: [],
       createdAt: now,
       updatedAt: now,
       paperStyle: 'ruled',
       paperColor: 'white',
       schemaVersion: SCHEMA_VERSION,
-      pages: [createBlankPage(1)],
+      pages: [{ ...createBlankPage(1), ...page }],
       sheets: [{ id: newId('sheet') }],
     };
+  };
+
+  const createNote = async () => {
+    const note = blankNote(`Note ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
     upsertLocal(await saveNote(note, false));
     setOpenNoteId(note.id);
   };
 
-  const updateNoteMeta = async (id: string, patch: Partial<NoteDocument>) => {
-    const target = notes?.find((n) => n.id === id);
+  /** Changes a note's details; `touch` also marks it modified (renaming does, moving and tagging do not). */
+  const updateNoteMeta = async (id: string, patch: Partial<NoteDocument> | ((n: NoteDocument) => Partial<NoteDocument>), touch = true) => {
+    const target = notesRef.current?.find((n) => n.id === id);
     if (!target) return;
-    upsertLocal(await saveNote({ ...target, ...patch }));
+    const next = { ...target, ...(typeof patch === 'function' ? patch(target) : patch) };
+    notesRef.current = (notesRef.current ?? []).map((n) => (n.id === id ? next : n));
+    upsertLocal(next);
+    upsertLocal(await saveNote(next, touch));
   };
 
   const duplicateNote = async (id: string) => {
@@ -85,18 +125,91 @@ export const App: React.FC = () => {
     setNotes((prev) => (prev ?? []).filter((n) => n.id !== id));
   };
 
-  const addSubject = async (name: string, color: string) => {
-    const next = [...subjects, { id: newId('subj'), name, color }];
-    setSubjects(next);
-    await saveSubjects(next);
+  // --- Folders -------------------------------------------------------------------------------
+
+  const commitFolders = async (next: Folder[]) => {
+    setFolders(next);
+    await saveFolders(next);
   };
 
-  const deleteSubject = async (id: string) => {
-    const next = subjects.filter((s) => s.id !== id);
-    setSubjects(next);
-    await saveSubjects(next);
-    for (const n of notes ?? []) if (n.subjectId === id) await updateNoteMeta(n.id, { subjectId: undefined });
-    if (selectedSubjectId === id) setSelectedSubjectId(null);
+  const createFolder = async (name: string, parentId: string | undefined, color: string) => {
+    const f: Folder = { id: newId('folder'), name, parentId, color, createdAt: Date.now() };
+    await commitFolders([...folders, f]);
+    return f;
+  };
+
+  const updateFolder = (id: string, patch: Partial<Pick<Folder, 'name' | 'color'>>) => commitFolders(folders.map((f) => (f.id === id ? { ...f, ...patch } : f)));
+
+  /** Moves a folder (with everything in it) under another folder or to the top level; never into itself. */
+  const moveFolder = async (id: string, parentId: string | undefined) => {
+    if (parentId && folderAndDescendants(folders, id).has(parentId)) return;
+    await commitFolders(folders.map((f) => (f.id === id ? { ...f, parentId } : f)));
+  };
+
+  /** Deletes a folder; its notes and subfolders move up to its parent folder (nothing is lost). */
+  const deleteFolder = async (id: string) => {
+    const gone = folders.find((f) => f.id === id);
+    if (!gone) return;
+    await commitFolders(folders.filter((f) => f.id !== id).map((f) => (f.parentId === id ? { ...f, parentId: gone.parentId } : f)));
+    for (const n of notesRef.current ?? []) if (n.folderId === id) await updateNoteMeta(n.id, { folderId: gone.parentId }, false);
+    if (selectedFolderId === id) setSelectedFolderId(gone.parentId ?? null);
+  };
+
+  // --- Tags ----------------------------------------------------------------------------------
+
+  const createTag = async (name: string, color: string) => {
+    const t: Tag = { id: newId('tag'), name, color };
+    const next = [...tags, t];
+    setTags(next);
+    await saveTags(next);
+    return t;
+  };
+
+  const updateTag = async (id: string, patch: Partial<Omit<Tag, 'id'>>) => {
+    const next = tags.map((t) => (t.id === id ? { ...t, ...patch } : t));
+    setTags(next);
+    await saveTags(next);
+  };
+
+  const deleteTag = async (id: string) => {
+    const next = tags.filter((t) => t.id !== id);
+    setTags(next);
+    await saveTags(next);
+    for (const n of notesRef.current ?? []) if (n.tagIds?.includes(id)) await updateNoteMeta(n.id, (cur) => ({ tagIds: (cur.tagIds ?? []).filter((t) => t !== id) }), false);
+  };
+
+  /** Imports files from outside: .opennote notes / backups, images and text files (each a new note). */
+  const importExternal = async (files: File[]) => {
+    let made = 0;
+    const failed: string[] = [];
+    let last: NoteDocument | null = null;
+    for (const file of files) {
+      const name = file.name.replace(/\.[^.]+$/, '') || 'Imported';
+      try {
+        if (/\.(opennote|json)$/i.test(file.name) || file.type === 'application/json') {
+          made += await importBackup(JSON.parse(await file.text()));
+        } else if (file.type.startsWith('image/')) {
+          const img = await readImage(file);
+          const w = Math.min(PAGE_WIDTH - 160, img.w, ((PAGE_HEIGHT - 160) * img.w) / img.h);
+          const h = (w * img.h) / img.w;
+          last = blankNote(name, { imageBlocks: [{ id: newId('image'), x: (PAGE_WIDTH - w) / 2, y: 80, width: w, height: h, dataUrl: img.dataUrl, createdAt: Date.now() }] });
+          upsertLocal(await saveNote(last, false));
+          made++;
+        } else if (/^text\//.test(file.type) || /\.(txt|md|tex)$/i.test(file.name)) {
+          last = blankNote(name, { textBlocks: [{ id: newId('text'), x: 96, y: 88, width: PAGE_WIDTH - 192, text: await file.text(), fontSize: 16, color: '#111827', createdAt: Date.now() }] });
+          upsertLocal(await saveNote(last, false));
+          made++;
+        } else {
+          failed.push(file.name);
+        }
+      } catch (err) {
+        failed.push(`${file.name} (${err instanceof Error ? err.message : String(err)})`);
+      }
+    }
+    await reload();
+    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: .opennote, images, .txt / .md / .tex.`);
+    else if (files.length === 1 && last) setOpenNoteId(last.id);
+    else window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
   };
 
   const backup = async () => {
@@ -130,7 +243,7 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#E5E5EA] dark:bg-[#121214] text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
+    <div className="h-full flex flex-col bg-ui-desk dark:bg-ui-app text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
       {loadError && <div className="bg-red-600 text-white text-xs px-3 py-1.5">Storage error: {loadError}</div>}
       {openNote ? (
         <Editor
@@ -145,23 +258,29 @@ export const App: React.FC = () => {
       ) : (
         <LibraryView
           notes={notes}
-          subjects={subjects}
-          selectedSubjectId={selectedSubjectId}
-          onSelectSubject={setSelectedSubjectId}
+          folders={folders}
+          tags={tags}
+          selectedFolderId={selectedFolderId}
+          onSelectFolder={setSelectedFolderId}
           onOpenNote={setOpenNoteId}
           onCreateNote={createNote}
           onDeleteNote={removeNote}
           onDuplicateNote={duplicateNote}
           onRenameNote={(id, title) => updateNoteMeta(id, { title })}
-          onMoveNote={(id, subjectId) => updateNoteMeta(id, { subjectId })}
-          onCreateSubject={addSubject}
-          onDeleteSubject={deleteSubject}
+          onMoveNote={(id, folderId) => updateNoteMeta(id, { folderId }, false)}
+          onSetNoteTags={(id, update) => updateNoteMeta(id, (n) => ({ tagIds: update(n.tagIds ?? []) }), false)}
+          onCreateFolder={createFolder}
+          onUpdateFolder={updateFolder}
+          onMoveFolder={moveFolder}
+          onDeleteFolder={deleteFolder}
+          onCreateTag={createTag}
+          onUpdateTag={updateTag}
+          onDeleteTag={deleteTag}
           onOpenSettings={() => setSettingsOpen(true)}
-          onBackup={backup}
-          onImport={importFile}
+          onImportFiles={importExternal}
         />
       )}
-      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} />
+      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
     </div>
   );
 };

@@ -160,7 +160,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-[#1C1C1E] rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[env(safe-area-inset-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Export “{doc.title}”</h3>
           <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-full">

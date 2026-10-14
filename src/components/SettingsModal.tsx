@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { X, Server, Check, Loader2, Wifi, AlertCircle } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload } from 'lucide-react';
+import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
 import { AppSettings, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
@@ -10,9 +11,14 @@ interface SettingsModalProps {
   onClose: () => void;
   settings: AppSettings;
   onSave: (s: AppSettings) => void;
+  /** Exports the whole library as one .opennote archive. */
+  onBackup: () => void;
+  /** Imports a .opennote archive or note. */
+  onImport: (file: File) => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, settings, onSave }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: close, settings, onSave, onBackup, onImport }) => {
+  const importRef = useRef<HTMLInputElement>(null);
   const [draft, setDraft] = useState(settings);
   const [test, setTest] = useState<{ state: 'idle' | 'busy' | 'ok' | 'error'; msg?: string }>({ state: 'idle' });
   const [rec, setRec] = useState({ on: penRecorder.enabled, count: penRecorder.count });
@@ -28,6 +34,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
   }, [isOpen, settings]);
 
   if (!isOpen) return null;
+  // The theme is previewed as soon as it is picked; closing without saving puts the saved one back.
+  const onClose = () => {
+    applyTheme(settings.theme);
+    close();
+  };
   const set = (patch: Partial<AppSettings>) => setDraft((d) => ({ ...d, ...patch }));
 
   const runTest = async () => {
@@ -58,7 +69,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
     }
   };
 
-  const field = 'w-full p-2.5 bg-gray-50 dark:bg-[#2C2C2E] border border-gray-200 dark:border-gray-700 rounded-xl font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none text-gray-800 dark:text-gray-200 select-text';
+  const field = 'w-full p-2.5 bg-gray-50 dark:bg-ui-raised border border-gray-200 dark:border-gray-700 rounded-xl font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none text-gray-800 dark:text-gray-200 select-text';
   const label = 'text-[11px] font-semibold text-gray-500 uppercase tracking-wider block mb-1.5';
   const Toggle: React.FC<{ checked: boolean; onChange: (v: boolean) => void; title: string; sub?: string }> = ({ checked, onChange, title, sub }) => (
     <label className="flex items-start justify-between gap-3 py-1.5 cursor-pointer">
@@ -72,11 +83,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-[#1C1C1E] rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="p-2 bg-blue-50 dark:bg-blue-900/40 text-blue-600 rounded-xl">
-              <Server className="w-5 h-5" />
+              <SettingsIcon className="w-5 h-5" />
             </div>
             <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Settings</h3>
           </div>
@@ -86,7 +97,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
         </div>
 
         <div className="p-5 space-y-4 overflow-y-auto">
-          <section className="space-y-3">
+          <section>
+            <div className={label}>Appearance</div>
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
+              {THEME_IDS.map((id) => {
+                const t = THEMES[id];
+                const on = draft.theme === id;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => {
+                      set({ theme: id });
+                      applyTheme(id);
+                    }}
+                    className={`rounded-2xl p-1.5 border-2 text-left transition ${on ? 'border-blue-500' : 'border-transparent hover:border-gray-300 dark:hover:border-gray-600'}`}
+                    title={t.label}
+                  >
+                    <div className="h-12 rounded-xl overflow-hidden flex ring-1 ring-black/10" style={{ backgroundColor: t.preview[0] }}>
+                      <div className="w-1/3 h-full" style={{ backgroundColor: t.preview[1] }} />
+                      <div className="flex-1 p-1.5 space-y-1">
+                        <div className="h-1.5 rounded-full w-3/4" style={{ backgroundColor: t.preview[2], opacity: 0.8 }} />
+                        <div className="h-1.5 rounded-full w-1/2" style={{ backgroundColor: t.preview[2], opacity: 0.35 }} />
+                      </div>
+                    </div>
+                    <div className={`text-[11px] mt-1 text-center truncate ${on ? 'font-semibold text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-300'}`}>{t.label}</div>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[11px] text-gray-400 mt-1.5">Changes the whole interface. Note pages keep the paper colour chosen for them.</p>
+          </section>
+
+          <section className="space-y-3 border-t border-gray-100 dark:border-gray-800 pt-3">
             <div>
               <label className={label}>Qwen3-VL server</label>
               <input className={field} value={draft.vlmEndpoint} onChange={(e) => set({ vlmEndpoint: e.target.value })} placeholder="http://100.77.212.97:9191" autoCapitalize="off" autoCorrect="off" />
@@ -130,6 +172,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
           </section>
 
           <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
+            <div className={label}>Library</div>
+            <p className="text-[11px] text-gray-400 mb-2">A backup is one <code className="font-mono">.opennote</code> archive of every note, folder and tag. Importing adds its notes (notes with the same id are replaced).</p>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={onBackup} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
+                <Download className="w-4 h-4" /> Backup (export .opennote)
+              </button>
+              <button onClick={() => importRef.current?.click()} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
+                <Upload className="w-4 h-4" /> Import .opennote
+              </button>
+              <input ref={importRef} type="file" accept=".opennote,.json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }} />
+            </div>
+          </section>
+
+          <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
             <div className={label}>Diagnostics</div>
             <Toggle
               checked={rec.on}
@@ -148,14 +204,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
           </section>
         </div>
 
-        <div className="px-5 py-3.5 bg-gray-50 dark:bg-[#2C2C2E]/50 border-t border-gray-100 dark:border-gray-800 flex justify-end gap-2">
+        <div className="px-5 py-3.5 bg-gray-50 dark:bg-ui-raised/50 border-t border-gray-100 dark:border-gray-800 flex justify-end gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 rounded-xl">
             Cancel
           </button>
           <button
             onClick={() => {
               onSave(draft);
-              onClose();
+              close();
             }}
             className="px-5 py-2 bg-blue-600 text-white text-sm font-semibold rounded-xl shadow"
           >

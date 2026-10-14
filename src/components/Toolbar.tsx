@@ -117,7 +117,7 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
 
 const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
   <div
-    className={`absolute top-14 z-50 bg-white/95 dark:bg-[#2C2C2E]/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto ${
+    className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto ${
       align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
     }`}
   >
@@ -143,7 +143,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   };
 
   const shelf = (
-    <div ref={pop.ref} className="flex items-center bg-gray-100/90 dark:bg-[#2C2C2E] p-1 sm:p-1.5 rounded-[22px] border border-gray-200/70 dark:border-white/10 gap-0.5 sm:gap-1 shadow-inner">
+    <div ref={pop.ref} className="flex items-center bg-gray-100/90 dark:bg-ui-raised p-1 sm:p-1.5 rounded-[22px] border border-gray-200/70 dark:border-white/10 gap-0.5 sm:gap-1 shadow-inner">
       <div className="relative">
         <ToolButton active={tools.tool === 'pen'} title="Pen (tap again for options)" onClick={() => selectTool('pen', 'pen')}>
           <PenLine className="w-6 h-6" />
@@ -300,7 +300,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const menu = usePopover();
 
   return (
-    <header className="bg-white/95 dark:bg-[#1C1C1E]/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[env(safe-area-inset-top)]">
+    <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[env(safe-area-inset-top)]">
       <div className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 px-3 py-2">
         <div className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
           <button onClick={p.onBack} className="flex items-center text-blue-600 dark:text-blue-400 px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">

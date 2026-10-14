@@ -136,7 +136,7 @@ const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void }> = (
           }}
           onBlur={() => setHex(value.toUpperCase())}
           spellCheck={false}
-          className="flex-1 min-w-0 font-mono text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-[#1C1C1E] text-gray-900 dark:text-gray-100 select-text"
+          className="flex-1 min-w-0 font-mono text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-ui-panel text-gray-900 dark:text-gray-100 select-text"
           aria-label="Hex colour"
         />
         <button

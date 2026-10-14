@@ -44,7 +44,7 @@ const PullIndicator: React.FC<{ bind: (set: (d: number) => void) => void }> = ({
   const k = Math.min(1, d / PULL_THRESHOLD);
   return (
     <div className="absolute left-0 right-0 bottom-0 z-20 flex items-center justify-center pointer-events-none" style={{ height: d }}>
-      <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-[#1C1C1E]/90 text-white text-xs font-semibold shadow-xl" style={{ opacity: Math.min(1, d / 30), transform: `scale(${0.85 + 0.15 * k})` }}>
+      <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-ui-bar/90 text-white text-xs font-semibold shadow-xl" style={{ opacity: Math.min(1, d / 30), transform: `scale(${0.85 + 0.15 * k})` }}>
         <svg width="22" height="22" viewBox="0 0 22 22">
           <circle cx="11" cy="11" r="9" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" />
           <circle cx="11" cy="11" r="9" fill="none" stroke="#3B82F6" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={`${k * 56.5} 56.5`} transform="rotate(-90 11 11)" />
@@ -849,7 +849,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
               if (el !== scrollEl) setScrollEl(el);
             }}
             onScroll={onScroll}
-            className="absolute inset-0 overflow-auto bg-[#E5E5EA] dark:bg-[#0E0E10]"
+            className="absolute inset-0 overflow-auto bg-ui-desk dark:bg-ui-desk"
             style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
           >
             <div ref={outerRef} style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
@@ -915,7 +915,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {/* Paste (lasso tool, something copied, nothing selected) */}
       {!selection && clipboard && tools.tool === 'lasso' && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
+          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
             <ClipboardPaste className="w-5 h-5" /> Paste
           </button>
         </div>
@@ -924,7 +924,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold">
+          <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold">
             {FILL_OPTIONS.map((f) => (
               <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
                 <span className="scale-125"><FillSwatch fill={f.id} color="#E5E7EB" /></span>
@@ -936,7 +936,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       )}
       {selection && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1.5 bg-[#1C1C1E]/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
+          <div className="flex items-center gap-1.5 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
             {selectionHasInk && (
               <>
                 <button onClick={() => convertSelection('math')} className={PILL + ' bg-blue-600'} title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
@@ -980,7 +980,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
       {busy && (
         <div className="fixed inset-0 bg-black/35 z-50 flex items-center justify-center" data-no-pan>
-          <div className="bg-white dark:bg-[#1C1C1E] px-6 py-5 rounded-3xl shadow-2xl flex flex-col items-center text-gray-900 dark:text-gray-100 max-w-xs text-center">
+          <div className="bg-white dark:bg-ui-panel px-6 py-5 rounded-3xl shadow-2xl flex flex-col items-center text-gray-900 dark:text-gray-100 max-w-xs text-center">
             <Loader2 className="w-7 h-7 text-blue-600 animate-spin mb-2" />
             <div className="font-bold text-sm">{busy.label}</div>
             {busy.detail && <div className="text-xs text-gray-400 mt-1">{busy.detail}</div>}

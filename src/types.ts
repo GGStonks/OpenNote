@@ -151,7 +151,12 @@ export interface AudioRecording {
 export interface NoteDocument {
   id: string;
   title: string;
+  /** Deprecated (before v1.13): the note's subject, migrated to folderId (subjects became folders). */
   subjectId?: string;
+  /** Folder holding the note (missing: the library's root). */
+  folderId?: string;
+  /** Tags of the note (Tag ids), any number. */
+  tagIds?: string[];
   createdAt: number;
   updatedAt: number;
   /** Default paper of the pages (the template of new pages); pages may override it. */
@@ -167,7 +172,23 @@ export interface NoteDocument {
   schemaVersion?: number;
 }
 
+/** Deprecated (before v1.13): flat subjects, migrated to top-level folders with the same ids. */
 export interface Subject {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/** A folder of the library; folders nest through parentId (missing: top level). */
+export interface Folder {
+  id: string;
+  name: string;
+  parentId?: string;
+  color?: string;
+  createdAt: number;
+}
+
+export interface Tag {
   id: string;
   name: string;
   color: string;

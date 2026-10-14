@@ -1,5 +1,5 @@
 import { letterSheetsFor, surfaceFromPages } from '../editor/sheets';
-import { AudioRecording, NoteDocument, NotePage, SCHEMA_VERSION, Subject, newId } from '../types';
+import { AudioRecording, Folder, NoteDocument, NotePage, SCHEMA_VERSION, Subject, Tag, newId } from '../types';
 
 /**
  * Offline persistence (IndexedDB inside the app's WebView; survives restarts on iOS and Android).
@@ -10,17 +10,13 @@ import { AudioRecording, NoteDocument, NotePage, SCHEMA_VERSION, Subject, newId 
  */
 
 const DB_NAME = 'OpenNote_Database';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NOTES = 'notes';
+/** Before v1.13: flat subjects. Read once to turn them into folders, then emptied. */
 const STORE_SUBJECTS = 'subjects';
+const STORE_FOLDERS = 'folders';
+const STORE_TAGS = 'tags';
 const STORE_AUDIO = 'audio';
-
-export const DEFAULT_SUBJECTS: Subject[] = [
-  { id: 'subj_math', name: 'Mathematics', color: '#1A73E8' },
-  { id: 'subj_physics', name: 'Physics & Eng', color: '#9333EA' },
-  { id: 'subj_lectures', name: 'Lecture Notes', color: '#10B981' },
-  { id: 'subj_drafts', name: 'Quick Drafts', color: '#F59E0B' },
-];
 
 export function createBlankPage(pageNumber: number): NotePage {
   return { id: newId('page'), pageNumber, strokes: [], latexBlocks: [], textBlocks: [], imageBlocks: [] };
@@ -31,7 +27,6 @@ function welcomeNote(): NoteDocument {
   return {
     id: 'doc_welcome',
     title: 'Welcome to OpenNote',
-    subjectId: 'subj_math',
     createdAt: now,
     updatedAt: now,
     paperStyle: 'ruled',
@@ -77,6 +72,11 @@ function welcomeNote(): NoteDocument {
  * notes and v1.12 development notes have separate pages, put one under the other.
  */
 export function migrateNote(n: NoteDocument): NoteDocument {
+  // Subjects became top-level folders with the same ids (v1.13).
+  if (n.subjectId !== undefined) {
+    const { subjectId, ...rest } = n;
+    n = { ...rest, folderId: n.folderId ?? subjectId };
+  }
   if (n.schemaVersion === SCHEMA_VERSION && n.sheets?.length) return n;
   const clean = (p: NotePage): NotePage => ({
     ...p,
@@ -115,6 +115,8 @@ function openDb(): Promise<IDBDatabase> {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_NOTES)) db.createObjectStore(STORE_NOTES, { keyPath: 'id' });
       if (!db.objectStoreNames.contains(STORE_SUBJECTS)) db.createObjectStore(STORE_SUBJECTS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_FOLDERS)) db.createObjectStore(STORE_FOLDERS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_TAGS)) db.createObjectStore(STORE_TAGS, { keyPath: 'id' });
       if (!db.objectStoreNames.contains(STORE_AUDIO)) {
         const s = db.createObjectStore(STORE_AUDIO, { keyPath: 'id' });
         s.createIndex('noteId', 'noteId');
@@ -186,24 +188,45 @@ export async function deleteNote(id: string): Promise<void> {
   await txDone(tx);
 }
 
-export async function getAllSubjects(): Promise<Subject[]> {
+async function replaceAll<T>(store: string, items: T[]): Promise<void> {
   const db = await openDb();
-  const subjects = (await req(db.transaction(STORE_SUBJECTS, 'readonly').objectStore(STORE_SUBJECTS).getAll())) as Subject[];
-  if (!subjects.length) {
-    await saveSubjects(DEFAULT_SUBJECTS);
-    return DEFAULT_SUBJECTS;
-  }
-  return subjects;
-}
-
-export async function saveSubjects(subjects: Subject[]): Promise<void> {
-  const db = await openDb();
-  const tx = db.transaction(STORE_SUBJECTS, 'readwrite', STRICT);
-  const store = tx.objectStore(STORE_SUBJECTS);
-  store.clear();
-  for (const s of subjects) store.put(s);
+  const tx = db.transaction(store, 'readwrite', STRICT);
+  const os = tx.objectStore(store);
+  os.clear();
+  for (const it of items) os.put(it);
   await txDone(tx);
 }
+
+/**
+ * The library's folders. The first time v1.13 runs, the subjects of older versions become
+ * top-level folders with the same ids (notes keep pointing at them, see migrateNote).
+ */
+export async function getAllFolders(): Promise<Folder[]> {
+  const db = await openDb();
+  const tx = db.transaction([STORE_FOLDERS, STORE_SUBJECTS], 'readonly');
+  const [folders, subjects] = await Promise.all([
+    req(tx.objectStore(STORE_FOLDERS).getAll()) as Promise<Folder[]>,
+    req(tx.objectStore(STORE_SUBJECTS).getAll()) as Promise<Subject[]>,
+  ]);
+  if (!subjects.length) return folders;
+  const now = Date.now();
+  const merged = [...folders];
+  subjects.forEach((s, i) => {
+    if (!merged.some((f) => f.id === s.id)) merged.push({ id: s.id, name: s.name, color: s.color, createdAt: now + i });
+  });
+  await saveFolders(merged);
+  await replaceAll<Subject>(STORE_SUBJECTS, []);
+  return merged;
+}
+
+export const saveFolders = (folders: Folder[]) => replaceAll(STORE_FOLDERS, folders);
+
+export async function getAllTags(): Promise<Tag[]> {
+  const db = await openDb();
+  return (await req(db.transaction(STORE_TAGS, 'readonly').objectStore(STORE_TAGS).getAll())) as Tag[];
+}
+
+export const saveTags = (tags: Tag[]) => replaceAll(STORE_TAGS, tags);
 
 // --- Audio recordings ---------------------------------------------------------------------------
 
@@ -241,14 +264,17 @@ export async function deleteRecording(id: string): Promise<void> {
 
 export interface LibraryBackup {
   format: 'opennote-backup';
-  version: 1;
+  /** 1: subjects (before v1.13); 2: folders and tags. */
+  version: 1 | 2;
   exportedAt: number;
-  subjects: Subject[];
+  subjects?: Subject[];
+  folders?: Folder[];
+  tags?: Tag[];
   notes: NoteDocument[];
 }
 
 export async function exportLibrary(): Promise<LibraryBackup> {
-  return { format: 'opennote-backup', version: 1, exportedAt: Date.now(), subjects: await getAllSubjects(), notes: await getAllNotes() };
+  return { format: 'opennote-backup', version: 2, exportedAt: Date.now(), folders: await getAllFolders(), tags: await getAllTags(), notes: await getAllNotes() };
 }
 
 /** Imports a backup or a single exported note; existing notes with the same id are replaced. */
@@ -257,11 +283,20 @@ export async function importBackup(data: unknown): Promise<number> {
   let notes: NoteDocument[] = [];
   if (obj?.format === 'opennote-backup' && Array.isArray(obj.notes)) {
     notes = obj.notes;
-    if (Array.isArray(obj.subjects)) {
-      const existing = await getAllSubjects();
-      const merged = [...existing];
-      for (const s of obj.subjects) if (!merged.some((m) => m.id === s.id)) merged.push(s);
-      await saveSubjects(merged);
+    const now = Date.now();
+    const incoming: Folder[] = [
+      ...(Array.isArray(obj.folders) ? obj.folders : []),
+      ...(Array.isArray(obj.subjects) ? obj.subjects.map((s, i) => ({ id: s.id, name: s.name, color: s.color, createdAt: now + i })) : []),
+    ];
+    if (incoming.length) {
+      const merged = await getAllFolders();
+      for (const f of incoming) if (!merged.some((m) => m.id === f.id)) merged.push(f);
+      await saveFolders(merged);
+    }
+    if (Array.isArray(obj.tags) && obj.tags.length) {
+      const merged = await getAllTags();
+      for (const t of obj.tags) if (!merged.some((m) => m.id === t.id)) merged.push(t);
+      await saveTags(merged);
     }
   } else if (obj && Array.isArray(obj.pages) && typeof obj.id === 'string') {
     notes = [obj as NoteDocument];
