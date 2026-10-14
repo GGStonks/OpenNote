@@ -10,9 +10,14 @@ export type PenStyle = 'fountain' | 'ballpoint';
 
 export type EraserMode = 'stroke' | 'partial';
 
-export type PaperStyle = 'blank' | 'ruled' | 'grid' | 'dots';
+export type PaperStyle = 'blank' | 'ruled' | 'narrow' | 'grid' | 'graph' | 'dots';
 
-export type PaperColor = 'white' | 'cream' | 'dark' | 'yellow';
+export type PaperColor = 'white' | 'cream' | 'yellow' | 'ochre' | 'blue' | 'green' | 'pink' | 'gray' | 'dark';
+
+/** Sheet formats (see editor/pageSetup.ts for their sizes). */
+export type PageSize = 'letter' | 'legal' | 'a3' | 'a4' | 'a5' | 'b5';
+
+export type PageOrientation = 'portrait' | 'landscape';
 
 /**
  * One ink sample. Mirrors what Notability's InkObjectEncoder stores per point
@@ -120,6 +125,14 @@ export interface NotePage {
   latexBlocks: LatexBlock[];
   textBlocks?: TextBlock[];
   imageBlocks?: ImageBlock[];
+  /**
+   * The page's own paper, set in the page manager. Missing: the note's default (NoteDocument),
+   * so changing the note's paper changes every page that was not customised.
+   */
+  paperStyle?: PaperStyle;
+  paperColor?: PaperColor;
+  size?: PageSize;
+  orientation?: PageOrientation;
 }
 
 export interface AudioRecording {
@@ -136,8 +149,12 @@ export interface NoteDocument {
   subjectId?: string;
   createdAt: number;
   updatedAt: number;
+  /** Default paper of the pages (the template of new pages); pages may override it. */
   paperStyle: PaperStyle;
   paperColor: PaperColor;
+  /** Default sheet format and orientation (missing: US Letter, portrait). */
+  pageSize?: PageSize;
+  orientation?: PageOrientation;
   pages: NotePage[];
   schemaVersion?: number;
 }
@@ -155,10 +172,14 @@ export interface Rect {
   height: number;
 }
 
+/** US Letter at 96 px per inch: the default page (and the page of notes made before v1.12). */
 export const PAGE_WIDTH = 816;
 export const PAGE_HEIGHT = 1056;
-/** 3: a note is one continuous surface (a single NotePage); older notes are merged on load. */
-export const SCHEMA_VERSION = 3;
+/**
+ * 4: a note is a list of real pages, each with its own size and paper. 3 (v1.6-v1.11): one
+ * continuous surface (a single NotePage), cut into pages at the page lines on load.
+ */
+export const SCHEMA_VERSION = 4;
 
 export function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;

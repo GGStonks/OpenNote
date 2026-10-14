@@ -1,7 +1,7 @@
-import { splitSurface } from '../editor/surface';
+import { pageSetup } from '../editor/pageSetup';
 import React, { useState } from 'react';
 import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
-import { NoteDocument, PAGE_HEIGHT, PAGE_WIDTH } from '../types';
+import { NoteDocument } from '../types';
 import { strokeToSvg } from '../ink/strokeRenderer';
 import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
 import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
@@ -28,7 +28,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
   const libs = new Set<string>(['arrows.meta']);
   const pkgs = new Set<string>();
   const body: string[] = [];
-  splitSurface(doc.pages[0]).forEach((p, i) => {
+  doc.pages.forEach((p, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: t.text.replace(/([#%&_{}$])/g, '\\$1') + '\n', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -74,7 +74,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
 
 function buildMarkdown(doc: NoteDocument): string {
   let md = `# ${doc.title}\n\n`;
-  splitSurface(doc.pages[0]).forEach((p, i) => {
+  doc.pages.forEach((p, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -96,17 +96,21 @@ function buildMarkdown(doc: NoteDocument): string {
 const turn = (el: string, deg: number | undefined, cx: number, cy: number) => (deg ? `<g transform="rotate(${deg} ${cx.toFixed(2)} ${cy.toFixed(2)})">${el}</g>` : el);
 
 function buildSvg(doc: NoteDocument): string {
-  const H = PAGE_HEIGHT, W = PAGE_WIDTH, gap = 24;
-  const pages = splitSurface(doc.pages[0]);
-  const total = pages.length * (H + gap) - gap;
-  const ink = doc.paperColor === 'dark' ? '#F3F4F6' : '#111827';
+  const gap = 24;
+  const pages = doc.pages.map((p) => ({ p, setup: pageSetup(doc, p) }));
+  const W = Math.max(...pages.map((x) => x.setup.width));
+  const total = pages.reduce((h, x) => h + x.setup.height + gap, 0) - gap;
   let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;
-  pages.forEach((p, i) => {
-    const dy = i * (H + gap);
-    out += `<g id="page-${i + 1}">\n<rect x="0" y="${dy}" width="${W}" height="${H}" fill="${PAPER_COLORS[doc.paperColor]}"/>\n`;
+  let top = 0;
+  pages.forEach(({ p, setup }, i) => {
+    const dy = top;
+    top += setup.height + gap;
+    const paper = PAPER_COLORS[setup.paperColor] ?? '#FFFFFF';
+    const ink = setup.paperColor === 'dark' ? '#F3F4F6' : '#111827';
+    out += `<g id="page-${i + 1}"${setup.width < W ? ` transform="translate(${(W - setup.width) / 2} 0)"` : ''}>\n<rect x="0" y="${dy}" width="${setup.width}" height="${setup.height}" fill="${paper}"/>\n`;
     for (const im of p.imageBlocks ?? []) out += turn(`<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>`, im.rotation, im.x + im.width / 2, im.y + dy + im.height / 2) + '\n';
     const order = [...p.strokes.filter((s) => s.tool === 'highlighter'), ...p.strokes.filter((s) => s.tool !== 'highlighter')];
-    for (const s of order) out += strokeToSvg(s, dy, PAPER_COLORS[doc.paperColor]) + '\n';
+    for (const s of order) out += strokeToSvg(s, dy, paper) + '\n';
     for (const b of p.latexBlocks) {
       if (b.isTikz) {
         const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;

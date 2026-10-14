@@ -1,4 +1,4 @@
-import { mergePages } from '../editor/surface';
+import { splitSurface } from '../editor/surface';
 import { AudioRecording, NoteDocument, NotePage, SCHEMA_VERSION, Subject, newId } from '../types';
 
 /**
@@ -51,7 +51,7 @@ function welcomeNote(): NoteDocument {
             createdAt: now,
             text:
               'Write with the pen, lasso handwriting and tap “LaTeX” or “TikZ” to transcribe it with your Qwen3-VL server. ' +
-              'Draw a shape and hold the pencil still to snap it, then move the pencil to size it. Two fingers scroll; a new page appears as you write.',
+              'Draw a shape and hold the pencil still to snap it, then move the pencil to size it. Two fingers scroll and pinch to zoom; pull up past the last page to add a new one.',
           },
         ],
         latexBlocks: [
@@ -70,26 +70,28 @@ function welcomeNote(): NoteDocument {
   };
 }
 
-/** Upgrades notes created by older versions (v1.6: pages are merged into one continuous surface). */
+/**
+ * Upgrades notes created by older versions. Before v1.6 notes had real pages (kept as they are);
+ * v1.6-v1.11 notes are one continuous surface, cut into pages at its page lines (surface.ts).
+ */
 export function migrateNote(n: NoteDocument): NoteDocument {
   if (n.schemaVersion === SCHEMA_VERSION) return n;
+  const clean = (p: NotePage, i: number): NotePage => ({
+    ...p,
+    pageNumber: i + 1,
+    strokes: (p.strokes ?? []).filter((s) => Array.isArray(s.points)),
+    latexBlocks: (p.latexBlocks ?? []).map(({ renderedHtml: _drop, ...b }) => b),
+    textBlocks: p.textBlocks ?? [],
+    imageBlocks: p.imageBlocks ?? [],
+  });
+  const source = (n.pages?.length ? n.pages : [createBlankPage(1)]).map(clean);
+  const pages = n.schemaVersion === 3 ? splitSurface(source[0]) : source;
   return {
     ...n,
     schemaVersion: SCHEMA_VERSION,
     paperStyle: n.paperStyle ?? 'ruled',
     paperColor: n.paperColor ?? 'white',
-    pages: [
-      mergePages(
-        (n.pages?.length ? n.pages : [createBlankPage(1)]).map((p, i) => ({
-          ...p,
-          pageNumber: i + 1,
-          strokes: (p.strokes ?? []).filter((s) => Array.isArray(s.points)),
-          latexBlocks: (p.latexBlocks ?? []).map(({ renderedHtml: _drop, ...b }) => b),
-          textBlocks: p.textBlocks ?? [],
-          imageBlocks: p.imageBlocks ?? [],
-        }))
-      ),
-    ],
+    pages: pages.map((p, i) => ({ ...p, pageNumber: i + 1 })),
   };
 }
 

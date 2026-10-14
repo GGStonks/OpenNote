@@ -13,7 +13,7 @@ export interface ClipContent {
   latexBlocks: LatexBlock[];
   textBlocks: TextBlock[];
   imageBlocks: ImageBlock[];
-  /** Bounds of the copied items (surface px), to place a paste. */
+  /** Bounds of the copied items (page px), to place a paste. */
   bounds: Rect;
 }
 
@@ -53,17 +53,18 @@ export function copySelection(page: NotePage, sel: Selection): number {
 }
 
 /**
- * A copy of the clipboard placed with its centre at `at` (surface px), kept on the sheet, with new
+ * A copy of the clipboard placed with its centre at `at` (page px), kept on the sheet, with new
  * ids. Returns the page with the pasted items and the selection of them.
  */
-export function pasteClipboard(page: NotePage, at: { x: number; y: number }, sheetWidth: number): { page: NotePage; sel: Omit<Selection, 'bounds'>; dx: number; dy: number } | null {
+export function pasteClipboard(page: NotePage, at: { x: number; y: number }, sheetWidth: number, sheetHeight = Infinity): { page: NotePage; sel: Omit<Selection, 'bounds'>; dx: number; dy: number } | null {
   const c = clip;
   if (!c) return null;
   const b = c.bounds;
   let dx = at.x - (b.x + b.width / 2), dy = at.y - (b.y + b.height / 2);
   dx = Math.max(-b.x, Math.min(sheetWidth - b.x - b.width, dx));
   if (b.width > sheetWidth) dx = -b.x;
-  dy = Math.max(-b.y, dy);
+  dy = Math.max(-b.y, Math.min(sheetHeight - b.y - b.height, dy));
+  if (b.height > sheetHeight) dy = -b.y;
   const strokes = c.strokes.map((s) => ({ ...structuredClone(s), id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy })) }));
   const latex = c.latexBlocks.map((x) => ({ ...structuredClone(x), id: newId(x.isTikz ? 'tikz' : 'latex'), x: x.x + dx, y: x.y + dy, createdAt: Date.now() }));
   const texts = c.textBlocks.map((x) => ({ ...structuredClone(x), id: newId('text'), x: x.x + dx, y: x.y + dy, createdAt: Date.now() }));

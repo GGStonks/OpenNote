@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
-  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste,
+  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft,
 } from 'lucide-react';
-import { EraserMode, FillType, LineStyle, PaperColor, PaperStyle, PenStyle, ShapeMode, ToolType } from '../types';
+import { EraserMode, FillType, LineStyle, PenStyle, ShapeMode, ToolType } from '../types';
+import { SetupPatch } from '../editor/pageSetup';
+import { PaperPicker, PaperValues } from './PaperPicker';
 import { ToolSettings } from './CanvasPage';
 import { ColorPicker } from './ColorPicker';
 
@@ -65,10 +67,11 @@ interface ToolbarProps {
   onRedo: () => void;
   title: string;
   setTitle: (t: string) => void;
-  paperStyle: PaperStyle;
-  setPaperStyle: (s: PaperStyle) => void;
-  paperColor: PaperColor;
-  setPaperColor: (c: PaperColor) => void;
+  /** The note's default paper (pages without paper of their own, and new pages). */
+  paper: PaperValues;
+  setPaper: (patch: SetupPatch) => void;
+  pagesOpen: boolean;
+  onTogglePages: () => void;
   onBack: () => void;
   onConvertPage: () => void;
   onExport: () => void;
@@ -304,6 +307,13 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <ChevronLeft className="w-6 h-6" />
             <span className="hidden 2xl:inline">Notes</span>
           </button>
+          <button
+            onClick={p.onTogglePages}
+            className={`p-2.5 rounded-xl active:scale-95 transition ${p.pagesOpen ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'}`}
+            title="Pages"
+          >
+            <PanelLeft className="w-6 h-6" />
+          </button>
           <input
             value={p.title}
             onChange={(e) => p.setTitle(e.target.value)}
@@ -340,25 +350,10 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
 
           {menu.open === 'paper' && (
             <Popover align="right">
-              <Label>Pattern</Label>
-              <div className="grid grid-cols-2 gap-1.5 mb-2">
-                {(['blank', 'ruled', 'grid', 'dots'] as PaperStyle[]).map((s) => (
-                  <button key={s} onClick={() => p.setPaperStyle(s)} className={`px-3 py-2.5 rounded-xl text-sm capitalize border ${p.paperStyle === s ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300'}`}>
-                    {s}
-                  </button>
-                ))}
+              <div className="text-xs text-gray-500 dark:text-gray-400 mb-3 leading-snug">
+                Note paper: used by new pages and by every page without paper of its own (set that in Pages).
               </div>
-              <Label>Colour</Label>
-              <div className="flex gap-2">
-                {([
-                  ['white', '#FFFFFF'],
-                  ['cream', '#FBF7EE'],
-                  ['yellow', '#FEF9C3'],
-                  ['dark', '#1C1C1F'],
-                ] as [PaperColor, string][]).map(([id, c]) => (
-                  <button key={id} onClick={() => p.setPaperColor(id)} title={id} className={`w-11 h-11 rounded-full border-2 shadow-sm ${p.paperColor === id ? 'border-blue-500 scale-110' : 'border-gray-300'}`} style={{ backgroundColor: c }} />
-                ))}
-              </div>
+              <PaperPicker value={p.paper} onChange={p.setPaper} />
             </Popover>
           )}
           {menu.open === 'more' && (

@@ -2,10 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal, flushSync } from 'react-dom';
 import {
   Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy,
-  ClipboardPaste, CopyPlus,
+  ClipboardPaste, CopyPlus, Plus, Minus, Maximize, MoveHorizontal,
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
-import { FillType, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, Rect, Stroke, newId, LineStyle } from '../types';
+import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings } from './CanvasPage';
 import { Toolbar } from './Toolbar';
@@ -13,7 +13,7 @@ import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal } from './ExportModal';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
-import { useViewport } from '../editor/useViewport';
+import { MAX_ZOOM, PULL_THRESHOLD, useViewport } from '../editor/useViewport';
 import { Selection, computeBounds, isEmptySelection, removeSelection } from '../editor/selection';
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
@@ -22,11 +22,37 @@ import { DEFAULT_INKS, InkColorInfo, colorHint, enforceColors, inkColors } from 
 import { renderLatexContent } from '../services/latexRender';
 import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
-import { bandSlice, bandStrokes, deleteBand, duplicateBand, surfacePageCount } from '../editor/surface';
-import { printDocument } from '../platform';
+import { PageSetup, SetupPatch, pageSetup } from '../editor/pageSetup';
+import { appendBlankPage, copyPages, deletePages, duplicatePages, insertPages, movePages, pagesFromClipboard, setPagesSetup, usePageClipboard } from '../editor/pages';
+import { PageManager } from './PageManager';
+import { haptic, printDocument } from '../platform';
 
+/** Margin around the pages and gap between them (content px). */
 const PAD = 16;
-const CONTENT_WIDTH = PAGE_WIDTH + PAD * 2;
+const GAP = 28;
+/** Space below the last page for the "pull to add a page" hint. */
+const TAIL = 88;
+const PAGES_KEY = 'opennote_pages_panel';
+
+/** Pull indicator below the note: grows with the pull; at the threshold a page is added. */
+const PullIndicator: React.FC<{ bind: (set: (d: number) => void) => void }> = ({ bind }) => {
+  const [d, setD] = useState(0);
+  useEffect(() => bind(setD), [bind]);
+  if (d <= 0) return null;
+  const k = Math.min(1, d / PULL_THRESHOLD);
+  return (
+    <div className="absolute left-0 right-0 bottom-0 z-20 flex items-center justify-center pointer-events-none" style={{ height: d }}>
+      <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-full bg-[#1C1C1E]/90 text-white text-xs font-semibold shadow-xl" style={{ opacity: Math.min(1, d / 30), transform: `scale(${0.85 + 0.15 * k})` }}>
+        <svg width="22" height="22" viewBox="0 0 22 22">
+          <circle cx="11" cy="11" r="9" fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth="2.5" />
+          <circle cx="11" cy="11" r="9" fill="none" stroke="#3B82F6" strokeWidth="2.5" strokeLinecap="round" strokeDasharray={`${k * 56.5} 56.5`} transform="rotate(-90 11 11)" />
+          <path d="M11 7v8M7 11h8" stroke="white" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+        {k < 1 ? 'Keep pulling to add a page' : 'New page'}
+      </div>
+    </div>
+  );
+};
 
 interface EditorProps {
   note: NoteDocument;
@@ -104,9 +130,24 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const gestures = useMemo(() => new GestureBus(), []);
   const editor = useNoteEditor(note, onSaved, () => gestures.inking);
   const { doc } = editor;
-  /** The note's continuous surface (one NotePage; see editor/surface.ts). */
-  const surface = doc.pages[0];
-  const pageCount = useMemo(() => surfacePageCount(surface), [surface]);
+  const pageCount = doc.pages.length;
+  /** Paper and size of every page, and where the pages are (content px, before zoom). */
+  const layout = useMemo(() => {
+    const setups: PageSetup[] = doc.pages.map((p) => pageSetup(doc, p));
+    const maxW = Math.max(...setups.map((s) => s.width));
+    const tops: number[] = [];
+    let y = PAD;
+    for (const s of setups) {
+      tops.push(y);
+      y += s.height + GAP;
+    }
+    const lefts = setups.map((s) => PAD + (maxW - s.width) / 2);
+    return { setups, tops, lefts, contentWidth: maxW + PAD * 2, bottom: y - GAP, totalHeight: y - GAP + PAD + TAIL };
+  }, [doc]);
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  const docRef = useRef(doc);
+  docRef.current = doc;
   const [tools, setToolsState] = useState<ToolSettings>(() => loadToolPrefs(settings));
   const toolsRef = useRef(tools);
   toolsRef.current = tools;
@@ -154,7 +195,19 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     },
     [editor]
   );
-  const { scrollRef, outerRef, zoom } = useViewport({ contentWidth: CONTENT_WIDTH, fingersNavigate, gestures, onFingerTap });
+  // Pull past the last page: a new page (the note's paper) is added at the end.
+  const pullSetter = useRef<((d: number) => void) | null>(null);
+  const bindPull = useCallback((set: (d: number) => void) => {
+    pullSetter.current = set;
+  }, []);
+  const onPull = useCallback((d: number) => pullSetter.current?.(d), []);
+  const onPullCommit = useCallback(() => {
+    editor.commit((d) => appendBlankPage(d).doc);
+    haptic('success');
+  }, [editor]);
+  const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy } = useViewport({
+    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit,
+  });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
   const [selection, setSelectionState] = useState<Selection | null>(null);
@@ -177,6 +230,28 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [exportOpen, setExportOpen] = useState(false);
   const [printMode, setPrintMode] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
+  const page = doc.pages[Math.min(currentPage, pageCount - 1)];
+  const [pagesOpen, setPagesOpenState] = useState(() => {
+    try {
+      return localStorage.getItem(PAGES_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+  const setPagesOpen = (open: boolean) => {
+    setPagesOpenState(open);
+    try {
+      localStorage.setItem(PAGES_KEY, open ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  };
+  const [selectedPages, setSelectedPages] = useState<ReadonlySet<string>>(() => new Set());
+  const pageClipboard = usePageClipboard();
+  // Pages that no longer exist (undo, delete) leave the page selection.
+  useEffect(() => {
+    if (![...selectedPages].every((id) => doc.pages.some((p) => p.id === id))) setSelectedPages(new Set([...selectedPages].filter((id) => doc.pages.some((p) => p.id === id))));
+  }, [doc.pages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const setSelection = useCallback((s: Selection | null) => setSelectionState(isEmptySelection(s) ? null : s), []);
   const [fillMenu, setFillMenu] = useState(false);
@@ -247,6 +322,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       } else if (mod && e.key.toLowerCase() === 'v' && clipboard) {
         e.preventDefault();
         paste();
+      } else if (mod && (e.key === '=' || e.key === '+')) {
+        e.preventDefault();
+        zoomBy(1.25);
+      } else if (mod && e.key === '-') {
+        e.preventDefault();
+        zoomBy(0.8);
+      } else if (mod && e.key === '0') {
+        e.preventDefault();
+        fitWidth();
       } else if (!mod) {
         const map: Record<string, ToolSettings['tool']> = { '1': 'pen', '2': 'highlighter', '3': 'eraser', '4': 'lasso', '5': 'text', '6': 'hand', '7': 'shape' };
         if (map[e.key]) setTools({ tool: map[e.key] });
@@ -258,13 +342,38 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // Track the page under the viewport centre.
+  // Track the page at a third of the screen's height.
   const onScroll = useCallback(() => {
     const el = scrollRef.current, outer = outerRef.current;
     if (!el || !outer) return;
-    const y = (el.scrollTop + el.clientHeight / 3 - outer.offsetTop) / zoom - PAD;
-    setCurrentPage(Math.max(0, Math.min(pageCount - 1, Math.floor(y / PAGE_HEIGHT))));
-  }, [zoom, pageCount, scrollRef, outerRef]);
+    const y = (el.scrollTop + el.clientHeight / 3 - outer.offsetTop) / zoom;
+    const tops = layoutRef.current.tops;
+    let k = 0;
+    while (k + 1 < tops.length && tops[k + 1] - GAP / 2 <= y) k++;
+    setCurrentPage(k);
+  }, [zoom, scrollRef, outerRef]);
+  useEffect(onScroll, [onScroll, layout]);
+
+  /** Scrolls to the top of page `k`. */
+  const jumpToPage = useCallback(
+    (k: number) => {
+      const el = scrollRef.current, outer = outerRef.current;
+      const top = layoutRef.current.tops[k];
+      if (!el || !outer || top === undefined) return;
+      el.scrollTo({ top: outer.offsetTop + (top - PAD / 2) * zoom, behavior: 'smooth' });
+      setCurrentPage(k);
+    },
+    [zoom, scrollRef, outerRef]
+  );
+
+  /** Bottom-right zoom button: fit the width; when already fitted, fit the whole current page. */
+  const toggleFit = () => {
+    if (fitMode === 'width') {
+      const k = Math.min(currentPage, pageCount - 1);
+      const s = layout.setups[k];
+      zoomToRect({ x: layout.lefts[k] - PAD / 2, y: layout.tops[k] - PAD / 2, width: s.width + PAD, height: s.height + PAD });
+    } else fitWidth();
+  };
 
   // ------------------------------------------------------------------------- selection actions
   const selPage = selection ? doc.pages.find((p) => p.id === selection.pageId) : undefined;
@@ -328,11 +437,12 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   const paste = () => {
-    const el = scrollRef.current;
-    const viewH = el ? el.clientHeight / zoom : PAGE_HEIGHT / 2;
-    const res = pasteClipboard(surface, { x: PAGE_WIDTH / 2, y: visibleTopOnPage() + viewH / 2 }, PAGE_WIDTH);
+    const at = viewCentreOnPage();
+    const target = doc.pages[at.index];
+    const s = layout.setups[at.index];
+    const res = pasteClipboard(target, { x: at.x, y: at.y }, s.width, s.height);
     if (!res) return;
-    editor.commitPage(surface.id, () => res.page);
+    editor.commitPage(target.id, () => res.page);
     const bounds = computeBounds(res.page, res.sel);
     setTools({ tool: 'lasso' });
     // After the tool change (which clears the selection), select what was pasted so it can be moved.
@@ -485,8 +595,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   const convertPage = () => {
-    const page = surface;
-    const ink = bandStrokes(surface, currentPage).filter((s) => s.tool === 'pen');
+    const ink = page.strokes.filter((s) => s.tool === 'pen');
     const b = boundsOfStrokes(ink);
     if (!b) return showToast('This page has no handwriting to transcribe');
     const colors = inkColors(ink, b);
@@ -506,15 +615,16 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const textual = t.kind === 'insert' && t.mode === 'text';
     const at = t.kind === 'insert' ? { x: t.bounds.x, y: t.bounds.y } : t.at;
     const mixedContent = !isTikz && /<p>|on-h/.test(renderLatexContent(code).html);
+    const pageW = layout.setups[doc.pages.findIndex((p) => p.id === t.pageId)]?.width ?? 816;
     const width =
       t.kind === 'insert' && !(mixedContent && !textual)
         ? textual
-          ? Math.min(PAGE_WIDTH - at.x - 24, Math.max(t.bounds.width, 560))
+          ? Math.min(pageW - at.x - 24, Math.max(t.bounds.width, 560))
           : Math.max(isTikz ? 160 : 60, t.bounds.width)
         : isTikz
           ? 360
           : mixedContent
-            ? Math.min(PAGE_WIDTH - at.x - 24, 600)
+            ? Math.min(pageW - at.x - 24, 600)
             : 200;
     const block: LatexBlock = {
       id: newId(isTikz ? 'tikz' : 'latex'),
@@ -554,25 +664,86 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   }, []);
 
   const insertLatexManually = () => {
-    setTarget({ kind: 'new', pageId: surface.id, at: { x: 96, y: visibleTopOnPage() + 80 } });
+    const at = visibleTopOnPage();
+    setTarget({ kind: 'new', pageId: doc.pages[at.index].id, at: { x: 96, y: at.y + 80 } });
     setModal({ latex: '', isTikz: false, origin: 'new', canReplaceInk: false });
   };
 
   // ------------------------------------------------------------------------- pages & media
-  // Pages are bands of the surface (always one blank page at the end, see surfacePageCount).
-  const duplicatePage = () => editor.commitPage(surface.id, (p) => duplicateBand(p, currentPage));
+  // Page operations (toolbar: the current page; page manager: the selected pages). Each one is a
+  // single undo step.
+  const currentIds = () => new Set([page.id]);
 
-  const deletePage = () => {
-    if (pageCount <= 1) return showToast('A note needs at least one page');
-    if (!window.confirm(`Delete page ${currentPage + 1}? (Undo can bring it back)`)) return;
-    editor.commitPage(surface.id, (p) => deleteBand(p, currentPage));
+  const duplicatePagesOf = (ids: ReadonlySet<string>) => {
+    if (!ids.size) return;
+    const r = duplicatePages(doc, ids);
+    editor.commit(() => r.doc);
+    setSelectedPages(new Set(r.copies));
+    showToast(`Duplicated ${ids.size} page${ids.size > 1 ? 's' : ''}`);
   };
 
-  /** Surface y of the top of the viewport (for placing new content). */
-  const visibleTopOnPage = () => {
+  const deletePagesOf = (ids: ReadonlySet<string>, confirm = false) => {
+    if (!ids.size) return;
+    if (confirm && !window.confirm(`Delete page ${currentPage + 1}? (Undo can bring it back)`)) return;
+    editor.commit((d) => deletePages(d, ids));
+    setSelectedPages(new Set());
+    showToast(`Deleted ${ids.size} page${ids.size > 1 ? 's' : ''} — Undo brings ${ids.size > 1 ? 'them' : 'it'} back`);
+  };
+
+  const copyPagesOf = (ids: ReadonlySet<string>) => {
+    const n = copyPages(doc, ids);
+    if (n) showToast(`Copied ${n} page${n > 1 ? 's' : ''} — Paste puts ${n > 1 ? 'them' : 'it'} into any note`);
+  };
+
+  const cutPagesOf = (ids: ReadonlySet<string>) => {
+    const n = copyPages(doc, ids);
+    if (!n) return;
+    editor.commit((d) => deletePages(d, ids));
+    setSelectedPages(new Set());
+    showToast(`Cut ${n} page${n > 1 ? 's' : ''} — Paste puts ${n > 1 ? 'them' : 'it'} back`);
+  };
+
+  /** Pastes copied pages after the last selected page (or after the current page). */
+  const pastePages = () => {
+    const pages = pagesFromClipboard();
+    if (!pages) return;
+    let after = -1;
+    doc.pages.forEach((p, i) => {
+      if (selectedPages.has(p.id)) after = i;
+    });
+    if (after < 0) after = Math.min(currentPage, pageCount - 1);
+    editor.commit((d) => insertPages(d, after + 1, pages));
+    setSelectedPages(new Set(pages.map((p) => p.id)));
+    showToast(`Pasted ${pages.length} page${pages.length > 1 ? 's' : ''}`);
+  };
+
+  const addPage = () => {
+    editor.commit((d) => appendBlankPage(d).doc);
+    setTimeout(() => jumpToPage(pageCount), 0);
+  };
+
+  /** A point on screen (relative to the scroll box) as a page and a point on it (page px). */
+  const pagePointAt = (sx: number, sy: number) => {
     const el = scrollRef.current, outer = outerRef.current;
-    if (!el || !outer) return 40;
-    return Math.max(24, (el.scrollTop - outer.offsetTop) / zoom - PAD);
+    const { tops, lefts, setups } = layoutRef.current;
+    if (!el || !outer) return { index: Math.min(currentPage, pageCount - 1), x: 96, y: 40 };
+    const cx = (el.scrollLeft + sx - outer.offsetLeft) / zoom, cy = (el.scrollTop + sy - outer.offsetTop) / zoom;
+    let k = 0;
+    while (k + 1 < tops.length && tops[k + 1] - GAP / 2 <= cy) k++;
+    return {
+      index: k,
+      x: Math.max(0, Math.min(setups[k].width, cx - lefts[k])),
+      y: Math.max(0, Math.min(setups[k].height, cy - tops[k])),
+    };
+  };
+  /** The page at the top of the screen and the y on it (for placing new content). */
+  const visibleTopOnPage = () => {
+    const at = pagePointAt(0, 0);
+    return { index: at.index, y: Math.max(24, Math.min(layoutRef.current.setups[at.index].height - 160, at.y)) };
+  };
+  const viewCentreOnPage = () => {
+    const el = scrollRef.current;
+    return el ? pagePointAt(el.clientWidth / 2, el.clientHeight / 2) : pagePointAt(0, 0);
   };
 
   const insertImage = (file: File) => {
@@ -587,11 +758,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         c.height = Math.round(img.height * s);
         c.getContext('2d')!.drawImage(img, 0, 0, c.width, c.height);
         const dataUrl = c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.88);
-        const w = Math.min(PAGE_WIDTH - 160, c.width);
+        const at = visibleTopOnPage();
+        const sheet = layoutRef.current.setups[at.index];
+        const w = Math.min(sheet.width - 160, c.width);
         const h = (w * c.height) / c.width;
-        editor.commitPage(surface.id, (p) => ({
+        editor.commitPage(docRef.current.pages[at.index].id, (p) => ({
           ...p,
-          imageBlocks: [...(p.imageBlocks ?? []), { id: newId('image'), x: (PAGE_WIDTH - w) / 2, y: visibleTopOnPage() + 60, width: w, height: h, dataUrl, createdAt: Date.now() }],
+          imageBlocks: [...(p.imageBlocks ?? []), { id: newId('image'), x: (sheet.width - w) / 2, y: Math.max(24, Math.min(sheet.height - h - 24, at.y + 60)), width: w, height: h, dataUrl, createdAt: Date.now() }],
         }));
         setTools({ tool: 'lasso' });
         showToast('Image inserted — use the lasso to move or resize it');
@@ -617,7 +790,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   // ------------------------------------------------------------------------- render
-  const totalHeight = PAD * 2 + pageCount * PAGE_HEIGHT + 80;
+  const { totalHeight, contentWidth } = layout;
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
   return (
@@ -631,10 +804,18 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onRedo={editor.redo}
         title={doc.title}
         setTitle={(title) => editor.commit((d) => ({ ...d, title }))}
-        paperStyle={doc.paperStyle}
-        setPaperStyle={(paperStyle) => editor.commit((d) => ({ ...d, paperStyle }))}
-        paperColor={doc.paperColor}
-        setPaperColor={(paperColor) => editor.commit((d) => ({ ...d, paperColor }))}
+        paper={{ paperStyle: doc.paperStyle, paperColor: doc.paperColor, size: doc.pageSize ?? 'letter', orientation: doc.orientation ?? 'portrait' }}
+        setPaper={(patch: SetupPatch) =>
+          editor.commit((d) => ({
+            ...d,
+            ...(patch.paperStyle ? { paperStyle: patch.paperStyle } : {}),
+            ...(patch.paperColor ? { paperColor: patch.paperColor } : {}),
+            ...(patch.size ? { pageSize: patch.size } : {}),
+            ...(patch.orientation ? { orientation: patch.orientation } : {}),
+          }))
+        }
+        pagesOpen={pagesOpen}
+        onTogglePages={() => setPagesOpen(!pagesOpen)}
         onBack={async () => {
           await editor.flush();
           onBack();
@@ -642,8 +823,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onConvertPage={convertPage}
         onExport={() => setExportOpen(true)}
         onSettings={onOpenSettings}
-        onDuplicatePage={duplicatePage}
-        onDeletePage={deletePage}
+        onDuplicatePage={() => duplicatePagesOf(currentIds())}
+        onDeletePage={() => deletePagesOf(currentIds(), true)}
         onInsertLatex={insertLatexManually}
         onInsertImage={insertImage}
         onPaste={clipboard ? paste : undefined}
@@ -652,51 +833,109 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         audioSlot={<AudioRecorder noteId={doc.id} onError={(m) => showToast(m, true)} />}
       />
 
-      <div
-        ref={(el) => {
-          scrollRef.current = el;
-          if (el !== scrollEl) setScrollEl(el);
-        }}
-        onScroll={onScroll}
-        className="relative flex-1 overflow-y-auto overflow-x-hidden bg-[#E5E5EA] dark:bg-[#0E0E10]"
-        style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
-      >
-        <div ref={outerRef} style={{ width: CONTENT_WIDTH * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
-          <div style={{ width: CONTENT_WIDTH, transform: `scale(${zoom})`, transformOrigin: '0 0', padding: PAD }}>
-            {[surface].map((page) => (
-              <div key={page.id}>
-                <CanvasPage
-                  page={page}
-                  pageIndex={0}
-                  pageCount={pageCount}
-                  paperStyle={doc.paperStyle}
-                  paperColor={doc.paperColor}
-                  tools={tools}
-                  zoom={zoom}
-                  editor={editor.ops}
-                  gestures={gestures}
-                  selection={selection?.pageId === page.id ? selection : null}
-                  setSelection={setSelection}
-                  selectedBlockId={selectedBlockId}
-                  setSelectedBlockId={setSelectedBlockId}
-                  editingTextId={editingTextId}
-                  setEditingTextId={setEditingTextId}
-                  onEditLatex={onEditLatex}
-                  printMode={false}
-                  scrollRoot={scrollEl}
-                />
+      <div className="relative flex-1 flex min-h-0">
+        {pagesOpen && (
+          <>
+            {/* Narrow screens: the panel covers the page; a tap beside it closes it. */}
+            <div className="md:hidden absolute inset-0 z-30 bg-black/25" onClick={() => setPagesOpen(false)} data-no-pan />
+            <div className="absolute md:relative z-40 h-full shadow-2xl md:shadow-none">
+              <PageManager
+                doc={doc}
+                currentPage={Math.min(currentPage, pageCount - 1)}
+                selected={selectedPages}
+                setSelected={setSelectedPages}
+                onJump={jumpToPage}
+                onMove={(ids, to) => editor.commit((d) => movePages(d, ids, to))}
+                onDelete={(ids) => deletePagesOf(ids)}
+                onDuplicate={duplicatePagesOf}
+                onCopy={copyPagesOf}
+                onCut={cutPagesOf}
+                onPaste={pastePages}
+                canPaste={!!pageClipboard}
+                onSetup={(ids, patch) => editor.commit((d) => setPagesSetup(d, ids, patch))}
+                onAddPage={addPage}
+                onClose={() => setPagesOpen(false)}
+              />
+            </div>
+          </>
+        )}
+        <div className="relative flex-1 min-w-0">
+          <div
+            ref={(el) => {
+              scrollRef.current = el;
+              if (el !== scrollEl) setScrollEl(el);
+            }}
+            onScroll={onScroll}
+            className="absolute inset-0 overflow-auto bg-[#E5E5EA] dark:bg-[#0E0E10]"
+            style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
+          >
+            <div ref={outerRef} style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
+              <div style={{ width: contentWidth, height: totalHeight, transform: `scale(${zoom})`, transformOrigin: '0 0', position: 'relative' }}>
+                {doc.pages.map((pg, i) => {
+                  const s = layout.setups[i];
+                  return (
+                    <div key={pg.id} style={{ position: 'absolute', left: layout.lefts[i], top: layout.tops[i] }}>
+                      <CanvasPage
+                        page={pg}
+                        pageIndex={i}
+                        width={s.width}
+                        height={s.height}
+                        paperStyle={s.paperStyle}
+                        paperColor={s.paperColor}
+                        tools={tools}
+                        zoom={zoom}
+                        editor={editor.ops}
+                        gestures={gestures}
+                        selection={selection?.pageId === pg.id ? selection : null}
+                        setSelection={setSelection}
+                        selectedBlockId={selectedBlockId}
+                        setSelectedBlockId={setSelectedBlockId}
+                        editingTextId={editingTextId}
+                        setEditingTextId={setEditingTextId}
+                        onEditLatex={onEditLatex}
+                        printMode={false}
+                        scrollRoot={scrollEl}
+                      />
+                    </div>
+                  );
+                })}
+                <div className="absolute left-0 right-0 flex justify-center pointer-events-none" style={{ top: layout.bottom + 28 }}>
+                  <div className="flex items-center gap-1.5 text-[13px] font-medium text-gray-400 dark:text-gray-500">
+                    <Plus className="w-4 h-4" /> Pull up to add a page
+                  </div>
+                </div>
               </div>
-            ))}
+            </div>
+          </div>
+          <PullIndicator bind={bindPull} />
+
+          {/* Page indicator and zoom */}
+          <div
+            className="absolute right-3 z-30 flex items-center gap-1.5"
+            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + env(safe-area-inset-bottom))` }}
+            data-no-pan
+          >
+            <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
+              {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}
+            </div>
+            <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
+              <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={toggleFit}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
+                title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
+              >
+                {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
+                {Math.round(zoom * 100)}%
+              </button>
+              <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-
-      {/* Page indicator */}
-      <div
-        className="fixed right-4 z-30 pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur"
-        style={{ bottom: `calc(${selection ? 96 : 18}px + env(safe-area-inset-bottom))` }}
-      >
-        {currentPage + 1} / {pageCount}
       </div>
 
       {/* Paste (lasso tool, something copied, nothing selected) */}
@@ -807,33 +1046,43 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {printMode &&
         createPortal(
           <div className="on-print-root">
-            {/* The surface cut into US Letter pages at the page lines (the trailing blank page is not printed). */}
-            {Array.from({ length: Math.max(1, pageCount - 1) }, (_, k) => (
-              <div key={k} className="on-print-page">
-                <div style={{ transform: `translateY(${-k * PAGE_HEIGHT}px)` }}>
-                <CanvasPage
-                  page={bandSlice(surface, k)}
-                  pageIndex={k}
-                  pageCount={pageCount}
-                  paperStyle={doc.paperStyle}
-                  paperColor={doc.paperColor}
-                  tools={tools}
-                  zoom={1}
-                  editor={editor.ops}
-                  gestures={gestures}
-                  selection={null}
-                  setSelection={() => undefined}
-                  selectedBlockId={null}
-                  setSelectedBlockId={() => undefined}
-                  editingTextId={null}
-                  setEditingTextId={() => undefined}
-                  onEditLatex={() => undefined}
-                  printMode
-                  scrollRoot={null}
-                />
+            {/* Each page on its own sheet, at its own size (named @page rules). */}
+            <style>
+              {[...new Set(layout.setups.map((x) => `${x.width}x${x.height}`))]
+                .map((k) => {
+                  const [w, h] = k.split('x').map(Number);
+                  return `@page on-${k} { size: ${(w / 96).toFixed(3)}in ${(h / 96).toFixed(3)}in; margin: 0; }`;
+                })
+                .join('\n')}
+            </style>
+            {doc.pages.map((pg, k) => {
+              const s = layout.setups[k];
+              return (
+                <div key={pg.id} className="on-print-page" style={{ width: s.width, height: s.height, page: `on-${s.width}x${s.height}` } as React.CSSProperties}>
+                  <CanvasPage
+                    page={pg}
+                    pageIndex={k}
+                    width={s.width}
+                    height={s.height}
+                    paperStyle={s.paperStyle}
+                    paperColor={s.paperColor}
+                    tools={tools}
+                    zoom={1}
+                    editor={editor.ops}
+                    gestures={gestures}
+                    selection={null}
+                    setSelection={() => undefined}
+                    selectedBlockId={null}
+                    setSelectedBlockId={() => undefined}
+                    editingTextId={null}
+                    setEditingTextId={() => undefined}
+                    onEditLatex={() => undefined}
+                    printMode
+                    scrollRoot={null}
+                  />
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>,
           document.body
         )}

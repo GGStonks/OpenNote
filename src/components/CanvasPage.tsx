@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2, RotateCw } from 'lucide-react';
 import {
-  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PAGE_HEIGHT, PAGE_WIDTH, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
+  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
 } from '../types';
 import {
@@ -66,37 +66,55 @@ interface CanvasPageProps {
   onEditLatex: (pageId: string, block: LatexBlock) => void;
   printMode: boolean;
   scrollRoot: HTMLElement | null;
-  /** Pages (PAGE_HEIGHT bands) the surface shows. */
-  pageCount: number;
+  /** Size of the page in px (its format and orientation, see editor/pageSetup.ts). */
+  width: number;
+  height: number;
 }
 
 export const PAPER_COLORS: Record<PaperColor, string> = {
   white: '#FFFFFF',
   cream: '#FBF7EE',
   yellow: '#FEF9C3',
+  ochre: '#F1DFAE',
+  blue: '#E6F0FB',
+  green: '#E8F4E5',
+  pink: '#FBE7EE',
+  gray: '#EDEDED',
   dark: '#1C1C1F',
 };
 
 /** Paper patterns as CSS backgrounds (no canvas memory, prints as vectors). */
 export function paperBackground(style: PaperStyle, color: PaperColor): React.CSSProperties {
   const dark = color === 'dark';
-  const base = PAPER_COLORS[color];
+  const base = PAPER_COLORS[color] ?? PAPER_COLORS.white;
   const line = dark ? 'rgba(255,255,255,0.13)' : 'rgba(59,130,246,0.22)';
   const grid = dark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.08)';
   const margin = dark ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.4)';
   const css: React.CSSProperties = { backgroundColor: base };
-  if (style === 'ruled') {
+  if (style === 'ruled' || style === 'narrow') {
+    const gap = style === 'narrow' ? 24 : 32;
     css.backgroundImage = [
       `linear-gradient(to right, transparent 79px, ${margin} 79px, ${margin} 80px, transparent 80px)`,
       `linear-gradient(${base}, ${base})`,
-      `linear-gradient(to bottom, transparent 31px, ${line} 31px, ${line} 32px)`,
+      `linear-gradient(to bottom, transparent ${gap - 1}px, ${line} ${gap - 1}px, ${line} ${gap}px)`,
     ].join(',');
-    css.backgroundSize = `100% 100%, 100% 79px, 100% 32px`;
-    css.backgroundPosition = `0 0, 0 0, 0 48px`;
+    css.backgroundSize = `100% 100%, 100% 79px, 100% ${gap}px`;
+    css.backgroundPosition = `0 0, 0 0, 0 ${80 - gap}px`;
     css.backgroundRepeat = 'no-repeat, no-repeat, repeat';
   } else if (style === 'grid') {
     css.backgroundImage = `linear-gradient(to right, ${grid} 1px, transparent 1px), linear-gradient(to bottom, ${grid} 1px, transparent 1px)`;
     css.backgroundSize = '24px 24px';
+  } else if (style === 'graph') {
+    // Millimetre-style graph paper: fine lines every 12 px, stronger ones every 60 px.
+    const major = dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.13)';
+    const minor = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
+    css.backgroundImage = [
+      `linear-gradient(to right, ${major} 1px, transparent 1px)`,
+      `linear-gradient(to bottom, ${major} 1px, transparent 1px)`,
+      `linear-gradient(to right, ${minor} 1px, transparent 1px)`,
+      `linear-gradient(to bottom, ${minor} 1px, transparent 1px)`,
+    ].join(',');
+    css.backgroundSize = '60px 60px, 60px 60px, 12px 12px, 12px 12px';
   } else if (style === 'dots') {
     css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} 1.3px, transparent 1.7px)`;
     css.backgroundSize = '24px 24px';
@@ -107,51 +125,37 @@ export function paperBackground(style: PaperStyle, color: PaperColor): React.CSS
 
 /** Lattice spacing of grid and dot paper (see paperBackground), or null for other papers. */
 export function paperGrid(style: PaperStyle): number | null {
-  return style === 'grid' || style === 'dots' ? 24 : null;
+  return style === 'grid' || style === 'dots' ? 24 : style === 'graph' ? 12 : null;
 }
 
 const MAX_CANVAS_PIXELS = 16_000_000;
+/** Above this zoom committed ink is drawn as SVG (sharp at any zoom) instead of page canvases. */
+const VECTOR_ZOOM = 2.5;
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
 
 /**
- * Backing-store scale of the page canvases. Quantised in half-zoom steps so that zooming does not
- * reallocate and repaint the canvases for every small zoom change.
+ * Backing-store scale of a canvas covering `area` page px². Quantised in half-zoom steps so that
+ * zooming does not reallocate and repaint the canvases for every small zoom change.
  */
-function canvasRatio(zoom: number): number {
+function canvasRatio(zoom: number, area: number): number {
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const z = Math.ceil(Math.max(1, Math.min(zoom, 2.5)) * 2) / 2;
-  const maxByBudget = Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * PAGE_HEIGHT));
+  const z = Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2;
+  const maxByBudget = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, area));
   return Math.max(1, Math.min(dpr * z, maxByBudget));
 }
 
-function setupCanvas(canvas: HTMLCanvasElement, ratio: number): CanvasRenderingContext2D | null {
-  const w = Math.round(PAGE_WIDTH * ratio);
-  const h = Math.round(PAGE_HEIGHT * ratio);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  const ctx = canvas.getContext('2d');
-  ctx?.setTransform(ratio, 0, 0, ratio, 0, 0);
-  return ctx;
-}
-
-const strokeBoxes = new WeakMap<Stroke, { minY: number; maxY: number }>();
-
-function strokeYRange(s: Stroke) {
-  let r = strokeBoxes.get(s);
-  if (!r) {
-    let minY = Infinity, maxY = -Infinity;
-    for (const p of s.points) {
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    }
-    const pad = (s.tool === 'highlighter' ? s.width * 3 : s.width * 2) + 12;
-    r = { minY: minY - pad, maxY: maxY + pad };
-    strokeBoxes.set(s, r);
-  }
-  return r;
+/** Committed ink as SVG markup (cached per stroke): high zoom and printing. */
+const svgCache = new WeakMap<Stroke, { paper: string; svg: string }>();
+function strokesSvg(strokes: Stroke[], paper: string): string {
+  const one = (s: Stroke) => {
+    const c = svgCache.get(s);
+    if (c && c.paper === paper) return c.svg;
+    const svg = strokeToSvg(s, 0, paper);
+    svgCache.set(s, { paper, svg });
+    return svg;
+  };
+  return [...strokes.filter((s) => s.tool === 'highlighter'), ...strokes.filter((s) => s.tool !== 'highlighter')].map(one).join('');
 }
 
 /** Painting a tile that is not on screen yet is spread over frames, this many ms per frame. */
@@ -162,26 +166,25 @@ const TILE_FULL_REPAINT = 0.5;
 type TilePaint = { strokes: Stroke[]; ratio: number; complete: boolean };
 
 /**
- * Committed ink of one page-high band of the surface. Tiles exist only near the viewport (a canvas
+ * Committed ink of a page. Tiles exist only near the viewport (a canvas
  * is up to 16 Mpx and WebKit has a tight total canvas budget), and each one is the cached bitmap of
  * its band: it is painted once and then only where something changed.
  *
  *  - Strokes appended on top (the common case while writing) are painted on top.
  *  - Any other change (erasing, undo, moving, restyling) repaints only the area of the strokes that
- *    were removed or added, clipped to it, instead of the whole band: the precision eraser on a
+ *    were removed or added, clipped to it, instead of the whole page: the precision eraser on a
  *    full page repainted hundreds of strokes for every eraser sample.
  *  - A tile is created when it comes within a screen of the viewport and kept until it is more
  *    than 2.5 screens away (scrolling back and forth does not repaint), and a tile that is still
  *    off screen is painted a few ms per frame, so scrolling a dense note does not stall on it.
- *
- * Strokes crossing a page line are painted by both tiles.
  */
-const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
-  const { band, strokes, ratio, scrollRoot } = props;
+const InkTile = React.memo(function InkTile(props: { eager: boolean; width: number; height: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
+  const { eager, width: W, height: H, strokes: mine, ratio, scrollRoot } = props;
+  const top = 0;
   const holderRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [alive, setAlive] = useState(band < 2);
-  const onScreen = useRef(band < 1);
+  const [alive, setAlive] = useState(eager);
+  const onScreen = useRef(eager);
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
@@ -197,11 +200,6 @@ const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stro
       view.disconnect();
     };
   }, [scrollRoot]);
-  const top = band * PAGE_HEIGHT;
-  const mine = useMemo(() => strokes.filter((s) => {
-    const r = strokeYRange(s);
-    return r.maxY >= top && r.minY <= top + PAGE_HEIGHT;
-  }), [strokes, top]);
   const painted = useRef<TilePaint | null>(null);
   const slicing = useRef<number | null>(null);
   useEffect(() => () => {
@@ -217,7 +215,7 @@ const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stro
       painted.current = null;
       return;
     }
-    const w = Math.round(PAGE_WIDTH * ratio), h = Math.round(PAGE_HEIGHT * ratio);
+    const w = Math.round(W * ratio), h = Math.round(H * ratio);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -244,12 +242,12 @@ const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stro
       for (const s of mine) if (!before.has(s)) area = unionRect(area, strokePaintBounds(s));
       if (!area) {
         // Same strokes in another order: repaint all of them.
-        area = { minX: 0, minY: top, maxX: PAGE_WIDTH, maxY: top + PAGE_HEIGHT };
+        area = { minX: 0, minY: top, maxX: W, maxY: top + H };
       }
       const x0 = Math.max(0, Math.floor(area.minX * ratio) / ratio), y0 = Math.max(top, Math.floor(area.minY * ratio) / ratio);
-      const x1 = Math.min(PAGE_WIDTH, Math.ceil(area.maxX * ratio) / ratio), y1 = Math.min(top + PAGE_HEIGHT, Math.ceil(area.maxY * ratio) / ratio);
+      const x1 = Math.min(W, Math.ceil(area.maxX * ratio) / ratio), y1 = Math.min(top + H, Math.ceil(area.maxY * ratio) / ratio);
       if (x1 <= x0 || y1 <= y0) return;
-      if ((x1 - x0) * (y1 - y0) < TILE_FULL_REPAINT * PAGE_WIDTH * PAGE_HEIGHT) {
+      if ((x1 - x0) * (y1 - y0) < TILE_FULL_REPAINT * W * H) {
         const hit = mine.filter((s) => {
           const b = strokePaintBounds(s);
           return b.maxX >= x0 && b.minX <= x1 && b.maxY >= y0 && b.minY <= y1;
@@ -265,7 +263,7 @@ const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stro
       }
     }
 
-    ctx.clearRect(0, top, PAGE_WIDTH, PAGE_HEIGHT);
+    ctx.clearRect(0, top, W, H);
     if (onScreen.current || mine.length < 40) {
       drawStrokes(ctx, mine);
       return;
@@ -302,10 +300,10 @@ const InkTile = React.memo(function InkTile(props: { band: number; strokes: Stro
       painted.current = { strokes: job, ratio, complete: true };
     };
     step();
-  }, [mine, ratio, alive, top]);
+  }, [mine, ratio, alive, top, W, H]);
   return (
-    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: PAGE_WIDTH, height: PAGE_HEIGHT }}>
-      {alive && <canvas ref={canvasRef} style={{ width: PAGE_WIDTH, height: PAGE_HEIGHT }} />}
+    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+      {alive && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
     </div>
   );
 });
@@ -340,13 +338,13 @@ function drawSnapDot(ctx: CanvasRenderingContext2D, dot: { x: number; y: number 
 }
 
 /** Dimension label (length / angle / size) drawn next to the pen, constant size on screen. */
-function drawMeasure(ctx: CanvasRenderingContext2D, text: string, at: { x: number; y: number }, k: number): DirtyRect {
+function drawMeasure(ctx: CanvasRenderingContext2D, text: string, at: { x: number; y: number }, k: number, pageWidth: number): DirtyRect {
   ctx.save();
   ctx.font = `600 ${12 * k}px -apple-system, system-ui, sans-serif`;
   const w = ctx.measureText(text).width + 12 * k;
   const h = 20 * k;
   // Above-right of the pen tip, kept on the page.
-  const x = Math.min(PAGE_WIDTH - w - 2, Math.max(2, at.x + 14 * k));
+  const x = Math.min(pageWidth - w - 2, Math.max(2, at.x + 14 * k));
   const y = Math.max(2, at.y - 14 * k - h);
   ctx.fillStyle = 'rgba(17,24,39,0.82)';
   ctx.beginPath();
@@ -408,12 +406,10 @@ function dampedPrediction(points: Point[], q: Point | null): Point[] {
 const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const {
     page, pageIndex, paperStyle, paperColor, tools, zoom, editor, gestures, selection, setSelection,
-    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot, pageCount,
+    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot, width: PAGE_W, height: PAGE_H,
   } = props;
-  void pageIndex;
-  const SURF_H = pageCount * PAGE_HEIGHT;
-  const surfHRef = useRef(SURF_H);
-  surfHRef.current = SURF_H;
+  const sizeRef = useRef({ w: PAGE_W, h: PAGE_H });
+  sizeRef.current = { w: PAGE_W, h: PAGE_H };
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -431,7 +427,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
 
-  const ratio = canvasRatio(zoom);
+  const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
+  /** High zoom: the committed ink is drawn as SVG, which stays sharp where canvases hit their budget. */
+  const vector = printMode || zoom > VECTOR_ZOOM;
+  const inkSvg = useMemo(() => (vector ? strokesSvg(shownStrokes, PAPER_COLORS[paperColor] ?? '#FFFFFF') : ''), [vector, shownStrokes, paperColor]);
 
   // ------------------------------------------------------------------ live layer
   const dirty = useRef<DirtyRect | null>(null);
@@ -448,28 +447,29 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const claimLive = useCallback((): CanvasRenderingContext2D | null => {
     const canvas = activeCanvasRef.current, cont = containerRef.current;
     if (!canvas || !cont) return null;
-    const H = surfHRef.current;
+    const { w: W, h: H } = sizeRef.current;
     const c = cont.getBoundingClientRect();
     const root = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
     const scale = c.height / H || 1;
     const v0 = Math.max(0, (root.top - c.top) / scale), v1 = Math.min(H, (root.bottom - c.top) / scale);
     const view = Math.max(1, (root.bottom - root.top) / scale);
     const height = Math.min(H, Math.ceil(view * 1.5));
-    const r = Math.min(canvasRatio(zoomRef.current), Math.sqrt(MAX_CANVAS_PIXELS / (PAGE_WIDTH * height)));
+    const r = canvasRatio(zoomRef.current, W * height);
     const cur = live.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    if (cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.height === height && Math.abs(cur.ratio - r) < 1e-6) return ctx;
+    if (cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.height === height && Math.abs(cur.ratio - r) < 1e-6 && canvas.width === Math.round(W * r)) return ctx;
     const top = Math.max(0, Math.min(H - height, (v0 + v1) / 2 - height / 2));
-    const w = Math.round(PAGE_WIDTH * r), h = Math.round(height * r);
+    const w = Math.round(W * r), h = Math.round(height * r);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
+      canvas.style.width = `${W}px`;
       canvas.style.height = `${height}px`;
     }
     canvas.style.top = `${top}px`;
     ctx.setTransform(r, 0, 0, r, 0, -top * r);
-    ctx.clearRect(0, top, PAGE_WIDTH, height);
+    ctx.clearRect(0, top, W, height);
     live.current = { top, height, ratio: r };
     dirty.current = null;
     return ctx;
@@ -509,7 +509,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       target.removeEventListener('scroll', onMove);
       window.removeEventListener('resize', onMove);
     };
-  }, [scrollRoot, claimLive, ratio, pageCount]);
+  }, [scrollRoot, claimLive, ratio, PAGE_W, PAGE_H]);
 
   // First-stroke lag: every tool's code is run once in idle time after the note opens (prewarm.ts).
   // The rect is re-measured after a zoom.
@@ -630,7 +630,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const dot = d.snapped ? null : d.smart.snapDot;
       if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart.snapKind === 'grid', k));
       const m = smartPenMeasure(d.smart);
-      if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k));
+      if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
       const style = liveStyle('pen');
@@ -721,8 +721,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const toPoint = (e: { clientX: number; clientY: number; pressure: number; pointerType: string; timeStamp?: number }, start: number, angles = {}): Point => {
     const rect = canvasRect();
     return {
-      x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width,
-      y: ((e.clientY - rect.top) * surfHRef.current) / rect.height,
+      x: ((e.clientX - rect.left) * sizeRef.current.w) / rect.width,
+      y: ((e.clientY - rect.top) * sizeRef.current.h) / rect.height,
       pressure: e.pointerType === 'pen' ? (e.pressure > 0 ? e.pressure : 0.5) : 0.5,
       t: Math.round((eventTime(e) - start) * 10) / 10,
       ...angles,
@@ -806,7 +806,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         id: newId('text'),
         x: pt.x,
         y: pt.y - 14,
-        width: Math.max(160, Math.min(520, PAGE_WIDTH - pt.x - 32)),
+        width: Math.max(160, Math.min(520, PAGE_W - pt.x - 32)),
         text: '',
         fontSize: 18,
         color: '#111827',
@@ -1219,11 +1219,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const dy = (e.clientY - t.startY) / zoom;
     const b = t.sel.bounds;
     if (t.mode === 'move') {
-      // The surface is one continuous sheet (every page band of it): a selection may move to any
-      // page, but not off the sheet, where the page clips it and it could not be picked up again.
+      // Not off the sheet, where the page clips it and it could not be picked up again.
       // (Never pulled back from where it already is: the bounds carry a margin.)
-      t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_WIDTH - b.x - b.width), dx));
-      t.dy = Math.max(Math.min(0, -b.y), dy);
+      t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_W - b.x - b.width), dx));
+      t.dy = Math.max(Math.min(0, -b.y), Math.min(Math.max(0, PAGE_H - b.y - b.height), dy));
     } else if (t.mode === 'scale') {
       t.f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
     } else {
@@ -1346,7 +1345,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const pagePoint = (e: { clientX: number; clientY: number }) => {
     const rect = containerRef.current!.getBoundingClientRect();
-    return { x: ((e.clientX - rect.left) * PAGE_WIDTH) / rect.width, y: ((e.clientY - rect.top) * surfHRef.current) / rect.height };
+    return { x: ((e.clientX - rect.left) * sizeRef.current.w) / rect.width, y: ((e.clientY - rect.top) * sizeRef.current.h) / rect.height };
   };
 
   const startHandle = (e: React.PointerEvent, h: ShapeHandle) => {
@@ -1400,8 +1399,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // ------------------------------------------------------------------ render
   const blocksInteractive = tools.tool === 'lasso' || tools.tool === 'text';
   const pageStyle: React.CSSProperties = {
-    width: PAGE_WIDTH,
-    height: SURF_H,
+    width: PAGE_W,
+    height: PAGE_H,
     ...paperBackground(paperStyle, paperColor),
   };
 
@@ -1437,14 +1436,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       {(blockPage.imageBlocks ?? []).map((im) => (
         <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
       ))}
-      {printMode ? (
-        <svg className="absolute inset-0" width={PAGE_WIDTH} height={SURF_H} viewBox={`0 0 ${PAGE_WIDTH} ${SURF_H}`}
-          dangerouslySetInnerHTML={{
-            __html: [...page.strokes.filter((s) => s.tool === 'highlighter'), ...page.strokes.filter((s) => s.tool !== 'highlighter')].map((s) => strokeToSvg(s, 0, PAPER_COLORS[paperColor])).join(''),
-          }}
-        />
+      {vector ? (
+        <svg className="absolute inset-0 pointer-events-none" width={PAGE_W} height={PAGE_H} viewBox={`0 0 ${PAGE_W} ${PAGE_H}`} dangerouslySetInnerHTML={{ __html: inkSvg }} />
       ) : (
-        Array.from({ length: pageCount }, (_, k) => <InkTile key={k} band={k} strokes={shownStrokes} ratio={ratio} scrollRoot={scrollRoot} />)
+        <InkTile eager={pageIndex < 2} width={PAGE_W} height={PAGE_H} strokes={shownStrokes} ratio={ratio} scrollRoot={scrollRoot} />
       )}
       {layerSel && layerSel.strokeIds.length > 0 && (
         <canvas
@@ -1502,7 +1497,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ))}
 
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
-      {!printMode && <canvas ref={activeCanvasRef} className="absolute left-0 z-10 pointer-events-none" style={{ top: 0, width: PAGE_WIDTH, height: 0 }} />}
+      {!printMode && <canvas ref={activeCanvasRef} className="absolute left-0 z-10 pointer-events-none" style={{ top: 0, width: PAGE_W, height: 0 }} />}
       {visible && !printMode && (
         <div
           ref={inputRef}
@@ -1618,16 +1613,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           </div>
         ))}
 
-      {/* Page breaks: a hairline and the page number; the PDF is cut here. */}
-      {!printMode &&
-        Array.from({ length: pageCount }, (_, k) => (
-          <React.Fragment key={k}>
-            {k > 0 && (
-              <div className="absolute left-0 right-0 pointer-events-none" style={{ top: k * PAGE_HEIGHT - 0.5, height: 1, background: darkPaper ? 'rgba(255,255,255,0.18)' : 'rgba(100,116,139,0.35)' }} />
-            )}
-            <div className="absolute right-4 text-[11px] font-medium text-gray-400 pointer-events-none" style={{ top: (k + 1) * PAGE_HEIGHT - 22 }}>{k + 1}</div>
-          </React.Fragment>
-        ))}
+      {/* Page number */}
+      {!printMode && <div className="absolute right-4 bottom-2 text-[11px] font-medium text-gray-400 pointer-events-none">{pageIndex + 1}</div>}
     </div>
   );
 };
