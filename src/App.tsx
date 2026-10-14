@@ -61,6 +61,7 @@ export const App: React.FC = () => {
       paperColor: 'white',
       schemaVersion: SCHEMA_VERSION,
       pages: [createBlankPage(1)],
+      sheets: [{ id: newId('sheet') }],
     };
     upsertLocal(await saveNote(note, false));
     setOpenNoteId(note.id);

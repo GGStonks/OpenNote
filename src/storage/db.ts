@@ -1,4 +1,4 @@
-import { splitSurface } from '../editor/surface';
+import { letterSheetsFor, surfaceFromPages } from '../editor/sheets';
 import { AudioRecording, NoteDocument, NotePage, SCHEMA_VERSION, Subject, newId } from '../types';
 
 /**
@@ -37,6 +37,7 @@ function welcomeNote(): NoteDocument {
     paperStyle: 'ruled',
     paperColor: 'white',
     schemaVersion: SCHEMA_VERSION,
+    sheets: [{ id: newId('sheet') }],
     pages: [
       {
         ...createBlankPage(1),
@@ -71,28 +72,27 @@ function welcomeNote(): NoteDocument {
 }
 
 /**
- * Upgrades notes created by older versions. Before v1.6 notes had real pages (kept as they are);
- * v1.6-v1.11 notes are one continuous surface, cut into pages at its page lines (surface.ts).
+ * Upgrades notes created by older versions to one surface cut into pages (editor/sheets.ts):
+ * v1.6-v1.11 notes already are one surface (US Letter pages are added for its content); older
+ * notes and v1.12 development notes have separate pages, put one under the other.
  */
 export function migrateNote(n: NoteDocument): NoteDocument {
-  if (n.schemaVersion === SCHEMA_VERSION) return n;
-  const clean = (p: NotePage, i: number): NotePage => ({
+  if (n.schemaVersion === SCHEMA_VERSION && n.sheets?.length) return n;
+  const clean = (p: NotePage): NotePage => ({
     ...p,
-    pageNumber: i + 1,
     strokes: (p.strokes ?? []).filter((s) => Array.isArray(s.points)),
     latexBlocks: (p.latexBlocks ?? []).map(({ renderedHtml: _drop, ...b }) => b),
     textBlocks: p.textBlocks ?? [],
     imageBlocks: p.imageBlocks ?? [],
   });
+  const base = { ...n, schemaVersion: SCHEMA_VERSION, paperStyle: n.paperStyle ?? 'ruled', paperColor: n.paperColor ?? 'white' } as NoteDocument;
   const source = (n.pages?.length ? n.pages : [createBlankPage(1)]).map(clean);
-  const pages = n.schemaVersion === 3 ? splitSurface(source[0]) : source;
-  return {
-    ...n,
-    schemaVersion: SCHEMA_VERSION,
-    paperStyle: n.paperStyle ?? 'ruled',
-    paperColor: n.paperColor ?? 'white',
-    pages: pages.map((p, i) => ({ ...p, pageNumber: i + 1 })),
-  };
+  if (n.schemaVersion === 3 || n.schemaVersion === SCHEMA_VERSION) {
+    const surface = { ...source[0], pageNumber: 1 };
+    return { ...base, pages: [surface], sheets: letterSheetsFor(surface) };
+  }
+  const { surface, sheets } = surfaceFromPages(base, source);
+  return { ...base, pages: [surface], sheets };
 }
 
 let dbPromise: Promise<IDBDatabase> | null = null;

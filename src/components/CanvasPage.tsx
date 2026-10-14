@@ -24,6 +24,7 @@ import {
   Selection, computeBounds, normDeg, resetRotation, selectInLasso, selectionRotation, singleBlockSelection, transformSelection,
 } from '../editor/selection';
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
+import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 
 export interface ToolSettings {
   tool: ToolType;
@@ -49,10 +50,8 @@ export interface ToolSettings {
 }
 
 interface CanvasPageProps {
+  /** The note's surface (all of its content). */
   page: NotePage;
-  pageIndex: number;
-  paperStyle: PaperStyle;
-  paperColor: PaperColor;
   tools: ToolSettings;
   zoom: number;
   editor: PageOps;
@@ -66,9 +65,8 @@ interface CanvasPageProps {
   onEditLatex: (pageId: string, block: LatexBlock) => void;
   printMode: boolean;
   scrollRoot: HTMLElement | null;
-  /** Size of the page in px (its format and orientation, see editor/pageSetup.ts). */
-  width: number;
-  height: number;
+  /** The surface's size and the pages it is cut into (editor/sheets.ts). */
+  layout: SurfaceLayout;
 }
 
 export const PAPER_COLORS: Record<PaperColor, string> = {
@@ -83,8 +81,12 @@ export const PAPER_COLORS: Record<PaperColor, string> = {
   dark: '#1C1C1F',
 };
 
-/** Paper patterns as CSS backgrounds (no canvas memory, prints as vectors). */
-export function paperBackground(style: PaperStyle, color: PaperColor): React.CSSProperties {
+/**
+ * Paper patterns as CSS backgrounds (no canvas memory, prints as vectors). `origin`: where the
+ * paper sits on the surface, so grid and dot lattices of every page line up with the surface's
+ * lattice (the one the Draw tool snaps to).
+ */
+export function paperBackground(style: PaperStyle, color: PaperColor, origin = { x: 0, y: 0 }): React.CSSProperties {
   const dark = color === 'dark';
   const base = PAPER_COLORS[color] ?? PAPER_COLORS.white;
   const line = dark ? 'rgba(255,255,255,0.13)' : 'rgba(59,130,246,0.22)';
@@ -104,6 +106,7 @@ export function paperBackground(style: PaperStyle, color: PaperColor): React.CSS
   } else if (style === 'grid') {
     css.backgroundImage = `linear-gradient(to right, ${grid} 1px, transparent 1px), linear-gradient(to bottom, ${grid} 1px, transparent 1px)`;
     css.backgroundSize = '24px 24px';
+    css.backgroundPosition = `${-origin.x}px ${-origin.y}px`;
   } else if (style === 'graph') {
     // Millimetre-style graph paper: fine lines every 12 px, stronger ones every 60 px.
     const major = dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.13)';
@@ -115,10 +118,11 @@ export function paperBackground(style: PaperStyle, color: PaperColor): React.CSS
       `linear-gradient(to bottom, ${minor} 1px, transparent 1px)`,
     ].join(',');
     css.backgroundSize = '60px 60px, 60px 60px, 12px 12px, 12px 12px';
+    css.backgroundPosition = `${-origin.x}px ${-origin.y}px`;
   } else if (style === 'dots') {
     css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} 1.3px, transparent 1.7px)`;
     css.backgroundSize = '24px 24px';
-    css.backgroundPosition = '12px 12px';
+    css.backgroundPosition = `${12 - origin.x}px ${12 - origin.y}px`;
   }
   return css;
 }
@@ -145,10 +149,11 @@ function canvasRatio(zoom: number, area: number): number {
   return Math.max(1, Math.min(dpr * z, maxByBudget));
 }
 
-/** Committed ink as SVG markup (cached per stroke): high zoom and printing. */
+/** Committed ink as SVG markup (cached per stroke): high zoom and printing. `paperOf`: for "hole" fills. */
 const svgCache = new WeakMap<Stroke, { paper: string; svg: string }>();
-function strokesSvg(strokes: Stroke[], paper: string): string {
+function strokesSvg(strokes: Stroke[], paperOf: (s: Stroke) => string): string {
   const one = (s: Stroke) => {
+    const paper = paperOf(s);
     const c = svgCache.get(s);
     if (c && c.paper === paper) return c.svg;
     const svg = strokeToSvg(s, 0, paper);
@@ -165,8 +170,26 @@ const TILE_FULL_REPAINT = 0.5;
 
 type TilePaint = { strokes: Stroke[]; ratio: number; complete: boolean };
 
+const strokeBoxes = new WeakMap<Stroke, { minY: number; maxY: number }>();
+
+function strokeYRange(s: Stroke) {
+  let r = strokeBoxes.get(s);
+  if (!r) {
+    let minY = Infinity, maxY = -Infinity;
+    for (const p of s.points) {
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const pad = (s.tool === 'highlighter' ? s.width * 3 : s.width * 2) + 12;
+    r = { minY: minY - pad, maxY: maxY + pad };
+    strokeBoxes.set(s, r);
+  }
+  return r;
+}
+
 /**
- * Committed ink of a page. Tiles exist only near the viewport (a canvas
+ * Committed ink of one page of the surface (its height, the surface's whole width: ink may go
+ * beside a narrower page). Tiles exist only near the viewport (a canvas
  * is up to 16 Mpx and WebKit has a tight total canvas budget), and each one is the cached bitmap of
  * its band: it is painted once and then only where something changed.
  *
@@ -177,10 +200,15 @@ type TilePaint = { strokes: Stroke[]; ratio: number; complete: boolean };
  *  - A tile is created when it comes within a screen of the viewport and kept until it is more
  *    than 2.5 screens away (scrolling back and forth does not repaint), and a tile that is still
  *    off screen is painted a few ms per frame, so scrolling a dense note does not stall on it.
+ *
+ * Strokes crossing a page line are painted by both tiles.
  */
-const InkTile = React.memo(function InkTile(props: { eager: boolean; width: number; height: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
-  const { eager, width: W, height: H, strokes: mine, ratio, scrollRoot } = props;
-  const top = 0;
+const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
+  const { eager, top, width: W, height: H, strokes, ratio, scrollRoot } = props;
+  const mine = useMemo(() => strokes.filter((s) => {
+    const r = strokeYRange(s);
+    return r.maxY >= top && r.minY <= top + H;
+  }), [strokes, top, H]);
   const holderRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [alive, setAlive] = useState(eager);
@@ -405,23 +433,30 @@ function dampedPrediction(points: Point[], q: Point | null): Point[] {
 
 const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const {
-    page, pageIndex, paperStyle, paperColor, tools, zoom, editor, gestures, selection, setSelection,
-    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot, width: PAGE_W, height: PAGE_H,
+    page, tools, zoom, editor, gestures, selection, setSelection,
+    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot, layout,
   } = props;
+  const pageIndex = 0;
+  const PAGE_W = layout.width, PAGE_H = layout.height;
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  /** The page (sheet) at surface height y. */
+  const sheetAt = (y: number): SheetBox => layoutRef.current.sheets[sheetIndexAt(layoutRef.current, y)];
   const sizeRef = useRef({ w: PAGE_W, h: PAGE_H });
   sizeRef.current = { w: PAGE_W, h: PAGE_H };
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLDivElement>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement>(null);
   const visible = true;
-  const darkPaper = paperColor === 'dark';
-  const defaultInk = darkPaper ? '#F3F4F6' : '#111827';
+  /** Blocks: the default ink follows the paper of the page they are on. */
+  const darkAt = (y: number) => sheetAt(y).paperColor === 'dark';
+  const inkAt = (y: number) => (darkAt(y) ? '#F3F4F6' : '#111827');
   const pageRef = useRef(page);
   pageRef.current = page;
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
-  const paperStyleRef = useRef(paperStyle);
-  paperStyleRef.current = paperStyle;
+  /** Paper under the pen (the Draw tool snaps to its lattice). */
+  const paperStyleRef = useRef(layout.sheets[0].paperStyle);
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
@@ -430,7 +465,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn as SVG, which stays sharp where canvases hit their budget. */
   const vector = printMode || zoom > VECTOR_ZOOM;
-  const inkSvg = useMemo(() => (vector ? strokesSvg(shownStrokes, PAPER_COLORS[paperColor] ?? '#FFFFFF') : ''), [vector, shownStrokes, paperColor]);
+  const inkSvg = useMemo(
+    () => (vector ? strokesSvg(shownStrokes, (st) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF') : ''),
+    [vector, shownStrokes, layout] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
   // ------------------------------------------------------------------ live layer
   const dirty = useRef<DirtyRect | null>(null);
@@ -522,11 +560,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // Shape tool: the page's snap targets are built ahead of the first shape, and again after edits.
   useEffect(() => {
     if (printMode || tools.tool !== 'shape') return;
-    const grid = tools.shapeGridSnap ? paperGrid(paperStyle) : null;
+    const grid = tools.shapeGridSnap ? paperGrid(paperStyleRef.current) : null;
     const strokes = page.strokes;
     const id = setTimeout(() => snapCacheFor(strokes, tools.shapeSnap, grid), 50);
     return () => clearTimeout(id);
-  }, [printMode, tools.tool, tools.shapeSnap, tools.shapeGridSnap, paperStyle, page.strokes]);
+  }, [printMode, tools.tool, tools.shapeSnap, tools.shapeGridSnap, page.strokes]);
 
   // iPadOS Scribble / system gestures: Pencil strokes on the canvas must never be interpreted as
   // handwriting input or scrolling, which delays and drops strokes.
@@ -806,7 +844,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         id: newId('text'),
         x: pt.x,
         y: pt.y - 14,
-        width: Math.max(160, Math.min(520, PAGE_W - pt.x - 32)),
+        width: (() => {
+          const sh = sheetAt(pt.y);
+          return Math.max(160, Math.min(520, sh.left + sh.width - pt.x - 32));
+        })(),
         text: '',
         fontSize: 18,
         color: '#111827',
@@ -827,6 +868,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     claimLive();
     const start = eventTime(e.nativeEvent);
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
+    paperStyleRef.current = sheetAt(pt.y).paperStyle;
     // The pen engine takes a force-less pen sample as unknown, not as the 0.5 fallback.
     if (tool === 'pen' && e.pointerType === 'pen' && !(e.pressure > 0)) pt.pressure = 0;
     drawing.current = {
@@ -1354,7 +1396,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     e.preventDefault();
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const others = page.strokes.filter((s) => s.id !== editShape.id);
-    const grid = tools.shapeGridSnap ? paperGrid(paperStyle) : null;
+    const grid = tools.shapeGridSnap ? paperGrid(sheetAt(h.y).paperStyle) : null;
     const cache = snapCacheFor(others, tools.shapeSnap, grid);
     if (!claimLive()) return;
     handleDrag.current = { pointerId: e.pointerId, orig: editShape, handle: h, cache, sel: selection, last: editShape, snapped: false, snapDot: null };
@@ -1398,11 +1440,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // ------------------------------------------------------------------ render
   const blocksInteractive = tools.tool === 'lasso' || tools.tool === 'text';
-  const pageStyle: React.CSSProperties = {
-    width: PAGE_W,
-    height: PAGE_H,
-    ...paperBackground(paperStyle, paperColor),
-  };
+  const pageStyle: React.CSSProperties = { width: PAGE_W, height: PAGE_H };
 
   // Block views are memoised and keep their first handlers: these read the current tool and page.
   const latexHandlers = (b: LatexBlock) => ({
@@ -1424,10 +1462,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   return (
     <div
       ref={containerRef}
-      className="on-page relative select-none shadow-[0_4px_24px_rgba(0,0,0,0.12)] overflow-hidden"
+      className="on-page relative select-none overflow-hidden"
       style={pageStyle}
       data-page-index={pageIndex}
     >
+      {/* The pages' paper: one continuous strip, cut where a page ends (a hairline). */}
+      {layout.sheets.map((sh) => (
+        <div
+          key={sh.id}
+          className={`absolute pointer-events-none ${printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]'}`}
+          style={{ left: sh.left, top: sh.top, width: sh.width, height: sh.height, ...paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }) }}
+        />
+      ))}
       {/*
         Stacking, bottom to top: the paper (this element's background), images, ink, the
         selection being moved, typed / converted content, the input layer. Images were drawn after
@@ -1439,7 +1485,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       {vector ? (
         <svg className="absolute inset-0 pointer-events-none" width={PAGE_W} height={PAGE_H} viewBox={`0 0 ${PAGE_W} ${PAGE_H}`} dangerouslySetInnerHTML={{ __html: inkSvg }} />
       ) : (
-        <InkTile eager={pageIndex < 2} width={PAGE_W} height={PAGE_H} strokes={shownStrokes} ratio={ratio} scrollRoot={scrollRoot} />
+        layout.sheets.map((sh) => (
+          <InkTile key={sh.id} eager={sh.index < 2} top={sh.top} width={PAGE_W} height={sh.height} strokes={shownStrokes} ratio={canvasRatio(zoom, PAGE_W * sh.height)} scrollRoot={scrollRoot} />
+        ))
       )}
       {layerSel && layerSel.strokeIds.length > 0 && (
         <canvas
@@ -1462,8 +1510,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         <LatexBlockView
           key={b.id}
           block={b}
-          inkColor={defaultInk}
-          darkPaper={darkPaper}
+          inkColor={inkAt(b.y + b.height / 2)}
+          darkPaper={darkAt(b.y + b.height / 2)}
           interactive={blocksInteractive && !printMode}
           selected={selectedBlockId === b.id}
           zoom={zoom}
@@ -1479,7 +1527,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           editing={editingTextId === t.id}
           selected={false}
           zoom={zoom}
-          darkPaper={darkPaper}
+          darkPaper={darkAt(t.y)}
           onStartEdit={() => {
             if (toolsRef.current.tool === 'lasso') setSelection(singleBlockSelection(pageRef.current, 'text', t.id));
             else setEditingTextId(t.id);
@@ -1613,8 +1661,24 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           </div>
         ))}
 
-      {/* Page number */}
-      {!printMode && <div className="absolute right-4 bottom-2 text-[11px] font-medium text-gray-400 pointer-events-none">{pageIndex + 1}</div>}
+      {/* Page lines and numbers; the PDF is cut at the lines. */}
+      {!printMode &&
+        layout.sheets.map((sh) => (
+          <React.Fragment key={sh.id}>
+            {sh.index > 0 && (
+              <div
+                className="absolute pointer-events-none"
+                style={{
+                  left: Math.min(sh.left, layout.sheets[sh.index - 1].left), width: Math.max(sh.width, layout.sheets[sh.index - 1].width), top: sh.top - 0.5, height: 1,
+                  background: sh.paperColor === 'dark' ? 'rgba(255,255,255,0.18)' : 'rgba(100,116,139,0.35)',
+                }}
+              />
+            )}
+            <div className="absolute text-[11px] font-medium text-gray-400 pointer-events-none" style={{ left: sh.left + sh.width - 40, width: 24, textAlign: 'right', top: sh.top + sh.height - 22 }}>
+              {sh.index + 1}
+            </div>
+          </React.Fragment>
+        ))}
     </div>
   );
 };

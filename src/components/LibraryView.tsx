@@ -5,6 +5,10 @@ import {
 } from 'lucide-react';
 import { NoteDocument, Subject } from '../types';
 import { NoteThumb } from './NoteThumb';
+import { printedSheets } from '../editor/sheets';
+
+/** Pages of a note (not counting the blank page the note always ends with). */
+const pageCountOf = (n: NoteDocument) => (n.sheets?.length ? printedSheets(n).length : 1);
 
 interface LibraryViewProps {
   notes: NoteDocument[];
@@ -199,7 +203,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                         )}
                         <div className="text-[11px] text-gray-400 mt-0.5 flex items-center gap-1">
                           <Clock className="w-3 h-3" />
-                          {new Date(note.updatedAt).toLocaleDateString()} · {note.pages.length}p
+                          {new Date(note.updatedAt).toLocaleDateString()} · {pageCountOf(note)}p
                         </div>
                       </div>
                       <div className="relative" onClick={(e) => e.stopPropagation()}>
@@ -219,7 +223,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                     <FileText className="w-5 h-5 text-blue-600 flex-shrink-0" />
                     <div className="truncate">
                       <div className="font-semibold text-sm truncate">{note.title}</div>
-                      <div className="text-[11px] text-gray-400">{new Date(note.updatedAt).toLocaleString()} · {note.pages.length} page{note.pages.length === 1 ? '' : 's'}</div>
+                      <div className="text-[11px] text-gray-400">{new Date(note.updatedAt).toLocaleString()} · {pageCountOf(note)} page{pageCountOf(note) === 1 ? '' : 's'}</div>
                     </div>
                   </div>
                   <div className="relative" onClick={(e) => e.stopPropagation()}>

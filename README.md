@@ -11,10 +11,10 @@
 
 **Note taking (Notability-style)**
 - Library with subjects, search (titles, typed text, LaTeX source), thumbnails of the first page (ink, images, math, TikZ, text), rename / move / duplicate / delete, backup & import. Android's cloud auto-backup is off (it restored stale notes on reinstall): use Backup to keep or move notes.
-- **Real pages**, each with its own paper: pattern (blank, ruled, narrow ruled, squared, graph, dotted), colour (white, cream, yellow, ochre, blue, green, pink, grey, dark), orientation (portrait / landscape) and size (Letter, Legal, A3, A4, A5, B5). The toolbar's Paper menu sets the note's paper, used by new pages and every page without paper of its own. Notes from v1.6–v1.11 (one continuous canvas) are cut into pages at their page lines when opened.
+- **One continuous canvas cut into pages**: ink, shapes, lasso and eraser cross page lines freely, and as soon as you write on the last page a blank one follows it. Each page has its own paper: pattern (blank, ruled, narrow ruled, squared, graph, dotted), colour (white, cream, yellow, ochre, blue, green, pink, grey, dark), orientation (portrait / landscape) and size (Letter, Legal, A3, A4, A5, B5); narrower pages are centred on the canvas. The toolbar's Paper menu sets the note's paper, used by new pages and every page without paper of its own. Page operations move what sits on a page (an item belongs to the page holding its middle). PDF export cuts the canvas at the page lines, each page at its own size.
 - **Zoom** from 50 % to 500 %: pinch with two fingers (about the point between them), ctrl + wheel / trackpad pinch, or ⌘+ / ⌘− / ⌘0. The note opens fitted to the width; the button in the bottom-right corner fits the width, and when already fitted fits the whole page. Above 250 % ink is drawn as vectors, sharp at any zoom. Scrolling with two fingers (or one finger when "pencil only" is on, or the hand tool) has momentum and goes sideways when zoomed in.
 - **Pull up to add a page**: drag (or scroll) past the end of the last page; an indicator fills up and a new page is added when it is full.
-- **Page manager** (sidebar button next to the back button): live thumbnails of every page; tap to go to a page, "Select" (or ctrl / ⌘ / shift-click) for several; drag a page by its grip (or with the mouse) to reorder; paper, duplicate, copy, cut, paste (into any note) and delete for the selected pages.
+- **Page manager** (sidebar button next to the back button): live thumbnails of every page (ink crossing a page line shows on both); tap to go to a page, "Select" (or ctrl / ⌘ / shift-click) for several; drag a page by its grip (or with the mouse) to reorder; paper, duplicate, copy, cut, paste (into any note) and delete for the selected pages.
 - Two-finger tap = undo, three-finger tap = redo (Notability gestures; can be turned off in Settings).
 - Colour picker for pen, Draw tool and highlighter: presets, full spectrum + hex, and favourite colours (kept on the device).
 - Text boxes (kept when you tap elsewhere; removed only if empty), images, add / duplicate / delete pages, undo/redo (whole gestures are one step), keyboard shortcuts (1–6 tools, ⌘Z / ⌘⇧Z).
@@ -101,7 +101,7 @@ src/
     Blocks.tsx                LaTeX / TikZ / text / image blocks
     PageManager.tsx, PaperPicker.tsx  page sidebar (thumbnails, reorder, page clipboard), paper picker
     Toolbar.tsx, LibraryView.tsx, LatexModal.tsx, ExportModal.tsx, SettingsModal.tsx, AudioRecorder.tsx
-  editor/                     page paper (pageSetup.ts), page operations (pages.ts), v1.6 surface migration (surface.ts), selection maths, zoom / scrolling / pull and tap gestures,
+  editor/                     page paper (pageSetup.ts), the canvas and its pages: layout, page operations, page clipboard, migration (sheets.ts), selection maths, zoom / scrolling / pull and tap gestures,
                               smart pen (smartPen.ts), shape handles and snap-and-size (shapeEdit.ts)
   ink/engine/                 the ink engine (Nib), self-contained: no imports from the rest of the app
     nib.ts                    handwriting model: zero-phase smoothing, lift-off, pressure

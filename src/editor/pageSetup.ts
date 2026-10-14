@@ -1,4 +1,4 @@
-import { NoteDocument, NotePage, PageOrientation, PageSize, PaperColor, PaperStyle } from '../types';
+import { NoteDocument, PageOrientation, PageSheet, PageSize, PaperColor, PaperStyle } from '../types';
 
 /**
  * Paper of each page: a page's own pattern, colour, format and orientation (set in the page
@@ -48,7 +48,7 @@ export interface PageSetup {
 
 export type SetupPatch = Partial<Pick<PageSetup, 'paperStyle' | 'paperColor' | 'size' | 'orientation'>>;
 
-export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 'pageSize' | 'orientation'>, page: NotePage): PageSetup {
+export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 'pageSize' | 'orientation'>, page: PageSheet): PageSetup {
   const size = page.size ?? doc.pageSize ?? 'letter';
   const orientation = page.orientation ?? doc.orientation ?? 'portrait';
   const s = PAGE_SIZES[size] ?? PAGE_SIZES.letter;
@@ -64,6 +64,6 @@ export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 
 }
 
 /** True when the page has paper of its own (not the note's default). */
-export function hasOwnSetup(p: NotePage): boolean {
+export function hasOwnSetup(p: PageSheet): boolean {
   return p.paperStyle !== undefined || p.paperColor !== undefined || p.size !== undefined || p.orientation !== undefined;
 }

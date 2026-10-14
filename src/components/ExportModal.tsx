@@ -1,4 +1,4 @@
-import { pageSetup } from '../editor/pageSetup';
+import { splitIntoPages } from '../editor/sheets';
 import React, { useState } from 'react';
 import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
 import { NoteDocument } from '../types';
@@ -28,7 +28,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
   const libs = new Set<string>(['arrows.meta']);
   const pkgs = new Set<string>();
   const body: string[] = [];
-  doc.pages.forEach((p, i) => {
+  splitIntoPages(doc).forEach(({ page: p }, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: t.text.replace(/([#%&_{}$])/g, '\\$1') + '\n', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -74,7 +74,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
 
 function buildMarkdown(doc: NoteDocument): string {
   let md = `# ${doc.title}\n\n`;
-  doc.pages.forEach((p, i) => {
+  splitIntoPages(doc).forEach(({ page: p }, i) => {
     const items: Item[] = [];
     for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: t.text + '\n' });
     for (const b of p.latexBlocks) {
@@ -97,7 +97,7 @@ const turn = (el: string, deg: number | undefined, cx: number, cy: number) => (d
 
 function buildSvg(doc: NoteDocument): string {
   const gap = 24;
-  const pages = doc.pages.map((p) => ({ p, setup: pageSetup(doc, p) }));
+  const pages = splitIntoPages(doc).map(({ page, box }) => ({ p: page, setup: box }));
   const W = Math.max(...pages.map((x) => x.setup.width));
   const total = pages.reduce((h, x) => h + x.setup.height + gap, 0) - gap;
   let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;

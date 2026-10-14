@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { LatexBlock, NoteDocument, NotePage, PaperColor, PaperStyle, Stroke } from '../types';
-import { pageSetup } from '../editor/pageSetup';
+import { sheetView, surfaceLayout } from '../editor/sheets';
 import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
@@ -136,8 +136,8 @@ export const PageThumb: React.FC<{
 /** Library card: the note's first page, cut to the card's height. */
 export const NoteThumb: React.FC<{ note: NoteDocument }> = React.memo(({ note }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const page = note.pages[0];
-  const setup = useMemo(() => (page ? pageSetup(note, page) : null), [note, page]);
+  const setup = useMemo(() => (note.pages[0] && note.sheets?.length ? surfaceLayout(note).sheets[0] : null), [note]);
+  const page = useMemo(() => (setup ? sheetView(note.pages[0], setup) : null), [note, setup]);
   const [cardWidth, setCardWidth] = useState(160);
   useEffect(() => {
     const el = wrapRef.current;

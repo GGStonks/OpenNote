@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Circle, ClipboardCopy, ClipboardPaste, CopyPlus, GripVertical, Palette, Plus, Scissors, Trash2, X } from 'lucide-react';
 import { NoteDocument, NotePage } from '../types';
-import { PageSetup, SetupPatch, hasOwnSetup, pageSetup } from '../editor/pageSetup';
+import { SetupPatch, hasOwnSetup } from '../editor/pageSetup';
+import { SheetBox, SurfaceLayout, sheetView } from '../editor/sheets';
 import { PageThumb } from './NoteThumb';
 import { PaperPicker, PaperValues } from './PaperPicker';
 
 /**
- * Page manager: every page of the note as a live thumbnail, in a side panel.
+ * Page manager: every page of the note (each piece of its surface, ink crossing a page line shown
+ * on both) as a live thumbnail, in a side panel.
  *
  *  - Tap a page to go to it (it becomes the selection). "Select" (or ctrl / ⌘ / shift on a
  *    keyboard) selects several pages.
@@ -18,6 +20,7 @@ import { PaperPicker, PaperValues } from './PaperPicker';
 
 interface PageManagerProps {
   doc: NoteDocument;
+  layout: SurfaceLayout;
   currentPage: number;
   selected: ReadonlySet<string>;
   setSelected: (s: ReadonlySet<string>) => void;
@@ -58,16 +61,19 @@ function useThrottled<T>(value: T, ms: number): T {
   return shown;
 }
 
-const LiveThumb: React.FC<{ page: NotePage; setup: PageSetup; root: Element | null }> = ({ page, setup, root }) => {
-  const shown = useThrottled(page, THUMB_THROTTLE_MS);
-  const scale = Math.min(THUMB_W / setup.width, THUMB_MAX_H / setup.height);
-  return <PageThumb page={shown} width={setup.width} height={setup.height} paperStyle={setup.paperStyle} paperColor={setup.paperColor} scale={scale} root={root} />;
+const LiveThumb: React.FC<{ surface: NotePage; box: SheetBox; root: Element | null }> = ({ surface, box, root }) => {
+  const page = useMemo(() => sheetView(surface, box), [surface, box]);
+  const scale = Math.min(THUMB_W / box.width, THUMB_MAX_H / box.height);
+  return <PageThumb page={page} width={box.width} height={box.height} paperStyle={box.paperStyle} paperColor={box.paperColor} scale={scale} root={root} />;
 };
 
 const BAR_BTN = 'w-9 h-9 flex items-center justify-center rounded-xl transition active:scale-90 disabled:opacity-30 disabled:active:scale-100';
 
 export const PageManager: React.FC<PageManagerProps> = (p) => {
-  const { doc, selected, setSelected } = p;
+  const { doc, layout, selected, setSelected } = p;
+  const pages = doc.sheets;
+  /** The surface, following edits at most every THUMB_THROTTLE_MS. */
+  const surface = useThrottled(doc.pages[0], THUMB_THROTTLE_MS);
   const [selectMode, setSelectMode] = useState(false);
   const [paperOpen, setPaperOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
@@ -76,12 +82,12 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   /** Last page tapped (shift-click selects the range from it). */
   const anchor = useRef<string | null>(null);
 
-  const setups = useMemo(() => doc.pages.map((pg) => pageSetup(doc, pg)), [doc]);
+  const setups = layout.sheets;
   const count = selected.size;
 
   // Keep the current page in view in the list.
   useEffect(() => {
-    const id = doc.pages[p.currentPage]?.id;
+    const id = pages[p.currentPage]?.id;
     const el = id ? items.current.get(id) : null;
     const list = listRef.current;
     if (!el || !list) return;
@@ -94,12 +100,12 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   }, [count]);
 
   const onTap = (e: React.MouseEvent, index: number) => {
-    const id = doc.pages[index].id;
+    const id = pages[index].id;
     if (e.shiftKey && anchor.current) {
-      const a = doc.pages.findIndex((pg) => pg.id === anchor.current);
+      const a = pages.findIndex((pg) => pg.id === anchor.current);
       if (a >= 0) {
         const [lo, hi] = a < index ? [a, index] : [index, a];
-        setSelected(new Set(doc.pages.slice(lo, hi + 1).map((pg) => pg.id)));
+        setSelected(new Set(pages.slice(lo, hi + 1).map((pg) => pg.id)));
         return;
       }
     }
@@ -121,13 +127,13 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   const autoScroll = useRef<number | null>(null);
 
   const dropIndex = (clientY: number) => {
-    for (let i = 0; i < doc.pages.length; i++) {
-      const el = items.current.get(doc.pages[i].id);
+    for (let i = 0; i < pages.length; i++) {
+      const el = items.current.get(pages[i].id);
       if (!el) continue;
       const r = el.getBoundingClientRect();
       if (clientY < r.top + r.height / 2) return i;
     }
-    return doc.pages.length;
+    return pages.length;
   };
 
   const stopAutoScroll = () => {
@@ -204,31 +210,31 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
 
   // ---------------------------------------------------------------------------- paper of the selection
   const paperValue = useMemo<PaperValues>(() => {
-    const sel = setups.filter((_, i) => selected.has(doc.pages[i].id));
+    const sel = setups.filter((_, i) => selected.has(pages[i].id));
     const same = <K extends keyof PaperValues>(k: K) => (sel.length && sel.every((s) => s[k] === sel[0][k]) ? (sel[0][k] as PaperValues[K]) : null);
     return { paperStyle: same('paperStyle'), paperColor: same('paperColor'), size: same('size'), orientation: same('orientation') };
-  }, [setups, selected, doc.pages]);
-  const anyOwn = doc.pages.some((pg) => selected.has(pg.id) && hasOwnSetup(pg));
+  }, [setups, selected, pages]);
+  const anyOwn = pages.some((pg) => selected.has(pg.id) && hasOwnSetup(pg));
 
-  const dragLabel = drag ? (drag.ids.size > 1 ? `${drag.ids.size} pages` : `Page ${doc.pages.findIndex((pg) => drag.ids.has(pg.id)) + 1}`) : '';
+  const dragLabel = drag ? (drag.ids.size > 1 ? `${drag.ids.size} pages` : `Page ${pages.findIndex((pg) => drag.ids.has(pg.id)) + 1}`) : '';
 
   return (
     <aside className="h-full w-[216px] flex-shrink-0 flex flex-col bg-[#F2F2F7] dark:bg-[#161618] border-r border-gray-200 dark:border-gray-800 select-none" data-no-pan>
       <div className="flex items-center gap-1 px-3 py-2 border-b border-gray-200 dark:border-gray-800">
         <div className="font-semibold text-sm text-gray-900 dark:text-gray-100 flex-1">
-          {count > 1 ? `${count} selected` : `${doc.pages.length} page${doc.pages.length === 1 ? '' : 's'}`}
+          {count > 1 ? `${count} selected` : `${pages.length} page${pages.length === 1 ? '' : 's'}`}
         </div>
         {selectMode && (
           <button
-            onClick={() => setSelected(count === doc.pages.length ? new Set() : new Set(doc.pages.map((pg) => pg.id)))}
+            onClick={() => setSelected(count === pages.length ? new Set() : new Set(pages.map((pg) => pg.id)))}
             className="text-xs font-semibold text-blue-600 dark:text-blue-400 px-1.5 py-1 rounded-lg"
           >
-            {count === doc.pages.length ? 'None' : 'All'}
+            {count === pages.length ? 'None' : 'All'}
           </button>
         )}
         <button
           onClick={() => {
-            if (selectMode && count > 1) setSelected(new Set([doc.pages[p.currentPage]?.id].filter(Boolean) as string[]));
+            if (selectMode && count > 1) setSelected(new Set([pages[p.currentPage]?.id].filter(Boolean) as string[]));
             setSelectMode(!selectMode);
           }}
           className={`text-xs font-semibold px-2 py-1 rounded-lg ${selectMode ? 'bg-blue-600 text-white' : 'text-blue-600 dark:text-blue-400'}`}
@@ -248,7 +254,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
         className="flex-1 overflow-y-auto overscroll-contain px-3 py-3"
         style={{ touchAction: drag ? 'none' : 'pan-y' }}
       >
-        {doc.pages.map((pg, i) => {
+        {pages.map((pg, i) => {
           const setup = setups[i];
           const isSel = selected.has(pg.id);
           const isCur = i === p.currentPage;
@@ -273,7 +279,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
                     isSel ? 'ring-[3px] ring-blue-500' : isCur ? 'ring-2 ring-blue-300 dark:ring-blue-800' : 'ring-1 ring-black/10 dark:ring-white/10'
                   }`}
                 >
-                  <LiveThumb page={pg} setup={setup} root={listEl} />
+                  <LiveThumb surface={surface} box={setup} root={listEl} />
                   {(selectMode || count > 1) && (
                     <span className="absolute right-1 bottom-1 text-blue-600 bg-white rounded-full">
                       {isSel ? <CheckCircle2 className="w-5 h-5" /> : <Circle className="w-5 h-5 text-gray-400" />}
@@ -300,7 +306,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
             </React.Fragment>
           );
         })}
-        {drag && drag.to === doc.pages.length && <div className="h-1 rounded-full bg-blue-500 mb-3" />}
+        {drag && drag.to === pages.length && <div className="h-1 rounded-full bg-blue-500 mb-3" />}
         <button
           onClick={p.onAddPage}
           className="w-full flex items-center justify-center gap-1.5 py-3 rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-700 text-gray-500 text-xs font-semibold active:scale-95 transition"
@@ -313,7 +319,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
         <div className="max-h-[55%] overflow-y-auto border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-[#1C1C1E] px-3 py-3">
           <div className="flex items-center mb-1">
             <div className="text-xs font-semibold text-gray-700 dark:text-gray-200 flex-1">
-              Paper of {count > 1 ? `${count} pages` : `page ${doc.pages.findIndex((pg) => selected.has(pg.id)) + 1}`}
+              Paper of {count > 1 ? `${count} pages` : `page ${pages.findIndex((pg) => selected.has(pg.id)) + 1}`}
             </div>
             <button onClick={() => setPaperOpen(false)} className="p-1 text-gray-400 rounded-lg">
               <X className="w-4 h-4" />

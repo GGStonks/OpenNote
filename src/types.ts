@@ -125,10 +125,15 @@ export interface NotePage {
   latexBlocks: LatexBlock[];
   textBlocks?: TextBlock[];
   imageBlocks?: ImageBlock[];
-  /**
-   * The page's own paper, set in the page manager. Missing: the note's default (NoteDocument),
-   * so changing the note's paper changes every page that was not customised.
-   */
+}
+
+/**
+ * One page of a note: a piece of the note's continuous surface, with its own paper. Missing
+ * fields: the note's default (NoteDocument), so changing the note's paper changes every page
+ * that was not customised.
+ */
+export interface PageSheet {
+  id: string;
   paperStyle?: PaperStyle;
   paperColor?: PaperColor;
   size?: PageSize;
@@ -155,7 +160,10 @@ export interface NoteDocument {
   /** Default sheet format and orientation (missing: US Letter, portrait). */
   pageSize?: PageSize;
   orientation?: PageOrientation;
+  /** The note's content: one continuous surface (pages[0]), in surface px. */
   pages: NotePage[];
+  /** The pages the surface is cut into, top to bottom (see editor/sheets.ts). */
+  sheets: PageSheet[];
   schemaVersion?: number;
 }
 
@@ -176,10 +184,11 @@ export interface Rect {
 export const PAGE_WIDTH = 816;
 export const PAGE_HEIGHT = 1056;
 /**
- * 4: a note is a list of real pages, each with its own size and paper. 3 (v1.6-v1.11): one
- * continuous surface (a single NotePage), cut into pages at the page lines on load.
+ * 5: one continuous surface (pages[0]) cut into pages of any size and paper (sheets).
+ * 4 (v1.12 development): separate pages, each with its own paper. 3 (v1.6-v1.11): one surface
+ * cut into US Letter pages. Older notes: separate US Letter pages.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export function newId(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
