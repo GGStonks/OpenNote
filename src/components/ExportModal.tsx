@@ -1,4 +1,5 @@
 import { splitIntoPages } from '../editor/sheets';
+import { zLayers } from '../editor/zorder';
 import React, { useState } from 'react';
 import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
 import { NoteDocument } from '../types';
@@ -108,10 +109,24 @@ function buildSvg(doc: NoteDocument): string {
     const paper = PAPER_COLORS[setup.paperColor] ?? '#FFFFFF';
     const ink = setup.paperColor === 'dark' ? '#F3F4F6' : '#111827';
     out += `<g id="page-${i + 1}"${setup.width < W ? ` transform="translate(${(W - setup.width) / 2} 0)"` : ''}>\n<rect x="0" y="${dy}" width="${setup.width}" height="${setup.height}" fill="${paper}"/>\n`;
-    for (const im of p.imageBlocks ?? []) out += turn(`<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>`, im.rotation, im.x + im.width / 2, im.y + dy + im.height / 2) + '\n';
-    const order = [...p.strokes.filter((s) => s.tool === 'highlighter'), ...p.strokes.filter((s) => s.tool !== 'highlighter')];
-    for (const s of order) out += strokeToSvg(s, dy, paper) + '\n';
-    for (const b of p.latexBlocks) {
+    // In stacking order (editor/zorder.ts), as on screen.
+    for (const l of zLayers(p)) {
+      if (l.kind === 'ink') {
+        const order = [...l.strokes.filter((s) => s.tool === 'highlighter'), ...l.strokes.filter((s) => s.tool !== 'highlighter')];
+        for (const s of order) out += strokeToSvg(s, dy, paper) + '\n';
+        continue;
+      }
+      if (l.kind === 'image') {
+        const im = l.block;
+        out += turn(`<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>`, im.rotation, im.x + im.width / 2, im.y + dy + im.height / 2) + '\n';
+        continue;
+      }
+      if (l.kind === 'text') {
+        const t = l.block;
+        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
+        continue;
+      }
+      const b = l.block;
       if (b.isTikz) {
         const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;
         const inner = svg.replace(/<svg\b/, `<svg x="${b.x}" y="${b.y + dy}" width="${b.width}" height="${b.height}"`).replace(/currentColor/g, b.color ?? ink);
@@ -120,9 +135,6 @@ function buildSvg(doc: NoteDocument): string {
         const html = renderLatexContent(b.latexCode).html;
         out += turn(`<foreignObject x="${b.x}" y="${b.y + dy}" width="${Math.max(b.width, 40) + 20}" height="${Math.max(b.height, 30) + 10}"><xhtml:div style="font-size:${22 * (b.scale ?? 1)}px;color:${b.color ?? ink}">${html}</xhtml:div></foreignObject>`, b.rotation, b.x + b.width / 2, b.y + dy + b.height / 2) + '\n';
       }
-    }
-    for (const t of p.textBlocks ?? []) {
-      out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
     }
     out += '</g>\n';
   });

@@ -109,10 +109,91 @@ export function looksLikeBareMath(src: string): boolean {
   return mathy && words.length <= 3;
 }
 
+/** Index just past the brace group starting at `i` (s[i] === '{'), or -1 when it is not closed. */
+function braceEnd(s: string, i: number): number {
+  let depth = 0;
+  for (let j = i; j < s.length; j++) {
+    if (s[j] === '\\') { j++; continue; }
+    if (s[j] === '{') depth++;
+    else if (s[j] === '}' && --depth === 0) return j + 1;
+  }
+  return -1;
+}
+
+const balanced = (s: string) => {
+  let depth = 0;
+  for (let j = 0; j < s.length; j++) {
+    if (s[j] === '\\') { j++; continue; }
+    if (s[j] === '{') depth++;
+    else if (s[j] === '}' && --depth < 0) return false;
+  }
+  return depth === 0;
+};
+
+/**
+ * Coloured words of the notes, nested groups included (\textcolor{#F00}{a \textbf{b}}): each
+ * \textcolor is matched with its own closing brace, so every word gets its own colour (math inside
+ * $...$ is coloured by KaTeX itself).
+ */
+function colorSpans(t: string): string {
+  let out = '';
+  let i = 0;
+  while (i < t.length) {
+    const m = /^\\textcolor\s*(?:\[HTML\])?\s*\{#?([0-9A-Fa-f]{6})\}\s*\{/.exec(t.slice(i, i + 48));
+    if (m) {
+      const open = i + m[0].length - 1;
+      const end = braceEnd(t, open);
+      if (end > 0) {
+        out += `<span style="color:#${m[1]}">${colorSpans(t.slice(open + 1, end - 1))}</span>`;
+        i = end;
+        continue;
+      }
+    }
+    out += t[i++];
+  }
+  return out;
+}
+
+/**
+ * Notes where a colour group holds math (\textcolor{#F00}{the sum $x+y$}): the math is cut out of
+ * the text before the group is read, which lost the group's colour (or showed the markup). The
+ * colour is given to each piece instead: the text around the math and the math itself.
+ */
+function distributeColors(src: string): string {
+  let out = '';
+  let i = 0;
+  while (i < src.length) {
+    const m = /^\\textcolor\s*\{(#?[0-9A-Fa-f]{6}|[A-Za-z]+)\}\s*\{/.exec(src.slice(i, i + 48));
+    if (m) {
+      const open = i + m[0].length - 1;
+      const end = braceEnd(src, open);
+      const inner = end > 0 ? src.slice(open + 1, end - 1) : '';
+      if (end > 0 && /\$|\\\(|\\\[/.test(inner)) {
+        const c = m[1];
+        const segs = segmentLatex(distributeColors(inner));
+        if (segs.every((g) => g.kind !== 'text' || balanced(g.text))) {
+          out += segs
+            .map((g) =>
+              g.kind === 'text' ? (g.text.trim() ? `\\textcolor{${c}}{${g.text}}` : g.text) : g.kind === 'inline' ? `$\\textcolor{${c}}{${g.tex}}$` : `\\[\\textcolor{${c}}{${g.tex}}\\]`
+            )
+            .join('');
+          i = end;
+          continue;
+        }
+      }
+    }
+    if (src[i] === '\\') {
+      out += src.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
+    out += src[i++];
+  }
+  return out;
+}
+
 function formatInline(text: string): string {
-  return escapeHtml(text)
-    // Coloured words of the notes (math inside $...$ is coloured by KaTeX itself).
-    .replace(/\\textcolor\s*(?:\[HTML\])?\s*\{#?([0-9A-Fa-f]{6})\}\{([^{}]*)\}/g, '<span style="color:#$1">$2</span>')
+  return colorSpans(escapeHtml(text))
     .replace(/\\textbf\{([^}]*)\}/g, '<b>$1</b>')
     .replace(/\\(textit|emph)\{([^}]*)\}/g, '<i>$2</i>')
     .replace(/\\underline\{([^}]*)\}/g, '<u>$1</u>')
@@ -132,9 +213,10 @@ const HEADING_RE = /\\(section|subsection|subsubsection)\*?\{([^}]*)\}|^[ \t]*(#
  * environments. Returns HTML plus the first KaTeX error (if any) so the UI can surface it.
  */
 export function renderLatexContent(src: string): MathRenderResult {
-  const cleaned = cleanModelOutput(src);
+  let cleaned = cleanModelOutput(src);
   if (!cleaned) return { html: '' };
   const explicit = /\$|\\\[|\\\(/.test(cleaned);
+  if (explicit) cleaned = distributeColors(cleaned);
   if (!explicit && looksLikeBareMath(cleaned)) return renderMath(cleaned, true);
 
   let firstError: string | undefined;

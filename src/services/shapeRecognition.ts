@@ -456,9 +456,11 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
     }
     const ls = s.lineStyle ?? 'solid';
     const lw = (ls === 'dotted' ? s.width * 1.8 : s.width * 1.4) * PT_PER_PX;
-    const opts = [`draw=${color}`, `line width=${lw.toFixed(2)}pt`];
-    if (ls === 'dashed') opts.push(`dash pattern=on ${(s.width * 4 * PT_PER_PX).toFixed(2)}pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
-    if (ls === 'dotted') opts.push(`dash pattern=on 0pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    // A shape's fill without its outline (left by the precision eraser): draw=none.
+    const opts = s.fillOnly ? ['draw=none'] : [`draw=${color}`, `line width=${lw.toFixed(2)}pt`];
+    if (!s.fillOnly && ls === 'dashed') opts.push(`dash pattern=on ${(s.width * 4 * PT_PER_PX).toFixed(2)}pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    if (!s.fillOnly && ls === 'dotted') opts.push(`dash pattern=on 0pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    if (!s.fillOnly && ls !== 'solid' && s.dashOffset) opts.push(`dash phase=${(s.dashOffset * PT_PER_PX).toFixed(2)}pt`);
     let hatch: FillType | null = null;
     if (closed && s.fill && s.fill !== 'none') {
       opts.push('even odd rule');

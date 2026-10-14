@@ -1,4 +1,5 @@
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
+import { itemTime } from '../editor/zorder';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
 import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, pressureWidth, thinModeled } from './engine';
 
@@ -28,6 +29,10 @@ export interface InkStyle {
   arrow?: boolean;
   /** The points are already the modelled centre line (Stroke.modeled). */
   modeled?: 'variable' | 'uniform';
+  /** Start of the dash pattern (Stroke.dashOffset). */
+  dashOffset?: number;
+  /** Fill only, no outline (Stroke.fillOnly). */
+  fillOnly?: boolean;
 }
 
 interface Built {
@@ -232,6 +237,7 @@ function paintFill(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opt
 }
 
 function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opacity: number) {
+  if (style.fillOnly) return;
   ctx.save();
   if (style.tool === 'highlighter') {
     ctx.globalAlpha = 0.35;
@@ -258,6 +264,7 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
       ctx.setLineDash([0.1, style.width * 3]);
       ctx.lineWidth = style.width * 1.8;
     }
+    if (ls !== 'solid' && style.dashOffset) ctx.lineDashOffset = style.dashOffset;
     ctx.stroke(b.path);
   }
   if (b.arrow) {
@@ -285,6 +292,8 @@ export function styleOf(s: Stroke): InkStyle {
     fill: s.fill,
     arrow: s.arrow,
     modeled: s.modeled,
+    dashOffset: s.dashOffset,
+    fillOnly: s.fillOnly,
   };
 }
 
@@ -405,6 +414,7 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
     lineD = areaD = svgCenterlineD(pts, false, closed);
   }
   if (closed) out += svgFill(style, areaD, pts, paper);
+  if (s.fillOnly) return out;
 
   if (ink?.widths && style.tool === 'pen') {
     let d = '';
@@ -419,7 +429,8 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
     const dash =
       ls === 'dashed' ? ` stroke-dasharray="${s.width * 4},${s.width * 3}"` : ls === 'dotted' ? ` stroke-dasharray="0.1,${s.width * 3}"` : '';
     const w = ls === 'dotted' ? s.width * 1.8 : strokeWidth(style);
-    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${f2(w)}" stroke-linecap="round" stroke-linejoin="round"${dash}/>`;
+    const offset = dash && s.dashOffset ? ` stroke-dashoffset="${f2(s.dashOffset)}"` : '';
+    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${f2(w)}" stroke-linecap="round" stroke-linejoin="round"${dash}${offset}/>`;
   }
   if (s.arrow && !closed) {
     const h = arrowHead(pts, style);
@@ -466,6 +477,8 @@ export function strokeHitTest(s: Stroke, x: number, y: number, radius: number): 
   if (x < b.minX - radius || x > b.maxX + radius || y < b.minY - radius || y > b.maxY + radius) return false;
   const r = radius + (s.tool === 'highlighter' ? s.width * 2.75 : s.width * 0.9);
   const pts = s.points;
+  // The fill left of a shape whose outline was erased: touched anywhere on it.
+  if (s.fillOnly && pts.length > 2 && insidePolygon(x, y, pts)) return true;
   if (pts.length === 1) return Math.hypot(pts[0].x - x, pts[0].y - y) <= r + (s.shapeKind === 'point' ? s.width : 0);
   for (let i = 1; i < pts.length; i++) if (distToSegment(x, y, pts[i - 1], pts[i]) <= r) return true;
   if (s.closed && pts.length > 2) {
@@ -513,15 +526,100 @@ function densify(points: Point[], closed: boolean, step: number): Point[] {
   return out;
 }
 
-/** Keeps roughly one point every `spacing` units (always keeping both ends). */
-function thin(points: Point[], spacing: number): Point[] {
-  if (points.length < 3) return points;
-  const out = [points[0]];
-  for (let i = 1; i < points.length - 1; i++) {
-    const l = out[out.length - 1];
-    if (Math.hypot(points[i].x - l.x, points[i].y - l.y) >= spacing) out.push(points[i]);
+/** Where the segment a→b enters / leaves the circle (c, r): parameters strictly inside (0, 1). */
+function circleCuts(a: XY, b: XY, cx: number, cy: number, r: number): number[] {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const fx = a.x - cx, fy = a.y - cy;
+  const A = dx * dx + dy * dy, B = 2 * (fx * dx + fy * dy), C = fx * fx + fy * fy - r * r;
+  if (A < 1e-12) return [];
+  const disc = B * B - 4 * A * C;
+  if (disc <= 0) return [];
+  const q = Math.sqrt(disc);
+  return [(-B - q) / (2 * A), (-B + q) / (2 * A)].filter((t) => t > 1e-9 && t < 1 - 1e-9);
+}
+
+/**
+ * Precision eraser on a shape (Draw tool, snapped shapes): the outline is cut exactly where it
+ * crosses the eraser circle, and every piece keeps the outline's exact geometry (straight edges
+ * stay the same segments; a smart curve is its own spline, flattened finely), its width, colour,
+ * line style (dashes continue where they were, Stroke.dashOffset), opacity and rotation, and its
+ * place in the stacking order. A piece that keeps the end of an open shape keeps its arrowhead.
+ * The pieces of a closed shape join across its starting point. A filled shape keeps its fill as a
+ * separate fill-only stroke. Returns null when nothing of the outline is under the eraser.
+ */
+function eraseShape(s: Stroke, x: number, y: number, r: number, makeId: () => string): Stroke[] | null {
+  const closed = !!s.closed && s.points.length > 2;
+  const src: Point[] =
+    s.shapeKind === 'curve'
+      ? flattenBeziers(curveSegments(s.points, closed), 0.2).map((p) => ({ x: p.x, y: p.y, pressure: 0.5 }))
+      : closed
+        ? [...s.points, s.points[0]]
+        : s.points;
+  if (src.length < 2) return null;
+  const inside = (p: XY) => Math.hypot(p.x - x, p.y - y) <= r;
+  type Run = { points: Point[]; offset: number; first: boolean; last: boolean };
+  const runs: Run[] = [];
+  let cur: Run | null = inside(src[0]) ? null : { points: [src[0]], offset: 0, first: true, last: false };
+  let cut = false;
+  let at = 0;
+  for (let i = 1; i < src.length; i++) {
+    const a = src[i - 1], b = src[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    for (const t of circleCuts(a, b, x, y, r)) {
+      const p = lerpPoint(a, b, t);
+      cut = true;
+      if (cur) {
+        // Going under the eraser: the piece ends on its edge.
+        cur.points.push(p);
+        runs.push(cur);
+        cur = null;
+      } else cur = { points: [p], offset: at + len * t, first: false, last: false };
+    }
+    if (cur && !inside(b)) cur.points.push(b);
+    else if (cur) {
+      // Ends inside without a crossing (rounding): close the piece here.
+      runs.push(cur);
+      cur = null;
+      cut = true;
+    } else if (!inside(b) && !cur) {
+      cur = { points: [b], offset: at + len, first: false, last: false };
+    }
+    at += len;
   }
-  out.push(points[points.length - 1]);
+  if (cur) {
+    cur.last = true;
+    runs.push(cur);
+  }
+  if (!cut && runs.length === 1 && runs[0].first && runs[0].last) return null;
+  // A closed outline: the piece through its starting point is one piece.
+  if (closed && runs.length > 1 && runs[0].first && runs[runs.length - 1].last) {
+    const tail = runs.pop()!, head = runs.shift()!;
+    runs.unshift({ points: [...tail.points, ...head.points.slice(1)], offset: tail.offset, first: false, last: false });
+  }
+  const created = itemTime(s);
+  const dashed = (s.lineStyle ?? 'solid') !== 'solid';
+  const out: Stroke[] = [];
+  if (closed && s.fill && s.fill !== 'none') out.push({ ...s, id: makeId(), createdAt: created, fillOnly: true, arrow: undefined });
+  for (const run of runs) {
+    let length = 0;
+    for (let i = 1; i < run.points.length; i++) length += Math.hypot(run.points[i].x - run.points[i - 1].x, run.points[i].y - run.points[i - 1].y);
+    if (run.points.length < 2 || length < 0.5) continue;
+    const piece: Stroke = {
+      ...s,
+      id: makeId(),
+      createdAt: created,
+      points: run.points,
+      isShape: true,
+      shapeKind: 'polyline',
+      closed: false,
+      fill: undefined,
+      fillOnly: undefined,
+      arrow: run.last && !closed ? s.arrow : undefined,
+    };
+    if (dashed) piece.dashOffset = (s.dashOffset ?? 0) + run.offset;
+    else delete piece.dashOffset;
+    out.push(piece);
+  }
   return out;
 }
 
@@ -542,31 +640,36 @@ export function eraseStrokesPartial(
   x: number,
   y: number,
   radius: number,
-  makeId: () => string
+  makeId: () => string,
+  /** Fill-only strokes left by this same eraser gesture: kept (the eraser was cutting their outline). */
+  keep?: ReadonlySet<string>
 ): { strokes: Stroke[]; changed: boolean } {
   let changed = false;
   const out: Stroke[] = [];
   for (const s of strokes) {
-    if (!strokeHitTest(s, x, y, radius)) {
+    if (!strokeHitTest(s, x, y, radius) || (s.fillOnly && keep?.has(s.id))) {
       out.push(s);
       continue;
     }
-    if (s.shapeKind === 'point') {
+    if (s.shapeKind === 'point' || s.fillOnly) {
       changed = true;
       continue;
     }
     const r = radius + s.width * 0.6;
-    const curve = s.shapeKind === 'curve';
-    const ink = !s.isShape;
+    if (s.isShape) {
+      const pieces = eraseShape(s, x, y, r, makeId);
+      if (!pieces) out.push(s);
+      else {
+        changed = true;
+        out.push(...pieces);
+      }
+      continue;
+    }
+    // Handwriting.
     const closed = !!s.closed && s.points.length > 2;
-    let pts: Point[];
-    let modeled: Stroke['modeled'];
-    if (curve) pts = flattenBeziers(curveSegments(s.points, closed), 1.5).map((p) => ({ x: p.x, y: p.y, pressure: 0.5 }));
-    else if (ink) {
-      const g = inkGeometry(s.points, styleOf(s));
-      modeled = g.widths ? 'variable' : 'uniform';
-      pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
-    } else pts = densify(s.points, closed, Math.max(1.5, radius / 3));
+    const g = inkGeometry(s.points, styleOf(s));
+    const modeled: Stroke['modeled'] = g.widths ? 'variable' : 'uniform';
+    const pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
     const inside = (p: Point) => Math.hypot(p.x - x, p.y - y) <= r;
     if (!pts.some(inside)) {
       // Touched the outline's padding only: nothing of the line is under the eraser.
@@ -583,12 +686,12 @@ export function eraseStrokesPartial(
         out.push({
           ...s,
           id: makeId(),
-          points: curve ? thin(run, 4.5) : run,
+          createdAt: itemTime(s),
+          points: run,
           closed: false,
           fill: undefined,
           arrow: keepsEnd ? s.arrow : undefined,
-          ...(modeled ? { modeled } : {}),
-          ...(s.isShape && !curve ? { shapeKind: 'polyline' as ShapeKind } : {}),
+          modeled,
         });
       }
       run = [];

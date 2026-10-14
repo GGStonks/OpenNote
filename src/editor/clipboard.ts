@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { ImageBlock, LatexBlock, NotePage, Rect, Stroke, TextBlock, newId } from '../types';
 import { Selection } from './selection';
+import { restamp } from './zorder';
 
 /**
  * OpenNote's clipboard for selections: Copy keeps the selected items (nothing appears on the
@@ -65,10 +66,13 @@ export function pasteClipboard(page: NotePage, at: { x: number; y: number }, she
   if (b.width > sheetWidth) dx = -b.x;
   dy = Math.max(-b.y, Math.min(sheetHeight - b.y - b.height, dy));
   if (b.height > sheetHeight) dy = -b.y;
-  const strokes = c.strokes.map((s) => ({ ...structuredClone(s), id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy })) }));
-  const latex = c.latexBlocks.map((x) => ({ ...structuredClone(x), id: newId(x.isTikz ? 'tikz' : 'latex'), x: x.x + dx, y: x.y + dy, createdAt: Date.now() }));
-  const texts = c.textBlocks.map((x) => ({ ...structuredClone(x), id: newId('text'), x: x.x + dx, y: x.y + dy, createdAt: Date.now() }));
-  const images = c.imageBlocks.map((x) => ({ ...x, id: newId('image'), x: x.x + dx, y: x.y + dy, createdAt: Date.now() }));
+  // The paste goes on top of everything (zorder.ts), its items in the order they were copied in.
+  const { strokes, latexBlocks: latex, textBlocks: texts, imageBlocks: images } = restamp({
+    strokes: c.strokes.map((s) => ({ ...structuredClone(s), id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + dx, y: p.y + dy })) })),
+    latexBlocks: c.latexBlocks.map((x) => ({ ...structuredClone(x), id: newId(x.isTikz ? 'tikz' : 'latex'), x: x.x + dx, y: x.y + dy })),
+    textBlocks: c.textBlocks.map((x) => ({ ...structuredClone(x), id: newId('text'), x: x.x + dx, y: x.y + dy })),
+    imageBlocks: c.imageBlocks.map((x) => ({ ...x, id: newId('image'), x: x.x + dx, y: x.y + dy })),
+  });
   return {
     page: {
       ...page,

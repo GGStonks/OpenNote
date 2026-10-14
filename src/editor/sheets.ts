@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from 'react';
 import { ImageBlock, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PageSheet, Stroke, TextBlock, newId } from '../types';
 import { PageSetup, SetupPatch, pageSetup } from './pageSetup';
+import { restamp } from './zorder';
 
 /**
  * A note is one continuous vertical surface (doc.pages[0]): ink and blocks go anywhere on it and
@@ -123,14 +124,14 @@ function translate(c: Items, dx: number, dy: number): Items {
 
 /** A copy with new ids. */
 function cloneItems(c: Items): Items {
-  const now = Date.now();
   const k = structuredClone(c);
-  return {
+  // Stacking order (zorder.ts): the copy is new, on top, in the original's order.
+  return restamp({
     strokes: k.strokes.map((s) => ({ ...s, id: newId('stroke') })),
-    latexBlocks: k.latexBlocks.map((b) => ({ ...b, id: newId(b.isTikz ? 'tikz' : 'latex'), createdAt: now })),
-    textBlocks: k.textBlocks.map((b) => ({ ...b, id: newId('text'), createdAt: now })),
-    imageBlocks: k.imageBlocks.map((b) => ({ ...b, id: newId('image'), createdAt: now })),
-  };
+    latexBlocks: k.latexBlocks.map((b) => ({ ...b, id: newId(b.isTikz ? 'tikz' : 'latex') })),
+    textBlocks: k.textBlocks.map((b) => ({ ...b, id: newId('text') })),
+    imageBlocks: k.imageBlocks.map((b) => ({ ...b, id: newId('image') })),
+  });
 }
 
 // ----------------------------------------------------------------------------- re-cutting
@@ -212,11 +213,32 @@ export function appendBlankSheet(d: NoteDocument): NoteDocument {
   return recut(d, (es) => [...es, blank()]);
 }
 
-/** Infinite roll: once the content reaches into the last page, a blank page follows it. */
-export function ensureTrailingSheet(d: NoteDocument): NoteDocument {
+/** New content reaching below this share of the last page's height adds a page after it. */
+const ROLL_ZONE = 0.75;
+
+/**
+ * Infinite roll: new content (drawn, typed, inserted or pasted) that reaches the bottom of the
+ * last page (its lower quarter, or past its end) gets exactly one blank page after it. It is decided once, from what the edit added (items whose
+ * ids `before` did not have), never from what is on the page: a stroke that runs off the end of
+ * the note must not add a page for each page it reaches into, and a trailing page the user deletes
+ * must not come back because of content that was already there. Returns `d` when nothing is added.
+ */
+export function trailingSheetFor(before: NotePage, d: NoteDocument): NoteDocument {
+  const after = d.pages[0];
+  if (after === before) return d;
+  const had = new Set<string>();
+  for (const s of before.strokes) had.add(s.id);
+  for (const x of before.latexBlocks) had.add(x.id);
+  for (const x of before.textBlocks ?? []) had.add(x.id);
+  for (const x of before.imageBlocks ?? []) had.add(x.id);
+  let bottom = -Infinity;
+  for (const s of after.strokes) if (!had.has(s.id)) bottom = Math.max(bottom, strokeY(s).maxY);
+  for (const x of after.latexBlocks) if (!had.has(x.id)) bottom = Math.max(bottom, x.y + x.height);
+  for (const x of after.textBlocks ?? []) if (!had.has(x.id)) bottom = Math.max(bottom, x.y + textH(x));
+  for (const x of after.imageBlocks ?? []) if (!had.has(x.id)) bottom = Math.max(bottom, x.y + x.height);
   const L = surfaceLayout(d);
   const last = L.sheets[L.sheets.length - 1];
-  return contentBottom(d.pages[0]) > last.top + 1 ? appendBlankSheet(d) : d;
+  return bottom > last.top + last.height * ROLL_ZONE ? appendBlankSheet(d) : d;
 }
 
 export function deleteSheets(d: NoteDocument, ids: ReadonlySet<string>): NoteDocument {

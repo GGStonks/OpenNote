@@ -18,13 +18,14 @@ import { Selection, computeBounds, isEmptySelection, removeSelection } from '../
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
+import { restamp } from '../editor/zorder';
 import { DEFAULT_INKS, InkColorInfo, colorHint, enforceColors, inkColors } from '../services/inkColors';
 import { renderLatexContent } from '../services/latexRender';
 import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { SetupPatch } from '../editor/pageSetup';
 import {
-  appendBlankSheet, copySheets, deleteSheets, duplicateSheets, ensureTrailingSheet, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup,
+  appendBlankSheet, copySheets, deleteSheets, duplicateSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
@@ -226,10 +227,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [printMode, setPrintMode] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const curSheet = sl.sheets[Math.min(currentPage, pageCount - 1)];
-  // Infinite roll: once something is written on the last page, a blank page follows it.
+  // Infinite roll: new content reaching the bottom of the last page adds one blank page after it (only
+  // for edits: not undo / redo, erasing or page operations, so a deleted trailing page stays deleted).
+  const rollBase = useRef(surface);
   useEffect(() => {
-    if (ensureTrailingSheet(doc) !== doc) editor.silent((d) => ensureTrailingSheet(d));
-  }, [doc]); // eslint-disable-line react-hooks/exhaustive-deps
+    const before = rollBase.current;
+    rollBase.current = surface;
+    if (before === surface || editor.lastChange() !== 'commit') return;
+    if (trailingSheetFor(before, doc) !== doc) editor.silent((d) => trailingSheetFor(before, d));
+  }, [surface]); // eslint-disable-line react-hooks/exhaustive-deps
   const [pagesOpen, setPagesOpenState] = useState(() => {
     try {
       return localStorage.getItem(PAGES_KEY) === '1';
@@ -390,10 +396,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     if (!selection || !selPage) return;
     const off = 24;
     const sel = selection;
-    const strokes = selPage.strokes.filter((s) => sel.strokeIds.includes(s.id)).map((s) => ({ ...s, id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + off, y: p.y + off })) }));
-    const latex = selPage.latexBlocks.filter((b) => sel.latexIds.includes(b.id)).map((b) => ({ ...b, id: newId('latex'), x: b.x + off, y: b.y + off }));
-    const texts = (selPage.textBlocks ?? []).filter((b) => sel.textIds.includes(b.id)).map((b) => ({ ...b, id: newId('text'), x: b.x + off, y: b.y + off }));
-    const images = (selPage.imageBlocks ?? []).filter((b) => sel.imageIds.includes(b.id)).map((b) => ({ ...b, id: newId('image'), x: b.x + off, y: b.y + off }));
+    // The copy goes on top of everything (editor/zorder.ts), in the same order among itself.
+    const { strokes, latexBlocks: latex, textBlocks: texts, imageBlocks: images } = restamp({
+      strokes: selPage.strokes.filter((s) => sel.strokeIds.includes(s.id)).map((s) => ({ ...s, id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + off, y: p.y + off })) })),
+      latexBlocks: selPage.latexBlocks.filter((b) => sel.latexIds.includes(b.id)).map((b) => ({ ...b, id: newId(b.isTikz ? 'tikz' : 'latex'), x: b.x + off, y: b.y + off })),
+      textBlocks: (selPage.textBlocks ?? []).filter((b) => sel.textIds.includes(b.id)).map((b) => ({ ...b, id: newId('text'), x: b.x + off, y: b.y + off })),
+      imageBlocks: (selPage.imageBlocks ?? []).filter((b) => sel.imageIds.includes(b.id)).map((b) => ({ ...b, id: newId('image'), x: b.x + off, y: b.y + off })),
+    });
     editor.commitPage(sel.pageId, (p) => ({
       ...p,
       strokes: [...p.strokes, ...strokes],

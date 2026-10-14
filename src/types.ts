@@ -65,6 +65,15 @@ export interface Stroke {
   modeled?: 'variable' | 'uniform';
   /** Degrees this item has been rotated from how it was made (0 = original orientation). */
   rotation?: number;
+  /**
+   * When the stroke was made (ms): its place in the stacking order with images and blocks
+   * (editor/zorder.ts). Missing on strokes made before v2.0.1: the time in the id is used.
+   */
+  createdAt?: number;
+  /** Dashed / dotted lines: where the pattern starts (a piece left by the precision eraser continues its stroke's pattern). */
+  dashOffset?: number;
+  /** Only the fill of a closed shape, without its outline (what the precision eraser leaves of a filled shape). */
+  fillOnly?: boolean;
 }
 
 /**

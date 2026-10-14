@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { zLayers } from '../editor/zorder';
 import { LatexBlock, NoteDocument, NotePage, PaperColor, PaperStyle, Stroke } from '../types';
 import { sheetView, surfaceLayout } from '../editor/sheets';
 import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
@@ -82,20 +83,28 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
   const ink = dark ? '#F3F4F6' : '#111827';
   return (
     <>
-      {(page.imageBlocks ?? []).map((im) => (
-        <ThumbImage key={im.id} src={im.dataUrl} style={{ left: im.x, top: im.y, width: im.width, height: im.height, ...rotationStyle(im.rotation) }} />
-      ))}
-      <ThumbInk strokes={page.strokes} scale={scale} width={width} height={height} />
-      {page.latexBlocks.map((b) => (b.isTikz ? <ThumbTikz key={b.id} block={b} color={ink} darkPaper={dark} /> : <ThumbMath key={b.id} block={b} color={ink} />))}
-      {(page.textBlocks ?? []).map((t) => (
-        <div
-          key={t.id}
-          className="absolute whitespace-pre-wrap break-words"
-          style={{ left: t.x, top: t.y, width: t.width, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...rotationStyle(t.rotation) }}
-        >
-          {t.text}
-        </div>
-      ))}
+      {/* In stacking order (editor/zorder.ts), as on the page. */}
+      {zLayers(page).map((l) => {
+        if (l.kind === 'ink') return <ThumbInk key={l.key} strokes={l.strokes} scale={scale} width={width} height={height} />;
+        if (l.kind === 'image') {
+          const im = l.block;
+          return <ThumbImage key={l.key} src={im.dataUrl} style={{ left: im.x, top: im.y, width: im.width, height: im.height, ...rotationStyle(im.rotation) }} />;
+        }
+        if (l.kind === 'latex') {
+          const b = l.block;
+          return b.isTikz ? <ThumbTikz key={l.key} block={b} color={ink} darkPaper={dark} /> : <ThumbMath key={l.key} block={b} color={ink} />;
+        }
+        const t = l.block;
+        return (
+          <div
+            key={l.key}
+            className="absolute whitespace-pre-wrap break-words"
+            style={{ left: t.x, top: t.y, width: t.width, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...rotationStyle(t.rotation) }}
+          >
+            {t.text}
+          </div>
+        );
+      })}
     </>
   );
 };

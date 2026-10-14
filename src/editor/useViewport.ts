@@ -286,6 +286,9 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       // The mouse drags the page only where it does not draw (hand tool, gaps between pages).
       const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && !(e.target as HTMLElement).closest('[data-ink-input]');
       if (e.pointerType !== 'touch' && !navigateMouse) return;
+      // The Pencil is writing: a touch now is the hand resting on the glass. It must not scroll or
+      // zoom the page under the pen (the stroke would be bent), nor count as a finger.
+      if (e.pointerType === 'touch' && gestures.inking && gestures.inkingWith === 'pen') return;
       // Leave touches on controls and text boxes alone.
       const target = e.target as HTMLElement;
       if (target.closest('textarea, input, button')) return;

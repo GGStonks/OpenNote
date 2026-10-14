@@ -1,5 +1,6 @@
 import { Rect, Stroke, TextBlock } from '../types';
 import { drawStrokes } from '../ink/strokeRenderer';
+import { normalizeHex } from '../components/ColorPicker';
 
 /**
  * Builds the image sent to the VLM.
@@ -69,7 +70,7 @@ export function renderInkImage(strokes: Stroke[], bounds: Rect, textBlocks: Text
   // Highlighters carry no content for transcription; ink is drawn dark and fully opaque.
   const ink = strokes
     .filter((s) => s.tool === 'pen')
-    .map((s) => ({ ...s, color: inkColors?.get(s.color.toUpperCase()) ?? readableInk(s.color), opacity: 1, width: Math.max(s.width, 2) }));
+    .map((s) => ({ ...s, color: inkColors?.get(normalizeHex(s.color) ?? '') ?? readableInk(s.color), opacity: 1, width: Math.max(s.width, 2) }));
   drawStrokes(ctx, ink);
   return canvas.toDataURL('image/png');
 }

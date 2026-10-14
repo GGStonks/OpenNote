@@ -25,6 +25,7 @@ import {
 } from '../editor/selection';
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
+import { ZLayer, zLayers } from '../editor/zorder';
 
 export interface ToolSettings {
   tool: ToolType;
@@ -331,7 +332,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   }, [mine, ratio, alive, top, W, H]);
   return (
     <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
-      {alive && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
+      {alive && mine.length > 0 && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
     </div>
   );
 });
@@ -465,10 +466,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn as SVG, which stays sharp where canvases hit their budget. */
   const vector = printMode || zoom > VECTOR_ZOOM;
-  const inkSvg = useMemo(
-    () => (vector ? strokesSvg(shownStrokes, (st) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF') : ''),
-    [vector, shownStrokes, layout] // eslint-disable-line react-hooks/exhaustive-deps
-  );
+  /** Paper under a stroke ("hole" fills in SVG). */
+  const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
+  /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
+  const layerSvgs = useMemo(() => new WeakMap<Stroke[], string>(), [layout, vector]);
+  const layerSvg = (strokes: Stroke[]) => {
+    let svg = layerSvgs.get(strokes);
+    if (svg === undefined) layerSvgs.set(strokes, (svg = strokesSvg(strokes, svgPaperOf)));
+    return svg;
+  };
 
   // ------------------------------------------------------------------ live layer
   const dirty = useRef<DirtyRect | null>(null);
@@ -738,19 +744,24 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     requestRender();
   }, [requestRender]);
 
-  // A pinch starting with a finger that was drawing cancels that stroke.
+  // A second finger (pinch / two-finger scroll) cancels what the first finger started, leaving no
+  // trace: the stroke in progress is dropped, what it erased comes back, a text box it was about to
+  // place is not placed.
   useEffect(
     () =>
       gestures.onCancel(() => {
+        pendingText.current = null;
         const d = drawing.current;
         if (d && d.pointerType === 'touch') {
           if (d.holdTimer) clearTimeout(d.holdTimer);
-          if (d.tool === 'eraser') editor.endGesture();
+          if (d.tool === 'eraser') editor.cancelGesture();
           clearActive();
         }
       }),
     [gestures, clearActive, editor]
   );
+  /** Text tool, finger: the text box is placed when the finger lifts (a second finger may make it a pinch). */
+  const pendingText = useRef<{ pointerId: number; pt: Point } | null>(null);
 
   // getBoundingClientRect forces a layout: measured at pen-down and again only after the page moved.
   const rectCache = useRef<DOMRect | null>(null);
@@ -767,11 +778,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
   };
 
+  /** Strokes the precision eraser made in the current gesture (the fill it leaves of a shape stays). */
+  const eraseMade = useRef(new Set<string>());
   const eraseAt = (x: number, y: number) => {
     const r = toolsRef.current.eraserSize;
     if (toolsRef.current.eraserMode === 'partial') {
+      const made = eraseMade.current;
+      const makeId = () => {
+        const id = newId('stroke');
+        made.add(id);
+        return id;
+      };
       editor.previewPage(page.id, (p) => {
-        const res = eraseStrokesPartial(p.strokes, x, y, r, () => newId('stroke'));
+        const res = eraseStrokesPartial(p.strokes, x, y, r, makeId, made);
         return res.changed ? { ...p, strokes: res.strokes } : p;
       });
     } else {
@@ -813,6 +832,24 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }, 450);
   };
 
+  const placeText = (pt: Point) => {
+    const block: TextBlock = {
+      id: newId('text'),
+      x: pt.x,
+      y: pt.y - 14,
+      width: (() => {
+        const sh = sheetAt(pt.y);
+        return Math.max(160, Math.min(520, sh.left + sh.width - pt.x - 32));
+      })(),
+      text: '',
+      fontSize: 18,
+      color: '#111827',
+      createdAt: Date.now(),
+    };
+    editor.commitPage(page.id, (p) => ({ ...p, textBlocks: [...(p.textBlocks ?? []), block] }));
+    setEditingTextId(block.id);
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const tool = tools.tool;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -840,21 +877,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         return;
       }
       const pt = toPoint(e, performance.now());
-      const block: TextBlock = {
-        id: newId('text'),
-        x: pt.x,
-        y: pt.y - 14,
-        width: (() => {
-          const sh = sheetAt(pt.y);
-          return Math.max(160, Math.min(520, sh.left + sh.width - pt.x - 32));
-        })(),
-        text: '',
-        fontSize: 18,
-        color: '#111827',
-        createdAt: Date.now(),
-      };
-      editor.commitPage(page.id, (p) => ({ ...p, textBlocks: [...(p.textBlocks ?? []), block] }));
-      setEditingTextId(block.id);
+      if (e.pointerType === 'touch') {
+        pendingText.current = { pointerId: e.pointerId, pt };
+        return;
+      }
+      placeText(pt);
       return;
     }
 
@@ -898,6 +925,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
     gestures.inking = true;
+    gestures.inkingWith = e.pointerType;
     if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
       const d = drawing.current;
       const listener: PencilListener = (samples, predicted, ended) => nativeInputRef.current(d, samples, predicted, ended);
@@ -909,6 +937,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (tool === 'lasso') setSelection(null);
     if (tool === 'eraser') {
       editor.beginGesture();
+      eraseMade.current = new Set();
       eraserPos.current = pt;
       eraseAt(pt.x, pt.y);
     }
@@ -1108,7 +1137,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const opts = smartOptions();
       const sh = d.snapped;
       const stroke: Stroke = {
-        id: newId('stroke'), tool: 'pen', color: opts.color, width: opts.width, opacity: 1, penStyle: 'ballpoint',
+        id: newId('stroke'), createdAt: Date.now(), tool: 'pen', color: opts.color, width: opts.width, opacity: 1, penStyle: 'ballpoint',
         lineStyle: opts.lineStyle, points: sh.points, isShape: true, closed: sh.closed, shapeKind: sh.kind,
         ...(sh.closed && opts.fill !== 'none' ? { fill: opts.fill } : {}),
         ...(!sh.closed && opts.arrow ? { arrow: true } : {}),
@@ -1116,8 +1145,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
       haptic('success');
     } else if (!cancelled && d.smart) {
-      const stroke = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
-      if (stroke) {
+      const made = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
+      if (made) {
+        const stroke: Stroke = { ...made, createdAt: Date.now() };
         editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
         if (stroke.closed && d.smart.closing) haptic('success');
       }
@@ -1132,6 +1162,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       const stroke: Stroke = {
         id: newId('stroke'),
+        createdAt: Date.now(),
         tool: d.tool,
         color: style.color,
         width: style.width,
@@ -1371,6 +1402,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.f, drag.rot) : page),
     [drag, page]
   );
+  /** The content in stacking order (editor/zorder.ts); unchanged ink layers keep their arrays. */
+  const layersRef = useRef<ZLayer[] | undefined>(undefined);
+  const layers = useMemo(() => (layersRef.current = zLayers({ ...blockPage, strokes: shownStrokes }, layersRef.current)), [blockPage, shownStrokes]);
 
   // ------------------------------------------------------------------ shape editing (handles)
   // Same idea for reshaping: the edited shape is drawn on the live layer while dragging and
@@ -1475,20 +1509,72 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         />
       ))}
       {/*
-        Stacking, bottom to top: the paper (this element's background), images, ink, the
-        selection being moved, typed / converted content, the input layer. Images were drawn after
-        the ink and covered whatever was written on them.
+        Stacking: the paper, then the content in the order it was made (editor/zorder.ts): strokes
+        made before an image or a block are under it, strokes made after it over it. Then the
+        selection being moved and the input layer.
       */}
-      {(blockPage.imageBlocks ?? []).map((im) => (
-        <ImageBlockView key={im.id} block={im} selected={!!selection?.imageIds.includes(im.id)} />
-      ))}
-      {vector ? (
-        <svg className="absolute inset-0 pointer-events-none" width={PAGE_W} height={PAGE_H} viewBox={`0 0 ${PAGE_W} ${PAGE_H}`} dangerouslySetInnerHTML={{ __html: inkSvg }} />
-      ) : (
-        layout.sheets.map((sh) => (
-          <InkTile key={sh.id} eager={sh.index < 2} top={sh.top} width={PAGE_W} height={sh.height} strokes={shownStrokes} ratio={canvasRatio(zoom, PAGE_W * sh.height)} scrollRoot={scrollRoot} />
-        ))
-      )}
+      {layers.map((l) => {
+        if (l.kind === 'ink') {
+          return vector ? (
+            <svg
+              key={l.key}
+              className="absolute inset-0 pointer-events-none"
+              width={PAGE_W}
+              height={PAGE_H}
+              viewBox={`0 0 ${PAGE_W} ${PAGE_H}`}
+              dangerouslySetInnerHTML={{ __html: layerSvg(l.strokes) }}
+            />
+          ) : (
+            <React.Fragment key={l.key}>
+              {layout.sheets.map((sh) => (
+                <InkTile key={sh.id} eager={sh.index < 2} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} ratio={canvasRatio(zoom, PAGE_W * sh.height)} scrollRoot={scrollRoot} />
+              ))}
+            </React.Fragment>
+          );
+        }
+        if (l.kind === 'image') return <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} />;
+        if (l.kind === 'latex') {
+          const b = l.block;
+          return (
+            <LatexBlockView
+              key={l.key}
+              block={b}
+              inkColor={inkAt(b.y + b.height / 2)}
+              darkPaper={darkAt(b.y + b.height / 2)}
+              interactive={blocksInteractive && !printMode}
+              selected={selectedBlockId === b.id}
+              zoom={zoom}
+              measure={!printMode}
+              {...latexHandlers(b)}
+            />
+          );
+        }
+        const t = l.block;
+        return (
+          <TextBlockView
+            key={l.key}
+            block={t}
+            interactive={blocksInteractive && !printMode}
+            editing={editingTextId === t.id}
+            selected={false}
+            zoom={zoom}
+            darkPaper={darkAt(t.y)}
+            onStartEdit={() => {
+              if (toolsRef.current.tool === 'lasso') setSelection(singleBlockSelection(pageRef.current, 'text', t.id));
+              else setEditingTextId(t.id);
+            }}
+            onCommit={(text) => {
+              setEditingTextId(null);
+              const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
+              if (!cur) return;
+              if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
+              else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
+            }}
+            onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
+            onSilentUpdate={() => undefined}
+          />
+        );
+      })}
       {layerSel && layerSel.strokeIds.length > 0 && (
         <canvas
           ref={floatCanvasRef}
@@ -1505,45 +1591,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         />
       )}
 
-      {/* Typed / converted content */}
-      {blockPage.latexBlocks.map((b) => (
-        <LatexBlockView
-          key={b.id}
-          block={b}
-          inkColor={inkAt(b.y + b.height / 2)}
-          darkPaper={darkAt(b.y + b.height / 2)}
-          interactive={blocksInteractive && !printMode}
-          selected={selectedBlockId === b.id}
-          zoom={zoom}
-          measure={!printMode}
-          {...latexHandlers(b)}
-        />
-      ))}
-      {(blockPage.textBlocks ?? []).map((t) => (
-        <TextBlockView
-          key={t.id}
-          block={t}
-          interactive={blocksInteractive && !printMode}
-          editing={editingTextId === t.id}
-          selected={false}
-          zoom={zoom}
-          darkPaper={darkAt(t.y)}
-          onStartEdit={() => {
-            if (toolsRef.current.tool === 'lasso') setSelection(singleBlockSelection(pageRef.current, 'text', t.id));
-            else setEditingTextId(t.id);
-          }}
-          onCommit={(text) => {
-            setEditingTextId(null);
-            const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
-            if (!cur) return;
-            if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
-            else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
-          }}
-          onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
-          onSilentUpdate={() => undefined}
-        />
-      ))}
-
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
       {!printMode && <canvas ref={activeCanvasRef} className="absolute left-0 z-10 pointer-events-none" style={{ top: 0, width: PAGE_W, height: 0 }} />}
       {visible && !printMode && (
@@ -1558,8 +1605,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           }}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
-          onPointerUp={(e) => finish(e, false)}
-          onPointerCancel={(e) => finish(e, true)}
+          onPointerUp={(e) => {
+            const t = pendingText.current;
+            if (t && t.pointerId === e.pointerId) {
+              pendingText.current = null;
+              if (gestures.touches <= 1 && !gestures.navigating) placeText(t.pt);
+            }
+            finish(e, false);
+          }}
+          onPointerCancel={(e) => {
+            if (pendingText.current?.pointerId === e.pointerId) pendingText.current = null;
+            finish(e, true);
+          }}
           onPointerLeave={() => {
             if (!drawing.current && eraserPos.current) {
               eraserPos.current = null;

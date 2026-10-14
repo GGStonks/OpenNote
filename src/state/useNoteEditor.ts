@@ -23,8 +23,16 @@ export interface PageOps {
   beginGesture: () => void;
   previewPage: (pageId: string, updater: PageUpdater) => void;
   endGesture: () => void;
+  /** Ends a gesture leaving no trace: the document goes back to how it was before it began. */
+  cancelGesture: () => void;
   silentPage: (pageId: string, updater: PageUpdater) => void;
 }
+
+/**
+ * What made the latest change of the document: an edit ('commit'), a gesture in progress
+ * ('gesture'), undo / redo ('history') or non-undoable bookkeeping ('silent').
+ */
+export type ChangeKind = 'commit' | 'gesture' | 'history' | 'silent';
 
 export interface NoteEditor {
   doc: NoteDocument;
@@ -38,6 +46,9 @@ export interface NoteEditor {
   beginGesture: () => void;
   previewPage: (pageId: string, updater: PageUpdater) => void;
   endGesture: () => void;
+  cancelGesture: () => void;
+  /** What made the current document (see ChangeKind). */
+  lastChange: () => ChangeKind;
   /** Non-undoable bookkeeping (render caches, measured sizes). */
   silentPage: (pageId: string, updater: PageUpdater) => void;
   /** Non-undoable change of the whole document (e.g. the automatic blank page at the end). */
@@ -75,6 +86,8 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
   const dirtySince = useRef(0);
   const isBusyRef = useRef(isBusy);
   isBusyRef.current = isBusy;
+  const changeKind = useRef<ChangeKind>('silent');
+  const lastChange = useCallback(() => changeKind.current, []);
 
   const flush = useCallback(async () => {
     if (saveTimer.current) {
@@ -130,6 +143,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
       const next = updater(prev);
       if (next === prev) return;
       if (!gestureBase.current) pushUndo(prev);
+      changeKind.current = gestureBase.current ? 'gesture' : 'commit';
       setDoc(next);
       scheduleSave();
     },
@@ -145,7 +159,9 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
   const previewPage = useCallback(
     (pageId: string, updater: PageUpdater) => {
       const next = mapPage(docRef.current, pageId, updater);
-      if (next !== docRef.current) setDoc(next);
+      if (next === docRef.current) return;
+      changeKind.current = 'gesture';
+      setDoc(next);
     },
     [setDoc]
   );
@@ -159,6 +175,15 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     }
   }, [scheduleSave]);
 
+  const cancelGesture = useCallback(() => {
+    const base = gestureBase.current;
+    gestureBase.current = null;
+    if (base && base !== docRef.current) {
+      changeKind.current = 'history';
+      setDoc(base);
+    }
+  }, [setDoc]);
+
   const silentPage = useCallback(
     (pageId: string, updater: PageUpdater) => {
       const next = mapPage(docRef.current, pageId, updater);
@@ -167,6 +192,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
       const patch = (d: NoteDocument) => mapPage(d, pageId, updater);
       undoStack.current = undoStack.current.map((d) => (d.pages.some((p) => p.id === pageId) ? patch(d) : d));
       if (gestureBase.current) gestureBase.current = patch(gestureBase.current);
+      changeKind.current = 'silent';
       setDoc(next);
       scheduleSave();
     },
@@ -177,6 +203,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     (updater: (d: NoteDocument) => NoteDocument) => {
       const next = updater(docRef.current);
       if (next === docRef.current) return;
+      changeKind.current = 'silent';
       setDoc(next);
       scheduleSave();
     },
@@ -187,6 +214,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     const prev = undoStack.current.pop();
     if (!prev) return;
     redoStack.current.push(docRef.current);
+    changeKind.current = 'history';
     setDoc(prev);
     setHistoryVersion((v) => v + 1);
     scheduleSave();
@@ -196,6 +224,7 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     const next = redoStack.current.pop();
     if (!next) return;
     undoStack.current.push(docRef.current);
+    changeKind.current = 'history';
     setDoc(next);
     setHistoryVersion((v) => v + 1);
     scheduleSave();
@@ -219,8 +248,8 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
   }, [flush]);
 
   const ops = useMemo<PageOps>(
-    () => ({ commitPage, beginGesture, previewPage, endGesture, silentPage }),
-    [commitPage, beginGesture, previewPage, endGesture, silentPage]
+    () => ({ commitPage, beginGesture, previewPage, endGesture, cancelGesture, silentPage }),
+    [commitPage, beginGesture, previewPage, endGesture, cancelGesture, silentPage]
   );
 
   return {
@@ -233,6 +262,8 @@ export function useNoteEditor(initial: NoteDocument, onSaved: (d: NoteDocument) 
     beginGesture,
     previewPage,
     endGesture,
+    cancelGesture,
+    lastChange,
     silentPage,
     silent,
     undo,

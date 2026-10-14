@@ -12,6 +12,8 @@ export class GestureBus {
   dragging = false;
   /** True while a pen / highlighter / shape / eraser stroke is in progress (autosave waits). */
   inking = false;
+  /** Pointer type of the stroke in progress ('pen': fingers touching the glass meanwhile are a palm). */
+  inkingWith = '';
   private cancelHandlers = new Set<() => void>();
   private dragCancelHandlers = new Set<() => void>();
 

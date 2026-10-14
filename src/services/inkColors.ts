@@ -72,15 +72,33 @@ function distinctNames(hexes: string[]): string[] {
   });
 }
 
-/** Light inks are darkened for the image (same hue); white / light grey become mid grey. */
-function visibleOnWhite(hex: string): string {
+/**
+ * How an ink is drawn in the image: light inks are darkened (same hue), white / light grey become
+ * a mid grey. Candidates, best first: the first one far enough from the inks already placed is
+ * used, so two inks never look the same in the image (the model could not tell them apart and
+ * swapped their colours).
+ */
+function imageCandidates(hex: string): string[] {
   const c = rgb(hex);
   const L = lum(c);
-  if (L <= 170) return hex;
+  if (L <= 170) return [hex];
   const [r, g, b] = c;
-  if (Math.max(r, g, b) - Math.min(r, g, b) < 28) return '#6B6B6B';
-  const k = 120 / L;
-  return toHex(r * k, g * k, b * k);
+  if (Math.max(r, g, b) - Math.min(r, g, b) < 28) return ['#6B6B6B', '#9A9A9A', '#3F3F3F'];
+  return [120, 95, 150, 75].map((t) => toHex(r * (t / L), g * (t / L), b * (t / L)));
+}
+
+const dist = (a: string, b: string) => Math.sqrt(rgb(a).reduce((s, v, i) => s + (v - rgb(b)[i]) ** 2, 0));
+/** Inks closer than this (RGB distance) in the image are hard to tell apart. */
+const MIN_IMAGE_DISTANCE = 60;
+
+function imageColors(hexes: string[]): string[] {
+  const used: string[] = [];
+  return hexes.map((hex) => {
+    const cands = imageCandidates(hex);
+    const pick = cands.find((c) => used.every((u) => dist(c, u) >= MIN_IMAGE_DISTANCE)) ?? cands[0];
+    used.push(pick);
+    return pick;
+  });
 }
 
 function inkLength(s: Stroke): number {
@@ -107,11 +125,12 @@ export function inkColors(strokes: Stroke[], bounds: Rect): InkColorInfo {
   const pct = (v: number, o: number, size: number) => Math.round(Math.max(0, Math.min(100, ((v - o) / Math.max(1, size)) * 100)));
   const sorted = [...by.entries()].sort((a, b) => b[1].len - a[1].len);
   const names = distinctNames(sorted.map(([hex]) => hex));
+  const shown = imageColors(sorted.map(([hex]) => hex));
   const colors = sorted
     .map(([hex, e], i) => ({
       hex,
       name: names[i],
-      imageColor: visibleOnWhite(hex),
+      imageColor: shown[i],
       share: e.len / Math.max(1, total),
       region: { x0: pct(e.x0, bounds.x, bounds.width), y0: pct(e.y0, bounds.y, bounds.height), x1: pct(e.x1, bounds.x, bounds.width), y1: pct(e.y1, bounds.y, bounds.height) },
     }))
@@ -147,18 +166,21 @@ const NAMED: Record<string, string> = {
   brown: '#804000', pink: '#FFC0CB',
 };
 
-function nearest(hex: string, allowed: string[]): string {
-  const c = rgb(hex);
-  let best = allowed[0], bd = Infinity;
-  for (const a of allowed) {
-    const d = rgb(a).reduce((s, v, i) => s + (v - c[i]) ** 2, 0);
-    if (d < bd) { bd = d; best = a; }
+/**
+ * The ink a colour in the reply means: the nearest ink, compared with both its real colour and the
+ * colour it has in the image (the model may write the colour it saw).
+ */
+function nearestInk(hex: string, info: InkColorInfo): string {
+  let best = info.colors[0].hex, bd = Infinity;
+  for (const c of info.colors) {
+    const d = Math.min(dist(hex, c.hex), dist(hex, c.imageColor));
+    if (d < bd) { bd = d; best = c.hex; }
   }
   return best;
 }
 
 /** Index just past the brace group that starts at `i` (s[i] === '{'), or -1. */
-function groupEnd(s: string, i: number): number {
+export function groupEnd(s: string, i: number): number {
   let depth = 0;
   for (let j = i; j < s.length; j++) {
     if (s[j] === '\\') { j++; continue; }
@@ -169,12 +191,15 @@ function groupEnd(s: string, i: number): number {
 }
 
 /**
- * Makes the reply use only the given colours (see the top of this file). `allowed` is the list of
- * ink colours; with a single colour all colour markup is removed.
+ * Makes the reply use only the ink colours (see the top of this file): every colour is turned into
+ * its ink's code, and markup of the base colour (all markup, with one ink) is removed where it is
+ * not needed. Base markup is only removed where nothing around it is coloured: inside another
+ * colour's group, or after a \color switch, it is what gives those symbols the base colour back,
+ * and removing it gave them the surrounding colour.
  */
 export function enforceColors(latex: string, info: InkColorInfo): string {
-  const allowed = info.colors.map((c) => c.hex);
-  if (!allowed.length) return latex;
+  if (!info.colors.length) return latex;
+  const single = info.colors.length === 1;
   const resolve = (spec: string, model?: string): string => {
     let hex = normalizeHex(spec.replace(/^#/, ''));
     if (!hex && model && /rgb/i.test(model)) {
@@ -182,29 +207,56 @@ export function enforceColors(latex: string, info: InkColorInfo): string {
       if (v.length === 3 && v.every((x) => Number.isFinite(x))) hex = /RGB/.test(model) ? toHex(v[0], v[1], v[2]) : toHex(v[0] * 255, v[1] * 255, v[2] * 255);
     }
     hex ??= NAMED[spec.trim().toLowerCase()] ?? null;
-    return nearest(hex ?? info.base, allowed);
+    return hex ? nearestInk(hex, info) : info.base;
   };
-  let s = latex;
   // \textcolor[HTML]{FF1010}{..}, \textcolor{red}{..}, \color[rgb]{..} -> \textcolor{#XXXXXX}
-  s = s.replace(/\\(textcolor|color)\s*(?:\[([A-Za-z]+)\])?\s*\{([^{}]*)\}/g, (_m, cmd: string, model: string | undefined, spec: string) => `\\${cmd}{${resolve(spec, model)}}`);
-  // Remove the markup of the base colour (and all markup when there is one colour): the block has that colour.
-  let out = '';
-  for (let i = 0; i < s.length; ) {
-    const m = /^\\textcolor\{(#[0-9A-F]{6})\}\s*\{/.exec(s.slice(i, i + 40));
-    if (m && (m[1] === info.base || allowed.length === 1)) {
-      const open = i + m[0].length - 1;
-      const end = groupEnd(s, open);
-      if (end > 0) {
-        out += enforceInner(s.slice(open + 1, end - 1));
-        i = end;
+  const s = latex.replace(/\\(textcolor|color)\s*(?:\[([A-Za-z]+)\])?\s*\{([^{}]*)\}/g, (_m, cmd: string, model: string | undefined, spec: string) => `\\${cmd}{${resolve(spec, model)}}`);
+
+  /** `tinted`: a colour other than the base is in effect here. */
+  const walk = (src: string, tinted: boolean): string => {
+    let out = '';
+    let i = 0;
+    while (i < src.length) {
+      const rest = src.slice(i, i + 40);
+      const tc = /^\\textcolor\{(#[0-9A-F]{6})\}\s*\{/.exec(rest);
+      if (tc) {
+        const open = i + tc[0].length - 1;
+        const end = groupEnd(src, open);
+        if (end > 0) {
+          const hex = tc[1];
+          const inner = walk(src.slice(open + 1, end - 1), hex !== info.base);
+          // Unwrapped as it is (a group would change the spacing of math), unless it switches colours inside.
+          if (single || (hex === info.base && !tinted)) out += /\\color\{/.test(inner) ? `{${inner}}` : inner;
+          else out += `\\textcolor{${hex}}{${inner}}`;
+          i = end;
+          continue;
+        }
+      }
+      const sw = /^\\color\{(#[0-9A-F]{6})\}/.exec(rest);
+      if (sw) {
+        const hex = sw[1];
+        if (!single && !(hex === info.base && !tinted)) out += sw[0];
+        // The switch colours the rest of the group.
+        tinted = !single && hex !== info.base;
+        i += sw[0].length;
         continue;
       }
+      if (src[i] === '\\') {
+        out += src.slice(i, i + 2);
+        i += 2;
+        continue;
+      }
+      if (src[i] === '{') {
+        const end = groupEnd(src, i);
+        if (end > 0) {
+          out += `{${walk(src.slice(i + 1, end - 1), tinted)}}`;
+          i = end;
+          continue;
+        }
+      }
+      out += src[i++];
     }
-    out += s[i++];
-  }
-  return out;
-
-  function enforceInner(inner: string): string {
-    return enforceColors(inner, info);
-  }
+    return out;
+  };
+  return walk(s, false);
 }
