@@ -18,6 +18,8 @@
  * Messages (one string each, numbers with up to 2 decimals):
  *   b,r,g,b,a,variable,clipX,clipY,clipW,clipH   begin / restart (clears the layer)
  *   u,n,x,y,r,...                                 n new settled points, then the tail (x, y, radius)
+ *   d,clipX,clipY,clipW,clipH,<commands>         a whole drawing (Draw tool shapes, snapped shapes):
+ *                                                 replaces what is shown (commands: inkRecorder.ts)
  *   e                                             the page shows the stroke: clear
  *   c                                             cancel: clear now
  */
@@ -81,6 +83,8 @@ export class NativeInk {
   private key = '';
   private sent = 0;
   private done = false;
+  /** Something was sent (end / cancel must clear it). */
+  private shown = false;
 
   static get available(): boolean {
     if (send === undefined) send = sender();
@@ -97,6 +101,7 @@ export class NativeInk {
       this.sent = 0;
       const [r, g, b, a] = rgba(style.color);
       send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h)].join(','));
+      this.shown = true;
     }
     const m = stroke.model;
     const pts = m.points;
@@ -112,17 +117,26 @@ export class NativeInk {
     send!(out.join(','));
   }
 
+  /** Shows a whole drawing (commands from inkRecorder's record), replacing the stroke or the last drawing. */
+  drawing(commands: string, tf: InkTransform): void {
+    if (this.done || !NativeInk.available) return;
+    this.model = null;
+    this.key = '';
+    send!(`d,${f(tf.clip.x)},${f(tf.clip.y)},${f(tf.clip.w)},${f(tf.clip.h)}${commands ? ',' + commands : ''}`);
+    this.shown = true;
+  }
+
   /** The page now shows the finished stroke (or its replacement): the shell's layer is cleared. */
   end(): void {
     if (this.done) return;
     this.done = true;
-    if (this.model && NativeInk.available) send!('e');
+    if (this.shown && NativeInk.available) send!('e');
   }
 
   /** The stroke was dropped (or became something the shell does not draw): cleared at once. */
   cancel(): void {
     if (this.done) return;
     this.done = true;
-    if (this.model && NativeInk.available) send!('c');
+    if (this.shown && NativeInk.available) send!('c');
   }
 }

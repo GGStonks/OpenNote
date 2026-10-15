@@ -31,7 +31,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.0.4";
+static NSString *const kVersion = @"2.0.5";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -294,6 +294,163 @@ static void ONAddCapsule(CGMutablePathRef path, ONInkPt a, ONInkPt b) {
 /** Settled ink is split into layers of this many points: a full one is never redrawn. */
 static const NSUInteger kInkChunk = 64;
 
+/**
+ * A whole live drawing (Draw tool shapes, snapped pen shapes, the snap dot) replayed from the
+ * page's drawing commands (src/ink/inkRecorder.ts) with Core Graphics: what the page's canvas
+ * draws, call for call. Only the area that changed is redrawn.
+ */
+@interface ONSceneView : UIView
+- (void)showCommands:(NSArray<NSString *> *)tokens from:(NSUInteger)start clip:(CGRect)clip;
+- (void)clearScene;
+@end
+
+@implementation ONSceneView {
+    NSArray<NSString *> *_tokens;
+    NSUInteger _start;
+    CGRect _clip, _shown;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.opaque = NO;
+        self.backgroundColor = UIColor.clearColor;
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.contentMode = UIViewContentModeRedraw;
+        _shown = CGRectNull;
+    }
+    return self;
+}
+
+/** Bounds of every coordinate in the commands, padded by the widest line. */
+static CGRect ONSceneBounds(NSArray<NSString *> *t, NSUInteger i) {
+    __block CGFloat minX = INFINITY, minY = INFINITY, maxX = -INFINITY, maxY = -INFINITY;
+    CGFloat pad = 2;
+    void (^add)(CGFloat, CGFloat, CGFloat) = ^(CGFloat x, CGFloat y, CGFloat r) {
+        minX = MIN(minX, x - r); minY = MIN(minY, y - r); maxX = MAX(maxX, x + r); maxY = MAX(maxY, y + r);
+    };
+    NSUInteger n = t.count;
+    while (i < n) {
+        NSString *op = t[i++];
+        unichar c = op.length ? [op characterAtIndex:0] : 0;
+        switch (c) {
+            case 'M': case 'L': if (i + 1 < n) add(t[i].doubleValue, t[i + 1].doubleValue, 0); i += 2; break;
+            case 'Q': for (int k = 0; k < 2 && i + 1 < n; k++, i += 2) add(t[i].doubleValue, t[i + 1].doubleValue, 0); break;
+            case 'C': for (int k = 0; k < 3 && i + 1 < n; k++, i += 2) add(t[i].doubleValue, t[i + 1].doubleValue, 0); break;
+            case 'E': if (i + 2 < n) add(t[i].doubleValue, t[i + 1].doubleValue, t[i + 2].doubleValue); i += 6; break;
+            case 'X': if (i + 3 < n) { add(t[i].doubleValue, t[i + 1].doubleValue, 0); add(t[i].doubleValue + t[i + 2].doubleValue, t[i + 1].doubleValue + t[i + 3].doubleValue, 0); } i += 4; break;
+            case 'W': if (i < n) pad = MAX(pad, t[i].doubleValue + 2); i += 1; break;
+            case 'F': case 'K': i += 4; break;
+            case 'A': case 'f': case 'x': i += 1; break;
+            case 'P': i += 2; break;
+            case 'D': { NSUInteger cnt = i < n ? (NSUInteger)MAX(0, t[i].integerValue) : 0; i += cnt + 2; break; }
+            default: break;
+        }
+    }
+    if (minX > maxX) return CGRectNull;
+    return CGRectInset(CGRectMake(minX, minY, maxX - minX, maxY - minY), -pad, -pad);
+}
+
+- (void)showCommands:(NSArray<NSString *> *)tokens from:(NSUInteger)start clip:(CGRect)clip {
+    CGRect now = CGRectIntersection(ONSceneBounds(tokens, start), clip);
+    CGRect dirty = CGRectUnion(_shown, now);
+    _tokens = tokens;
+    _start = start;
+    _clip = clip;
+    _shown = now;
+    if (!CGRectIsNull(dirty)) [self setNeedsDisplayInRect:CGRectIntegral(dirty)];
+}
+
+- (void)clearScene {
+    if (!_tokens) return;
+    _tokens = nil;
+    if (!CGRectIsNull(_shown)) [self setNeedsDisplayInRect:CGRectIntegral(_shown)];
+    _shown = CGRectNull;
+}
+
+static CGColorRef ONColor(NSArray<NSString *> *t, NSUInteger i) {
+    return [UIColor colorWithRed:t[i].doubleValue / 255 green:t[i + 1].doubleValue / 255 blue:t[i + 2].doubleValue / 255 alpha:t[i + 3].doubleValue].CGColor;
+}
+
+/** canvas arc(): a sweep of 2pi or more is a full circle; otherwise CG's own arc (same direction convention). */
+static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat a0, CGFloat a1, BOOL ccw) {
+    if (fabs(a1 - a0) >= 2 * M_PI - 1e-4) {
+        CGFloat dir = ccw ? -1 : 1;
+        CGPoint start = CGPointMake(cx + r * cos(a0), cy + r * sin(a0));
+        if (CGPathIsEmpty(p)) CGPathMoveToPoint(p, NULL, start.x, start.y);
+        else CGPathAddLineToPoint(p, NULL, start.x, start.y);
+        CGPathAddArc(p, NULL, cx, cy, r, a0, a0 + dir * M_PI, ccw);
+        CGPathAddArc(p, NULL, cx, cy, r, a0 + dir * M_PI, a0 + dir * 2 * M_PI, ccw);
+        return;
+    }
+    CGPathAddArc(p, NULL, cx, cy, r, a0, a1, ccw);
+}
+
+- (void)drawRect:(CGRect)rect {
+    NSArray<NSString *> *t = _tokens;
+    if (!t) return;
+    CGContextRef g = UIGraphicsGetCurrentContext();
+    CGContextSaveGState(g);
+    CGContextClipToRect(g, _clip);
+    CGMutablePathRef path = CGPathCreateMutable();
+    NSUInteger i = _start, n = t.count;
+    static const CGLineCap caps[] = { kCGLineCapButt, kCGLineCapRound, kCGLineCapSquare };
+    static const CGLineJoin joins[] = { kCGLineJoinMiter, kCGLineJoinRound, kCGLineJoinBevel };
+    while (i < n) {
+        NSString *op = t[i++];
+        unichar c = op.length ? [op characterAtIndex:0] : 0;
+        switch (c) {
+            case 'S': CGContextSaveGState(g); break;
+            case 'R': CGContextRestoreGState(g); break;
+            case 'F': if (i + 3 < n) CGContextSetFillColorWithColor(g, ONColor(t, i)); i += 4; break;
+            case 'K': if (i + 3 < n) CGContextSetStrokeColorWithColor(g, ONColor(t, i)); i += 4; break;
+            case 'A': if (i < n) CGContextSetAlpha(g, t[i].doubleValue); i += 1; break;
+            case 'W': if (i < n) CGContextSetLineWidth(g, t[i].doubleValue); i += 1; break;
+            case 'P': if (i + 1 < n) { CGContextSetLineCap(g, caps[MIN(2, MAX(0, t[i].intValue))]); CGContextSetLineJoin(g, joins[MIN(2, MAX(0, t[i + 1].intValue))]); } i += 2; break;
+            case 'D': {
+                NSUInteger cnt = i < n ? (NSUInteger)MAX(0, t[i].integerValue) : 0;
+                if (i + cnt + 1 >= n) { i = n; break; }
+                CGFloat lengths[16];
+                NSUInteger m = MIN(cnt, (NSUInteger)16);
+                for (NSUInteger k = 0; k < m; k++) lengths[k] = t[i + 1 + k].doubleValue;
+                CGContextSetLineDash(g, t[i + 1 + cnt].doubleValue, m ? lengths : NULL, m);
+                i += cnt + 2;
+                break;
+            }
+            case 'N': CGPathRelease(path); path = CGPathCreateMutable(); break;
+            case 'M': if (i + 1 < n) CGPathMoveToPoint(path, NULL, t[i].doubleValue, t[i + 1].doubleValue); i += 2; break;
+            case 'L':
+                if (i + 1 < n) {
+                    if (CGPathIsEmpty(path)) CGPathMoveToPoint(path, NULL, t[i].doubleValue, t[i + 1].doubleValue);
+                    else CGPathAddLineToPoint(path, NULL, t[i].doubleValue, t[i + 1].doubleValue);
+                }
+                i += 2;
+                break;
+            case 'Q': if (i + 3 < n && !CGPathIsEmpty(path)) CGPathAddQuadCurveToPoint(path, NULL, t[i].doubleValue, t[i + 1].doubleValue, t[i + 2].doubleValue, t[i + 3].doubleValue); i += 4; break;
+            case 'C': if (i + 5 < n && !CGPathIsEmpty(path)) CGPathAddCurveToPoint(path, NULL, t[i].doubleValue, t[i + 1].doubleValue, t[i + 2].doubleValue, t[i + 3].doubleValue, t[i + 4].doubleValue, t[i + 5].doubleValue); i += 6; break;
+            case 'E': if (i + 5 < n) ONArc(path, t[i].doubleValue, t[i + 1].doubleValue, t[i + 2].doubleValue, t[i + 3].doubleValue, t[i + 4].doubleValue, t[i + 5].intValue != 0); i += 6; break;
+            case 'X': if (i + 3 < n) CGPathAddRect(path, NULL, CGRectMake(t[i].doubleValue, t[i + 1].doubleValue, t[i + 2].doubleValue, t[i + 3].doubleValue)); i += 4; break;
+            case 'Z': if (!CGPathIsEmpty(path)) CGPathCloseSubpath(path); break;
+            case 'f':
+                CGContextAddPath(g, path);
+                if (i < n && t[i].intValue == 1) CGContextEOFillPath(g); else CGContextFillPath(g);
+                i += 1;
+                break;
+            case 's': CGContextAddPath(g, path); CGContextStrokePath(g); break;
+            case 'x':
+                CGContextAddPath(g, path);
+                if (i < n && t[i].intValue == 1) CGContextEOClip(g); else CGContextClip(g);
+                i += 1;
+                break;
+            default: break;
+        }
+    }
+    CGPathRelease(path);
+    CGContextRestoreGState(g);
+}
+
+@end
+
 @implementation ONInkView {
     CALayer *_clip;
     NSMutableArray<CAShapeLayer *> *_chunks;
@@ -306,6 +463,7 @@ static const NSUInteger kInkChunk = 64;
     BOOL _hasRaw;
     CGPoint _raw;
     NSUInteger _generation;
+    ONSceneView *_scene;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -316,6 +474,8 @@ static const NSUInteger kInkChunk = 64;
         _clip = [CALayer layer];
         _clip.masksToBounds = YES;
         [self.layer addSublayer:_clip];
+        _scene = [[ONSceneView alloc] initWithFrame:self.bounds];
+        [self addSubview:_scene];
         _chunks = [NSMutableArray array];
         _settled = [NSMutableData data];
         _tailPts = [NSMutableData data];
@@ -378,6 +538,7 @@ static const NSUInteger kInkChunk = 64;
     _chunkStart = 0;
     _hasRaw = NO;
     _active = NO;
+    [_scene clearScene];
 }
 
 - (const ONInkPt *)settled {
@@ -480,6 +641,16 @@ static const NSUInteger kInkChunk = 64;
         [seq appendData:_tailPts];
         [self setShape:_tail points:(const ONInkPt *)seq.bytes count:seq.length / sizeof(ONInkPt)];
         [self drawLead];
+    } else if ([kind isEqualToString:@"d"] && f.count >= 5) {
+        // A whole drawing: replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
+        BOOL wasScene = _active && !_chunks.count && !_tail;
+        if (!wasScene) {
+            [self clear];
+            _generation++;
+        }
+        _active = YES;
+        CGRect clip = CGRectMake(f[1].doubleValue, f[2].doubleValue, f[3].doubleValue, f[4].doubleValue);
+        [_scene showCommands:f from:5 clip:clip];
     } else if ([kind isEqualToString:@"e"] || [kind isEqualToString:@"c"]) {
         _generation++;
         [self clear];

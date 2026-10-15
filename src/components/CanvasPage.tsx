@@ -12,6 +12,7 @@ import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
+import { record } from '../ink/inkRecorder';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -205,6 +206,41 @@ function strokeYRange(s: Stroke) {
  *
  * Strokes crossing a page line are painted by both tiles.
  */
+/**
+ * One page band of ink as SVG (zoomed in past VECTOR_ZOOM: sharp at any zoom). Like InkTile it is
+ * built only near the view and dropped far from it: one SVG of the whole note was rebuilt and
+ * parsed (megabytes of markup on a long note) every time a pinch ended past VECTOR_ZOOM.
+ */
+const VectorTile = React.memo(function VectorTile(props: { top: number; width: number; height: number; strokes: Stroke[]; scrollRoot: HTMLElement | null; paperOf: (s: Stroke) => string }) {
+  const { top, width: W, height: H, strokes, scrollRoot } = props;
+  const paperOf = useRef(props.paperOf);
+  paperOf.current = props.paperOf;
+  const mine = useMemo(() => strokes.filter((s) => {
+    const r = strokeYRange(s);
+    return r.maxY >= top && r.minY <= top + H;
+  }), [strokes, top, H]);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const [alive, setAlive] = useState(false);
+  useEffect(() => {
+    const el = holderRef.current;
+    if (!el) return;
+    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '50% 0px' });
+    const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '150% 0px' });
+    near.observe(el);
+    far.observe(el);
+    return () => {
+      near.disconnect();
+      far.disconnect();
+    };
+  }, [scrollRoot]);
+  const svg = useMemo(() => (alive && mine.length ? strokesSvg(mine, (s) => paperOf.current(s)) : ''), [alive, mine]);
+  return (
+    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+      {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
+    </div>
+  );
+});
+
 const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
   const { eager, top, width: W, height: H, strokes, ratio, scrollRoot } = props;
   const mine = useMemo(() => strokes.filter((s) => {
@@ -724,18 +760,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (edit.snapDot) next = unionRect(next, drawSnapDot(ctx, edit.snapDot, false, k));
     }
     if (d && d.smart) {
-      const opts = smartOptions();
-      const shape = d.snapped ?? smartPenShape(d.smart, false);
-      if (shape) {
-        next = drawLiveStroke(ctx, shape.points, {
-          tool: 'pen', color: opts.color, width: opts.width, penStyle: 'ballpoint', isShape: true, closed: shape.closed, shapeKind: shape.kind,
-          lineStyle: shape.kind === 'point' ? 'solid' : opts.lineStyle,
-          fill: shape.closed ? opts.fill : undefined,
-          arrow: !shape.closed && opts.arrow,
-        });
-      }
-      const dot = d.snapped ? null : d.smart.snapDot;
-      if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart.snapKind === 'grid', k));
+      next = paintSmart(ctx, d, k);
       const m = smartPenMeasure(d.smart);
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
@@ -744,7 +769,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
-        next = drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
+        next = paintSnapped(ctx, d);
       } else {
         next = drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
       }
@@ -785,6 +810,30 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     dirty.current = next;
   };
+  /** The Draw tool's shape in progress and its snap dot (the measure label is drawn by renderActive). */
+  function paintSmart(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>, k: number): DirtyRect | null {
+    let next: DirtyRect | null = null;
+    const opts = smartOptions();
+    const shape = d.snapped ?? (d.smart ? smartPenShape(d.smart, false) : null);
+    if (shape) {
+      next = drawLiveStroke(ctx, shape.points, {
+        tool: 'pen', color: opts.color, width: opts.width, penStyle: 'ballpoint', isShape: true, closed: shape.closed, shapeKind: shape.kind,
+        lineStyle: shape.kind === 'point' ? 'solid' : opts.lineStyle,
+        fill: shape.closed ? opts.fill : undefined,
+        arrow: !shape.closed && opts.arrow,
+      });
+    }
+    const dot = d.snapped ? null : d.smart?.snapDot;
+    if (dot) next = unionRect(next, drawSnapDot(ctx, dot, d.smart?.snapKind === 'grid', k));
+    return next;
+  }
+
+  /** A pen or highlighter stroke snapped to a shape (hold to snap). */
+  function paintSnapped(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>): DirtyRect | null {
+    if (!d.snapped) return null;
+    return drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool as 'pen' | 'highlighter'), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
+  }
+
   /** Settled live ink of a finished/cancelled stroke, cleared on the next frame. */
   const staleInk = useRef<DirtyRect | null>(null);
 
@@ -890,6 +939,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         const pen = cur.points[cur.points.length - 1];
         cur.adjust = { kind: shape.kind, base: shape.points, closed: shape.closed, pen0: { x: pen.x, y: pen.y } };
         retireInk(cur);
+        syncInk(cur);
         haptic('snap');
         requestRender();
       }
@@ -978,7 +1028,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       pressure: pt.pressure,
       force: [pt.pressure],
       model: tool === 'pen' ? new LiveStroke() : null,
-      ink: tool === 'pen' && NativeInk.available ? new NativeInk() : null,
+      ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       native: null,
@@ -1148,16 +1198,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
   }
 
-  /** Sends the live stroke to the shell's native ink layer (iOS / Android app). */
+  /** Sends the live stroke or shape to the shell's native ink layer (iOS / Android app). */
   function syncInk(d: NonNullable<typeof drawing.current>) {
-    if (!d.ink || !d.model) return;
-    if (d.snapped) {
-      // Held still and snapped to a shape: the page draws the shape.
-      d.ink.cancel();
+    if (!d.ink) return;
+    d.inkTf ??= inkTransform();
+    if (d.smart || d.snapped) {
+      // Shapes (Draw tool, or a pen stroke held still and snapped): the whole drawing, as the page draws it.
+      const k = 1 / Math.max(0.3, zoomRef.current);
+      d.ink.drawing(record(d.inkTf, (ctx) => (d.smart ? paintSmart(ctx, d, k) : paintSnapped(ctx, d))), d.inkTf);
       return;
     }
+    if (!d.model) return;
     const style = liveStyle('pen');
-    d.inkTf ??= inkTransform();
     d.ink.update(d.model, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure }, d.inkTf);
   }
 
@@ -1617,6 +1669,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       */}
       {layers.map((l) => {
         if (l.kind === 'ink') {
+          if (vector && !printMode) {
+            return (
+              <React.Fragment key={l.key}>
+                {layout.sheets.map((sh) => (
+                  <VectorTile key={sh.id} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} scrollRoot={scrollRoot} paperOf={svgPaperOf} />
+                ))}
+              </React.Fragment>
+            );
+          }
           return vector ? (
             <svg
               key={l.key}

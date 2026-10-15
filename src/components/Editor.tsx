@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
 import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
+import { markMoved } from '../ink/strokeRenderer';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings } from './CanvasPage';
 import { Toolbar } from './Toolbar';
@@ -398,7 +399,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const sel = selection;
     // The copy goes on top of everything (editor/zorder.ts), in the same order among itself.
     const { strokes, latexBlocks: latex, textBlocks: texts, imageBlocks: images } = restamp({
-      strokes: selPage.strokes.filter((s) => sel.strokeIds.includes(s.id)).map((s) => ({ ...s, id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + off, y: p.y + off })) })),
+      strokes: selPage.strokes.filter((s) => sel.strokeIds.includes(s.id)).map((s) => markMoved({ ...s, id: newId('stroke'), points: s.points.map((p) => ({ ...p, x: p.x + off, y: p.y + off })) }, s, off, off)),
       latexBlocks: selPage.latexBlocks.filter((b) => sel.latexIds.includes(b.id)).map((b) => ({ ...b, id: newId(b.isTikz ? 'tikz' : 'latex'), x: b.x + off, y: b.y + off })),
       textBlocks: (selPage.textBlocks ?? []).filter((b) => sel.textIds.includes(b.id)).map((b) => ({ ...b, id: newId('text'), x: b.x + off, y: b.y + off })),
       imageBlocks: (selPage.imageBlocks ?? []).filter((b) => sel.imageIds.includes(b.id)).map((b) => ({ ...b, id: newId('image'), x: b.x + off, y: b.y + off })),

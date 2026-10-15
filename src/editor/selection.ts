@@ -1,5 +1,5 @@
 import { NotePage, Rect, Stroke } from '../types';
-import { curveSegments, strokeBounds } from '../ink/strokeRenderer';
+import { curveSegments, markMoved, strokeBounds } from '../ink/strokeRenderer';
 import { flattenBeziers, XY } from '../ink/spline';
 
 export interface Selection {
@@ -207,18 +207,21 @@ export function transformSelection(page: NotePage, sel: Selection, dx: number, d
     const C = T(b.x + w / 2, b.y + h / 2);
     return { x: C.x - (w * factor) / 2, y: C.y - (h * factor) / 2, ...turned(b.rotation) };
   };
+  const ids = new Set(sel.strokeIds);
+  const moveOnly = factor === 1 && !rot;
   return {
     ...page,
-    strokes: page.strokes.map((st) =>
-      sel.strokeIds.includes(st.id)
-        ? {
-            ...st,
-            width: st.width * (factor === 1 ? 1 : Math.sqrt(factor)),
-            points: st.points.map((p) => ({ ...p, ...T(p.x, p.y) })),
-            ...turned(st.rotation),
-          }
-        : st
-    ),
+    strokes: page.strokes.map((st) => {
+      if (!ids.has(st.id)) return st;
+      const out: Stroke = {
+        ...st,
+        width: st.width * (factor === 1 ? 1 : Math.sqrt(factor)),
+        points: st.points.map((p) => ({ ...p, ...T(p.x, p.y) })),
+        ...turned(st.rotation),
+      };
+      // Only moved: the ink keeps its geometry, moved (no re-modelling when a selection is dropped).
+      return moveOnly ? markMoved(out, st, dx, dy) : out;
+    }),
     latexBlocks: page.latexBlocks.map((b) =>
       sel.latexIds.includes(b.id)
         ? { ...b, ...box(b, b.width, b.height), width: b.width * factor, height: b.height * factor, scale: (b.scale ?? 1) * factor }

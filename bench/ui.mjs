@@ -7,7 +7,14 @@
  *   pen     replays recorded pen strokes as real input (CDP pen events, 240 Hz like the Pencil)
  *           on the page in view, and reports frame times and input lag: from a pen event to the
  *           frame that showed it
- *   scroll  scrolls through the note, and reports frame times
+ *   scroll  scrolls through the note with the mouse wheel, and reports frame times
+ *   swipe   one finger flicks the note up and down (the app's own finger scrolling and momentum)
+ *   pinch   two fingers zoom in and out (including the repaint at the new zoom when they lift)
+ *   lasso   selects a block of handwriting with the lasso and drags it around
+ *   pages   drags a page in the page manager
+ *
+ * For the finger scenarios the lag is from a pointer event to the next frame.
+ * --only pen,scroll,swipe,pinch,lasso,pages runs some of them (default: all).
  *
  * Run: npm run build && node bench/ui.mjs [--cpu 4] [--pages 8] [--headed]
  * Needs playwright-core (/home/ds/AI/camofox-browser/node_modules) and Playwright's Chromium.
@@ -121,8 +128,8 @@ if (arg('css')) await page.addStyleTag({ content: arg('css') });
 const cdp = await ctx.newCDPSession(page);
 await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
 
-// Frame clock and input lag, measured in the page.
-await page.evaluate(() => {
+// Frame clock and input lag, measured in the page (installed again after each reopen).
+const instrument = () => page.evaluate(() => {
   const w = window;
   w.__bench = { frames: [], moves: [], lags: [], on: false };
   const loop = (t) => {
@@ -133,8 +140,9 @@ await page.evaluate(() => {
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
-  window.addEventListener('pointermove', (e) => w.__bench.on && e.pointerType === 'pen' && w.__bench.moves.push(e.timeStamp), true);
+  window.addEventListener('pointermove', (e) => w.__bench.on && w.__bench.moves.push(e.timeStamp), true);
 });
+await instrument();
 async function profiled(label, run) {
   if (!PROFILE) return run();
   await cdp.send('Profiler.enable');
@@ -157,7 +165,7 @@ async function profiled(label, run) {
 }
 async function traced(label, run) {
   if (!TRACE) return run();
-  await browser.startTracing(page, { categories: ['devtools.timeline', 'disabled-by-default-devtools.timeline'] });
+  await browser.startTracing(page, { categories: (arg('cats') ?? 'devtools.timeline,disabled-by-default-devtools.timeline').split(',') });
   const out = await run();
   const { traceEvents } = JSON.parse((await browser.stopTracing()).toString());
   const main = traceEvents.find((e) => e.name === 'thread_name' && e.args?.name === 'CrRendererMain');
@@ -185,15 +193,151 @@ async function traced(label, run) {
   [...by.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12).forEach(([k, v]) => console.log(`    ${v.toFixed(0).padStart(7)} ${longest.get(k).toFixed(0).padStart(6)}  ${k}`));
   return out;
 }
-const start = () => page.evaluate(() => Object.assign(window.__bench, { frames: [], moves: [], lags: [], on: true }));
-const stop = () => page.evaluate(() => { window.__bench.on = false; return { frames: window.__bench.frames, lags: window.__bench.lags }; });
+/** --count: draw calls and resizes per canvas size during each scenario (which canvases do work). */
+const COUNT = process.argv.includes('--count');
+const start = async () => {
+  if (COUNT) await page.evaluate(() => {
+    window.__draws = new Map();
+    if (window.__countInstalled) return;
+    window.__countInstalled = true;
+    const P = CanvasRenderingContext2D.prototype;
+    for (const m of ['fill', 'stroke', 'clearRect', 'drawImage']) {
+      const orig = P[m];
+      P[m] = function (...a) {
+        const k = `${m} ${this.canvas.width}x${this.canvas.height}`;
+        window.__draws.set(k, (window.__draws.get(k) ?? 0) + 1);
+        return orig.apply(this, a);
+      };
+    }
+    const w = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'width');
+    Object.defineProperty(HTMLCanvasElement.prototype, 'width', { get: w.get, set(v) { window.__draws.set(`resize ${v}`, (window.__draws.get(`resize ${v}`) ?? 0) + 1); w.set.call(this, v); } });
+  });
+  await page.evaluate(() => Object.assign(window.__bench, { frames: [], moves: [], lags: [], on: true }));
+};
+const stop = async () => {
+  if (COUNT) console.log('  canvases:', await page.evaluate(() => JSON.stringify([...window.__draws.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10))));
+  return page.evaluate(() => { window.__bench.on = false; return { frames: window.__bench.frames, lags: window.__bench.lags }; });
+};
 
 const mouse = (type, x, y, force = 0.5) =>
   cdp.send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1, pointerType: 'pen', force });
 
 console.log(`CPU ${CPU}x slower, ${PAGES} pages, ${recorded.length} recorded strokes`);
+const ONLY = new Set((arg('only', 'pen,scroll,swipe,pinch,lasso,pages')).split(','));
+
+/** Back to a freshly opened note (each scenario starts from the same state). */
+async function reopen() {
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await page.getByText('Bench note').first().click();
+  await page.waitForTimeout(2500);
+  await instrument();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
+}
+const touch = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], id) => ({ x, y, id })) });
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** Moves fingers from `a` to `b` (arrays of [x, y]) in `ms`, one event per 8 ms. */
+async function fingers(a, b, ms, end = true) {
+  await touch('touchStart', a);
+  const n = Math.max(1, Math.round(ms / 8));
+  for (let i = 1; i <= n; i++) {
+    await touch('touchMove', a.map(([x, y], k) => [x + ((b[k][0] - x) * i) / n, y + ((b[k][1] - y) * i) / n]));
+    await sleep(8);
+  }
+  if (end) await touch('touchEnd', []);
+}
+async function report(label, run) {
+  await start();
+  const t = Date.now();
+  await traced(label, () => profiled(label, run));
+  const r = await stop();
+  frameStats(label, r.frames);
+  if (r.lags.length) console.log(`${label.padEnd(8)} input lag p50 ${f1(pct(r.lags, 0.5))} p95 ${f1(pct(r.lags, 0.95))} max ${f1(Math.max(...r.lags))} ms, ${((Date.now() - t) / 1000).toFixed(1)} s`);
+}
+
+if (ONLY.has('swipe')) {
+  await reopen();
+  await report('swipe', async () => {
+    for (let i = 0; i < 3; i++) {
+      await fingers([[410, 900]], [[410, 400]], 160);
+      await sleep(900);
+    }
+    for (let i = 0; i < 3; i++) {
+      await fingers([[410, 400]], [[410, 900]], 160);
+      await sleep(900);
+    }
+  });
+}
+if (ONLY.has('pinch')) {
+  await reopen();
+  await report('pinch', async () => {
+    for (let i = 0; i < 2; i++) {
+      await fingers([[360, 600], [460, 600]], [[210, 600], [610, 600]], 400);
+      await sleep(1200);
+      if (arg('shots') && i === 0) await page.screenshot({ path: join(arg('shots'), 'zoomed.png') });
+      await fingers([[210, 600], [610, 600]], [[360, 600], [460, 600]], 400);
+      await sleep(1200);
+    }
+  });
+}
+if (ONLY.has('lasso')) {
+  await reopen();
+  await page.locator('button[title^="Lasso"]').click();
+  await page.waitForTimeout(300);
+  // A loop around a block of handwriting near the top of the first page.
+  const loop = Array.from({ length: 60 }, (_, i) => {
+    const a = (i / 59) * Math.PI * 2;
+    return [410 + Math.cos(a) * 300, 520 + Math.sin(a) * 170];
+  });
+  await mouse('mousePressed', loop[0][0], loop[0][1]);
+  for (const [x, y] of loop.slice(1)) {
+    await mouse('mouseMoved', x, y);
+    await sleep(8);
+  }
+  await mouse('mouseReleased', loop[59][0], loop[59][1]);
+  await page.waitForTimeout(800);
+  await report('lasso', async () => {
+    // Drag the selection around and back (pen on the selection), twice.
+    for (let r = 0; r < 2; r++) {
+      await mouse('mousePressed', 410, 520);
+      for (let i = 1; i <= 60; i++) {
+        await mouse('mouseMoved', 410 + Math.sin(i / 10) * 150, 520 + i * 4);
+        await sleep(8);
+      }
+      await mouse('mouseReleased', 410, 760);
+      await sleep(900);
+      await page.keyboard.press('Control+z');
+      await sleep(600);
+    }
+  });
+}
+if (ONLY.has('pages')) {
+  await reopen();
+  await page.locator('button[title="Pages"]').click();
+  await page.waitForTimeout(1500);
+  const grip = page.locator('span[title="Drag to move"]').first();
+  const box = await grip.boundingBox();
+  if (!box) console.log('pages    (no page manager grip found)');
+  else {
+    const gx = box.x + box.width / 2, gy = box.y + box.height / 2;
+    // The panel open, nothing touched: what it costs by itself.
+    await report('pg idle', () => sleep(4000));
+
+    await report('pages', async () => {
+      for (let r = 0; r < 2; r++) {
+        await fingers([[gx, gy]], [[gx + 20, gy + 700]], 1000, false);
+        await sleep(400);
+        await touch('touchEnd', []);
+        await sleep(900);
+      }
+    });
+
+  }
+}
+if (ONLY.has('pen') || ONLY.has('scroll')) await reopen();
 
 // Pen: write a few lines of recorded strokes into the middle of the screen.
+if (ONLY.has('pen')) {
 await start();
 const t0 = Date.now();
 let wrote = 0;
@@ -220,11 +364,12 @@ for (const s of recorded.slice(0, Number(arg('strokes', 40)))) {
 const pen = await stop();
 frameStats('pen', pen.frames);
 console.log(`pen      input lag p50 ${f1(pct(pen.lags, 0.5))} p95 ${f1(pct(pen.lags, 0.95))} max ${f1(Math.max(...pen.lags))} ms (event to next frame), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+}
 
 // Scroll: wheel scrolling down through the note and back, twice (first view of the pages, then
 // with their ink already modelled).
 await page.mouse.move(410, 600);
-for (const pass of ['scroll 1', 'scroll 2']) {
+for (const pass of ONLY.has('scroll') ? ['scroll 1', 'scroll 2'] : []) {
   await start();
   await (pass === 'scroll 2' ? (f) => traced(pass, f) : (f) => f())(() => profiled(pass, async () => {
     for (let i = 0; i < 60; i++) {

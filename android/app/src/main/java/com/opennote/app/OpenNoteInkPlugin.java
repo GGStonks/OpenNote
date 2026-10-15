@@ -3,6 +3,7 @@ package com.opennote.app;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
@@ -82,6 +83,10 @@ public class OpenNoteInkPlugin extends Plugin {
         private final int[] wvLoc = new int[2];
         private final int[] myLoc = new int[2];
         private final RectF oval = new RectF();
+        /** A whole drawing (Draw tool shapes, snapped pen shapes) as the page's commands (inkRecorder.ts). */
+        private String[] scene;
+        private final RectF sceneClip = new RectF();
+        private final Paint scenePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
         InkOverlay(Context context, WebView webView) {
             super(context);
@@ -145,6 +150,7 @@ public class OpenNoteInkPlugin extends Plugin {
             tailPath = new Path();
             hasRaw = false;
             active = false;
+            scene = null;
         }
 
         void handle(String msg) {
@@ -201,6 +207,19 @@ public class OpenNoteInkPlugin extends Plugin {
                     tailWidth = tail.length > 0 ? tail[tail.length - 1] * 2 : 0;
                     break;
                 }
+                case "d": {
+                    if (f.length < 5) return;
+                    // Replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
+                    boolean wasScene = active && scene != null;
+                    if (!wasScene) {
+                        clear();
+                        generation++;
+                    }
+                    sceneClip.set(Float.parseFloat(f[1]), Float.parseFloat(f[2]), Float.parseFloat(f[1]) + Float.parseFloat(f[3]), Float.parseFloat(f[2]) + Float.parseFloat(f[4]));
+                    scene = f;
+                    active = true;
+                    break;
+                }
                 case "e":
                 case "c":
                     generation++;
@@ -244,6 +263,137 @@ public class OpenNoteInkPlugin extends Plugin {
             canvas.drawPath(path, paint);
         }
 
+        /** Canvas state the page's commands set (canvas.save() does not keep Paint settings). */
+        private static final class SceneState {
+            int fill = Color.BLACK, stroke = Color.BLACK;
+            float alpha = 1, width = 1;
+            Paint.Cap cap = Paint.Cap.BUTT;
+            Paint.Join join = Paint.Join.MITER;
+            float[] dash = null;
+            float dashOffset = 0;
+
+            SceneState copy() {
+                SceneState c = new SceneState();
+                c.fill = fill; c.stroke = stroke; c.alpha = alpha; c.width = width; c.cap = cap; c.join = join;
+                c.dash = dash; c.dashOffset = dashOffset;
+                return c;
+            }
+        }
+
+        private static int color(String[] t, int i) {
+            return Color.argb(Math.round(Float.parseFloat(t[i + 3]) * 255), Math.round(Float.parseFloat(t[i])), Math.round(Float.parseFloat(t[i + 1])), Math.round(Float.parseFloat(t[i + 2])));
+        }
+
+        private static int withAlpha(int c, float alpha) {
+            return (c & 0x00FFFFFF) | (Math.round(Color.alpha(c) * alpha) << 24);
+        }
+
+        /** canvas arc(): angles in radians, ccw = decreasing angle; a sweep of 2pi or more is a full circle. */
+        private void arc(Path p, float cx, float cy, float r, double a0, double a1, boolean ccw) {
+            oval.set(cx - r, cy - r, cx + r, cy + r);
+            double sweep;
+            if (Math.abs(a1 - a0) >= 2 * Math.PI - 1e-4) sweep = ccw ? -2 * Math.PI : 2 * Math.PI;
+            else if (!ccw) { sweep = a1 - a0; while (sweep < 0) sweep += 2 * Math.PI; }
+            else { sweep = a1 - a0; while (sweep > 0) sweep -= 2 * Math.PI; }
+            if (Math.abs(sweep) >= 2 * Math.PI - 1e-4) {
+                // Android's arcTo cannot draw a whole circle: two halves.
+                float half = (float) Math.toDegrees(sweep / 2);
+                p.arcTo(oval, (float) Math.toDegrees(a0), half, p.isEmpty());
+                p.arcTo(oval, (float) Math.toDegrees(a0) + half, half, false);
+            } else {
+                p.arcTo(oval, (float) Math.toDegrees(a0), (float) Math.toDegrees(sweep), p.isEmpty());
+            }
+        }
+
+        private void drawScene(Canvas canvas, String[] t) {
+            int saved = canvas.save();
+            canvas.clipRect(sceneClip);
+            SceneState st = new SceneState();
+            ArrayList<SceneState> stack = new ArrayList<>();
+            Path path = new Path();
+            int i = 5, n = t.length;
+            try {
+                while (i < n) {
+                    String op = t[i++];
+                    switch (op) {
+                        case "S": stack.add(st.copy()); canvas.save(); break;
+                        case "R":
+                            // Never below this drawing's own save (an unbalanced restore would crash).
+                            if (!stack.isEmpty()) {
+                                st = stack.remove(stack.size() - 1);
+                                if (canvas.getSaveCount() > saved + 1) canvas.restore();
+                            }
+                            break;
+                        case "F": st.fill = color(t, i); i += 4; break;
+                        case "K": st.stroke = color(t, i); i += 4; break;
+                        case "A": st.alpha = Float.parseFloat(t[i++]); break;
+                        case "W": st.width = Float.parseFloat(t[i++]); break;
+                        case "P": {
+                            int c = Integer.parseInt(t[i]), j = Integer.parseInt(t[i + 1]);
+                            st.cap = c == 1 ? Paint.Cap.ROUND : c == 2 ? Paint.Cap.SQUARE : Paint.Cap.BUTT;
+                            st.join = j == 1 ? Paint.Join.ROUND : j == 2 ? Paint.Join.BEVEL : Paint.Join.MITER;
+                            i += 2;
+                            break;
+                        }
+                        case "D": {
+                            int cnt = Integer.parseInt(t[i]);
+                            float[] d = new float[cnt];
+                            for (int k = 0; k < cnt; k++) d[k] = Math.max(0.01f, Float.parseFloat(t[i + 1 + k]));
+                            st.dash = cnt >= 2 && cnt % 2 == 0 ? d : null;
+                            st.dashOffset = Float.parseFloat(t[i + 1 + cnt]);
+                            i += cnt + 2;
+                            break;
+                        }
+                        case "N": path = new Path(); break;
+                        case "M": path.moveTo(Float.parseFloat(t[i]), Float.parseFloat(t[i + 1])); i += 2; break;
+                        case "L":
+                            if (path.isEmpty()) path.moveTo(Float.parseFloat(t[i]), Float.parseFloat(t[i + 1]));
+                            else path.lineTo(Float.parseFloat(t[i]), Float.parseFloat(t[i + 1]));
+                            i += 2;
+                            break;
+                        case "Q": path.quadTo(Float.parseFloat(t[i]), Float.parseFloat(t[i + 1]), Float.parseFloat(t[i + 2]), Float.parseFloat(t[i + 3])); i += 4; break;
+                        case "C": path.cubicTo(Float.parseFloat(t[i]), Float.parseFloat(t[i + 1]), Float.parseFloat(t[i + 2]), Float.parseFloat(t[i + 3]), Float.parseFloat(t[i + 4]), Float.parseFloat(t[i + 5])); i += 6; break;
+                        case "E":
+                            arc(path, Float.parseFloat(t[i]), Float.parseFloat(t[i + 1]), Float.parseFloat(t[i + 2]), Double.parseDouble(t[i + 3]), Double.parseDouble(t[i + 4]), !"0".equals(t[i + 5]));
+                            i += 6;
+                            break;
+                        case "X": {
+                            float x = Float.parseFloat(t[i]), y = Float.parseFloat(t[i + 1]);
+                            path.addRect(x, y, x + Float.parseFloat(t[i + 2]), y + Float.parseFloat(t[i + 3]), Path.Direction.CW);
+                            i += 4;
+                            break;
+                        }
+                        case "Z": path.close(); break;
+                        case "f":
+                            path.setFillType("1".equals(t[i++]) ? Path.FillType.EVEN_ODD : Path.FillType.WINDING);
+                            scenePaint.setPathEffect(null);
+                            scenePaint.setStyle(Paint.Style.FILL);
+                            scenePaint.setColor(withAlpha(st.fill, st.alpha));
+                            canvas.drawPath(path, scenePaint);
+                            break;
+                        case "s":
+                            scenePaint.setStyle(Paint.Style.STROKE);
+                            scenePaint.setColor(withAlpha(st.stroke, st.alpha));
+                            scenePaint.setStrokeWidth(st.width);
+                            scenePaint.setStrokeCap(st.cap);
+                            scenePaint.setStrokeJoin(st.join);
+                            scenePaint.setPathEffect(st.dash != null ? new DashPathEffect(st.dash, st.dashOffset) : null);
+                            canvas.drawPath(path, scenePaint);
+                            break;
+                        case "x":
+                            path.setFillType("1".equals(t[i++]) ? Path.FillType.EVEN_ODD : Path.FillType.WINDING);
+                            canvas.clipPath(path);
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            } catch (RuntimeException e) {
+                // A malformed message: show what was drawn so far rather than crash the app.
+            }
+            canvas.restoreToCount(saved);
+        }
+
         @Override
         protected void onDraw(Canvas canvas) {
             if (!active) return;
@@ -251,6 +401,11 @@ public class OpenNoteInkPlugin extends Plugin {
             getLocationInWindow(myLoc);
             canvas.save();
             canvas.translate(wvLoc[0] - myLoc[0], wvLoc[1] - myLoc[1]);
+            if (scene != null) {
+                drawScene(canvas, scene);
+                canvas.restore();
+                return;
+            }
             canvas.clipRect(clip);
             for (int i = 0; i < chunks.size(); i++) {
                 Path p = chunks.get(i);

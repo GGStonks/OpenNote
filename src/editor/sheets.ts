@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { ImageBlock, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PageSheet, Stroke, TextBlock, newId } from '../types';
+import { markMoved } from '../ink/strokeRenderer';
 import { PageSetup, SetupPatch, pageSetup } from './pageSetup';
 import { restamp } from './zorder';
 
@@ -110,7 +111,19 @@ function ownership(surface: NotePage, L: SurfaceLayout): Items[] {
   return out;
 }
 
-const moveStroke = (s: Stroke, dx: number, dy: number): Stroke => ({ ...s, points: s.points.map((q) => ({ ...q, x: q.x + dx, y: q.y + dy })) });
+/**
+ * The stroke moved by (dx, dy). The same stroke moved by the same offset gives the same object:
+ * page thumbnails are rebuilt after every edit, and only the pages whose strokes really changed
+ * are painted again (unchanged copies were new objects, so every thumbnail repainted all its ink).
+ */
+const movedCopies = new WeakMap<Stroke, { dx: number; dy: number; out: Stroke }>();
+const moveStroke = (s: Stroke, dx: number, dy: number): Stroke => {
+  const c = movedCopies.get(s);
+  if (c && c.dx === dx && c.dy === dy) return c.out;
+  const out = markMoved({ ...s, points: s.points.map((q) => ({ ...q, x: q.x + dx, y: q.y + dy })) }, s, dx, dy);
+  movedCopies.set(s, { dx, dy, out });
+  return out;
+};
 
 function translate(c: Items, dx: number, dy: number): Items {
   if (!dx && !dy) return c;

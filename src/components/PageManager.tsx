@@ -267,8 +267,10 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
           const moving = drag?.ids.has(pg.id);
           return (
             <React.Fragment key={pg.id}>
-              {drag && drag.to === i && <div className="h-1 -mt-0.5 mb-1.5 rounded-full bg-blue-500" />}
+              {/* Keyed: without keys, the marker appearing in front of a page remounted (and fully repainted) its thumbnail. */}
+              {drag && drag.to === i && <div key="drop" className="h-1 -mt-0.5 mb-1.5 rounded-full bg-blue-500" />}
               <div
+                key="page"
                 ref={(el) => {
                   if (el) items.current.set(pg.id, el);
                   else items.current.delete(pg.id);

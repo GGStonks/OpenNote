@@ -46,8 +46,23 @@ interface Built {
 
 const cache = new WeakMap<Stroke, Built>();
 
+/** Creates the renderer's paths; swapped while a drawing is recorded for the app shell (inkRecorder.ts). */
+let makePath: () => Path2D = () => new Path2D();
+const newPath = () => makePath();
+
+/** Runs `fn` with the renderer's paths made by `factory` (to record a live drawing as commands). */
+export function withPathFactory<T>(factory: () => Path2D, fn: () => T): T {
+  const prev = makePath;
+  makePath = factory;
+  try {
+    return fn();
+  } finally {
+    makePath = prev;
+  }
+}
+
 function centerlinePath(points: XY[], smooth: boolean, closed: boolean): Path2D {
-  const path = new Path2D();
+  const path = newPath();
   if (points.length === 0) return path;
   path.moveTo(points[0].x, points[0].y);
   if (points.length === 1) {
@@ -70,7 +85,7 @@ function centerlinePath(points: XY[], smooth: boolean, closed: boolean): Path2D 
 }
 
 function bezierPath(segs: Bezier[], closed: boolean): Path2D {
-  const path = new Path2D();
+  const path = newPath();
   if (!segs.length) return path;
   path.moveTo(segs[0][0].x, segs[0][0].y);
   for (const [, c1, c2, e] of segs) path.bezierCurveTo(c1.x, c1.y, c2.x, c2.y, e.x, e.y);
@@ -93,8 +108,28 @@ export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoi
   return { pts, widths, width };
 }
 
+type InkGeometry = ReturnType<typeof inkGeometry>;
+const geometryCache = new WeakMap<Stroke, InkGeometry>();
+
+/**
+ * inkGeometry of a committed stroke, cached per stroke (canvas, SVG and the precision eraser
+ * share it; a moved copy reuses its original's, moved). The SVG ink shown above VECTOR_ZOOM used to
+ * model every stroke of the note again after each pinch past it.
+ */
+export function strokeGeometry(s: Stroke): InkGeometry {
+  let g = geometryCache.get(s);
+  if (g) return g;
+  const m = movedFrom.get(s);
+  if (m && m.src.points.length === s.points.length) {
+    const o = strokeGeometry(m.src);
+    g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
+  } else g = inkGeometry(s.points, styleOf(s));
+  geometryCache.set(s, g);
+  return g;
+}
+
 function polylinePath(pts: XY[], closed = false): Path2D {
-  const path = new Path2D();
+  const path = newPath();
   if (!pts.length) return path;
   path.moveTo(pts[0].x, pts[0].y);
   if (pts.length === 1) path.lineTo(pts[0].x + 0.01, pts[0].y);
@@ -150,14 +185,14 @@ function boundsOf(points: XY[], pad: number) {
   return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
 }
 
-function build(points: Point[], style: InkStyle, last: boolean): Built {
+function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke): Built {
   const closed = !!style.closed && points.length > 2;
   const fillable = closed && !!style.fill && style.fill !== 'none';
   let path: Path2D;
   let filled = false;
   let area: Path2D | null = null;
   if (style.shapeKind === 'point') {
-    path = new Path2D();
+    path = newPath();
     const p = points[0];
     path.arc(p.x, p.y, Math.max(2.5, style.width * 1.7), 0, Math.PI * 2);
     filled = true;
@@ -166,7 +201,7 @@ function build(points: Point[], style: InkStyle, last: boolean): Built {
     if (fillable) area = path;
   } else if (!style.isShape) {
     // Handwriting: modelled stroke (inkEngine.ts).
-    const g = inkGeometry(points, style);
+    const g = stroke ? strokeGeometry(stroke) : inkGeometry(points, style);
     if (g.widths) {
       path = capsulePath(g.pts, g.widths);
       filled = true;
@@ -181,7 +216,7 @@ function build(points: Point[], style: InkStyle, last: boolean): Built {
   if (style.arrow && !closed && style.shapeKind !== 'point' && points.length > 1) {
     const h = arrowHead(points, style);
     if (h) {
-      arrow = new Path2D();
+      arrow = newPath();
       arrow.moveTo(h[0].x, h[0].y);
       arrow.lineTo(h[1].x, h[1].y);
       arrow.lineTo(h[2].x, h[2].y);
@@ -297,10 +332,42 @@ export function styleOf(s: Stroke): InkStyle {
   };
 }
 
+/** Strokes that are another stroke moved by (dx, dy): their geometry is the original's, moved. */
+const movedFrom = new WeakMap<Stroke, { src: Stroke; dx: number; dy: number }>();
+
+/**
+ * Records that `copy` is `src` moved by (dx, dy) (same style, every point moved): its geometry is
+ * then the original's moved, instead of the ink engine modelling the whole stroke again. Page
+ * thumbnails (every stroke moved into its page's frame), dropping a lasso selection, paste and
+ * duplicate made long notes stall on modelling thousands of strokes again.
+ */
+export function markMoved(copy: Stroke, src: Stroke, dx: number, dy: number): Stroke {
+  const m = movedFrom.get(src);
+  movedFrom.set(copy, m ? { src: m.src, dx: m.dx + dx, dy: m.dy + dy } : { src, dx, dy });
+  return copy;
+}
+
+function movedPath(p: Path2D, dx: number, dy: number): Path2D {
+  const out = newPath();
+  out.addPath(p, new DOMMatrix([1, 0, 0, 1, dx, dy]));
+  return out;
+}
+
 function built(s: Stroke): Built {
   let b = cache.get(s);
   if (!b) {
-    b = build(s.points, styleOf(s), true);
+    const m = movedFrom.get(s);
+    if (m && m.src.points.length === s.points.length && typeof DOMMatrix !== 'undefined') {
+      const o = built(m.src);
+      b = {
+        path: movedPath(o.path, m.dx, m.dy),
+        filled: o.filled,
+        area: o.area ? (o.area === o.path ? null : movedPath(o.area, m.dx, m.dy)) : null,
+        arrow: o.arrow ? movedPath(o.arrow, m.dx, m.dy) : null,
+        bounds: { minX: o.bounds.minX + m.dx, minY: o.bounds.minY + m.dy, maxX: o.bounds.maxX + m.dx, maxY: o.bounds.maxY + m.dy },
+      };
+      if (o.area === o.path) b.area = b.path;
+    } else b = build(s.points, styleOf(s), true, s);
     cache.set(s, b);
   }
   return b;
@@ -414,7 +481,8 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
   let out = '';
   let lineD: string;
   let areaD: string;
-  const ink = !s.isShape ? inkGeometry(pts, style) : null;
+  const geo = !s.isShape ? strokeGeometry(s) : null;
+  const ink = geo && dy ? { ...geo, pts: geo.pts.map((q) => ({ ...q, y: q.y + dy })) } : geo;
   if (s.shapeKind === 'curve') {
     lineD = areaD = svgBezierD(curveSegments(pts, closed), closed);
   } else if (ink) {
@@ -677,7 +745,7 @@ export function eraseStrokesPartial(
     }
     // Handwriting.
     const closed = !!s.closed && s.points.length > 2;
-    const g = inkGeometry(s.points, styleOf(s));
+    const g = strokeGeometry(s);
     const modeled: Stroke['modeled'] = g.widths ? 'variable' : 'uniform';
     const pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
     const inside = (p: Point) => Math.hypot(p.x - x, p.y - y) <= r;

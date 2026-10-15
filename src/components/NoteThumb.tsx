@@ -65,9 +65,15 @@ const ThumbTikz: React.FC<{ block: LatexBlock; color: string; darkPaper: boolean
 
 const ThumbInk: React.FC<{ strokes: Stroke[]; scale: number; width: number; height: number }> = ({ strokes, scale, width, height }) => {
   const ref = useRef<HTMLCanvasElement>(null);
+  /** What the canvas shows: the same strokes at the same size are not painted again. */
+  const shown = useRef<{ strokes: Stroke[]; key: string } | null>(null);
   useLayoutEffect(() => {
     const c = ref.current;
     if (!c) return;
+    const key = `${scale}|${width}|${height}`;
+    const prev = shown.current;
+    if (prev && prev.key === key && prev.strokes.length === strokes.length && prev.strokes.every((s, i) => s === strokes[i])) return;
+    shown.current = { strokes, key };
     const r = Math.min(2, window.devicePixelRatio || 1) * scale;
     c.width = Math.max(1, Math.round(width * r));
     c.height = Math.max(1, Math.round(height * r));
@@ -81,10 +87,11 @@ const ThumbInk: React.FC<{ strokes: Stroke[]; scale: number; width: number; heig
 
 const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; width: number; height: number }> = ({ page, dark, scale, width, height }) => {
   const ink = dark ? '#F3F4F6' : '#111827';
+  const layers = useMemo(() => zLayers(page), [page]);
   return (
     <>
       {/* In stacking order (editor/zorder.ts), as on the page. */}
-      {zLayers(page).map((l) => {
+      {layers.map((l) => {
         if (l.kind === 'ink') return <ThumbInk key={l.key} strokes={l.strokes} scale={scale} width={width} height={height} />;
         if (l.kind === 'image') {
           const im = l.block;
