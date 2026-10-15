@@ -20,7 +20,7 @@ interface IosBridge {
 
 declare global {
   interface Window {
-    OpenNoteNative?: { platform: 'ios'; version: string };
+    OpenNoteNative?: { platform: 'ios'; version: string; fullFrameRate?: boolean; /** The display's maximum refresh rate (Hz). */ maxFps?: number };
     webkit?: { messageHandlers?: { opennote?: IosBridge } };
   }
 }

@@ -125,6 +125,8 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   const [drag, setDrag] = useState<{ ids: ReadonlySet<string>; x: number; y: number; to: number } | null>(null);
   const dragRef = useRef<{ ids: ReadonlySet<string>; pointerId: number; startY: number; started: boolean; to: number; x: number; y: number } | null>(null);
   const autoScroll = useRef<number | null>(null);
+  /** Time of the last auto-scroll step (frame-time scaling). */
+  const autoScrollAt = useRef<number | null>(null);
 
   const dropIndex = (clientY: number) => {
     for (let i = 0; i < pages.length; i++) {
@@ -139,15 +141,19 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   const stopAutoScroll = () => {
     if (autoScroll.current !== null) cancelAnimationFrame(autoScroll.current);
     autoScroll.current = null;
+    autoScrollAt.current = null;
   };
 
-  const runAutoScroll = () => {
+  const runAutoScroll = (now: number) => {
     const list = listRef.current, d = dragRef.current;
     autoScroll.current = null;
     if (!list || !d?.started) return;
+    // Speed per 60 Hz frame, scaled by the real frame time: the same speed at 60 and 120 Hz.
+    const frames = autoScrollAt.current === null ? 1 : Math.min(2, (now - autoScrollAt.current) / (1000 / 60));
+    autoScrollAt.current = now;
     const r = list.getBoundingClientRect();
     const edge = 48;
-    const v = d.y < r.top + edge ? -(r.top + edge - d.y) / 3 : d.y > r.bottom - edge ? (d.y - (r.bottom - edge)) / 3 : 0;
+    const v = (d.y < r.top + edge ? -(r.top + edge - d.y) / 3 : d.y > r.bottom - edge ? (d.y - (r.bottom - edge)) / 3 : 0) * frames;
     if (v) {
       list.scrollTop += v;
       d.to = dropIndex(d.y);

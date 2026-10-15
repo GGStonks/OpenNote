@@ -35,6 +35,8 @@ export interface PenRecording {
   devicePixelRatio: number;
   /** iOS shell: WebKit's 60 fps cap for page rendering was switched off. */
   fullFrameRate?: boolean;
+  /** iOS shell: the display's maximum refresh rate (Hz). */
+  maxFps?: number;
   screen: { width: number; height: number };
   exportedAt: number;
   strokes: RecordedStroke[];
@@ -92,7 +94,8 @@ export const penRecorder = {
       platform,
       userAgent: navigator.userAgent,
       devicePixelRatio: window.devicePixelRatio,
-      fullFrameRate: (window.OpenNoteNative as { fullFrameRate?: boolean } | undefined)?.fullFrameRate,
+      fullFrameRate: window.OpenNoteNative?.fullFrameRate,
+      maxFps: window.OpenNoteNative?.maxFps,
       screen: { width: screen.width, height: screen.height },
       exportedAt: Date.now(),
       strokes: strokes.slice(),

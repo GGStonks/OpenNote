@@ -30,7 +30,7 @@ clang -target "arm64-apple-ios$MIN_IOS" -isysroot "$IOS_SDK" -fobjc-arc -fmodule
 echo "--> Linking Mach-O executable"
 ld64.lld -arch arm64 -platform_version ios "$MIN_IOS" "$SDK_VERSION" -syslibroot "$IOS_SDK" \
   -dead_strip -lSystem -lobjc \
-  -framework Foundation -framework UIKit -framework WebKit \
+  -framework Foundation -framework UIKit -framework WebKit -framework QuartzCore \
   "$WORK/OpenNoteShell.o" -o "$APP/OpenNote"
 
 echo "--> Assembling bundle"

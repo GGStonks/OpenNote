@@ -20,15 +20,22 @@
 //    the ink itself.
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
+//  - Full refresh rate: WebKit's 60 fps cap is lifted and, while the screen is touched, a display link
+//    asks for the display's maximum rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones).
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/message.h>
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.0.1";
+static NSString *const kVersion = @"2.0.2";
+
+@interface ONFrameRateBooster : NSObject
+- (void)poke;
+@end
 
 #pragma mark - 240 Hz Apple Pencil samples
 
@@ -39,6 +46,7 @@ static NSString *const kVersion = @"2.0.1";
 // off after its first few milliseconds.
 @interface ONWindow : UIWindow
 @property (nonatomic, weak) WKWebView *webView;
+@property (nonatomic, strong) ONFrameRateBooster *booster;
 @end
 
 @implementation ONWindow {
@@ -53,7 +61,10 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
 }
 
 - (void)sendEvent:(UIEvent *)event {
-    if (event.type == UIEventTypeTouches && self.webView) [self forwardPencil:event];
+    if (event.type == UIEventTypeTouches) {
+        [self.booster poke];
+        if (self.webView) [self forwardPencil:event];
+    }
     [super sendEvent:event];
 }
 
@@ -147,13 +158,14 @@ static NSString *ONMimeType(NSString *ext) {
 
 @end
 
-#pragma mark - 120 Hz
+#pragma mark - Full display refresh rate
 
 // WebKit runs requestAnimationFrame, and with it the app's scrolling, momentum and live ink, at
 // 60 fps even on a 120 Hz ProMotion display: the internal feature "Prefer Page Rendering Updates
 // near 60fps" (Safari > Feature Flags) is on by default. It is switched off through WebKit's
 // feature-flag SPI, whose spelling changed between iOS versions; each form is tried and checked at
-// runtime. Returns YES if the flag was found and turned off.
+// runtime. Returns YES if the flag was found and turned off. The key is matched loosely too
+// ("...Near60FPS..."), as WebKit has renamed flags before.
 static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
     NSString *const key = @"PreferPageRenderingUpdatesNear60FPSEnabled";
     NSArray<NSArray<NSString *> *> *spis = @[
@@ -165,6 +177,7 @@ static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
         SEL list = NSSelectorFromString(spi[0]), set = NSSelectorFromString(spi[1]);
         if (![WKPreferences respondsToSelector:list] || ![prefs respondsToSelector:set]) continue;
         NSArray *features = ((NSArray * (*)(id, SEL))objc_msgSend)([WKPreferences class], list);
+        id loose = nil;
         for (id feature in features) {
             NSString *featureKey = nil;
             @try {
@@ -172,14 +185,65 @@ static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
             } @catch (NSException *e) {
                 continue;
             }
+            if (![featureKey isKindOfClass:[NSString class]]) continue;
             if ([featureKey isEqualToString:key]) {
                 ((void (*)(id, SEL, BOOL, id))objc_msgSend)(prefs, set, NO, feature);
                 return YES;
             }
+            if (!loose && [featureKey rangeOfString:@"Near60FPS" options:NSCaseInsensitiveSearch].location != NSNotFound) loose = feature;
+        }
+        if (loose) {
+            ((void (*)(id, SEL, BOOL, id))objc_msgSend)(prefs, set, NO, loose);
+            return YES;
         }
     }
     return NO;
 }
+
+/** The fastest refresh rate of the device's display: 60 on most iPads, 120 on ProMotion ones. */
+static NSInteger ONMaxFramesPerSecond(void) {
+    NSInteger fps = [UIScreen mainScreen].maximumFramesPerSecond;
+    return fps > 0 ? fps : 60;
+}
+
+// A ProMotion panel runs at the highest rate any client asks for and drops to a low rate when
+// nothing does, so WebKit's own requests are backed up by the shell's. While a finger or the Pencil is on the screen, and for a few seconds after (scroll
+// momentum, the ink settling), a display link asks for the display's maximum rate. On a 60 Hz
+// iPad there is nothing to raise and the link is never created.
+@implementation ONFrameRateBooster {
+    CADisplayLink *_link;
+    CFTimeInterval _until;
+    NSInteger _maxFps;
+}
+
+static const CFTimeInterval kBoostLinger = 3.0;
+
+- (instancetype)init {
+    if ((self = [super init])) _maxFps = ONMaxFramesPerSecond();
+    return self;
+}
+
+- (void)poke {
+    if (_maxFps <= 60) return;
+    _until = CACurrentMediaTime() + kBoostLinger;
+    if (_link) return;
+    _link = [CADisplayLink displayLinkWithTarget:self selector:@selector(tick:)];
+    if ([_link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
+        float max = (float)_maxFps;
+        _link.preferredFrameRateRange = CAFrameRateRangeMake(max, max, max);
+    } else {
+        _link.preferredFramesPerSecond = _maxFps;
+    }
+    [_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+}
+
+- (void)tick:(CADisplayLink *)link {
+    if (CACurrentMediaTime() < _until) return;
+    [_link invalidate];
+    _link = nil;
+}
+
+@end
 
 #pragma mark - View controller
 
@@ -205,8 +269,8 @@ static BOOL ONEnableFullFrameRate(WKPreferences *prefs) {
     BOOL fullFrameRate = ONEnableFullFrameRate(config.preferences);
 
     WKUserContentController *ucc = config.userContentController;
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@ };",
-                                                     kVersion, fullFrameRate ? @"true" : @"false"];
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, maxFps: %ld };",
+                                                     kVersion, fullFrameRate ? @"true" : @"false", (long)ONMaxFramesPerSecond()];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
 
@@ -455,6 +519,7 @@ static void ONRemoveScribble(UIView *view) {
     ONViewController *vc = [[ONViewController alloc] init];
     window.rootViewController = vc;
     window.webView = vc.webView ?: (WKWebView *)vc.view;
+    window.booster = [[ONFrameRateBooster alloc] init];
     self.window = window;
     [self.window makeKeyAndVisible];
     return YES;
