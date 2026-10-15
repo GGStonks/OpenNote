@@ -203,7 +203,7 @@ function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke)
     // Handwriting: modelled stroke (inkEngine.ts).
     const g = stroke ? strokeGeometry(stroke) : inkGeometry(points, style);
     if (g.widths) {
-      path = capsulePath(g.pts, g.widths);
+      path = capsulePath(g.pts, g.widths, 0, newPath());
       filled = true;
     } else path = polylinePath(g.pts);
     if (fillable) area = polylinePath(g.pts, true);
@@ -381,6 +381,19 @@ export function prepareStroke(s: Stroke): boolean {
   if (!s.points.length || cache.has(s)) return false;
   built(s);
   return true;
+}
+
+/**
+ * Paints one part of a committed stroke with paths built afresh (not the cached ones), so that a
+ * recording context sees every path command (pinch overlay, pinchScene.ts). The ink engine's model
+ * of the line is still the cached one (strokeGeometry).
+ */
+export function paintStrokeFresh(ctx: CanvasRenderingContext2D, s: Stroke, part: 'fill' | 'ink') {
+  if (!s.points.length) return;
+  const style = styleOf(s);
+  const b = build(s.points, style, true, s);
+  if (part === 'fill') paintFill(ctx, b, style, {});
+  else paintInk(ctx, b, style, s.opacity ?? 1);
 }
 
 /** drawStrokes' fill pass for one stroke (to paint a list of strokes in slices). */

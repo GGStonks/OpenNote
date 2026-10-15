@@ -2,6 +2,31 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { GestureBus } from './gestures';
 import type { Stroke } from '../types';
 import { drawStrokes, strokePaintBounds } from '../ink/strokeRenderer';
+import { sceneItem } from '../ink/pinchScene';
+import { tileWork } from './tileWork';
+
+/**
+ * The pinch overlay's worker (pinchWorker.ts), shared by every pinch so strokes are sent to it once.
+ * null where OffscreenCanvas is missing (iPadOS before 16.4) or the worker failed: the overlay is
+ * then drawn on the page's thread.
+ */
+let pinchWorker: Worker | null | undefined;
+const workerIds = new WeakMap<Stroke, number>();
+let nextWorkerId = 1;
+function getPinchWorker(): Worker | null {
+  if (pinchWorker !== undefined) return pinchWorker;
+  try {
+    if (typeof OffscreenCanvas === 'undefined' || !('transferControlToOffscreen' in HTMLCanvasElement.prototype)) return (pinchWorker = null);
+    const w = new Worker(new URL('../ink/pinchWorker.ts', import.meta.url), { type: 'module' });
+    w.addEventListener('error', () => {
+      pinchWorker = null;
+    });
+    pinchWorker = w;
+  } catch {
+    pinchWorker = null;
+  }
+  return pinchWorker;
+}
 
 /**
  * Viewport of the note: scrolling, zoom and the pull that adds a page.
@@ -65,6 +90,23 @@ class PinchInk {
   /** The mapping (view x = ax + S * surface x) the canvas was last drawn with. */
   private drawn: { ax: number; ay: number; S: number } | null = null;
   private idle: ReturnType<typeof setTimeout> | null = null;
+  /** Worker mode: the views sent (by sequence number), the page region whose strokes were sent. */
+  private worker: Worker | null = null;
+  private seq = 0;
+  private views = new Map<number, { ax: number; ay: number; S: number }>();
+  private region: { x0: number; y0: number; x1: number; y1: number } | null = null;
+  private settleSeq = -1;
+  private onDrawn = (e: MessageEvent) => {
+    if (e.data?.type !== 'drawn' || !this.canvas) return;
+    const v = this.views.get(e.data.seq);
+    if (!v) return;
+    for (const k of this.views.keys()) if (k <= e.data.seq) this.views.delete(k);
+    // Until the worker's first drawing the stretched page ink stays visible (no blank frame).
+    if (!this.drawn) this.outer.setAttribute('data-pinching', '');
+    this.drawn = v;
+    this.follow();
+    if (this.settleSeq >= 0 && e.data.seq >= this.settleSeq) this.handOver();
+  };
 
   constructor(private el: HTMLElement, private outer: HTMLElement, private ink: () => { strokes: Stroke[]; pad: number } | null) {}
 
@@ -80,7 +122,20 @@ class PinchInk {
       this.el.parentElement?.appendChild(c);
       this.canvas = c;
       this.drawn = null;
-      this.outer.setAttribute('data-pinching', '');
+      this.region = null;
+      this.settleSeq = -1;
+      tileWork.deferring = true;
+      this.worker = getPinchWorker();
+      if (this.worker) {
+        try {
+          const off = c.transferControlToOffscreen();
+          this.worker.postMessage({ type: 'init', canvas: off, dpr: Math.min(window.devicePixelRatio || 1, 2) }, [off]);
+          this.worker.addEventListener('message', this.onDrawn);
+        } catch {
+          this.worker = null;
+        }
+      }
+      if (!this.worker) this.outer.setAttribute('data-pinching', '');
     }
     if (this.frame === null) this.frame = requestAnimationFrame(() => this.update(false));
     // Fingers resting: drawn exactly for where they are.
@@ -92,7 +147,35 @@ class PinchInk {
   settle(z: number) {
     if (!this.canvas || !this.state) return;
     this.state = { k: 1, o: { x: 0, y: 0 }, z };
+    if (this.worker) {
+      // Hand over once the worker has drawn the final view (at most 600 ms later).
+      this.update(true);
+      this.settleSeq = this.seq;
+      if (!this.drawn) {
+        this.remove();
+        return;
+      }
+      if (this.idle) clearTimeout(this.idle);
+      this.idle = setTimeout(() => this.handOver(), 600);
+      return;
+    }
     this.update(false);
+    this.handOver();
+  }
+
+  /**
+   * The page's ink is shown again once its tiles have repainted at the new zoom (in slices, under
+   * the overlay; at most 2.5 s), then the overlay goes on the next frame.
+   */
+  private handOver(since = performance.now()) {
+    if (this.removeTimer !== null) return;
+    if (tileWork.pending.size && performance.now() - since < 2500) {
+      this.removeTimer = requestAnimationFrame(() => {
+        this.removeTimer = null;
+        this.handOver(since);
+      });
+      return;
+    }
     this.removeTimer = requestAnimationFrame(() => {
       this.outer.removeAttribute('data-pinching');
       this.removeTimer = requestAnimationFrame(() => this.remove());
@@ -100,6 +183,14 @@ class PinchInk {
   }
 
   remove() {
+    tileWork.deferring = false;
+    if (this.worker) {
+      this.worker.removeEventListener('message', this.onDrawn);
+      this.worker.postMessage({ type: 'detach' });
+      this.worker = null;
+    }
+    this.views.clear();
+    this.settleSeq = -1;
     if (this.frame !== null) cancelAnimationFrame(this.frame);
     if (this.removeTimer !== null) cancelAnimationFrame(this.removeTimer);
     if (this.idle) clearTimeout(this.idle);
@@ -132,6 +223,15 @@ class PinchInk {
     const el = this.el;
     const w = el.clientWidth, h = el.clientHeight;
     const m = this.mapping(ink.pad);
+    if (this.worker) {
+      this.sendScene(ink.strokes, m, w, h);
+      const seq = ++this.seq;
+      this.views.set(seq, m);
+      this.place(c, w, h);
+      this.worker.postMessage({ type: 'view', seq, ax: m.ax + MARGIN * w, ay: m.ay + MARGIN * h, S: m.S, w: w * (1 + 2 * MARGIN), h: h * (1 + 2 * MARGIN) });
+      this.follow();
+      return;
+    }
     const d = this.drawn;
     if (d && !exact) {
       const r = m.S / d.S;
@@ -144,6 +244,53 @@ class PinchInk {
       }
     }
     this.draw(c, ink.strokes, m, w, h);
+  }
+
+  /** Positions and sizes the overlay element (its pixels belong to the worker). */
+  private place(c: HTMLCanvasElement, w: number, h: number) {
+    c.style.left = `${this.el.offsetLeft}px`;
+    c.style.top = `${this.el.offsetTop}px`;
+    c.style.width = `${w * (1 + 2 * MARGIN)}px`;
+    c.style.height = `${h * (1 + 2 * MARGIN)}px`;
+  }
+
+  /** Worker mode: moves the canvas from the view it was drawn for to the current one. */
+  private follow() {
+    const c = this.canvas, d = this.drawn, ink = this.ink();
+    if (!c || !d || !ink || !this.state) return;
+    const w = this.el.clientWidth, h = this.el.clientHeight;
+    const m = this.mapping(ink.pad);
+    const r = m.S / d.S;
+    c.style.transform = `translate(${m.ax + (-MARGIN * w - d.ax) * r}px, ${m.ay + (-MARGIN * h - d.ay) * r}px) scale(${r})`;
+  }
+
+  /**
+   * Worker mode: sends the strokes of the page region around the view that the worker does not have
+   * yet (each once per session), and which of them to draw. The region is the view plus half a view
+   * on every side, and grows when the view leaves it (zooming out).
+   */
+  private sendScene(strokes: Stroke[], m: { ax: number; ay: number; S: number }, w: number, h: number) {
+    const vx0 = -m.ax / m.S, vx1 = (w - m.ax) / m.S, vy0 = -m.ay / m.S, vy1 = (h - m.ay) / m.S;
+    const r = this.region;
+    if (r && vx0 >= r.x0 && vx1 <= r.x1 && vy0 >= r.y0 && vy1 <= r.y1) return;
+    const dw = (vx1 - vx0) / 2, dh = (vy1 - vy0) / 2;
+    const reg = { x0: vx0 - dw, x1: vx1 + dw, y0: vy0 - dh, y1: vy1 + dh };
+    this.region = reg;
+    const list: { id: number; item: ReturnType<typeof sceneItem> }[] = [];
+    const ids: number[] = [];
+    for (const s of strokes) {
+      const b = strokePaintBounds(s);
+      if (b.maxX < reg.x0 || b.minX > reg.x1 || b.maxY < reg.y0 || b.minY > reg.y1) continue;
+      let id = workerIds.get(s);
+      if (id === undefined) {
+        id = nextWorkerId++;
+        workerIds.set(s, id);
+        list.push({ id, item: sceneItem(s) });
+      }
+      ids.push(id);
+    }
+    if (list.length) this.worker!.postMessage({ type: 'items', list });
+    this.worker!.postMessage({ type: 'order', ids });
   }
 
   private draw(c: HTMLCanvasElement, strokes: Stroke[], m: { ax: number; ay: number; S: number }, w: number, h: number) {

@@ -13,6 +13,7 @@ import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
+import { tileWork } from '../editor/tileWork';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -221,10 +222,24 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
   }), [strokes, top, H]);
   const holderRef = useRef<HTMLDivElement>(null);
   const [alive, setAlive] = useState(false);
+  // Made under the pinch overlay: the overlay waits until this tile knows whether it is near the view
+  // and, if it is, has its SVG.
+  const token = useRef({});
+  const reported = useRef(false);
+  useEffect(() => {
+    if (tileWork.deferring) tileWork.pending.add(token.current);
+    return () => {
+      tileWork.pending.delete(token.current);
+    };
+  }, []);
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
-    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '50% 0px' });
+    const near = new IntersectionObserver((en) => {
+      reported.current = true;
+      if (en.some((e) => e.isIntersecting)) setAlive(true);
+      else tileWork.pending.delete(token.current);
+    }, { root: scrollRoot, rootMargin: '50% 0px' });
     const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '150% 0px' });
     near.observe(el);
     far.observe(el);
@@ -234,6 +249,9 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
     };
   }, [scrollRoot]);
   const svg = useMemo(() => (alive && mine.length ? strokesSvg(mine, (s) => paperOf.current(s)) : ''), [alive, mine]);
+  useEffect(() => {
+    if (reported.current && (alive || !mine.length)) tileWork.pending.delete(token.current);
+  }, [alive, svg, mine.length]);
   return (
     <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
@@ -285,11 +303,14 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   }, [scrollRoot]);
   const painted = useRef<TilePaint | null>(null);
   const slicing = useRef<number | null>(null);
+  const token = useRef({});
   useEffect(() => () => {
     if (slicing.current !== null) cancelAnimationFrame(slicing.current);
+    tileWork.pending.delete(token.current);
   }, []);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
+    tileWork.pending.delete(token.current);
     if (slicing.current !== null) {
       cancelAnimationFrame(slicing.current);
       slicing.current = null;
@@ -359,10 +380,12 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       const v = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
       return !!r && r.bottom > v.top && r.top < v.bottom;
     };
-    if (onScreen.current || mine.length < 40 || inView()) {
+    // Under the pinch overlay every tile repaints in slices (it is covered until it is done).
+    if (!tileWork.deferring && (onScreen.current || mine.length < 40 || inView())) {
       drawStrokes(ctx, mine);
       return;
     }
+    tileWork.pending.add(token.current);
     // Off screen (scrolling towards it): paint in slices, in the order drawStrokes uses
     // (highlighters, then fills, then ink), and take the tile as painted only at the end.
     painted.current = { strokes: mine, ratio, complete: false };
@@ -379,7 +402,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       const until = performance.now() + TILE_SLICE_MS;
       while (pass < passes.length) {
         for (; i < job.length; i++) {
-          if (performance.now() > until && !onScreen.current) {
+          if (performance.now() > until && (!onScreen.current || tileWork.deferring)) {
             slicing.current = requestAnimationFrame(step);
             return;
           }
@@ -393,6 +416,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
         i = 0;
       }
       painted.current = { strokes: job, ratio, complete: true };
+      tileWork.pending.delete(token.current);
     };
     step();
   }, [mine, ratio, alive, top, W, H]);
