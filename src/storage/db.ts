@@ -1,5 +1,5 @@
 import { letterSheetsFor, surfaceFromPages } from '../editor/sheets';
-import { AudioRecording, Folder, NoteDocument, NotePage, SCHEMA_VERSION, Subject, Tag, newId } from '../types';
+import { AudioRecording, Folder, NoteDocument, NotePage, Point, SCHEMA_VERSION, Stroke, Subject, Tag, newId } from '../types';
 
 /**
  * Offline persistence (IndexedDB inside the app's WebView; survives restarts on iOS and Android).
@@ -95,6 +95,78 @@ export function migrateNote(n: NoteDocument): NoteDocument {
   return { ...base, pages: [surface], sheets };
 }
 
+// --- Stored stroke points -------------------------------------------------------------------------
+
+/**
+ * A stroke as stored: its points packed in one Float64Array (x, y, pressure, t, alt, az per point;
+ * NaN = not set) instead of an object per point. IndexedDB copies the whole note on every save,
+ * and a note of a few thousand strokes has hundreds of thousands of points: copying them one object
+ * at a time took about a second on a mid-range tablet, between two strokes. A typed array is copied
+ * in one block. Float64 keeps every value exactly.
+ */
+type StoredStroke = Omit<Stroke, 'points'> & { pts: Float64Array };
+type StoredPage = Omit<NotePage, 'strokes'> & { strokes: StoredStroke[] };
+
+const PT = 6;
+/** Strokes and pages are immutable: each is packed once (and pages whose strokes did not change are reused). */
+const packedStrokes = new WeakMap<Stroke, StoredStroke>();
+const packedPages = new WeakMap<NotePage, StoredPage>();
+
+function packStroke(s: Stroke): StoredStroke {
+  let out = packedStrokes.get(s);
+  if (out) return out;
+  const { points, ...rest } = s;
+  const pts = new Float64Array(points.length * PT);
+  points.forEach((p, i) => {
+    const o = i * PT;
+    pts[o] = p.x;
+    pts[o + 1] = p.y;
+    pts[o + 2] = p.pressure;
+    pts[o + 3] = p.t ?? NaN;
+    pts[o + 4] = p.alt ?? NaN;
+    pts[o + 5] = p.az ?? NaN;
+  });
+  out = { ...rest, pts };
+  packedStrokes.set(s, out);
+  return out;
+}
+
+function unpackStroke(s: StoredStroke | Stroke): Stroke {
+  if (!('pts' in s) || !(s.pts instanceof Float64Array)) return s as Stroke;
+  const { pts, ...rest } = s;
+  const points: Point[] = [];
+  for (let o = 0; o + PT <= pts.length; o += PT) {
+    const p: Point = { x: pts[o], y: pts[o + 1], pressure: pts[o + 2] };
+    if (!Number.isNaN(pts[o + 3])) p.t = pts[o + 3];
+    if (!Number.isNaN(pts[o + 4])) p.alt = pts[o + 4];
+    if (!Number.isNaN(pts[o + 5])) p.az = pts[o + 5];
+    points.push(p);
+  }
+  const out: Stroke = { ...rest, points };
+  packedStrokes.set(out, s as StoredStroke);
+  return out;
+}
+
+function packNote(note: NoteDocument): NoteDocument {
+  const pages = (note.pages ?? []).map((p) => {
+    let out = packedPages.get(p);
+    if (!out) {
+      out = { ...p, strokes: (p.strokes ?? []).map(packStroke) };
+      packedPages.set(p, out);
+    }
+    return out;
+  });
+  return { ...note, pages: pages as unknown as NotePage[] };
+}
+
+function unpackNote(note: NoteDocument): NoteDocument {
+  if (!note.pages?.some((p) => p.strokes?.some((s) => 'pts' in s))) return note;
+  return { ...note, pages: note.pages.map((p) => ({ ...p, strokes: (p.strokes ?? []).map(unpackStroke) })) };
+}
+
+/** Test hooks (bench/storageRoundtrip.ts). */
+export const __storageCodec = { packNote, unpackNote };
+
 let dbPromise: Promise<IDBDatabase> | null = null;
 
 function openDb(): Promise<IDBDatabase> {
@@ -166,14 +238,14 @@ export async function getAllNotes(): Promise<NoteDocument[]> {
     await saveNote(w, false);
     return [w];
   }
-  return notes.map(migrateNote).sort((a, b) => b.updatedAt - a.updatedAt);
+  return notes.map((n) => migrateNote(unpackNote(n))).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function saveNote(note: NoteDocument, touch = true): Promise<NoteDocument> {
   const updated = touch ? { ...note, updatedAt: Date.now() } : note;
   const db = await openDb();
   const tx = db.transaction(STORE_NOTES, 'readwrite', STRICT);
-  tx.objectStore(STORE_NOTES).put(updated);
+  tx.objectStore(STORE_NOTES).put(packNote(updated));
   await txDone(tx);
   return updated;
 }

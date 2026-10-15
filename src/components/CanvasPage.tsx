@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
 } from '../ink/strokeRenderer';
 import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
@@ -214,19 +214,36 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [alive, setAlive] = useState(eager);
   const onScreen = useRef(eager);
+  /** Within half a screen of the view: the canvas is displayed (see `shown` below). */
+  const shown = useRef(true);
+  const applyShown = () => {
+    const c = canvasRef.current;
+    if (c) c.style.display = shown.current ? '' : 'none';
+  };
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
     const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '100% 0px' });
     const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '250% 0px' });
     const view = new IntersectionObserver((en) => (onScreen.current = en.some((e) => e.isIntersecting)), { root: scrollRoot, rootMargin: '0px' });
+    // A painted tile that is off screen keeps its pixels but leaves the rendering (display: none):
+    // every displayed canvas was handed to the compositor again on each frame, so with all the
+    // tiles kept around the view, writing on a long note got slower with every page (measured:
+    // 8 pages took 3x the frame work of 1 and dropped frames on a slower tablet). It is shown
+    // again, without repainting, before it scrolls into view.
+    const show = new IntersectionObserver((en) => {
+      shown.current = en.some((e) => e.isIntersecting);
+      applyShown();
+    }, { root: scrollRoot, rootMargin: '50% 0px' });
     near.observe(el);
     far.observe(el);
     view.observe(el);
+    show.observe(el);
     return () => {
       near.disconnect();
       far.disconnect();
       view.disconnect();
+      show.disconnect();
     };
   }, [scrollRoot]);
   const painted = useRef<TilePaint | null>(null);
@@ -244,6 +261,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       painted.current = null;
       return;
     }
+    applyShown();
     const w = Math.round(W * ratio), h = Math.round(H * ratio);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
@@ -256,6 +274,10 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     const prev = painted.current && painted.current.complete && painted.current.ratio === ratio ? painted.current : null;
     painted.current = { strokes: mine, ratio, complete: true };
     if (prev && prev.strokes === mine) return;
+    // Every edit gives every tile a new list; a tile whose strokes are the same ones in the same
+    // order has nothing to paint. (It used to fall through to "same strokes in another order" and
+    // repaint completely: each finished stroke repainted every page kept around the view.)
+    if (prev && prev.strokes.length === mine.length && prev.strokes.every((s, i) => mine[i] === s)) return;
 
     if (prev) {
       // Appended pen strokes: painted on top.
@@ -563,6 +585,43 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   useEffect(() => {
     rectCache.current = null;
   }, [zoom]);
+  // Scrolling a long note: every stroke's geometry (the ink engine's model of the line) is built
+  // the first time its page is painted, which on a slower tablet stalled scrolling into pages not
+  // seen yet. After the note opens or changes, it is built in the background a few ms at a time,
+  // nearest to the view first, and paused while a pen, finger or gesture is down.
+  useEffect(() => {
+    if (printMode) return;
+    const strokes = page.strokes;
+    let order: Stroke[] | null = null;
+    let i = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const slice = () => {
+      timer = null;
+      if (drawing.current || gestures.inking || gestures.touches > 0) {
+        timer = setTimeout(slice, 200);
+        return;
+      }
+      if (!order) {
+        const cont = containerRef.current;
+        const c = cont?.getBoundingClientRect();
+        const root = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
+        const scale = c && sizeRef.current.h ? c.height / sizeRef.current.h : 1;
+        const mid = c ? ((root.top + root.bottom) / 2 - c.top) / (scale || 1) : 0;
+        const dist = new Map(strokes.map((s) => {
+          const r = strokeYRange(s);
+          return [s, Math.max(0, r.minY - mid, mid - r.maxY)];
+        }));
+        order = strokes.slice().sort((a, b) => dist.get(a)! - dist.get(b)!);
+      }
+      const until = performance.now() + 4;
+      while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
+      if (i < order.length) timer = setTimeout(slice, 16);
+    };
+    timer = setTimeout(slice, 300);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [printMode, page.strokes, scrollRoot]);
   // Shape tool: the page's snap targets are built ahead of the first shape, and again after edits.
   useEffect(() => {
     if (printMode || tools.tool !== 'shape') return;

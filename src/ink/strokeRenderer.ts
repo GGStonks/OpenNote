@@ -306,6 +306,16 @@ function built(s: Stroke): Built {
   return b;
 }
 
+/**
+ * Builds a committed stroke's geometry ahead of its first paint (cached like a paint would).
+ * Returns false if it was already built.
+ */
+export function prepareStroke(s: Stroke): boolean {
+  if (!s.points.length || cache.has(s)) return false;
+  built(s);
+  return true;
+}
+
 /** drawStrokes' fill pass for one stroke (to paint a list of strokes in slices). */
 export function paintStrokeFill(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
   if (s.points.length) paintFill(ctx, built(s), styleOf(s), opts);
