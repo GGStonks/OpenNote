@@ -2,6 +2,7 @@ package com.opennote.app;
 
 import android.os.Build;
 import android.os.Bundle;
+import android.view.MotionEvent;
 import android.view.Window;
 import android.view.WindowManager;
 
@@ -15,8 +16,16 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(OpenNotePrintPlugin.class);
+        registerPlugin(OpenNoteInkPlugin.class);
         super.onCreate(savedInstanceState);
         enterImmersive();
+    }
+
+    /** Native live ink: the stylus's newest position reaches the ink overlay before the WebView. */
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent ev) {
+        OpenNoteInkPlugin.onTouch(ev);
+        return super.dispatchTouchEvent(ev);
     }
 
     @Override

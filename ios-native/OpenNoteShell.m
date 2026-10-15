@@ -31,10 +31,17 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.0.3";
+static NSString *const kVersion = @"2.0.4";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
+@end
+
+@interface ONInkView : UIView
+@property (nonatomic, readonly) BOOL active;
+- (void)handleMessage:(NSString *)msg;
+- (void)leadTo:(CGPoint)p;
+- (void)touchEnded;
 @end
 
 #pragma mark - 240 Hz Apple Pencil samples
@@ -47,6 +54,7 @@ static NSString *const kVersion = @"2.0.3";
 @interface ONWindow : UIWindow
 @property (nonatomic, weak) WKWebView *webView;
 @property (nonatomic, strong) ONFrameRateBooster *booster;
+@property (nonatomic, weak) ONInkView *inkView;
 @end
 
 @implementation ONWindow {
@@ -97,7 +105,13 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
         [js appendString:@"],[])"];
         [view evaluateJavaScript:js completionHandler:nil];
-        if (phase >= 2) _pencil = nil;
+        // Native live ink: the line reaches the pen's newest position now, not after the page.
+        ONInkView *ink = self.inkView;
+        if (ink.active && phase == 1) [ink leadTo:[samples.lastObject preciseLocationInView:view]];
+        if (phase >= 2) {
+            _pencil = nil;
+            [ink touchEnded];
+        }
     }
 }
 
@@ -245,12 +259,243 @@ static const CFTimeInterval kBoostLinger = 3.0;
 
 @end
 
+#pragma mark - Native live ink
+
+// The stroke being written, drawn natively above the web view (src/ink/nativeInk.ts): the page
+// sends the ink engine's modelled points as it models them, and this layer shows them without
+// waiting for the web view's rendering (its next frame, paint and layer hand-off), which made the
+// pen trail visibly on 60 Hz iPads. The geometry is the engine's (src/ink/engine/geometry.ts,
+// addCapsule): fountain pen = union of capsules between consecutive points (nonzero fill, all
+// wound the same way), ballpoint = round-capped line. The page keeps drawing the stroke too and
+// says when its own copy is on screen ("e"); only then is this layer cleared.
+
+typedef struct { CGFloat x, y, r; } ONInkPt;
+
+/** One capsule exactly as addCapsule draws it (angles decreasing = canvas anticlockwise). */
+static void ONAddCapsule(CGMutablePathRef path, ONInkPt a, ONInkPt b) {
+    CGFloat dx = b.x - a.x, dy = b.y - a.y, d = hypot(dx, dy);
+    if (d <= fabs(a.r - b.r) + 1e-6) {
+        ONInkPt c = a.r >= b.r ? a : b;
+        CGPathMoveToPoint(path, NULL, c.x + c.r, c.y);
+        CGPathAddArc(path, NULL, c.x, c.y, c.r, 0, -M_PI, YES);
+        CGPathAddArc(path, NULL, c.x, c.y, c.r, -M_PI, -2 * M_PI, YES);
+        CGPathCloseSubpath(path);
+        return;
+    }
+    CGFloat th = atan2(dy, dx), ph = acos((a.r - b.r) / d);
+    CGPathMoveToPoint(path, NULL, a.x + a.r * cos(th + ph), a.y + a.r * sin(th + ph));
+    CGPathAddLineToPoint(path, NULL, b.x + b.r * cos(th + ph), b.y + b.r * sin(th + ph));
+    CGPathAddArc(path, NULL, b.x, b.y, b.r, th + ph, th - ph, YES);
+    CGPathAddLineToPoint(path, NULL, a.x + a.r * cos(th - ph), a.y + a.r * sin(th - ph));
+    CGPathAddArc(path, NULL, a.x, a.y, a.r, th - ph, th + ph - 2 * M_PI, YES);
+    CGPathCloseSubpath(path);
+}
+
+/** Settled ink is split into layers of this many points: a full one is never redrawn. */
+static const NSUInteger kInkChunk = 64;
+
+@implementation ONInkView {
+    CALayer *_clip;
+    NSMutableArray<CAShapeLayer *> *_chunks;
+    CAShapeLayer *_tail, *_lead;
+    NSMutableData *_settled; // ONInkPt
+    NSUInteger _chunkStart;  // index of the open chunk's first point
+    NSMutableData *_tailPts;
+    BOOL _variable;
+    CGColorRef _color;
+    BOOL _hasRaw;
+    CGPoint _raw;
+    NSUInteger _generation;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.userInteractionEnabled = NO;
+        self.backgroundColor = UIColor.clearColor;
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        _clip = [CALayer layer];
+        _clip.masksToBounds = YES;
+        [self.layer addSublayer:_clip];
+        _chunks = [NSMutableArray array];
+        _settled = [NSMutableData data];
+        _tailPts = [NSMutableData data];
+    }
+    return self;
+}
+
+- (void)dealloc {
+    if (_color) CGColorRelease(_color);
+}
+
+- (CAShapeLayer *)newShape {
+    CAShapeLayer *l = [CAShapeLayer layer];
+    l.contentsScale = UIScreen.mainScreen.scale;
+    if (_variable) {
+        l.fillColor = _color;
+        l.strokeColor = NULL;
+    } else {
+        l.fillColor = NULL;
+        l.strokeColor = _color;
+        l.lineCap = kCALineCapRound;
+        l.lineJoin = kCALineJoinRound;
+    }
+    [_clip addSublayer:l];
+    return l;
+}
+
+/** Path through pts[0..n): capsules (fountain pen) or a polyline (ballpoint, stroked 2r wide). */
+- (CGPathRef)newPath:(const ONInkPt *)pts count:(NSUInteger)n width:(CGFloat *)width {
+    CGMutablePathRef path = CGPathCreateMutable();
+    if (!n) return path;
+    if (_variable) {
+        if (n == 1) ONAddCapsule(path, pts[0], pts[0]);
+        for (NSUInteger i = 1; i < n; i++) ONAddCapsule(path, pts[i - 1], pts[i]);
+    } else {
+        CGPathMoveToPoint(path, NULL, pts[0].x, pts[0].y);
+        if (n == 1) CGPathAddLineToPoint(path, NULL, pts[0].x + 0.01, pts[0].y);
+        for (NSUInteger i = 1; i < n; i++) CGPathAddLineToPoint(path, NULL, pts[i].x, pts[i].y);
+    }
+    if (width) *width = pts[n - 1].r * 2;
+    return path;
+}
+
+- (void)setShape:(CAShapeLayer *)layer points:(const ONInkPt *)pts count:(NSUInteger)n {
+    CGFloat w = 0;
+    CGPathRef path = [self newPath:pts count:n width:&w];
+    layer.path = path;
+    if (!_variable) layer.lineWidth = w;
+    CGPathRelease(path);
+}
+
+- (void)clear {
+    for (CAShapeLayer *l in _chunks) [l removeFromSuperlayer];
+    [_chunks removeAllObjects];
+    [_tail removeFromSuperlayer];
+    [_lead removeFromSuperlayer];
+    _tail = _lead = nil;
+    _settled.length = 0;
+    _tailPts.length = 0;
+    _chunkStart = 0;
+    _hasRaw = NO;
+    _active = NO;
+}
+
+- (const ONInkPt *)settled {
+    return (const ONInkPt *)_settled.bytes;
+}
+
+- (NSUInteger)settledCount {
+    return _settled.length / sizeof(ONInkPt);
+}
+
+/** The end of the modelled line (where the lead starts). */
+- (BOOL)lineEnd:(ONInkPt *)out {
+    NSUInteger nt = _tailPts.length / sizeof(ONInkPt), ns = self.settledCount;
+    if (nt) *out = ((const ONInkPt *)_tailPts.bytes)[nt - 1];
+    else if (ns) *out = self.settled[ns - 1];
+    else return NO;
+    return YES;
+}
+
+- (void)drawLead {
+    ONInkPt end;
+    if (!_hasRaw || ![self lineEnd:&end]) {
+        _lead.path = NULL;
+        return;
+    }
+    if (!_lead) _lead = [self newShape];
+    ONInkPt seg[2] = { end, { _raw.x, _raw.y, end.r } };
+    [self setShape:_lead points:seg count:2];
+}
+
+- (void)leadTo:(CGPoint)p {
+    _raw = p;
+    _hasRaw = YES;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self drawLead];
+    [CATransaction commit];
+}
+
+- (void)touchEnded {
+    // Safety net: the page normally clears the layer ("e"); if it never does, do not leave ink.
+    NSUInteger gen = _generation;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self->_generation == gen && self->_active) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [self clear];
+            [CATransaction commit];
+        }
+    });
+}
+
+- (void)handleMessage:(NSString *)msg {
+    NSArray<NSString *> *f = [msg componentsSeparatedByString:@","];
+    if (!f.count) return;
+    NSString *kind = f[0];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    if ([kind isEqualToString:@"b"] && f.count >= 10) {
+        [self clear];
+        _generation++;
+        if (_color) CGColorRelease(_color);
+        _color = CGColorRetain([UIColor colorWithRed:f[1].doubleValue / 255 green:f[2].doubleValue / 255 blue:f[3].doubleValue / 255 alpha:f[4].doubleValue].CGColor);
+        _variable = f[5].intValue != 0;
+        _clip.frame = CGRectMake(f[6].doubleValue, f[7].doubleValue, f[8].doubleValue, f[9].doubleValue);
+        _clip.sublayerTransform = CATransform3DMakeTranslation(-_clip.frame.origin.x, -_clip.frame.origin.y, 0);
+        _active = YES;
+    } else if ([kind isEqualToString:@"u"] && _active && f.count >= 2) {
+        NSUInteger fresh = (NSUInteger)MAX(0, f[1].integerValue);
+        NSUInteger total = (f.count - 2) / 3;
+        fresh = MIN(fresh, total);
+        for (NSUInteger i = 0; i < total; i++) {
+            ONInkPt q = { f[2 + i * 3].doubleValue, f[3 + i * 3].doubleValue, f[4 + i * 3].doubleValue };
+            if (i < fresh) [_settled appendBytes:&q length:sizeof q];
+            else {
+                if (i == fresh) _tailPts.length = 0;
+                [_tailPts appendBytes:&q length:sizeof q];
+            }
+        }
+        if (fresh == total) _tailPts.length = 0;
+        NSUInteger ns = self.settledCount;
+        if (fresh) {
+            // The open chunk runs from its first point to the end. Once it holds kInkChunk points it
+            // is left as it is, and the next one starts at its last point, so the line continues.
+            NSUInteger drawn = ns - fresh;
+            if (!_chunks.count) {
+                _chunkStart = 0;
+                [_chunks addObject:[self newShape]];
+            } else if (drawn - _chunkStart >= kInkChunk) {
+                _chunkStart = drawn - 1;
+                [_chunks addObject:[self newShape]];
+            }
+            [self setShape:_chunks.lastObject points:self.settled + _chunkStart count:ns - _chunkStart];
+        }
+        // The tail continues from the last settled point.
+        NSUInteger nt = _tailPts.length / sizeof(ONInkPt);
+        if (!_tail) _tail = [self newShape];
+        NSMutableData *seq = [NSMutableData dataWithCapacity:(nt + 1) * sizeof(ONInkPt)];
+        if (ns) [seq appendBytes:self.settled + ns - 1 length:sizeof(ONInkPt)];
+        [seq appendData:_tailPts];
+        [self setShape:_tail points:(const ONInkPt *)seq.bytes count:seq.length / sizeof(ONInkPt)];
+        [self drawLead];
+    } else if ([kind isEqualToString:@"e"] || [kind isEqualToString:@"c"]) {
+        _generation++;
+        [self clear];
+    }
+    [CATransaction commit];
+}
+
+@end
+
 #pragma mark - View controller
 
-@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
+@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
+@property (nonatomic, strong) ONInkView *inkView;
 /** In-flight bridge HTTP requests by the page's request id (main thread only), for httpCancel. */
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionTask *> *httpTasks;
 @end
@@ -273,6 +518,8 @@ static const CFTimeInterval kBoostLinger = 3.0;
                                                      kVersion, fullFrameRate ? @"true" : @"false", (long)ONMaxFramesPerSecond()];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
+    // Native live ink (fire and forget: no reply, so no round trip).
+    [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennoteInk"];
 
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
     self.webView.UIDelegate = self;
@@ -288,6 +535,8 @@ static const CFTimeInterval kBoostLinger = 3.0;
     // Linux toolchain has no compiler-rt for ___isPlatformVersionAtLeast.
     if ([self.webView respondsToSelector:@selector(setInspectable:)]) self.webView.inspectable = YES;
     self.view = self.webView;
+    self.inkView = [[ONInkView alloc] initWithFrame:self.webView.bounds];
+    [self.webView addSubview:self.inkView];
 
     UIPencilInteraction *pencil = [[UIPencilInteraction alloc] init];
     pencil.delegate = self;
@@ -326,6 +575,10 @@ static const CFTimeInterval kBoostLinger = 3.0;
 }
 
 #pragma mark Bridge
+
+- (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)message {
+    if ([message.name isEqualToString:@"opennoteInk"] && [message.body isKindOfClass:[NSString class]]) [self.inkView handleMessage:message.body];
+}
 
 - (void)userContentController:(WKUserContentController *)ucc
       didReceiveScriptMessage:(WKScriptMessage *)message
@@ -520,6 +773,7 @@ static void ONRemoveScribble(UIView *view) {
     window.rootViewController = vc;
     window.webView = vc.webView ?: (WKWebView *)vc.view;
     window.booster = [[ONFrameRateBooster alloc] init];
+    window.inkView = vc.inkView;
     self.window = window;
     [self.window makeKeyAndVisible];
     return YES;

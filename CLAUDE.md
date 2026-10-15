@@ -16,6 +16,13 @@ has said it must never be changed again. Tag: `nib-engine-v1`.
   Android (Chromium coalesced pointer events): platform differences are handled in the input layer
   (`src/components/CanvasPage.tsx`), never inside the engine.
 
+## Native live ink
+
+In the apps, the stroke being written is also drawn natively above the web view (lower pen latency):
+`src/ink/nativeInk.ts` sends LiveStroke's points to `ios-native/OpenNoteShell.m` (`ONInkView`) and
+`android/.../OpenNoteInkPlugin.java`. Both shells mirror the engine's capsule geometry (`addCapsule`);
+if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
+
 ## Useful commands
 
 - `npm run build` — engine test, storage round-trip test, type-check, production build

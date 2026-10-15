@@ -11,6 +11,7 @@ import {
 import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
+import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -679,6 +680,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** Raw input of the stroke for the pen recorder (Settings > Diagnostics); null when off. */
     rec: RecordedSample[] | null;
     recFrames: number[];
+    /** Pen tool in the app: the shell draws the live stroke natively too (src/ink/nativeInk.ts). */
+    ink: NativeInk | null;
+    inkTf: InkTransform | null;
     /** The pen lifted before the shell's last samples arrived: finish when they do. */
     finishPending: { cancelled: boolean; pointerType: string; timer: ReturnType<typeof setTimeout> } | null;
   } | null>(null);
@@ -797,6 +801,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const clearActive = useCallback(() => {
     if (drawing.current) retireInk(drawing.current);
+    drawing.current?.ink?.cancel();
     drawing.current = null;
     gestures.inking = false;
     eraserPos.current = null;
@@ -920,6 +925,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (existing.pointerType === 'touch' && e.pointerType === 'pen') {
         if (existing.holdTimer) clearTimeout(existing.holdTimer);
         retireInk(existing);
+        existing.ink?.cancel();
         drawing.current = null;
       } else if (existing.pointerId === e.pointerId || e.pointerType === existing.pointerType) {
         // A pointerup was lost (e.g. pointer capture dropped by the system): finish the old stroke
@@ -972,6 +978,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       pressure: pt.pressure,
       force: [pt.pressure],
       model: tool === 'pen' ? new LiveStroke() : null,
+      ink: tool === 'pen' && NativeInk.available ? new NativeInk() : null,
+      inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       native: null,
       nativeSeen: false,
@@ -983,6 +991,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       recFrames: [],
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+    syncInk(drawing.current);
     gestures.inking = true;
     gestures.inkingWith = e.pointerType;
     if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
@@ -1122,7 +1131,34 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         armHoldToSnap();
       }
     }
+    syncInk(d);
     requestRender();
+  }
+
+  /** Page px to the shell's view units, measured once per stroke (the page does not move under the pen). */
+  function inkTransform(): InkTransform {
+    const rect = canvasRect();
+    const unit = nativeInkUnit();
+    const root = scrollRoot?.getBoundingClientRect() ?? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+    return {
+      ox: rect.left * unit,
+      oy: rect.top * unit,
+      k: (rect.width / sizeRef.current.w) * unit,
+      clip: { x: root.left * unit, y: root.top * unit, w: root.width * unit, h: root.height * unit },
+    };
+  }
+
+  /** Sends the live stroke to the shell's native ink layer (iOS / Android app). */
+  function syncInk(d: NonNullable<typeof drawing.current>) {
+    if (!d.ink || !d.model) return;
+    if (d.snapped) {
+      // Held still and snapped to a shape: the page draws the shape.
+      d.ink.cancel();
+      return;
+    }
+    const style = liveStyle('pen');
+    d.inkTf ??= inkTransform();
+    d.ink.update(d.model, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure }, d.inkTf);
   }
 
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
@@ -1190,6 +1226,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawing.current = null;
     gestures.inking = false;
     retireInk(d);
+    if (d.ink) {
+      const ink = d.ink;
+      // The finished stroke is painted with React's commit below; the shell's layer is cleared
+      // once a frame showing it has been drawn, so the ink never blinks.
+      if (cancelled) ink.cancel();
+      else requestAnimationFrame(() => requestAnimationFrame(() => ink.end()));
+    }
 
     if (!cancelled && d.smart && d.snapped) {
       // Draw & hold made a clean shape: it keeps the Draw tool's style.
