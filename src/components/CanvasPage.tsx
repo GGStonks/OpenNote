@@ -14,7 +14,6 @@ import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil'
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
 import { tileWork } from '../editor/tileWork';
-import { sceneItem } from '../ink/pinchScene';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -140,6 +139,8 @@ export function paperGrid(style: PaperStyle): number | null {
 const MAX_CANVAS_PIXELS = 16_000_000;
 /** Above this zoom committed ink is drawn as SVG (sharp at any zoom) instead of page canvases. */
 const VECTOR_ZOOM = 2.5;
+/** From this zoom page canvases draw handwriting as the smooth line (strokeRenderer.smoothGeometry). */
+const SMOOTH_ZOOM = 1.5;
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
 
@@ -211,10 +212,12 @@ function strokeYRange(s: Stroke) {
 /**
  * One page band of ink as SVG (zoomed in past VECTOR_ZOOM: sharp at any zoom). Like InkTile it is
  * built only near the view and dropped far from it: one SVG of the whole note was rebuilt and
- * parsed (megabytes of markup on a long note) every time a pinch ended past VECTOR_ZOOM.
+ * parsed (megabytes of markup on a long note) every time a pinch ended past VECTOR_ZOOM. The page
+ * band's canvas (InkTile, `inkKey`) stays under it, as it was, and is hidden only once the SVG is
+ * there, so switching to vector ink never shows the page without ink.
  */
-const VectorTile = React.memo(function VectorTile(props: { top: number; width: number; height: number; strokes: Stroke[]; scrollRoot: HTMLElement | null; paperOf: (s: Stroke) => string }) {
-  const { top, width: W, height: H, strokes, scrollRoot } = props;
+const VectorTile = React.memo(function VectorTile(props: { top: number; width: number; height: number; strokes: Stroke[]; scrollRoot: HTMLElement | null; paperOf: (s: Stroke) => string; inkKey: string }) {
+  const { top, width: W, height: H, strokes, scrollRoot, inkKey } = props;
   const paperOf = useRef(props.paperOf);
   paperOf.current = props.paperOf;
   const mine = useMemo(() => strokes.filter((s) => {
@@ -223,24 +226,10 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
   }), [strokes, top, H]);
   const holderRef = useRef<HTMLDivElement>(null);
   const [alive, setAlive] = useState(false);
-  // Made under the pinch overlay: the overlay waits until this tile knows whether it is near the view
-  // and, if it is, has its SVG.
-  const token = useRef({});
-  const reported = useRef(false);
-  useEffect(() => {
-    if (tileWork.deferring) tileWork.pending.add(token.current);
-    return () => {
-      tileWork.pending.delete(token.current);
-    };
-  }, []);
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
-    const near = new IntersectionObserver((en) => {
-      reported.current = true;
-      if (en.some((e) => e.isIntersecting)) setAlive(true);
-      else tileWork.pending.delete(token.current);
-    }, { root: scrollRoot, rootMargin: '50% 0px' });
+    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '50% 0px' });
     const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '150% 0px' });
     near.observe(el);
     far.observe(el);
@@ -266,18 +255,27 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
       tileWork.resume.delete(make);
     };
   }, [alive, mine]);
-  useEffect(() => {
-    if (reported.current && (svg || !mine.length || !alive)) tileWork.pending.delete(token.current);
-  }, [alive, svg, mine.length]);
+  // The canvas under this band is hidden while the SVG shows the same ink.
+  useLayoutEffect(() => {
+    const ink = holderRef.current?.parentElement?.querySelector<HTMLElement>(`[data-ink-key="${inkKey}"]`);
+    if (!ink) return;
+    ink.style.visibility = svg ? 'hidden' : '';
+    return () => {
+      ink.style.visibility = '';
+    };
+  }, [svg, inkKey]);
   return (
-    <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
     </div>
   );
 });
 
-const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; scrollRoot: HTMLElement | null }) {
-  const { eager, top, width: W, height: H, strokes, ratio, scrollRoot } = props;
+/** What a tile's canvas shows: its strokes, at what resolution, and whether as the smooth line. */
+type TileShown = { strokes: Stroke[]; ratio: number; smooth: boolean };
+
+const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; smooth: boolean; scrollRoot: HTMLElement | null; inkKey: string }) {
+  const { eager, top, width: W, height: H, strokes, ratio, smooth, scrollRoot, inkKey } = props;
   const mine = useMemo(() => strokes.filter((s) => {
     const r = strokeYRange(s);
     return r.maxY >= top && r.minY <= top + H;
@@ -318,16 +316,54 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       show.disconnect();
     };
   }, [scrollRoot]);
-  const painted = useRef<TilePaint | null>(null);
+  /** What the canvas shows now (complete); null when it shows nothing usable. */
+  const painted = useRef<TileShown | null>(null);
   const slicing = useRef<number | null>(null);
-  const token = useRef({});
   useEffect(() => () => {
     if (slicing.current !== null) cancelAnimationFrame(slicing.current);
-    tileWork.pending.delete(token.current);
   }, []);
+
+  /**
+   * Paints `job` on ctx a few ms per frame (not at all while two fingers zoom), in the order
+   * drawStrokes uses (highlighters, then fills, then ink), then calls done.
+   */
+  const paintSliced = (ctx: CanvasRenderingContext2D, job: Stroke[], sm: boolean, done: () => void) => {
+    const opts = { smooth: sm };
+    const passes: ((s: Stroke) => boolean)[] = [
+      (s) => s.tool === 'highlighter',
+      (s) => s.tool !== 'highlighter' && !!s.fill && s.fill !== 'none',
+      (s) => s.tool !== 'highlighter',
+    ];
+    let pass = 0, i = 0;
+    const step = () => {
+      slicing.current = null;
+      if (tileWork.paused) {
+        slicing.current = requestAnimationFrame(step);
+        return;
+      }
+      const until = performance.now() + TILE_SLICE_MS;
+      while (pass < passes.length) {
+        for (; i < job.length; i++) {
+          if (performance.now() > until) {
+            slicing.current = requestAnimationFrame(step);
+            return;
+          }
+          const s = job[i];
+          if (!passes[pass](s) || !s.points.length) continue;
+          if (pass === 0) drawStrokes(ctx, [s], opts);
+          else if (pass === 1) paintStrokeFill(ctx, s, opts);
+          else paintStrokeInk(ctx, s, opts);
+        }
+        pass++;
+        i = 0;
+      }
+      done();
+    };
+    step();
+  };
+
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    tileWork.pending.delete(token.current);
     if (slicing.current !== null) {
       cancelAnimationFrame(slicing.current);
       slicing.current = null;
@@ -338,6 +374,33 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     }
     applyShown();
     const w = Math.round(W * ratio), h = Math.round(H * ratio);
+    const prev = painted.current;
+
+    // A new resolution or line (the zoom changed): the canvas keeps showing its picture, stretched
+    // in place, while the new one is painted off screen a few ms per frame; then it is copied in
+    // at once. Repainting the canvas itself left it blank or half painted, or froze the page while
+    // every tile on screen was painted in one go.
+    if (prev && (prev.ratio !== ratio || prev.smooth !== smooth) && canvas.width > 0) {
+      const off = document.createElement('canvas');
+      off.width = w;
+      off.height = h;
+      const octx = off.getContext('2d');
+      if (!octx) return;
+      octx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
+      const job = mine;
+      paintSliced(octx, job, smooth, () => {
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(off, 0, 0);
+        ctx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
+        painted.current = { strokes: job, ratio, smooth };
+        off.width = off.height = 0;
+      });
+      return;
+    }
+
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
@@ -346,25 +409,26 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
-    const prev = painted.current && painted.current.complete && painted.current.ratio === ratio ? painted.current : null;
-    painted.current = { strokes: mine, ratio, complete: true };
-    if (prev && prev.strokes === mine) return;
+    const opts = { smooth };
+    const same = painted.current;
+    painted.current = { strokes: mine, ratio, smooth };
+    if (same && same.strokes === mine) return;
     // Every edit gives every tile a new list; a tile whose strokes are the same ones in the same
     // order has nothing to paint. (It used to fall through to "same strokes in another order" and
     // repaint completely: each finished stroke repainted every page kept around the view.)
-    if (prev && prev.strokes.length === mine.length && prev.strokes.every((s, i) => mine[i] === s)) return;
+    if (same && same.strokes.length === mine.length && same.strokes.every((s, i) => mine[i] === s)) return;
 
-    if (prev) {
+    if (same) {
       // Appended pen strokes: painted on top.
-      const n = prev.strokes.length;
-      if (mine.length > n && prev.strokes.every((s, i) => mine[i] === s) && mine.slice(n).every((s) => s.tool !== 'highlighter' && (!s.fill || s.fill === 'none'))) {
-        for (const s of mine.slice(n)) drawStroke(ctx, s);
+      const n = same.strokes.length;
+      if (mine.length > n && same.strokes.every((s, i) => mine[i] === s) && mine.slice(n).every((s) => s.tool !== 'highlighter' && (!s.fill || s.fill === 'none'))) {
+        for (const s of mine.slice(n)) drawStroke(ctx, s, opts);
         return;
       }
       // Anything else: repaint the area of what changed.
-      const before = new Set(prev.strokes), after = new Set(mine);
+      const before = new Set(same.strokes), after = new Set(mine);
       let area: DirtyRect | null = null;
-      for (const s of prev.strokes) if (!after.has(s)) area = unionRect(area, strokePaintBounds(s));
+      for (const s of same.strokes) if (!after.has(s)) area = unionRect(area, strokePaintBounds(s));
       for (const s of mine) if (!before.has(s)) area = unionRect(area, strokePaintBounds(s));
       if (!area) {
         // Same strokes in another order: repaint all of them.
@@ -383,66 +447,27 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
         ctx.rect(x0, y0, x1 - x0, y1 - y0);
         ctx.clip();
         ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
-        drawStrokes(ctx, hit);
+        drawStrokes(ctx, hit, opts);
         ctx.restore();
         return;
       }
     }
 
     ctx.clearRect(0, top, W, H);
-    // After a zoom the observer has not caught up with where the tile now is: it is measured, so a
-    // tile on screen is painted at once (the pinch's ink overlay hands over to it on the next frame).
-    const inView = () => {
-      const r = holderRef.current?.getBoundingClientRect();
-      const v = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
-      return !!r && r.bottom > v.top && r.top < v.bottom;
-    };
-    // Under the pinch overlay every tile repaints in slices (it is covered until it is done).
-    if (!tileWork.deferring && (onScreen.current || mine.length < 40 || inView())) {
-      drawStrokes(ctx, mine);
+    // A tile with nothing to show yet: on screen it is painted at once, off screen (scrolling
+    // towards it) in slices, taken as painted only at the end.
+    if (onScreen.current || mine.length < 40) {
+      drawStrokes(ctx, mine, opts);
       return;
     }
-    tileWork.pending.add(token.current);
-    // Off screen (scrolling towards it): paint in slices, in the order drawStrokes uses
-    // (highlighters, then fills, then ink), and take the tile as painted only at the end.
-    painted.current = { strokes: mine, ratio, complete: false };
-    const passes: ((s: Stroke) => boolean)[] = [
-      (s) => s.tool === 'highlighter',
-      (s) => s.tool !== 'highlighter' && !!s.fill && s.fill !== 'none',
-      (s) => s.tool !== 'highlighter',
-    ];
-    let pass = 0, i = 0;
+    painted.current = null;
     const job = mine;
-    const step = () => {
-      slicing.current = null;
-      if (painted.current?.strokes !== job) return;
-      if (tileWork.paused) {
-        slicing.current = requestAnimationFrame(step);
-        return;
-      }
-      const until = performance.now() + TILE_SLICE_MS;
-      while (pass < passes.length) {
-        for (; i < job.length; i++) {
-          if (performance.now() > until && (!onScreen.current || tileWork.deferring)) {
-            slicing.current = requestAnimationFrame(step);
-            return;
-          }
-          const s = job[i];
-          if (!passes[pass](s) || !s.points.length) continue;
-          if (pass === 0) drawStrokes(ctx, [s]);
-          else if (pass === 1) paintStrokeFill(ctx, s);
-          else paintStrokeInk(ctx, s);
-        }
-        pass++;
-        i = 0;
-      }
-      painted.current = { strokes: job, ratio, complete: true };
-      tileWork.pending.delete(token.current);
-    };
-    step();
-  }, [mine, ratio, alive, top, W, H]);
+    paintSliced(ctx, job, smooth, () => {
+      painted.current = { strokes: job, ratio, smooth };
+    });
+  }, [mine, ratio, smooth, alive, top, W, H]);
   return (
-    <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} data-ink-key={inkKey} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {alive && mine.length > 0 && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
     </div>
   );
@@ -581,6 +606,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // those canvases were drawn soft and then stretched.
   const tileArea = Math.max(1, ...layout.sheets.map((sh) => PAGE_W * sh.height));
   const vector = printMode || zoom > VECTOR_ZOOM || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2;
+  // The page canvases' zoom: the zoom, or while vector ink is shown, the last zoom below it (the
+  // canvases are not repainted for zooms the vector ink covers; they stay under it as they were).
+  const canvasZoom = useRef(zoom);
+  if (!vector) canvasZoom.current = zoom;
+  const inkZoom = canvasZoom.current;
   /** Paper under a stroke ("hole" fills in SVG). */
   const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
   /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
@@ -707,12 +737,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         order = strokes.slice().sort((a, b) => dist.get(a)! - dist.get(b)!);
       }
       const until = performance.now() + 4;
-      while (i < order.length && performance.now() < until) {
-        const s = order[i++];
-        prepareStroke(s);
-        // What the pinch overlay's worker needs (encoding it at the first pinch made it stutter).
-        sceneItem(s);
-      }
+      while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
       if (i < order.length) timer = setTimeout(slice, 16);
     };
     timer = setTimeout(slice, 300);
@@ -1733,12 +1758,29 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       */}
       {layers.map((l) => {
         if (l.kind === 'ink') {
-          if (vector && !printMode) {
+          if (!printMode) {
+            // Canvases always (at the last zoom below vector ink, kept while zoomed further in), with
+            // the vector ink over them past it; each canvas is hidden once its band's SVG is there.
             return (
               <React.Fragment key={l.key}>
                 {layout.sheets.map((sh) => (
-                  <VectorTile key={sh.id} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} scrollRoot={scrollRoot} paperOf={svgPaperOf} />
+                  <InkTile
+                    key={sh.id}
+                    inkKey={`${l.key}:${sh.id}`}
+                    eager={sh.index < 2}
+                    top={sh.top}
+                    width={PAGE_W}
+                    height={sh.height}
+                    strokes={l.strokes}
+                    ratio={canvasRatio(inkZoom, PAGE_W * sh.height)}
+                    smooth={inkZoom >= SMOOTH_ZOOM}
+                    scrollRoot={scrollRoot}
+                  />
                 ))}
+                {vector &&
+                  layout.sheets.map((sh) => (
+                    <VectorTile key={`v${sh.id}`} inkKey={`${l.key}:${sh.id}`} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} scrollRoot={scrollRoot} paperOf={svgPaperOf} />
+                  ))}
               </React.Fragment>
             );
           }
@@ -1751,13 +1793,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
               viewBox={`0 0 ${PAGE_W} ${PAGE_H}`}
               dangerouslySetInnerHTML={{ __html: layerSvg(l.strokes) }}
             />
-          ) : (
-            <React.Fragment key={l.key}>
-              {layout.sheets.map((sh) => (
-                <InkTile key={sh.id} eager={sh.index < 2} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} ratio={canvasRatio(zoom, PAGE_W * sh.height)} scrollRoot={scrollRoot} />
-              ))}
-            </React.Fragment>
-          );
+          ) : null;
         }
         if (l.kind === 'image') return <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} />;
         if (l.kind === 'latex') {

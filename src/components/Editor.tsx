@@ -203,11 +203,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     editor.commit((d) => appendBlankSheet(d));
     haptic('success');
   }, [editor]);
-  const surfaceRef = useRef(surface);
-  surfaceRef.current = surface;
-  const pinchInk = useCallback(() => ({ strokes: surfaceRef.current.strokes, pad: PAD }), []);
   const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy } = useViewport({
-    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, pinchInk, penScrolls,
+    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls,
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 

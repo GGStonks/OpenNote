@@ -16,7 +16,6 @@
  *   X x y w h (rect)   f rule   s   x rule (clip; rule 0 nonzero, 1 evenodd)
  */
 import { withPathFactory } from './strokeRenderer';
-import { OP } from './inkRecorder.ops';
 import type { InkTransform } from './nativeInk';
 
 type Op = (string | number)[];
@@ -199,20 +198,4 @@ export function record(tf: InkTransform, draw: (ctx: CanvasRenderingContext2D) =
     });
   }
   return tokens.join(',');
-}
-
-
-/**
- * Runs `draw` on a recording context and returns its commands as numbers in page px (opcode, then
- * its arguments; D: count, lengths, offset), for the pinch overlay's worker (pinchWorker.ts).
- */
-export function recordOps(draw: (ctx: CanvasRenderingContext2D) => void): Float32Array {
-  const ctx = new RecCtx();
-  withPathFactory(() => new RecPath() as unknown as Path2D, () => draw(ctx as unknown as CanvasRenderingContext2D));
-  const out: number[] = [];
-  for (const op of ctx.out) {
-    const [name, ...args] = op as [keyof typeof OP, ...number[]];
-    out.push(OP[name], ...args);
-  }
-  return new Float32Array(out);
 }

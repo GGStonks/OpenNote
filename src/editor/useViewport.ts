@@ -1,58 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { GestureBus } from './gestures';
-import type { Stroke } from '../types';
-import { drawStrokes, strokePaintBounds } from '../ink/strokeRenderer';
-import { sceneItem } from '../ink/pinchScene';
-import { setTilesPaused, tileWork } from './tileWork';
-
-/**
- * The pinch overlay's worker (pinchWorker.ts), shared by every pinch so strokes are sent to it once.
- * null where OffscreenCanvas is missing (iPadOS before 16.4) or the worker failed: the overlay is
- * then drawn on the page's thread.
- */
-let pinchWorker: Worker | null | undefined;
-const workerIds = new WeakMap<Stroke, number>();
-let nextWorkerId = 1;
-function getPinchWorker(): Worker | null {
-  if (pinchWorker !== undefined) return pinchWorker;
-  try {
-    if (typeof OffscreenCanvas === 'undefined' || !('transferControlToOffscreen' in HTMLCanvasElement.prototype)) return (pinchWorker = null);
-    const w = new Worker(new URL('../ink/pinchWorker.ts', import.meta.url), { type: 'module' });
-    w.addEventListener('error', () => {
-      pinchWorker = null;
-    });
-    pinchWorker = w;
-  } catch {
-    pinchWorker = null;
-  }
-  return pinchWorker;
-}
-
-/**
- * Viewport of the note: scrolling, zoom and the pull that adds a page.
- *
- * One finger scrolls natively (the browser's own scrolling and fling, off the main thread) when
- * fingers do not draw: the note and its pages have `touch-action: pan-x pan-y`, and the touches
- * that must not scroll are cancelled when they start (touchstart preventDefault): the Pencil (it
- * writes; it scrolls only with the hand tool), a hand resting on the glass while the Pencil writes,
- * and a second finger, so two fingers always pan and pinch-zoom here in JS, with momentum. v2.0.5
- * and earlier scrolled with every finger in JS (touch-action: none everywhere), which lagged behind
- * the finger on slower tablets. When fingers draw, the pages keep touch-action: none and one finger
- * draws. The mouse wheel scrolls natively and ctrl + wheel (trackpad pinch) zooms.
- *
- * Zoom goes from MIN_ZOOM (or less, when fitting the width needs less) to MAX_ZOOM; 1 = actual size
- * (96 px per inch). It starts fitted to the width and refits when the window changes size
- * (rotation, split view) until the user zooms. While two fingers pinch, the content is scaled with
- * a CSS transform about the point between them (no re-layout per frame); the zoom is applied when
- * the pinch ends, with the same point kept under the fingers. A pinch only starts once the fingers'
- * distance changed by PINCH_START, so a two-finger scroll does not zoom by accident.
- *
- * Pulling past the end of the note (fingers, hand tool or wheel) reports the pull distance and,
- * past PULL_THRESHOLD, asks for a new page (onPullCommit).
- *
- * A quick tap of two or three fingers that barely move is reported through onFingerTap
- * (Notability: two-finger tap = undo, three-finger tap = redo).
- */
+import { setTilesPaused } from './tileWork';
 
 interface Options {
   contentWidth: number;
@@ -65,270 +13,7 @@ interface Options {
   onPullCommit?: () => void;
   /** The Pencil scrolls too (hand tool). */
   penScrolls?: () => boolean;
-  /**
-   * The ink to draw sharp while two fingers zoom: the surface's strokes and where the surface sits
-   * in the unzoomed content (px). Without it the pinch shows the content stretched.
-   */
-  pinchInk?: () => { strokes: Stroke[]; pad: number } | null;
 }
-
-/**
- * Ink drawn sharp while two fingers zoom. The content is scaled with a CSS transform during a pinch,
- * which stretched the ink's canvases (blurry, more so the further the zoom went) until the fingers
- * lifted and the canvases were repainted at the new zoom, when the ink popped back sharp. A canvas
- * over the view now draws the visible strokes at the screen's resolution for the current pinch on
- * every frame (from their cached geometry), with the stretched ink hidden under it
- * ([data-pinching] [data-ink-layer], index.css), and stays until the page has repainted at the
- * new zoom, so the ink stays sharp throughout.
- */
-class PinchInk {
-  private canvas: HTMLCanvasElement | null = null;
-  private frame: number | null = null;
-  /** k: the pinch's scale; o: its origin (zoomed content px); z: the zoom the content is laid out at. */
-  state: { k: number; o: { x: number; y: number }; z: number } | null = null;
-  private removeTimer: number | null = null;
-  /** The mapping (view x = ax + S * surface x) the canvas was last drawn with. */
-  private drawn: { ax: number; ay: number; S: number } | null = null;
-  private idle: ReturnType<typeof setTimeout> | null = null;
-  /** Worker mode: the views sent (by sequence number), the page region whose strokes were sent. */
-  private worker: Worker | null = null;
-  private seq = 0;
-  private views = new Map<number, { ax: number; ay: number; S: number }>();
-  private region: { x0: number; y0: number; x1: number; y1: number } | null = null;
-  private settleSeq = -1;
-  private onDrawn = (e: MessageEvent) => {
-    if (e.data?.type !== 'drawn' || !this.canvas) return;
-    const v = this.views.get(e.data.seq);
-    if (!v) return;
-    for (const k of this.views.keys()) if (k <= e.data.seq) this.views.delete(k);
-    // Until the worker's first drawing the stretched page ink stays visible (no blank frame).
-    if (!this.drawn) this.outer.setAttribute('data-pinching', '');
-    this.drawn = v;
-    this.follow();
-    if (this.settleSeq >= 0 && e.data.seq >= this.settleSeq) this.handOver();
-  };
-
-  constructor(private el: HTMLElement, private outer: HTMLElement, private ink: () => { strokes: Stroke[]; pad: number } | null) {}
-
-  show(k: number, o: { x: number; y: number }, z: number) {
-    this.state = { k, o, z };
-    if (this.removeTimer !== null) {
-      cancelAnimationFrame(this.removeTimer);
-      this.removeTimer = null;
-    }
-    if (!this.canvas) {
-      const c = document.createElement('canvas');
-      c.style.cssText = 'position:absolute;pointer-events:none;z-index:5;transform-origin:0 0;';
-      this.el.parentElement?.appendChild(c);
-      this.canvas = c;
-      this.drawn = null;
-      this.region = null;
-      this.settleSeq = -1;
-      tileWork.deferring = true;
-      this.worker = getPinchWorker();
-      if (this.worker) {
-        try {
-          const off = c.transferControlToOffscreen();
-          this.worker.postMessage({ type: 'init', canvas: off, dpr: Math.min(window.devicePixelRatio || 1, 2) }, [off]);
-          this.worker.addEventListener('message', this.onDrawn);
-        } catch {
-          this.worker = null;
-        }
-      }
-      if (!this.worker) this.outer.setAttribute('data-pinching', '');
-    }
-    if (this.frame === null) this.frame = requestAnimationFrame(() => this.update(false));
-    // Fingers resting: drawn exactly for where they are.
-    if (this.idle) clearTimeout(this.idle);
-    this.idle = setTimeout(() => this.update(true), 120);
-  }
-
-  /** The page has been laid out at zoom z: the overlay hands over to it after two frames. */
-  settle(z: number) {
-    if (!this.canvas || !this.state) return;
-    this.state = { k: 1, o: { x: 0, y: 0 }, z };
-    if (this.worker) {
-      // Hand over once the worker has drawn the final view (at most 600 ms later).
-      this.update(true);
-      this.settleSeq = this.seq;
-      if (!this.drawn) {
-        this.remove();
-        return;
-      }
-      if (this.idle) clearTimeout(this.idle);
-      this.idle = setTimeout(() => this.handOver(), 600);
-      return;
-    }
-    this.update(false);
-    this.handOver();
-  }
-
-  /**
-   * The page's ink is shown again once its tiles have repainted at the new zoom (in slices, under
-   * the overlay; at most 2.5 s), then the overlay goes on the next frame.
-   */
-  private handOver(since = performance.now()) {
-    if (this.removeTimer !== null) return;
-    if (tileWork.pending.size && performance.now() - since < 2500) {
-      this.removeTimer = requestAnimationFrame(() => {
-        this.removeTimer = null;
-        this.handOver(since);
-      });
-      return;
-    }
-    this.removeTimer = requestAnimationFrame(() => {
-      this.outer.removeAttribute('data-pinching');
-      this.removeTimer = requestAnimationFrame(() => this.remove());
-    });
-  }
-
-  remove() {
-    tileWork.deferring = false;
-    this.outer.style.willChange = '';
-    if (this.worker) {
-      this.worker.removeEventListener('message', this.onDrawn);
-      this.worker.postMessage({ type: 'detach' });
-      this.worker = null;
-    }
-    this.views.clear();
-    this.settleSeq = -1;
-    if (this.frame !== null) cancelAnimationFrame(this.frame);
-    if (this.removeTimer !== null) cancelAnimationFrame(this.removeTimer);
-    if (this.idle) clearTimeout(this.idle);
-    this.frame = this.removeTimer = this.idle = null;
-    this.canvas?.remove();
-    this.canvas = null;
-    this.state = null;
-    this.drawn = null;
-    this.outer.removeAttribute('data-pinching');
-  }
-
-  /** The current mapping of surface px to view px. */
-  private mapping(pad: number) {
-    const st = this.state!;
-    const S = st.z * st.k;
-    const left = this.outer.offsetLeft - this.el.scrollLeft, top = this.outer.offsetTop - this.el.scrollTop;
-    return { S, ax: left + st.o.x * (1 - st.k) + pad * S, ay: top + st.o.y * (1 - st.k) + pad * S };
-  }
-
-  /**
-   * Follows the pinch. Drawing every visible stroke on every frame was too slow zoomed out, so the
-   * canvas (drawn with a margin of MARGIN view sizes on each side) is moved and scaled with a CSS
-   * transform between drawings, and drawn again when the zoom has changed by more than REDRAW_SCALE
-   * since, when its margin would come into view, or when the fingers rest (`exact`).
-   */
-  private update(exact: boolean) {
-    this.frame = null;
-    const c = this.canvas, ink = this.ink();
-    if (!c || !this.state || !ink) return;
-    const el = this.el;
-    const w = el.clientWidth, h = el.clientHeight;
-    const m = this.mapping(ink.pad);
-    if (this.worker) {
-      this.sendScene(ink.strokes, m, w, h);
-      const seq = ++this.seq;
-      this.views.set(seq, m);
-      this.place(c, w, h);
-      this.worker.postMessage({ type: 'view', seq, ax: m.ax + MARGIN * w, ay: m.ay + MARGIN * h, S: m.S, w: w * (1 + 2 * MARGIN), h: h * (1 + 2 * MARGIN) });
-      this.follow();
-      return;
-    }
-    const d = this.drawn;
-    if (d && !exact) {
-      const r = m.S / d.S;
-      // Where the drawn canvas's corners land now (view px).
-      const left = m.ax + (-MARGIN * w - d.ax) * r, top = m.ay + (-MARGIN * h - d.ay) * r;
-      const right = left + w * (1 + 2 * MARGIN) * r, bottom = top + h * (1 + 2 * MARGIN) * r;
-      if (Math.abs(r - 1) < REDRAW_SCALE && left <= 0 && top <= 0 && right >= w && bottom >= h) {
-        c.style.transform = `translate(${left}px, ${top}px) scale(${r})`;
-        return;
-      }
-    }
-    this.draw(c, ink.strokes, m, w, h);
-  }
-
-  /** Positions and sizes the overlay element (its pixels belong to the worker). */
-  private place(c: HTMLCanvasElement, w: number, h: number) {
-    c.style.left = `${this.el.offsetLeft}px`;
-    c.style.top = `${this.el.offsetTop}px`;
-    c.style.width = `${w * (1 + 2 * MARGIN)}px`;
-    c.style.height = `${h * (1 + 2 * MARGIN)}px`;
-  }
-
-  /** Worker mode: moves the canvas from the view it was drawn for to the current one. */
-  private follow() {
-    const c = this.canvas, d = this.drawn, ink = this.ink();
-    if (!c || !d || !ink || !this.state) return;
-    const w = this.el.clientWidth, h = this.el.clientHeight;
-    const m = this.mapping(ink.pad);
-    const r = m.S / d.S;
-    c.style.transform = `translate(${m.ax + (-MARGIN * w - d.ax) * r}px, ${m.ay + (-MARGIN * h - d.ay) * r}px) scale(${r})`;
-  }
-
-  /**
-   * Worker mode: sends the strokes of the page region around the view that the worker does not have
-   * yet (each once per session), and which of them to draw. The region is the view plus half a view
-   * on every side, and grows when the view leaves it (zooming out).
-   */
-  private sendScene(strokes: Stroke[], m: { ax: number; ay: number; S: number }, w: number, h: number) {
-    const vx0 = -m.ax / m.S, vx1 = (w - m.ax) / m.S, vy0 = -m.ay / m.S, vy1 = (h - m.ay) / m.S;
-    const r = this.region;
-    if (r && vx0 >= r.x0 && vx1 <= r.x1 && vy0 >= r.y0 && vy1 <= r.y1) return;
-    const dw = (vx1 - vx0) / 2, dh = (vy1 - vy0) / 2;
-    const reg = { x0: vx0 - dw, x1: vx1 + dw, y0: vy0 - dh, y1: vy1 + dh };
-    this.region = reg;
-    const list: { id: number; item: ReturnType<typeof sceneItem> }[] = [];
-    const ids: number[] = [];
-    for (const s of strokes) {
-      const b = strokePaintBounds(s);
-      if (b.maxX < reg.x0 || b.minX > reg.x1 || b.maxY < reg.y0 || b.minY > reg.y1) continue;
-      let id = workerIds.get(s);
-      if (id === undefined) {
-        id = nextWorkerId++;
-        workerIds.set(s, id);
-        list.push({ id, item: sceneItem(s) });
-      }
-      ids.push(id);
-    }
-    if (list.length) this.worker!.postMessage({ type: 'items', list });
-    this.worker!.postMessage({ type: 'order', ids });
-  }
-
-  private draw(c: HTMLCanvasElement, strokes: Stroke[], m: { ax: number; ay: number; S: number }, w: number, h: number) {
-    const el = this.el;
-    // At most 2x: the overlay lives only while fingers zoom, and a 3x canvas of the view plus its
-    // margin cost more to draw and composite than the sharpness was worth.
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    const cw = w * (1 + 2 * MARGIN), ch = h * (1 + 2 * MARGIN);
-    c.style.left = `${el.offsetLeft}px`;
-    c.style.top = `${el.offsetTop}px`;
-    c.style.width = `${cw}px`;
-    c.style.height = `${ch}px`;
-    c.style.transform = `translate(${-MARGIN * w}px, ${-MARGIN * h}px)`;
-    if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) {
-      c.width = Math.round(cw * dpr);
-      c.height = Math.round(ch * dpr);
-    }
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, c.width, c.height);
-    // Canvas px = (view px + margin) * dpr; view px = a + S * surface px.
-    const ox = m.ax + MARGIN * w, oy = m.ay + MARGIN * h;
-    const x0 = -ox / m.S, x1 = (cw - ox) / m.S, y0 = -oy / m.S, y1 = (ch - oy) / m.S;
-    const shown = strokes.filter((s) => {
-      const b = strokePaintBounds(s);
-      return b.maxX >= x0 && b.minX <= x1 && b.maxY >= y0 && b.minY <= y1;
-    });
-    ctx.setTransform(dpr * m.S, 0, 0, dpr * m.S, dpr * ox, dpr * oy);
-    drawStrokes(ctx, shown);
-    this.drawn = m;
-  }
-}
-
-/** The pinch overlay is drawn this many view sizes beyond each edge, and again past this change of scale. */
-const MARGIN = 0.15;
-const REDRAW_SCALE = 0.15;
 
 export type FitMode = 'width' | 'page' | null;
 
@@ -349,12 +34,9 @@ export const PULL_THRESHOLD = 110;
 /** Pull distance per px of finger travel past the end (rubber band). */
 const PULL_RESISTANCE = 0.5;
 
-export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, pinchInk, penScrolls }: Options) {
+export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls }: Options) {
   const penScrollsRef = useRef(penScrolls);
   penScrollsRef.current = penScrolls;
-  const pinchInkRef = useRef(pinchInk);
-  pinchInkRef.current = pinchInk;
-  const overlay = useRef<PinchInk | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const outerRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoomState] = useState(1);
@@ -473,7 +155,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
   // After a zoom change: put the anchor back in place before the frame is painted.
   useLayoutEffect(() => {
     applyAnchor();
-    if (overlay.current?.state) overlay.current.settle(zoom);
   }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopMomentum = () => {
@@ -572,6 +253,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       const p = pinch.current;
       pinch.current = null;
       setTilesPaused(false);
+      // The fingers lifted: the content is drawn at its new scale again (see onMove).
+      if (outerRef.current) outerRef.current.style.willChange = '';
       const outer = outerRef.current;
       if (!p || !p.engaged || !outer) return;
       const z = p.z0 * p.k;
@@ -582,11 +265,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         sy: p.o.y + outer.offsetTop - el.scrollTop,
       };
       setFitMode(null);
-      const before = zoomRef.current;
       setView(z, a);
-      // The zoom did not change (no new layout to wait for): the content is back as it was.
-      if (Math.abs(zoomRef.current - before) < 1e-4) overlay.current?.remove();
-      if (!overlay.current?.state) outer.style.willChange = '';
     };
 
     /** When the Pencil last came down (Chromium's touch events do not say which touches are a stylus). */
@@ -716,10 +395,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.k = z / pz.z0;
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           outer.style.transform = `scale(${pz.k})`;
-          if (pinchInkRef.current) {
-            overlay.current ??= new PinchInk(el, outer, () => pinchInkRef.current?.() ?? null);
-            overlay.current.show(pz.k, pz.o, pz.z0);
-          }
         }
       }
       pending.current.x += c.x - last.current.x;
@@ -846,8 +521,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (wheelPullTimer) clearTimeout(wheelPullTimer);
       stopMomentum();
       if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
-      overlay.current?.remove();
-      overlay.current = null;
       setTilesPaused(false);
     };
   }, [fingersNavigate, gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps

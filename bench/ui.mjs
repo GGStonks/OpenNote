@@ -311,14 +311,21 @@ if (ONLY.has('pinch')) {
 // Not in the default run: --only zoomshots --shots <dir> saves close-ups of the ink while two
 // fingers zoom (still down) and after they lift, at a medium and a high zoom.
 if (ONLY.has('zoomshots') && arg('shots')) {
-  for (const [name, spread] of [['mid', 230], ['high', 420]]) {
+  for (const [name, spread] of [['low', 92], ['mid', 230], ['high', 420]]) {
     await reopen();
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
     await fingers([[410 - 50, 600], [410 + 50, 600]], [[410 - spread, 600], [410 + spread, 600]], 500, false);
     await sleep(300);
     await page.screenshot({ path: join(arg('shots'), `zoom-${name}-pinching.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
     await touch('touchEnd', []);
-    await sleep(1500);
+    // Right after the fingers lift: the ink must never be missing (the tiles keep their picture
+    // while they repaint at the new zoom).
+    let waited = 0;
+    for (const at of [30, 150, 500, 1500]) {
+      await sleep(at - waited);
+      waited = at;
+      await page.screenshot({ path: join(arg('shots'), `zoom-${name}-after-${at}.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
+    }
     await page.screenshot({ path: join(arg('shots'), `zoom-${name}-after.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
     console.log(`zoomshots ${name}: zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
   }
@@ -344,24 +351,30 @@ if (ONLY.has('closeup') && arg('shots')) {
   await page.reload();
   await page.getByText('Closeup note').first().click();
   await sleep(2500);
-  for (let i = 0; i < 12; i++) {
-    await page.keyboard.press('Control+Equal');
-    await sleep(150);
-  }
-  await sleep(800);
-  // Centre the view on the writing.
+  // Centre the view on the writing, at a few zoom levels (canvas ink below about 250%, vector above).
   const xs = strokes.flatMap((st) => st.points.map((p) => p.x)), ys = strokes.flatMap((st) => st.points.map((p) => p.y));
   const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = Math.min(...ys) + 60;
-  await page.evaluate(([cx, cy]) => {
+  const centre = () => page.evaluate(([cx, cy]) => {
     const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
     const outer = el.firstElementChild;
     const z = parseFloat(document.body.innerText.match(/(\d+)%/)[1]) / 100;
     el.scrollLeft = outer.offsetLeft + (16 + cx) * z - el.clientWidth / 2;
     el.scrollTop = outer.offsetTop + (16 + cy) * z - el.clientHeight / 2;
   }, [cx, cy]);
-  await sleep(1500);
-  console.log(`closeup  zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%, ${strokes.length} strokes from ${file}`);
-  await page.screenshot({ path: join(arg('shots'), 'closeup.png'), clip: { x: 0, y: 250, width: 820, height: 800 } });
+  let steps = 0;
+  for (const target of [3, 4, 5, 12]) {
+    while (steps < target) {
+      await page.keyboard.press('Control+Equal');
+      await sleep(150);
+      steps++;
+    }
+    await sleep(600);
+    await centre();
+    await sleep(1500);
+    const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    console.log(`closeup  zoom ${z}%, ${strokes.length} strokes from ${file}`);
+    await page.screenshot({ path: join(arg('shots'), `closeup-${z}.png`), clip: { x: 0, y: 250, width: 820, height: 800 } });
+  }
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {

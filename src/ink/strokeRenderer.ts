@@ -260,7 +260,7 @@ function boundsOf(points: XY[], pad: number) {
   return { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
 }
 
-function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke): Built {
+function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke, smooth = false): Built {
   const closed = !!style.closed && points.length > 2;
   const fillable = closed && !!style.fill && style.fill !== 'none';
   let path: Path2D;
@@ -276,7 +276,7 @@ function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke)
     if (fillable) area = path;
   } else if (!style.isShape) {
     // Handwriting: modelled stroke (inkEngine.ts).
-    const g = stroke ? strokeGeometry(stroke) : inkGeometry(points, style);
+    const g = stroke ? (smooth ? strokeGeometrySmooth(stroke) : strokeGeometry(stroke)) : inkGeometry(points, style);
     if (g.widths) {
       path = capsulePath(g.pts, g.widths, 0, newPath());
       filled = true;
@@ -305,6 +305,8 @@ function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke)
 export interface PaintOptions {
   /** Paint "hole" fills with this colour instead of punching through the canvas (white-background rasters). */
   holeColor?: string;
+  /** Handwriting as the smooth line (smoothGeometry): page canvases zoomed in past SMOOTH_ZOOM. */
+  smooth?: boolean;
 }
 
 const HATCH_SPACING = 8;
@@ -428,12 +430,18 @@ function movedPath(p: Path2D, dx: number, dy: number): Path2D {
   return out;
 }
 
-function built(s: Stroke): Built {
-  let b = cache.get(s);
+/** The smooth line's paths (zoomed in), cached apart from the engine line's. */
+const smoothBuilt = new WeakMap<Stroke, Built>();
+
+function built(s: Stroke, smooth = false): Built {
+  // Only handwriting has a smooth variant; shapes are the same either way.
+  if (smooth && s.isShape) smooth = false;
+  const store = smooth ? smoothBuilt : cache;
+  let b = store.get(s);
   if (!b) {
     const m = movedFrom.get(s);
     if (m && m.src.points.length === s.points.length && typeof DOMMatrix !== 'undefined') {
-      const o = built(m.src);
+      const o = built(m.src, smooth);
       b = {
         path: movedPath(o.path, m.dx, m.dy),
         filled: o.filled,
@@ -442,8 +450,8 @@ function built(s: Stroke): Built {
         bounds: { minX: o.bounds.minX + m.dx, minY: o.bounds.minY + m.dy, maxX: o.bounds.maxX + m.dx, maxY: o.bounds.maxY + m.dy },
       };
       if (o.area === o.path) b.area = b.path;
-    } else b = build(s.points, styleOf(s), true, s);
-    cache.set(s, b);
+    } else b = build(s.points, styleOf(s), true, s, smooth);
+    store.set(s, b);
   }
   return b;
 }
@@ -458,27 +466,14 @@ export function prepareStroke(s: Stroke): boolean {
   return true;
 }
 
-/**
- * Paints one part of a committed stroke with paths built afresh (not the cached ones), so that a
- * recording context sees every path command (pinch overlay, pinchScene.ts). The ink engine's model
- * of the line is still the cached one (strokeGeometry).
- */
-export function paintStrokeFresh(ctx: CanvasRenderingContext2D, s: Stroke, part: 'fill' | 'ink') {
-  if (!s.points.length) return;
-  const style = styleOf(s);
-  const b = build(s.points, style, true, s);
-  if (part === 'fill') paintFill(ctx, b, style, {});
-  else paintInk(ctx, b, style, s.opacity ?? 1);
-}
-
 /** drawStrokes' fill pass for one stroke (to paint a list of strokes in slices). */
 export function paintStrokeFill(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
-  if (s.points.length) paintFill(ctx, built(s), styleOf(s), opts);
+  if (s.points.length) paintFill(ctx, built(s, opts.smooth), styleOf(s), opts);
 }
 
 /** drawStrokes' ink pass for one stroke. */
-export function paintStrokeInk(ctx: CanvasRenderingContext2D, s: Stroke) {
-  if (s.points.length) paintInk(ctx, built(s), styleOf(s), s.opacity ?? 1);
+export function paintStrokeInk(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
+  if (s.points.length) paintInk(ctx, built(s, opts.smooth), styleOf(s), s.opacity ?? 1);
 }
 
 /** The area a committed stroke paints (ink, fill, arrowhead), from its cached geometry. */
@@ -488,7 +483,7 @@ export function strokePaintBounds(s: Stroke): Built['bounds'] {
 
 export function drawStroke(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
   if (s.points.length === 0) return;
-  const b = built(s);
+  const b = built(s, opts.smooth);
   paintFill(ctx, b, styleOf(s), opts);
   paintInk(ctx, b, styleOf(s), s.opacity ?? 1);
 }
@@ -507,9 +502,10 @@ export function drawLiveStroke(ctx: CanvasRenderingContext2D, points: Point[], s
  * (so holes cut through fills and highlighters but never through ink), then ink.
  */
 export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], opts: PaintOptions = {}) {
-  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s), styleOf(s), s.opacity ?? 1);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s), styleOf(s), opts);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s), styleOf(s), s.opacity ?? 1);
+  const sm = opts.smooth;
+  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s, sm), styleOf(s), opts);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
 }
 
 // ---------------------------------------------------------------------------------------------

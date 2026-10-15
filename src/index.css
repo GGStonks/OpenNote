@@ -103,8 +103,3 @@
   color-scheme: light;
   color: #111827;
 }
-
-/* Two fingers zooming: the stretched ink is hidden under the sharp pinch overlay (useViewport.ts). */
-[data-pinching] [data-ink-layer] {
-  visibility: hidden;
-}
