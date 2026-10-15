@@ -3,7 +3,7 @@
  * two fingers zoom without holding up the page.
  *
  * Each committed stroke is encoded once (cached per stroke object):
- *  - handwriting: the ink engine's modelled centre line (strokeGeometry), as x, y, radius per point
+ *  - handwriting: the ink engine's modelled centre line made smooth (strokeGeometrySmooth), as x, y, radius per point
  *    for the fountain pen (the worker builds the same union of capsules as the page) or x, y per
  *    point and one width for a uniform line (ballpoint, highlighter);
  *  - anything else (shapes, fills, dashes, arrows): the page's own drawing commands, recorded
@@ -11,7 +11,7 @@
  * "Hole" fills, which punch through the canvas, are left out of the overlay.
  */
 import type { Stroke } from '../types';
-import { paintStrokeFresh, strokeGeometry, strokePaintBounds, strokeWidth, styleOf } from './strokeRenderer';
+import { paintStrokeFresh, strokeGeometrySmooth, strokePaintBounds, strokeWidth, styleOf } from './strokeRenderer';
 import { recordOps } from './inkRecorder';
 
 export type InkPart =
@@ -40,7 +40,8 @@ export function sceneItem(s: Stroke): SceneItem {
   const solid = (style.lineStyle ?? 'solid') === 'solid';
   if (s.fillOnly) ink = null;
   else if (!s.isShape && solid && s.points.length) {
-    const g = strokeGeometry(s);
+    // Zoomed in: the smooth line, as the page's vector ink (strokeRenderer.smoothGeometry).
+    const g = strokeGeometrySmooth(s);
     if (g.widths && !hl) {
       const pts = new Float32Array(g.pts.length * 3);
       g.pts.forEach((q, i) => {

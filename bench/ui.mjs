@@ -271,6 +271,31 @@ if (ONLY.has('swipe')) {
     }
   });
 }
+// --only pinchsplit: frames while two fingers move, separately from the second after they lift
+// (the note's ink prepared first, so first-use costs are left out).
+if (ONLY.has('pinchsplit')) {
+  await reopen();
+  await sleep(8000);
+  const deltas = { moving: [], after: [] };
+  const phase = async (name, run) => {
+    await start();
+    await run();
+    const f = (await stop()).frames;
+    for (let j = 1; j < f.length; j++) deltas[name].push(f[j] - f[j - 1]);
+  };
+  for (let i = 0; i < 2; i++) {
+    for (const [a, b] of [[[[360, 600], [460, 600]], [[210, 600], [610, 600]]], [[[210, 600], [610, 600]], [[360, 600], [460, 600]]]]) {
+      await phase('moving', () => traced('pinch moving', () => fingers(a, b, 600, false)));
+      await phase('after', async () => {
+        await touch('touchEnd', []);
+        await sleep(1000);
+      });
+    }
+  }
+  for (const [k, d] of Object.entries(deltas)) {
+    console.log(`${('pinch ' + k).padEnd(13)} frames ${d.length}  frame p50 ${f1(pct(d, 0.5))} p95 ${f1(pct(d, 0.95))} max ${f1(Math.max(...d))} ms  >25ms: ${d.filter((x) => x > 25).length}`);
+  }
+}
 if (ONLY.has('pinch')) {
   await reopen();
   await report('pinch', async () => {
@@ -297,6 +322,46 @@ if (ONLY.has('zoomshots') && arg('shots')) {
     await page.screenshot({ path: join(arg('shots'), `zoom-${name}-after.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
     console.log(`zoomshots ${name}: zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
   }
+}
+// Not in the default run: --only closeup --shots <dir> zooms to 500% with the buttons (no pinch) and
+// saves the ink at full resolution, to judge how handwriting looks zoomed in.
+if (ONLY.has('closeup') && arg('shots')) {
+  // One recording at its real size (page px as written on the iPad), in a note of its own.
+  const file = arg('rec', 'pen-20261013-150111-114strokes.json');
+  const rec = JSON.parse(readFileSync(join(recDir, file), 'utf8'));
+  const strokes = rec.strokes.filter((st) => st.tool === 'pen').map((st, i) => ({
+    id: `cu_${i}`, tool: 'pen', color: '#111827', width: st.width || 1.6, opacity: 1, penStyle: st.penStyle || 'fountain', createdAt: 1700000000000 + i,
+    points: st.samples.map((p) => ({ x: p[0], y: p[1], pressure: p[3], t: p[2] })),
+  }));
+  const now = Date.now();
+  await page.evaluate(async (note) => {
+    const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+    await new Promise((res) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(note); tx.oncomplete = res; });
+    db.close();
+  }, { id: 'doc_closeup', title: 'Closeup note', createdAt: now, updatedAt: now + 1e6, paperStyle: 'blank', paperColor: 'white', schemaVersion: 3,
+       pages: [{ id: 'page_cu', pageNumber: 1, strokes, latexBlocks: [], textBlocks: [], imageBlocks: [] }] });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await page.getByText('Closeup note').first().click();
+  await sleep(2500);
+  for (let i = 0; i < 12; i++) {
+    await page.keyboard.press('Control+Equal');
+    await sleep(150);
+  }
+  await sleep(800);
+  // Centre the view on the writing.
+  const xs = strokes.flatMap((st) => st.points.map((p) => p.x)), ys = strokes.flatMap((st) => st.points.map((p) => p.y));
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = Math.min(...ys) + 60;
+  await page.evaluate(([cx, cy]) => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    const outer = el.firstElementChild;
+    const z = parseFloat(document.body.innerText.match(/(\d+)%/)[1]) / 100;
+    el.scrollLeft = outer.offsetLeft + (16 + cx) * z - el.clientWidth / 2;
+    el.scrollTop = outer.offsetTop + (16 + cy) * z - el.clientHeight / 2;
+  }, [cx, cy]);
+  await sleep(1500);
+  console.log(`closeup  zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%, ${strokes.length} strokes from ${file}`);
+  await page.screenshot({ path: join(arg('shots'), 'closeup.png'), clip: { x: 0, y: 250, width: 820, height: 800 } });
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {

@@ -14,6 +14,7 @@ import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil'
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
 import { tileWork } from '../editor/tileWork';
+import { sceneItem } from '../ink/pinchScene';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -248,9 +249,25 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
       far.disconnect();
     };
   }, [scrollRoot]);
-  const svg = useMemo(() => (alive && mine.length ? strokesSvg(mine, (s) => paperOf.current(s)) : ''), [alive, mine]);
+  // Built after the render, and not while two fingers are zooming (tileWork.paused).
+  const [svg, setSvg] = useState('');
   useEffect(() => {
-    if (reported.current && (alive || !mine.length)) tileWork.pending.delete(token.current);
+    if (!alive || !mine.length) {
+      setSvg('');
+      return;
+    }
+    const make = () => setSvg(strokesSvg(mine, (s) => paperOf.current(s)));
+    if (!tileWork.paused) {
+      make();
+      return;
+    }
+    tileWork.resume.add(make);
+    return () => {
+      tileWork.resume.delete(make);
+    };
+  }, [alive, mine]);
+  useEffect(() => {
+    if (reported.current && (svg || !mine.length || !alive)) tileWork.pending.delete(token.current);
   }, [alive, svg, mine.length]);
   return (
     <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
@@ -399,6 +416,10 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     const step = () => {
       slicing.current = null;
       if (painted.current?.strokes !== job) return;
+      if (tileWork.paused) {
+        slicing.current = requestAnimationFrame(step);
+        return;
+      }
       const until = performance.now() + TILE_SLICE_MS;
       while (pass < passes.length) {
         for (; i < job.length; i++) {
@@ -686,7 +707,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         order = strokes.slice().sort((a, b) => dist.get(a)! - dist.get(b)!);
       }
       const until = performance.now() + 4;
-      while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
+      while (i < order.length && performance.now() < until) {
+        const s = order[i++];
+        prepareStroke(s);
+        // What the pinch overlay's worker needs (encoding it at the first pinch made it stutter).
+        sceneItem(s);
+      }
       if (i < order.length) timer = setTimeout(slice, 16);
     };
     timer = setTimeout(slice, 300);

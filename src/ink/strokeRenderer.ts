@@ -128,6 +128,81 @@ export function strokeGeometry(s: Stroke): InkGeometry {
   return g;
 }
 
+/** Smoothing of the zoomed-in line: Gaussian width along the line (page px). */
+const SMOOTH_SIGMA = 1.6;
+/** A turn sharper than this (degrees, over about a px either side) is a corner: the line is smoothed on either side of it. */
+const CORNER_DEG = 55;
+
+/**
+ * The modelled line made smooth for zoomed-in display. The ink engine's line is nearly straight
+ * between two Pencil samples (a few page px apart) and bends where they are; at 100% that is
+ * invisible, but zoomed to 300-500% the ink showed as straight pieces joined at angles. Each point
+ * is replaced by a Gaussian average (SMOOTH_SIGMA) of its neighbours along the line, its widths and
+ * pressure likewise; the window narrows towards the ends so they stay where they are, and the line
+ * is smoothed in pieces between sharp corners, so a cusp stays a cusp. Used for vector ink (zoomed
+ * in, print, export) and the pinch overlay; the page canvases at ordinary zoom keep the engine's
+ * line, as drawn live.
+ */
+export function smoothGeometry(g: InkGeometry): InkGeometry {
+  const P = g.pts, n = P.length;
+  if (n < 5) return g;
+  const d = (a: XY, b: XY) => Math.hypot(a.x - b.x, a.y - b.y);
+  const at = new Float64Array(n);
+  for (let i = 1; i < n; i++) at[i] = at[i - 1] + d(P[i], P[i - 1]);
+  // Corners split the line into pieces smoothed on their own.
+  const cuts = [0];
+  for (let i = 1; i < n - 1; i++) {
+    let a = i, b = i;
+    while (a > 0 && at[i] - at[a] < 1) a--;
+    while (b < n - 1 && at[b] - at[i] < 1) b++;
+    if (a === i || b === i) continue;
+    const t1 = Math.atan2(P[i].y - P[a].y, P[i].x - P[a].x), t2 = Math.atan2(P[b].y - P[i].y, P[b].x - P[i].x);
+    let turn = Math.abs(t2 - t1);
+    if (turn > Math.PI) turn = 2 * Math.PI - turn;
+    if ((turn * 180) / Math.PI > CORNER_DEG && at[i] - at[cuts[cuts.length - 1]] > 1) cuts.push(i);
+  }
+  cuts.push(n - 1);
+  const pts: ModeledPoint[] = P.map((q) => ({ ...q }));
+  const widths = g.widths ? g.widths.slice() : null;
+  const sig = SMOOTH_SIGMA, inv = 1 / (2 * sig * sig);
+  for (let c = 0; c < cuts.length - 1; c++) {
+    const lo = cuts[c], hi = cuts[c + 1];
+    for (let i = lo + 1; i < hi; i++) {
+      // Symmetric window, no wider than the distance to either end of the piece.
+      const half = Math.min(3 * sig, at[i] - at[lo], at[hi] - at[i]);
+      if (half <= 0) continue;
+      let sx = 0, sy = 0, sp = 0, sw = 0, ws = 0;
+      for (let j = i; j >= lo && at[i] - at[j] <= half; j--) {
+        const w = Math.exp(-((at[i] - at[j]) ** 2) * inv);
+        sx += P[j].x * w; sy += P[j].y * w; sp += P[j].p * w; ws += w;
+        if (widths) sw += g.widths![j] * w;
+      }
+      for (let j = i + 1; j <= hi && at[j] - at[i] <= half; j++) {
+        const w = Math.exp(-((at[j] - at[i]) ** 2) * inv);
+        sx += P[j].x * w; sy += P[j].y * w; sp += P[j].p * w; ws += w;
+        if (widths) sw += g.widths![j] * w;
+      }
+      pts[i] = { x: sx / ws, y: sy / ws, p: sp / ws, t: P[i].t };
+      if (widths) widths[i] = sw / ws;
+    }
+  }
+  return { pts, widths, width: g.width };
+}
+
+const smoothCache = new WeakMap<Stroke, InkGeometry>();
+/** smoothGeometry of a committed stroke, cached (a moved copy reuses its original's, moved). */
+export function strokeGeometrySmooth(s: Stroke): InkGeometry {
+  let g = smoothCache.get(s);
+  if (g) return g;
+  const m = movedFrom.get(s);
+  if (m && m.src.points.length === s.points.length) {
+    const o = strokeGeometrySmooth(m.src);
+    g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
+  } else g = smoothGeometry(strokeGeometry(s));
+  smoothCache.set(s, g);
+  return g;
+}
+
 function polylinePath(pts: XY[], closed = false): Path2D {
   const path = newPath();
   if (!pts.length) return path;
@@ -494,7 +569,8 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
   let out = '';
   let lineD: string;
   let areaD: string;
-  const geo = !s.isShape ? strokeGeometry(s) : null;
+  // SVG is the zoomed-in, printed and exported ink: the smooth line (see smoothGeometry).
+  const geo = !s.isShape ? strokeGeometrySmooth(s) : null;
   const ink = geo && dy ? { ...geo, pts: geo.pts.map((q) => ({ ...q, y: q.y + dy })) } : geo;
   if (s.shapeKind === 'curve') {
     lineD = areaD = svgBezierD(curveSegments(pts, closed), closed);

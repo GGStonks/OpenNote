@@ -3,7 +3,7 @@ import { GestureBus } from './gestures';
 import type { Stroke } from '../types';
 import { drawStrokes, strokePaintBounds } from '../ink/strokeRenderer';
 import { sceneItem } from '../ink/pinchScene';
-import { tileWork } from './tileWork';
+import { setTilesPaused, tileWork } from './tileWork';
 
 /**
  * The pinch overlay's worker (pinchWorker.ts), shared by every pinch so strokes are sent to it once.
@@ -184,6 +184,7 @@ class PinchInk {
 
   remove() {
     tileWork.deferring = false;
+    this.outer.style.willChange = '';
     if (this.worker) {
       this.worker.removeEventListener('message', this.onDrawn);
       this.worker.postMessage({ type: 'detach' });
@@ -570,6 +571,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     const endPinch = () => {
       const p = pinch.current;
       pinch.current = null;
+      setTilesPaused(false);
       const outer = outerRef.current;
       if (!p || !p.engaged || !outer) return;
       const z = p.z0 * p.k;
@@ -584,6 +586,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       setView(z, a);
       // The zoom did not change (no new layout to wait for): the content is back as it was.
       if (Math.abs(zoomRef.current - before) < 1e-4) overlay.current?.remove();
+      if (!overlay.current?.state) outer.style.willChange = '';
     };
 
     /** When the Pencil last came down (Chromium's touch events do not say which touches are a stylus). */
@@ -702,6 +705,10 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.o = { x: el.scrollLeft + c.x - outer.offsetLeft, y: el.scrollTop + c.y - outer.offsetTop };
           releasePull();
           outer.style.transition = '';
+          // Scaled as it is while the fingers move: without this the browser drew the paper,
+          // text and math again at every new scale, on every frame of the pinch.
+          outer.style.willChange = 'transform';
+          setTilesPaused(true);
         }
         if (pz.engaged) {
           const fitW = el.clientWidth / contentWidthRef.current;
@@ -841,6 +848,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
       overlay.current?.remove();
       overlay.current = null;
+      setTilesPaused(false);
     };
   }, [fingersNavigate, gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps
 
