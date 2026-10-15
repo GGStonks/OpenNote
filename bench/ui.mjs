@@ -258,10 +258,13 @@ async function report(label, run) {
 if (ONLY.has('swipe')) {
   await reopen();
   await report('swipe', async () => {
+    const top = () => page.evaluate(() => Math.round([...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto')?.scrollTop ?? -1));
+    const t0 = await top();
     for (let i = 0; i < 3; i++) {
       await fingers([[410, 900]], [[410, 400]], 160);
       await sleep(900);
     }
+    console.log(`swipe    scrolled ${t0} -> ${await top()} px after three flicks`);
     for (let i = 0; i < 3; i++) {
       await fingers([[410, 400]], [[410, 900]], 160);
       await sleep(900);
@@ -279,6 +282,35 @@ if (ONLY.has('pinch')) {
       await sleep(1200);
     }
   });
+}
+// Not in the default run: --only zoomshots --shots <dir> saves close-ups of the ink while two
+// fingers zoom (still down) and after they lift, at a medium and a high zoom.
+if (ONLY.has('zoomshots') && arg('shots')) {
+  for (const [name, spread] of [['mid', 230], ['high', 420]]) {
+    await reopen();
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await fingers([[410 - 50, 600], [410 + 50, 600]], [[410 - spread, 600], [410 + spread, 600]], 500, false);
+    await sleep(300);
+    await page.screenshot({ path: join(arg('shots'), `zoom-${name}-pinching.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
+    await touch('touchEnd', []);
+    await sleep(1500);
+    await page.screenshot({ path: join(arg('shots'), `zoom-${name}-after.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
+    console.log(`zoomshots ${name}: zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
+  }
+}
+// Not in the default run: --only pull checks that one finger pulling past the end adds a page.
+if (ONLY.has('pull')) {
+  await reopen();
+  const count = () => page.evaluate(() => document.body.innerText.match(/\d+\s*\/\s*(\d+)/)?.[1]);
+  await page.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    el.scrollTop = el.scrollHeight;
+  });
+  await sleep(500);
+  const before = await count();
+  await fingers([[410, 1000]], [[410, 600]], 600);
+  await sleep(800);
+  console.log(`pull     pages ${before} -> ${await count()}`);
 }
 if (ONLY.has('lasso')) {
   await reopen();

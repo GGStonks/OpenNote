@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { GestureBus } from './gestures';
+import type { Stroke } from '../types';
+import { drawStrokes, strokePaintBounds } from '../ink/strokeRenderer';
 
 /**
  * Viewport of the note: scrolling, zoom and the pull that adds a page.
  *
- * The page canvases need `touch-action: none` (otherwise the Pencil scrolls instead of writing on
- * iPad), which also disables native finger scrolling, so navigation is done here in JS: one finger
- * scrolls when fingers do not draw, two fingers always scroll and pinch-zoom, with momentum; the
- * mouse wheel scrolls natively and ctrl + wheel (trackpad pinch) zooms.
+ * One finger scrolls natively (the browser's own scrolling and fling, off the main thread) when
+ * fingers do not draw: the note and its pages have `touch-action: pan-x pan-y`, and the touches
+ * that must not scroll are cancelled when they start (touchstart preventDefault): the Pencil (it
+ * writes; it scrolls only with the hand tool), a hand resting on the glass while the Pencil writes,
+ * and a second finger, so two fingers always pan and pinch-zoom here in JS, with momentum. v2.0.5
+ * and earlier scrolled with every finger in JS (touch-action: none everywhere), which lagged behind
+ * the finger on slower tablets. When fingers draw, the pages keep touch-action: none and one finger
+ * draws. The mouse wheel scrolls natively and ctrl + wheel (trackpad pinch) zooms.
  *
  * Zoom goes from MIN_ZOOM (or less, when fitting the width needs less) to MAX_ZOOM; 1 = actual size
  * (96 px per inch). It starts fitted to the width and refits when the window changes size
@@ -32,7 +38,149 @@ interface Options {
   onPull?: (distance: number) => void;
   /** The pull reached PULL_THRESHOLD. */
   onPullCommit?: () => void;
+  /** The Pencil scrolls too (hand tool). */
+  penScrolls?: () => boolean;
+  /**
+   * The ink to draw sharp while two fingers zoom: the surface's strokes and where the surface sits
+   * in the unzoomed content (px). Without it the pinch shows the content stretched.
+   */
+  pinchInk?: () => { strokes: Stroke[]; pad: number } | null;
 }
+
+/**
+ * Ink drawn sharp while two fingers zoom. The content is scaled with a CSS transform during a pinch,
+ * which stretched the ink's canvases (blurry, more so the further the zoom went) until the fingers
+ * lifted and the canvases were repainted at the new zoom, when the ink popped back sharp. A canvas
+ * over the view now draws the visible strokes at the screen's resolution for the current pinch on
+ * every frame (from their cached geometry), with the stretched ink hidden under it
+ * ([data-pinching] [data-ink-layer], index.css), and stays until the page has repainted at the
+ * new zoom, so the ink stays sharp throughout.
+ */
+class PinchInk {
+  private canvas: HTMLCanvasElement | null = null;
+  private frame: number | null = null;
+  /** k: the pinch's scale; o: its origin (zoomed content px); z: the zoom the content is laid out at. */
+  state: { k: number; o: { x: number; y: number }; z: number } | null = null;
+  private removeTimer: number | null = null;
+  /** The mapping (view x = ax + S * surface x) the canvas was last drawn with. */
+  private drawn: { ax: number; ay: number; S: number } | null = null;
+  private idle: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private el: HTMLElement, private outer: HTMLElement, private ink: () => { strokes: Stroke[]; pad: number } | null) {}
+
+  show(k: number, o: { x: number; y: number }, z: number) {
+    this.state = { k, o, z };
+    if (this.removeTimer !== null) {
+      cancelAnimationFrame(this.removeTimer);
+      this.removeTimer = null;
+    }
+    if (!this.canvas) {
+      const c = document.createElement('canvas');
+      c.style.cssText = 'position:absolute;pointer-events:none;z-index:5;transform-origin:0 0;';
+      this.el.parentElement?.appendChild(c);
+      this.canvas = c;
+      this.drawn = null;
+      this.outer.setAttribute('data-pinching', '');
+    }
+    if (this.frame === null) this.frame = requestAnimationFrame(() => this.update(false));
+    // Fingers resting: drawn exactly for where they are.
+    if (this.idle) clearTimeout(this.idle);
+    this.idle = setTimeout(() => this.update(true), 120);
+  }
+
+  /** The page has been laid out at zoom z: the overlay hands over to it after two frames. */
+  settle(z: number) {
+    if (!this.canvas || !this.state) return;
+    this.state = { k: 1, o: { x: 0, y: 0 }, z };
+    this.update(false);
+    this.removeTimer = requestAnimationFrame(() => {
+      this.outer.removeAttribute('data-pinching');
+      this.removeTimer = requestAnimationFrame(() => this.remove());
+    });
+  }
+
+  remove() {
+    if (this.frame !== null) cancelAnimationFrame(this.frame);
+    if (this.removeTimer !== null) cancelAnimationFrame(this.removeTimer);
+    if (this.idle) clearTimeout(this.idle);
+    this.frame = this.removeTimer = this.idle = null;
+    this.canvas?.remove();
+    this.canvas = null;
+    this.state = null;
+    this.drawn = null;
+    this.outer.removeAttribute('data-pinching');
+  }
+
+  /** The current mapping of surface px to view px. */
+  private mapping(pad: number) {
+    const st = this.state!;
+    const S = st.z * st.k;
+    const left = this.outer.offsetLeft - this.el.scrollLeft, top = this.outer.offsetTop - this.el.scrollTop;
+    return { S, ax: left + st.o.x * (1 - st.k) + pad * S, ay: top + st.o.y * (1 - st.k) + pad * S };
+  }
+
+  /**
+   * Follows the pinch. Drawing every visible stroke on every frame was too slow zoomed out, so the
+   * canvas (drawn with a margin of MARGIN view sizes on each side) is moved and scaled with a CSS
+   * transform between drawings, and drawn again when the zoom has changed by more than REDRAW_SCALE
+   * since, when its margin would come into view, or when the fingers rest (`exact`).
+   */
+  private update(exact: boolean) {
+    this.frame = null;
+    const c = this.canvas, ink = this.ink();
+    if (!c || !this.state || !ink) return;
+    const el = this.el;
+    const w = el.clientWidth, h = el.clientHeight;
+    const m = this.mapping(ink.pad);
+    const d = this.drawn;
+    if (d && !exact) {
+      const r = m.S / d.S;
+      // Where the drawn canvas's corners land now (view px).
+      const left = m.ax + (-MARGIN * w - d.ax) * r, top = m.ay + (-MARGIN * h - d.ay) * r;
+      const right = left + w * (1 + 2 * MARGIN) * r, bottom = top + h * (1 + 2 * MARGIN) * r;
+      if (Math.abs(r - 1) < REDRAW_SCALE && left <= 0 && top <= 0 && right >= w && bottom >= h) {
+        c.style.transform = `translate(${left}px, ${top}px) scale(${r})`;
+        return;
+      }
+    }
+    this.draw(c, ink.strokes, m, w, h);
+  }
+
+  private draw(c: HTMLCanvasElement, strokes: Stroke[], m: { ax: number; ay: number; S: number }, w: number, h: number) {
+    const el = this.el;
+    // At most 2x: the overlay lives only while fingers zoom, and a 3x canvas of the view plus its
+    // margin cost more to draw and composite than the sharpness was worth.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const cw = w * (1 + 2 * MARGIN), ch = h * (1 + 2 * MARGIN);
+    c.style.left = `${el.offsetLeft}px`;
+    c.style.top = `${el.offsetTop}px`;
+    c.style.width = `${cw}px`;
+    c.style.height = `${ch}px`;
+    c.style.transform = `translate(${-MARGIN * w}px, ${-MARGIN * h}px)`;
+    if (c.width !== Math.round(cw * dpr) || c.height !== Math.round(ch * dpr)) {
+      c.width = Math.round(cw * dpr);
+      c.height = Math.round(ch * dpr);
+    }
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    // Canvas px = (view px + margin) * dpr; view px = a + S * surface px.
+    const ox = m.ax + MARGIN * w, oy = m.ay + MARGIN * h;
+    const x0 = -ox / m.S, x1 = (cw - ox) / m.S, y0 = -oy / m.S, y1 = (ch - oy) / m.S;
+    const shown = strokes.filter((s) => {
+      const b = strokePaintBounds(s);
+      return b.maxX >= x0 && b.minX <= x1 && b.maxY >= y0 && b.minY <= y1;
+    });
+    ctx.setTransform(dpr * m.S, 0, 0, dpr * m.S, dpr * ox, dpr * oy);
+    drawStrokes(ctx, shown);
+    this.drawn = m;
+  }
+}
+
+/** The pinch overlay is drawn this many view sizes beyond each edge, and again past this change of scale. */
+const MARGIN = 0.15;
+const REDRAW_SCALE = 0.15;
 
 export type FitMode = 'width' | 'page' | null;
 
@@ -53,7 +201,12 @@ export const PULL_THRESHOLD = 110;
 /** Pull distance per px of finger travel past the end (rubber band). */
 const PULL_RESISTANCE = 0.5;
 
-export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit }: Options) {
+export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, pinchInk, penScrolls }: Options) {
+  const penScrollsRef = useRef(penScrolls);
+  penScrollsRef.current = penScrolls;
+  const pinchInkRef = useRef(pinchInk);
+  pinchInkRef.current = pinchInk;
+  const overlay = useRef<PinchInk | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const outerRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoomState] = useState(1);
@@ -172,6 +325,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
   // After a zoom change: put the anchor back in place before the frame is painted.
   useLayoutEffect(() => {
     applyAnchor();
+    if (overlay.current?.state) overlay.current.settle(zoom);
   }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const stopMomentum = () => {
@@ -279,10 +433,27 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         sy: p.o.y + outer.offsetTop - el.scrollTop,
       };
       setFitMode(null);
+      const before = zoomRef.current;
       setView(z, a);
+      // The zoom did not change (no new layout to wait for): the content is back as it was.
+      if (Math.abs(zoomRef.current - before) < 1e-4) overlay.current?.remove();
     };
 
+    /** When the Pencil last came down (Chromium's touch events do not say which touches are a stylus). */
+    let penDownAt = -Infinity;
+    /** This gesture's movement scrolled the page here in JS (only then is there JS momentum). */
+    let jsScrolled = false;
+    /** The gesture started with the mouse (hand tool): the mouse drags the page here in JS. */
+    let mouseDown = false;
+    /** One finger (or the Pencil with the hand tool) scrolls natively: JS leaves it alone. */
+    const nativeSingle = () => pointers.current.size === 1 && fingersNavigate() && !mouseDown;
+
     const onDown = (e: PointerEvent) => {
+      if (e.pointerType === 'pen') penDownAt = performance.now();
+      if (pointers.current.size === 0) {
+        jsScrolled = false;
+        mouseDown = e.pointerType === 'mouse';
+      }
       // The mouse drags the page only where it does not draw (hand tool, gaps between pages).
       const navigateMouse = e.pointerType === 'mouse' && fingersNavigate() && e.button === 0 && !(e.target as HTMLElement).closest('[data-ink-input]');
       if (e.pointerType !== 'touch' && !navigateMouse) return;
@@ -361,6 +532,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         if (o && Math.hypot(p.x - o.x, p.y - o.y) > TAP_SLOP) t.moved = true;
       }
       if (!gestures.navigating || !last.current) return;
+      if (nativeSingle()) {
+        resetTrack();
+        return;
+      }
+      jsScrolled = true;
       if (gestures.dragging) {
         // A finger is moving a selection: keep the page still.
         resetTrack();
@@ -386,6 +562,10 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.k = z / pz.z0;
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           outer.style.transform = `scale(${pz.k})`;
+          if (pinchInkRef.current) {
+            overlay.current ??= new PinchInk(el, outer, () => pinchInkRef.current?.() ?? null);
+            overlay.current.show(pz.k, pz.o, pz.z0);
+          }
         }
       }
       pending.current.x += c.x - last.current.x;
@@ -429,7 +609,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
         cb.current.onFingerTap?.(t.fingers);
         return;
       }
-      if (wasNavigating && recent && !pulled && e.type !== 'pointercancel') startMomentum();
+      if (wasNavigating && recent && !pulled && jsScrolled && e.type !== 'pointercancel') startMomentum();
     };
 
     // Wheel: ctrl + wheel (and trackpad pinch, which arrives as ctrl + wheel) zooms about the
@@ -456,6 +636,42 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     // Safari's own pinch gestures would scale the whole UI.
     const noZoom = (ev: Event) => ev.preventDefault();
 
+    // Which touches may scroll natively (see the top of this file): decided when each touch starts.
+    let touchPullY: number | null = null;
+    const onTouchStart = (ev: TouchEvent) => {
+      const stylus = [...ev.changedTouches].some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus') || performance.now() - penDownAt < 120;
+      if (stylus) {
+        if (!penScrollsRef.current?.()) ev.preventDefault();
+        return;
+      }
+      if (gestures.inking && gestures.inkingWith === 'pen') ev.preventDefault();
+      else if (ev.touches.length >= 2) ev.preventDefault();
+      touchPullY = ev.touches.length === 1 ? ev.touches[0].clientY : null;
+    };
+    // One finger past the end of the note (native scrolling stops there): the pull that adds a page.
+    const onTouchMove = (ev: TouchEvent) => {
+      if (!cb.current.onPullCommit || ev.touches.length !== 1 || touchPullY === null || pointers.current.size > 1 || gestures.inking) return;
+      const y = ev.touches[0].clientY;
+      const dy = touchPullY - y;
+      touchPullY = y;
+      const maxTop = el.scrollHeight - el.clientHeight;
+      if (pullRaw.current > 0 && dy < 0) {
+        pullRaw.current = Math.max(0, pullRaw.current + dy);
+        reportPull();
+      } else if (dy > 0 && el.scrollTop >= maxTop - 1) {
+        pullRaw.current += dy;
+        reportPull();
+      }
+    };
+    const onTouchEnd = (ev: TouchEvent) => {
+      if (ev.touches.length) return;
+      touchPullY = null;
+      if (pullRaw.current > 0) releasePull();
+    };
+    el.addEventListener('touchstart', onTouchStart, { passive: false, capture: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('touchend', onTouchEnd, { passive: true });
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true });
     el.addEventListener('pointerdown', onDown, { capture: true });
     window.addEventListener('pointermove', onMove, { capture: true });
     window.addEventListener('pointerup', onUp, { capture: true });
@@ -463,6 +679,10 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     el.addEventListener('wheel', onWheel, { passive: false });
     document.addEventListener('gesturestart', noZoom, { passive: false } as AddEventListenerOptions);
     return () => {
+      el.removeEventListener('touchstart', onTouchStart, { capture: true });
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
       el.removeEventListener('pointerdown', onDown, { capture: true });
       window.removeEventListener('pointermove', onMove, { capture: true });
       window.removeEventListener('pointerup', onUp, { capture: true });
@@ -472,6 +692,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (wheelPullTimer) clearTimeout(wheelPullTimer);
       stopMomentum();
       if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+      overlay.current?.remove();
+      overlay.current = null;
     };
   }, [fingersNavigate, gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps
 

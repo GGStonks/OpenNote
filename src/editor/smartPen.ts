@@ -224,6 +224,8 @@ export interface SmartPenState {
   zoom: number;
   cache: SnapCache | null;
   start: XY | null;
+  /** The pen came down on another shape's point (start is that point, not where the pen landed). */
+  startSnapped: boolean;
   end: XY | null;
   /** Orange snap indicator. */
   snapDot: XY | null;
@@ -277,11 +279,12 @@ export function snapCacheFor(strokes: Stroke[], snap: boolean, grid: number | nu
 export function beginSmartPen(raw: PenSample, opts: SmartPenOptions, strokes: Stroke[], zoom: number): SmartPenState {
   const cache = snapCacheFor(strokes, opts.snap, opts.grid);
   const st: SmartPenState = {
-    mode: opts.mode, zoom, cache, start: null, end: null, snapDot: null, snapKind: null, closing: false, snapping: false,
+    mode: opts.mode, zoom, cache, start: null, startSnapped: false, end: null, snapDot: null, snapKind: null, closing: false, snapping: false,
     ink: null, length: 0, lastRaw: null, lastT: 0, settled: [], settledNear: [], lastTickT: -Infinity, vertex: null,
   };
   const p = snapAt(st, raw);
   st.start = p;
+  st.startSnapped = dist(p, raw) > 0.01;
   st.end = p;
   if (opts.mode === 'curve') {
     st.ink = new NibModeler();
@@ -529,11 +532,21 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
     if (near) near = near.slice(0, pts.length);
     closed = pts.length > 2;
   }
+  // Where the curve closes, the pen's landing (often a little hook) and its overshoot or gap were
+  // joined as they were, which showed as a kink or a wiggle at the seam: both ends are cut back a
+  // little and joined by a smooth bridge that follows the line's direction on either side. Not when
+  // the start snapped to another shape's point: the curve then keeps passing through it.
+  const startSnapped = st.startSnapped;
+  if (closed && !startSnapped) {
+    const seam = closeSeam(pts, near, k);
+    pts = seam.pts;
+    near = seam.near;
+  }
 
   if (st.cache) {
     pts = retrace(pts, st.cache, k, closed, near);
     // The ends snap to shape points nearby (the start was looked up when the pen came down).
-    if (st.start && dist(st.start, pts[0]) > 0.01) pts = ease(pts, st.start, BLEND * k, false);
+    if (st.start && (startSnapped || !closed) && dist(st.start, pts[0]) > 0.01) pts = ease(pts, st.start, BLEND * k, false);
     if (final && !closed) {
       const tip = pts[pts.length - 1];
       const end = findSnapKind(st.cache, tip, st.zoom, st.vertex && dist(tip, st.vertex) <= VERTEX_RELEASE * k ? st.vertex : null);
@@ -548,6 +561,68 @@ function curveShape(st: SmartPenState, final: boolean, k: number): SmartShape | 
   const ctrl = simplify(pts, SIMPLIFY, closed);
   if (ctrl.length === 2 && !closed) return { points: ctrl.map(P), kind: 'line', closed: false };
   return { points: ctrl.map(P), kind: 'curve', closed };
+}
+
+/** Seam of a closed curve: the start is cut back by this much (screen px; the pen's landing hook). */
+const SEAM_TRIM = 7;
+/** Smoothing of the seam: Gaussian width and the stretch on either side it fades out over (screen px). */
+const SEAM_SIGMA = 7;
+const SEAM_SPAN = 34;
+
+/**
+ * Where a closed curve joins: its start is cut back (the hook where the pen landed), the gap to the
+ * end is filled in a straight line, and the line is then smoothed about the seam (a Gaussian over
+ * the line, fading out over SEAM_SPAN on either side), so a hook, a gap or an end that drifted
+ * outward becomes a smooth join instead of a kink or an S-bend. The rest of the curve is untouched.
+ */
+function closeSeam(pts: XY[], near: (Near | null)[] | null, k: number): { pts: XY[]; near: (Near | null)[] | null } {
+  const total = pathLength(pts);
+  const trim = Math.min(SEAM_TRIM * k, total * 0.05);
+  let a = 0, s = 0;
+  while (a < pts.length - 3 && s + dist(pts[a], pts[a + 1]) <= trim) s += dist(pts[a], pts[++a]);
+  const body = pts.slice(a);
+  if (body.length < 4) return { pts, near };
+  const E = body[body.length - 1], S = body[0];
+  const gap = dist(E, S);
+  const fill: XY[] = [];
+  const nf = Math.floor(gap / 0.5);
+  for (let i = 1; i < nf; i++) fill.push({ x: E.x + ((S.x - E.x) * i) / nf, y: E.y + ((S.y - E.y) * i) / nf });
+  const loop = body.concat(fill);
+  const n = loop.length;
+  // Arc position of every point; the seam is the middle of the filled gap (or the join itself).
+  const at = new Float64Array(n);
+  for (let i = 1; i < n; i++) at[i] = at[i - 1] + dist(loop[i - 1], loop[i]);
+  const T = at[n - 1] + dist(loop[n - 1], loop[0]);
+  const seam = body.length - 1 >= 0 ? at[body.length - 1] + gap / 2 : 0;
+  const sigma = SEAM_SIGMA * k, span = Math.min(SEAM_SPAN * k + gap, T / 4);
+  const around = (x: number, y: number) => {
+    const d = Math.abs(x - y) % T;
+    return Math.min(d, T - d);
+  };
+  let cur = loop;
+  for (let pass = 0; pass < 2; pass++) {
+    const next = cur.slice();
+    for (let i = 0; i < n; i++) {
+      const ds = around(at[i], seam);
+      if (ds >= span) continue;
+      let sx = 0, sy = 0, sw = 0;
+      // Neighbours within 3 sigma along the loop (both ways, wrapping).
+      for (let step = -1; step <= 1; step += 2) {
+        for (let j = step < 0 ? i : (i + 1) % n, c = 0; c < n; j = (j + step + n) % n, c++) {
+          const d = around(at[j], at[i]);
+          if (d > 3 * sigma) break;
+          const w = Math.exp(-(d * d) / (2 * sigma * sigma));
+          sx += cur[j].x * w;
+          sy += cur[j].y * w;
+          sw += w;
+        }
+      }
+      const f = 1 - smooth(ds / span);
+      next[i] = { x: cur[i].x + (sx / sw - cur[i].x) * f, y: cur[i].y + (sy / sw - cur[i].y) * f };
+    }
+    cur = next;
+  }
+  return { pts: cur, near: near ? near.slice(a).concat(fill.map(() => null)) : null };
 }
 
 /** Line drawn more than this (screen px) before the pen counts as a target for self-snapping. */

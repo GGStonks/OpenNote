@@ -182,6 +182,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   }, [settings.stylusOnly, settings.holdToSnap]);
 
   const fingersNavigate = useCallback(() => toolsRef.current.stylusOnly || toolsRef.current.tool === 'hand', []);
+  const penScrolls = useCallback(() => toolsRef.current.tool === 'hand', []);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const onFingerTap = useCallback(
@@ -202,8 +203,11 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     editor.commit((d) => appendBlankSheet(d));
     haptic('success');
   }, [editor]);
+  const surfaceRef = useRef(surface);
+  surfaceRef.current = surface;
+  const pinchInk = useCallback(() => ({ strokes: surfaceRef.current.strokes, pad: PAD }), []);
   const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy } = useViewport({
-    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit,
+    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, pinchInk, penScrolls,
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
@@ -860,7 +864,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             }}
             onScroll={onScroll}
             className="absolute inset-0 overflow-auto bg-ui-desk dark:bg-ui-desk"
-            style={{ touchAction: 'none', overscrollBehavior: 'contain' }}
+            style={{ touchAction: 'pan-x pan-y', overscrollBehavior: 'contain' }}
           >
             <div ref={outerRef} style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
               <div style={{ width: contentWidth, height: totalHeight, transform: `scale(${zoom})`, transformOrigin: '0 0', position: 'relative' }}>

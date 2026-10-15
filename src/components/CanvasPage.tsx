@@ -235,7 +235,7 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
   }, [scrollRoot]);
   const svg = useMemo(() => (alive && mine.length ? strokesSvg(mine, (s) => paperOf.current(s)) : ''), [alive, mine]);
   return (
-    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
     </div>
   );
@@ -352,7 +352,14 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     }
 
     ctx.clearRect(0, top, W, H);
-    if (onScreen.current || mine.length < 40) {
+    // After a zoom the observer has not caught up with where the tile now is: it is measured, so a
+    // tile on screen is painted at once (the pinch's ink overlay hands over to it on the next frame).
+    const inView = () => {
+      const r = holderRef.current?.getBoundingClientRect();
+      const v = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
+      return !!r && r.bottom > v.top && r.top < v.bottom;
+    };
+    if (onScreen.current || mine.length < 40 || inView()) {
       drawStrokes(ctx, mine);
       return;
     }
@@ -390,7 +397,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     step();
   }, [mine, ratio, alive, top, W, H]);
   return (
-    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {alive && mine.length > 0 && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
     </div>
   );
@@ -524,7 +531,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn as SVG, which stays sharp where canvases hit their budget. */
-  const vector = printMode || zoom > VECTOR_ZOOM;
+  // Vector ink above VECTOR_ZOOM, and also wherever a page canvas would be held below the screen's
+  // resolution by its pixel budget (MAX_CANVAS_PIXELS; on a 3x Android screen from about 1.4x zoom):
+  // those canvases were drawn soft and then stretched.
+  const tileArea = Math.max(1, ...layout.sheets.map((sh) => PAGE_W * sh.height));
+  const vector = printMode || zoom > VECTOR_ZOOM || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2;
   /** Paper under a stroke ("hole" fills in SVG). */
   const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
   /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
@@ -669,11 +680,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }, [printMode, tools.tool, tools.shapeSnap, tools.shapeGridSnap, page.strokes]);
 
   // iPadOS Scribble / system gestures: Pencil strokes on the canvas must never be interpreted as
-  // handwriting input or scrolling, which delays and drops strokes.
+  // handwriting input or scrolling, which delays and drops strokes. Fingers that do not draw are let
+  // through: they scroll the note natively (useViewport.ts decides which touches may).
   useEffect(() => {
     const c = inputRef.current;
     if (!c) return;
     const block = (e: TouchEvent) => {
+      const stylus = [...e.touches].some((t) => (t as Touch & { touchType?: string }).touchType === 'stylus');
+      if (toolsRef.current.stylusOnly && !stylus && !gestures.inking) return;
       if (e.cancelable) e.preventDefault();
     };
     c.addEventListener('touchstart', block, { passive: false });
@@ -1762,7 +1776,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           data-ink-input
           className="absolute inset-0 z-10"
           style={{
-            touchAction: 'none',
+            // Fingers that do not draw scroll the note natively (useViewport.ts); the Pencil's touches
+            // are cancelled there before they can scroll.
+            touchAction: tools.stylusOnly ? 'pan-x pan-y' : 'none',
             pointerEvents: tools.tool === 'hand' ? 'none' : 'auto',
             cursor: tools.tool === 'text' ? 'text' : tools.tool === 'eraser' ? 'cell' : 'crosshair',
           }}
