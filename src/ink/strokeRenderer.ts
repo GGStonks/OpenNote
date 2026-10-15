@@ -144,8 +144,20 @@ const CORNER_DEG = 55;
  * line, as drawn live.
  */
 export function smoothGeometry(g: InkGeometry): InkGeometry {
+  return smoothLine(g, g.pts.length);
+}
+
+/** How far before the end of a line still being written its smooth line can change (page px). */
+export const SMOOTH_SETTLE = 6 * SMOOTH_SIGMA;
+
+/**
+ * smoothGeometry for points [from, upTo) only (the rest as they are): a line still being written is
+ * smoothed up to SMOOTH_SETTLE before its end (nativeInk.ts), where later points can no longer
+ * change it, so the live ink is the same smooth line the committed stroke gets.
+ */
+export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry {
   const P = g.pts, n = P.length;
-  if (n < 5) return g;
+  if (n < 5 || upTo <= 0) return g;
   const d = (a: XY, b: XY) => Math.hypot(a.x - b.x, a.y - b.y);
   const at = new Float64Array(n);
   for (let i = 1; i < n; i++) at[i] = at[i - 1] + d(P[i], P[i - 1]);
@@ -167,7 +179,8 @@ export function smoothGeometry(g: InkGeometry): InkGeometry {
   const sig = SMOOTH_SIGMA, inv = 1 / (2 * sig * sig);
   for (let c = 0; c < cuts.length - 1; c++) {
     const lo = cuts[c], hi = cuts[c + 1];
-    for (let i = lo + 1; i < hi; i++) {
+    if (hi <= from) continue;
+    for (let i = Math.max(lo + 1, from); i < hi && i < upTo; i++) {
       // Symmetric window, no wider than the distance to either end of the piece.
       const half = Math.min(3 * sig, at[i] - at[lo], at[hi] - at[i]);
       if (half <= 0) continue;

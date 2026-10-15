@@ -100,7 +100,8 @@ process.on('exit', cleanup);
 await new Promise((r) => setTimeout(r, 1500));
 
 const browser = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist'] });
-const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, deviceScaleFactor: 2, hasTouch: true });
+// --dpr: the screen's density (2 = iPad; Android tablets are often 2.6-3.5).
+const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 const url = `http://localhost:${PORT}/`;
@@ -362,7 +363,8 @@ if (ONLY.has('closeup') && arg('shots')) {
     el.scrollTop = outer.offsetTop + (16 + cy) * z - el.clientHeight / 2;
   }, [cx, cy]);
   let steps = 0;
-  for (const target of [3, 4, 5, 12]) {
+  // --steps: zoom-in steps (x1.25 each from fitting the width) for each close-up.
+  for (const target of arg('steps', '3,4,5,12').split(',').map(Number)) {
     while (steps < target) {
       await page.keyboard.press('Control+Equal');
       await sleep(150);

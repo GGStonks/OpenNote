@@ -139,8 +139,17 @@ export function paperGrid(style: PaperStyle): number | null {
 const MAX_CANVAS_PIXELS = 16_000_000;
 /** Above this zoom committed ink is drawn as SVG (sharp at any zoom) instead of page canvases. */
 const VECTOR_ZOOM = 2.5;
-/** From this zoom page canvases draw handwriting as the smooth line (strokeRenderer.smoothGeometry). */
-const SMOOTH_ZOOM = 1.5;
+/**
+ * Handwriting is drawn as the smooth line (strokeRenderer.smoothGeometry) where a page px covers at
+ * least this many screen pixels: the engine's line is straight between Pencil samples, which shows
+ * as faint corners once each piece spans enough pixels (Android's 2.6-3.5x screens even at 100%,
+ * the iPad's 2x screen from 125%). Below it the ink is the engine's line, exactly as drawn live.
+ */
+const SMOOTH_RATIO = 2.4;
+/** Whether ink at `zoom` is drawn as the smooth line (the page canvases' resolution, before its pixel budget). */
+function smoothAt(zoom: number): boolean {
+  return Math.min(window.devicePixelRatio || 1, 3) * (Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2) >= SMOOTH_RATIO;
+}
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
 
@@ -1299,7 +1308,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     if (!d.model) return;
     const style = liveStyle('pen');
-    d.ink.update(d.model, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure }, d.inkTf);
+    d.ink.update(
+      d.model,
+      { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure, smooth: smoothAt(zoomRef.current) },
+      d.inkTf
+    );
   }
 
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
@@ -1773,7 +1786,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     height={sh.height}
                     strokes={l.strokes}
                     ratio={canvasRatio(inkZoom, PAGE_W * sh.height)}
-                    smooth={inkZoom >= SMOOTH_ZOOM}
+                    smooth={smoothAt(inkZoom)}
                     scrollRoot={scrollRoot}
                   />
                 ))}
