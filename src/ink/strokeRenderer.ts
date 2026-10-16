@@ -320,8 +320,6 @@ export interface PaintOptions {
   holeColor?: string;
   /** Handwriting as the smooth line (smoothGeometry): page canvases zoomed in past SMOOTH_ZOOM. */
   smooth?: boolean;
-  /** With smooth: only where the smooth line is built already; the others as the line itself (no waiting mid-gesture). */
-  smoothIfReady?: boolean;
 }
 
 const HATCH_SPACING = 8;
@@ -475,14 +473,9 @@ function built(s: Stroke, smooth = false): Built {
  * Builds a committed stroke's geometry ahead of its first paint (cached like a paint would).
  * Returns false if it was already built.
  */
-/** The stroke's line is built (drawing it costs no modelling). */
-export function strokeReady(s: Stroke): boolean {
-  return !s.points.length || cache.has(s);
-}
-
-export function prepareStroke(s: Stroke, smooth = false): boolean {
-  if (!s.points.length || (smooth ? s.isShape || smoothBuilt.has(s) : cache.has(s))) return false;
-  built(s, smooth);
+export function prepareStroke(s: Stroke): boolean {
+  if (!s.points.length || cache.has(s)) return false;
+  built(s);
   return true;
 }
 
@@ -522,10 +515,10 @@ export function drawLiveStroke(ctx: CanvasRenderingContext2D, points: Point[], s
  * (so holes cut through fills and highlighters but never through ink), then ink.
  */
 export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], opts: PaintOptions = {}) {
-  const sm = (s: Stroke) => !!opts.smooth && (!opts.smoothIfReady || smoothBuilt.has(s));
-  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s, sm(s)), styleOf(s), s.opacity ?? 1);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s, sm(s)), styleOf(s), opts);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s, sm(s)), styleOf(s), s.opacity ?? 1);
+  const sm = opts.smooth;
+  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s, sm), styleOf(s), opts);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -23,9 +23,8 @@
  *   e                                             the page shows the stroke: clear
  *   c                                             cancel: clear now
  */
-import type { LiveStroke, ModeledPoint } from './engine';
+import type { LiveStroke } from './engine';
 import { pressureWidth } from './engine';
-import { SMOOTH_SETTLE, smoothLine } from './strokeRenderer';
 
 type Sender = (msg: string) => void;
 
@@ -54,12 +53,6 @@ export interface InkStyle {
   color: string;
   width: number;
   variable: boolean;
-  /**
-   * The committed stroke will be drawn as the smooth line (strokeRenderer.smoothLine; dense screens
-   * and zoomed in): the live ink is the same smooth line, up to SMOOTH_SETTLE before the pen,
-   * where later points can no longer change it.
-   */
-  smooth?: boolean;
 }
 
 let send: Sender | null | undefined;
@@ -101,7 +94,7 @@ export class NativeInk {
   /** Sends what the stroke's model added since the last call (restarting if the model or style changed). */
   update(stroke: LiveStroke, style: InkStyle, tf: InkTransform): void {
     if (this.done || !NativeInk.available) return;
-    const key = `${style.color}|${style.width}|${style.variable}|${!!style.smooth}|${tf.ox}|${tf.oy}|${tf.k}`;
+    const key = `${style.color}|${style.width}|${style.variable}|${tf.ox}|${tf.oy}|${tf.k}`;
     if (stroke !== this.model || key !== this.key) {
       this.model = stroke;
       this.key = key;
@@ -111,35 +104,16 @@ export class NativeInk {
       this.shown = true;
     }
     const m = stroke.model;
-    const raw = m.points;
-    const widthOf = (q: { p: number }) => (style.variable ? pressureWidth(style.width, q.p) : style.width);
-    // Settled ink to send for good: the engine's line, or its smooth line up to where it is final.
-    let pts: readonly ModeledPoint[] = raw;
-    let widths: readonly number[] | null = null;
-    let final = raw.length;
-    if (style.smooth && raw.length > 4) {
-      // Final: everything more than SMOOTH_SETTLE (along the line) before its newest point.
-      let back = 0;
-      final = raw.length - 1;
-      while (final > 0 && back < SMOOTH_SETTLE) {
-        back += Math.hypot(raw[final].x - raw[final - 1].x, raw[final].y - raw[final - 1].y);
-        final--;
-      }
-      final = Math.max(this.sent, final);
-      // Only the points about to be sent are smoothed (the line around them is the context).
-      const g = smoothLine({ pts: raw.slice(), widths: raw.map(widthOf), width: style.width }, final, this.sent);
-      pts = g.pts;
-      widths = g.widths;
-    }
-    const out: string[] = ['u', String(Math.max(0, final - this.sent))];
-    const push = (q: { x: number; y: number; p: number }, w: number) => {
+    const pts = m.points;
+    const tail = m.tail();
+    const out: string[] = ['u', String(Math.max(0, pts.length - this.sent))];
+    const push = (q: { x: number; y: number; p: number }) => {
+      const w = style.variable ? pressureWidth(style.width, q.p) : style.width;
       out.push(f(tf.ox + q.x * tf.k), f(tf.oy + q.y * tf.k), f((w / 2) * tf.k));
     };
-    for (let i = this.sent; i < final; i++) push(pts[i], widths ? widths[i] : widthOf(pts[i]));
-    this.sent = final;
-    // The provisional end: the settled line not final yet, then the engine's tail.
-    for (let i = final; i < raw.length; i++) push(raw[i], widthOf(raw[i]));
-    for (const q of m.tail()) push(q, widthOf(q));
+    for (let i = this.sent; i < pts.length; i++) push(pts[i]);
+    this.sent = pts.length;
+    for (const q of tail) push(q);
     send!(out.join(','));
   }
 

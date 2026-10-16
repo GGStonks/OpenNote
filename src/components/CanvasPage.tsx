@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeReady,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
 } from '../ink/strokeRenderer';
 import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
@@ -162,19 +162,17 @@ const MAX_CANVAS_PIXELS = 16_000_000;
 /** Above this zoom committed ink is drawn as SVG (sharp at any zoom) instead of page canvases. */
 const VECTOR_ZOOM = 2.5;
 /**
- * Handwriting is drawn as the smooth line (strokeRenderer.smoothGeometry) where a page px covers at
- * least this many screen pixels: the engine's line is straight between Pencil samples, which shows
- * as faint corners once each piece spans enough pixels (Android's 2.6-3.5x screens even at 100%,
- * the iPad's 2x screen from 125%). Below it the ink is the engine's line, exactly as drawn live.
+ * From this zoom page canvases draw handwriting as the smooth line (strokeRenderer.smoothGeometry):
+ * the engine's line is straight between Pencil samples, which shows as faint corners when zoomed in.
+ * Below it the ink is the engine's line, exactly as drawn live.
  */
-const SMOOTH_RATIO = 2.4;
-/** The sharp ink of a pinch is drawn when the fingers have rested this long (ms). */
-const SHARP_REST_MS = 150;
-/** Its canvas stays within this many pixels (the visible region plus a margin, at up to 2x). */
-const SHARP_MAX_PIXELS = 6_000_000;
-/** Whether ink at `zoom` is drawn as the smooth line (the page canvases' resolution, before its pixel budget). */
+const SMOOTH_ZOOM = 1.5;
+/** Whether ink at `zoom` is drawn as the smooth line. */
 function smoothAt(zoom: number): boolean {
-  return Math.min(window.devicePixelRatio || 1, 3) * (Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2) >= SMOOTH_RATIO;
+  // Zoomed in only: at ordinary zoom the finished stroke must be exactly the line drawn live, or
+  // it visibly shifted when the pen lifted (a retrace). v2.0.10 smoothed by screen density, so on
+  // Android every stroke shifted a little at lift.
+  return zoom >= SMOOTH_ZOOM;
 }
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
@@ -280,40 +278,16 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
       setSvg('');
       return;
     }
-    // Strokes not modelled yet are modelled first, a few ms at a time (one SVG of a page whose ink
-    // was not modelled froze the page for seconds after zooming in on a just-opened note).
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let cancelled = false;
-    const todo = mine.filter((st) => !strokeReady(st));
-    const make = () => {
-      timer = null;
-      if (cancelled) return;
-      if (tileWork.paused) {
-        tileWork.resume.add(make);
-        return;
-      }
-      const until = performance.now() + 6;
-      while (todo.length && performance.now() < until) prepareStroke(todo.pop()!);
-      if (todo.length) {
-        timer = setTimeout(make, 16);
-        return;
-      }
-      setSvg(strokesSvg(mine, (st) => paperOf.current(st)));
-    };
-    make();
+    const make = () => setSvg(strokesSvg(mine, (s) => paperOf.current(s)));
+    if (!tileWork.paused) {
+      make();
+      return;
+    }
+    tileWork.resume.add(make);
     return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
       tileWork.resume.delete(make);
     };
   }, [alive, mine]);
-  // Near the view without its SVG yet: the sharp ink of a pinch stays over it until it has one.
-  const token = useRef({});
-  useLayoutEffect(() => {
-    if (alive && mine.length && !svg) tileWork.pending.add(token.current);
-    else tileWork.pending.delete(token.current);
-  }, [alive, mine.length, svg]);
-  useEffect(() => () => void tileWork.pending.delete(token.current), []);
   // The canvas under this band is hidden while the SVG shows the same ink.
   useLayoutEffect(() => {
     const ink = holderRef.current?.parentElement?.querySelector<HTMLElement>(`[data-ink-key="${inkKey}"]`);
@@ -324,7 +298,7 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
     };
   }, [svg, inkKey]);
   return (
-    <div ref={holderRef} data-vector-tile className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
     </div>
   );
@@ -378,11 +352,8 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   /** What the canvas shows now (complete); null when it shows nothing usable. */
   const painted = useRef<TileShown | null>(null);
   const slicing = useRef<number | null>(null);
-  /** In tileWork.pending while this tile repaints for a new zoom. */
-  const token = useRef({});
   useEffect(() => () => {
     if (slicing.current !== null) cancelAnimationFrame(slicing.current);
-    tileWork.pending.delete(token.current);
   }, []);
 
   /**
@@ -426,7 +397,6 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    tileWork.pending.delete(token.current);
     if (slicing.current !== null) {
       cancelAnimationFrame(slicing.current);
       slicing.current = null;
@@ -451,9 +421,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       if (!octx) return;
       octx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
       const job = mine;
-      tileWork.pending.add(token.current);
       paintSliced(octx, job, smooth, () => {
-        tileWork.pending.delete(token.current);
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
@@ -775,35 +743,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }, [zoom]);
   // Scrolling a long note: every stroke's geometry (the ink engine's model of the line) is built
   // the first time its page is painted, which on a slower tablet stalled scrolling into pages not
-  // seen yet. After the note opens or changes, it is built in the background, nearest to the view
-  // first: only in idle time (requestIdleCallback where there is one, else a few ms every 50 ms), and
-  // not while a pen, finger or gesture is down or the note is scrolling (native scrolling, which
-  // releases the fingers to the browser, used to share its frames with this work on slow tablets).
+  // seen yet. After the note opens or changes, it is built in the background a few ms at a time,
+  // nearest to the view first, and paused while a pen, finger or gesture is down.
   useEffect(() => {
     if (printMode) return;
     const strokes = page.strokes;
     let order: Stroke[] | null = null;
     let i = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    let idleId: number | null = null;
-    let scrolledAt = 0;
-    const onScroll = () => {
-      scrolledAt = performance.now();
-    };
-    const scrollTarget: HTMLElement | Window = scrollRoot ?? window;
-    scrollTarget.addEventListener('scroll', onScroll, { passive: true });
-    // iPadOS has no requestIdleCallback (Android's WebView has).
-    const ric: ((cb: (d: { timeRemaining(): number }) => void, o?: { timeout: number }) => number) | null =
-      typeof (window as { requestIdleCallback?: unknown }).requestIdleCallback === 'function' ? window.requestIdleCallback.bind(window) : null;
-    const next = (delay: number) => {
-      if (ric && delay < 100) idleId = ric((d) => slice(d), { timeout: 1000 });
-      else timer = setTimeout(() => slice(null), delay);
-    };
-    const slice = (deadline: { timeRemaining(): number } | null) => {
+    const slice = () => {
       timer = null;
-      idleId = null;
-      if (drawing.current || gestures.inking || gestures.touches > 0 || performance.now() - scrolledAt < 300) {
-        timer = setTimeout(() => slice(null), 200);
+      if (drawing.current || gestures.inking || gestures.touches > 0) {
+        timer = setTimeout(slice, 200);
         return;
       }
       if (!order) {
@@ -818,183 +769,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         }));
         order = strokes.slice().sort((a, b) => dist.get(a)! - dist.get(b)!);
       }
-      const budget = deadline ? Math.min(8, Math.max(1, deadline.timeRemaining() - 1)) : 3;
-      const until = performance.now() + budget;
+      const until = performance.now() + 4;
       while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
-      if (i < order.length) next(ric ? 0 : 50);
+      if (i < order.length) timer = setTimeout(slice, 16);
     };
-    timer = setTimeout(() => slice(null), 300);
+    timer = setTimeout(slice, 300);
     return () => {
       if (timer) clearTimeout(timer);
-      const cic = (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback;
-      if (idleId !== null && cic) cic(idleId);
-      scrollTarget.removeEventListener('scroll', onScroll);
     };
   }, [printMode, page.strokes, scrollRoot]);
-  // ------------------------------------------------------------------ sharp ink while zooming
-  /**
-   * While two fingers zoom, the page (paper, text, images, the ink tiles) is scaled as it is by a
-   * CSS transform: cheap, but the ink went soft as the zoom grew, until the fingers lifted. The ink
-   * is now drawn again at the current scale on a canvas placed INSIDE the page, in page coordinates
-   * (the visible part plus a margin), so it moves and scales with the paper exactly: it cannot
-   * drift, which a screen-sized overlay did on devices (v2.0.6-2.0.8). It is drawn when the fingers
-   * rest (SHARP_REST_MS), never while they move, then scales with the page; the ink tiles are hidden
-   * under it ([data-sharp-ink], index.css) until, after the pinch, they have repainted at the new zoom.
-   */
-  useEffect(() => {
-    if (printMode) return;
-    const cont = containerRef.current;
-    if (!cont) return;
-    let sharp: { canvas: HTMLCanvasElement; x0: number; y0: number; x1: number; y1: number; S: number } | null = null;
-    let frame: number | null = null;
-    let rest: ReturnType<typeof setTimeout> | null = null;
-    let handover: number | null = null;
-    let zoomAtStart = zoomRef.current;
-    let pinching = false;
-    /** This pinch shows the stretched page ink (see draw). */
-    let gaveUp = false;
-
-    /** Screen px per page px now (the zoom times the pinch), and the page region on screen. */
-    const view = () => {
-      const c = cont.getBoundingClientRect();
-      const S = c.width / Math.max(1, sizeRef.current.w);
-      const r = scrollRoot?.getBoundingClientRect() ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
-      const x0 = Math.max(0, (r.left - c.left) / S), x1 = Math.min(sizeRef.current.w, (r.right - c.left) / S);
-      const y0 = Math.max(0, (r.top - c.top) / S), y1 = Math.min(sizeRef.current.h, (r.bottom - c.top) / S);
-      return { S, x0, y0, x1, y1 };
-    };
-
-    const draw = () => {
-      const v = view();
-      if (v.x1 <= v.x0 || v.y1 <= v.y0) return;
-      // At most 2x: on 3x Android screens a 3x canvas of the view cost more than the sharpness was worth.
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      // The visible region plus a third of it on every side, within a pixel budget.
-      let mx = (v.x1 - v.x0) / 3, my = (v.y1 - v.y0) / 3;
-      const px = (mx2: number, my2: number) => (v.x1 - v.x0 + 2 * mx2) * (v.y1 - v.y0 + 2 * my2) * (v.S * dpr) ** 2;
-      if (px(mx, my) > SHARP_MAX_PIXELS) mx = my = 0;
-      const k = px(mx, my) > SHARP_MAX_PIXELS ? Math.sqrt(SHARP_MAX_PIXELS / px(mx, my)) : 1;
-      const x0 = Math.max(0, v.x0 - mx), y0 = Math.max(0, v.y0 - my);
-      const x1 = Math.min(sizeRef.current.w, v.x1 + mx), y1 = Math.min(sizeRef.current.h, v.y1 + my);
-      const scale = v.S * dpr * k;
-      if (!sharp) {
-        const canvas = document.createElement('canvas');
-        canvas.style.cssText = 'position:absolute;pointer-events:none;z-index:6;';
-        cont.appendChild(canvas);
-        sharp = { canvas, x0, y0, x1, y1, S: v.S };
-      }
-      const c = sharp.canvas;
-      const w = Math.max(1, Math.round((x1 - x0) * scale)), h = Math.max(1, Math.round((y1 - y0) * scale));
-      if (c.width !== w || c.height !== h) {
-        c.width = w;
-        c.height = h;
-      }
-      const ctx = c.getContext('2d');
-      if (!ctx) return;
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-      ctx.setTransform(scale, 0, 0, scale, -x0 * scale, -y0 * scale);
-      // Picked by their height on the page (from the points, cached): their painted bounds would
-      // model every stroke of the note that was not modelled yet.
-      const strokes = shownRef.current.filter((st) => {
-        const r = strokeYRange(st);
-        return r.maxY >= y0 && r.minY <= y1;
-      });
-      // Strokes not modelled yet (just after a long note opened): modelling them mid-pinch froze the
-      // page for seconds, so this pinch keeps the page's own (stretched) ink instead.
-      if (!strokes.every(strokeReady)) {
-        gaveUp = true;
-        remove();
-        return;
-      }
-      drawStrokes(ctx, strokes, { smooth: v.S * dpr >= SMOOTH_RATIO, smoothIfReady: pinching });
-      // Pixels and position change in the same frame: the ink never shows out of place.
-      Object.assign(c.style, { left: `${x0}px`, top: `${y0}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
-      sharp = { canvas: c, x0, y0, x1, y1, S: v.S };
-      cont.setAttribute('data-sharp-ink', '');
-    };
-
-    // While the fingers move nothing is drawn (the page is only scaled, as cheap as it gets); a sharp
-    // drawing made while they rested scales with the page, and is dropped (the tiles shown again)
-    // as soon as the view leaves the region it covers. Redrawing during the movement made pinch
-    // zoom lag on every device (v2.1.0).
-    const update = () => {
-      frame = null;
-      if (!sharp) return;
-      const v = view();
-      const covered = v.x0 >= sharp.x0 - 0.5 && v.y0 >= sharp.y0 - 0.5 && v.x1 <= sharp.x1 + 0.5 && v.y1 <= sharp.y1 + 0.5;
-      if (!covered) remove();
-    };
-
-    const remove = () => {
-      if (frame !== null) cancelAnimationFrame(frame);
-      if (handover !== null) cancelAnimationFrame(handover);
-      if (rest) clearTimeout(rest);
-      frame = handover = null;
-      rest = null;
-      sharp?.canvas.remove();
-      sharp = null;
-      cont.removeAttribute('data-sharp-ink');
-    };
-
-    /** After the pinch: once the tiles have repainted at the new zoom (at most 2.5 s), they are shown again. */
-    const handOver = (since = performance.now()) => {
-      handover = requestAnimationFrame(() => {
-        handover = null;
-        if (pinching) return;
-        if (tileWork.pending.size && performance.now() - since < 2500) return handOver(since);
-        remove();
-      });
-    };
-    sharpHandOver.current = () => {
-      if (!sharp || pinching) return;
-      draw();
-      // Two frames so the tiles' first repaint work is registered before checking it.
-      handover = requestAnimationFrame(() => {
-        handover = null;
-        handOver();
-      });
-    };
-
-    const off = gestures.onPinch((phase) => {
-      if (phase === 'start') {
-        pinching = true;
-        gaveUp = false;
-        zoomAtStart = zoomRef.current;
-        if (handover !== null) cancelAnimationFrame(handover);
-        handover = null;
-      } else if (phase === 'move') {
-        if (frame === null) frame = requestAnimationFrame(update);
-        // Fingers resting: the ink is drawn sharp for where they are.
-        if (rest) clearTimeout(rest);
-        rest = setTimeout(() => {
-          rest = null;
-          if (pinching && !gaveUp && (!sharp || Math.abs(view().S / sharp.S - 1) > 0.02)) draw();
-        }, SHARP_REST_MS);
-      } else {
-        pinching = false;
-        if (rest) clearTimeout(rest);
-        rest = null;
-        // The zoom did not change: nothing will repaint, the tiles are as they were.
-        setTimeout(() => {
-          if (!pinching && Math.abs(zoomRef.current - zoomAtStart) < 1e-4) remove();
-        }, 300);
-      }
-    });
-    return () => {
-      off();
-      remove();
-      sharpHandOver.current = null;
-    };
-  }, [printMode, scrollRoot, gestures]); // eslint-disable-line react-hooks/exhaustive-deps
-  const shownRef = useRef(shownStrokes);
-  shownRef.current = shownStrokes;
-  const sharpHandOver = useRef<(() => void) | null>(null);
-  // The zoom changed (a pinch ended): the sharp ink is drawn for it and hands over to the tiles.
-  useLayoutEffect(() => {
-    sharpHandOver.current?.();
-  }, [zoom]);
-
   // Shape tool: the page's snap targets are built ahead of the first shape, and again after edits.
   useEffect(() => {
     if (printMode || tools.tool !== 'shape') return;
@@ -1104,9 +887,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
-      // Always painted, also in the apps where the shell draws the stroke natively too: leaving the
-      // live ink to the shell alone (v2.1.0-2.1.2) left the ink standing still while the pen moved
-      // on devices where the native layer did not keep up.
       const style = liveStyle('pen');
       d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
@@ -1554,7 +1334,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const style = liveStyle('pen');
     d.ink.update(
       d.model,
-      { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure, smooth: smoothAt(zoomRef.current) },
+      { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure },
       d.inkTf
     );
   }

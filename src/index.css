@@ -103,10 +103,3 @@
   color-scheme: light;
   color: #111827;
 }
-
-/* Two fingers zooming: the page's ink tiles are hidden under the sharp ink drawn for the current
-   scale inside the page (CanvasPage, data-sharp-ink); the paper and everything else stay as they are. */
-[data-sharp-ink] [data-ink-key],
-[data-sharp-ink] [data-vector-tile] {
-  visibility: hidden !important;
-}

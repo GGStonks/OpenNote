@@ -271,7 +271,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       const p = pinch.current;
       pinch.current = null;
       setTilesPaused(false);
-      if (p?.engaged) gestures.pinch('end');
       // The fingers lifted: the content is drawn at its new scale again (see onMove).
       if (outerRef.current) outerRef.current.style.willChange = '';
       const outer = outerRef.current;
@@ -407,7 +406,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           // text and math again at every new scale, on every frame of the pinch.
           outer.style.willChange = 'transform';
           setTilesPaused(true);
-          gestures.pinch('start');
         }
         if (pz.engaged) {
           const fitW = el.clientWidth / contentWidthRef.current;
@@ -415,7 +413,6 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.k = z / pz.z0;
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           outer.style.transform = `scale(${pz.k})`;
-          gestures.pinch('move');
         }
       }
       pending.current.x += c.x - last.current.x;

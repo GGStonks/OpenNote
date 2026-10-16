@@ -7,11 +7,6 @@
 export const tileWork = {
   paused: false,
   resume: new Set<() => void>(),
-  /**
-   * Tiles still repainting for a new zoom (InkTile's off-screen repaint, VectorTile's SVG): the
-   * sharp ink drawn during a pinch (CanvasPage) stays over them until none is.
-   */
-  pending: new Set<object>(),
 };
 
 export function setTilesPaused(paused: boolean) {
