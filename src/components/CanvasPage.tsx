@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeReady,
 } from '../ink/strokeRenderer';
 import { LiveStroke } from '../ink/engine';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
@@ -90,41 +90,63 @@ export const PAPER_COLORS: Record<PaperColor, string> = {
  * paper sits on the surface, so grid and dot lattices of every page line up with the surface's
  * lattice (the one the Draw tool snaps to).
  */
-export function paperBackground(style: PaperStyle, color: PaperColor, origin = { x: 0, y: 0 }): React.CSSProperties {
+/**
+ * The paper's pattern as CSS backgrounds. `scale`: how much the page is shrunk where it is shown
+ * (thumbnails, ~0.2-0.3): lines and dots are then drawn thicker and stronger in page px so they
+ * stay at least about one screen pixel, and graph paper keeps only its major lines. At full size
+ * the 1 px grid lines fell below a pixel in the thumbnails and grid / graph pages looked blank.
+ */
+export function paperBackground(style: PaperStyle, color: PaperColor, origin = { x: 0, y: 0 }, scale = 1, swatch = false): React.CSSProperties {
   const dark = color === 'dark';
   const base = PAPER_COLORS[color] ?? PAPER_COLORS.white;
-  const line = dark ? 'rgba(255,255,255,0.13)' : 'rgba(59,130,246,0.22)';
-  const grid = dark ? 'rgba(255,255,255,0.09)' : 'rgba(0,0,0,0.08)';
+  const small = scale < 0.6;
+  // Line thickness in page px, so a line covers about 0.9 screen px at this scale.
+  const lw = small ? Math.max(1, 0.9 / scale) : 1;
+  const boost = (a: number) => (small ? Math.min(1, a * 1.5) : a);
+  const line = dark ? `rgba(255,255,255,${boost(0.13)})` : `rgba(59,130,246,${boost(0.22)})`;
+  const grid = dark ? `rgba(255,255,255,${boost(0.09)})` : `rgba(0,0,0,${boost(0.08)})`;
   const margin = dark ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.4)';
   const css: React.CSSProperties = { backgroundColor: base };
-  if (style === 'ruled' || style === 'narrow') {
+  if ((style === 'ruled' || style === 'narrow') && swatch) {
+    // A small sample of the pattern (paper picker): lines and the margin, without the blank band a
+    // page keeps at its top (taller than the sample, which then looked blank).
+    const gap = style === 'narrow' ? 6 : 9;
+    css.backgroundImage = [
+      `linear-gradient(to right, transparent 9px, ${margin} 9px, ${margin} 10px, transparent 10px)`,
+      `linear-gradient(to bottom, transparent ${gap - 1}px, ${line} ${gap - 1}px, ${line} ${gap}px)`,
+    ].join(',');
+    css.backgroundSize = `100% 100%, 100% ${gap}px`;
+    css.backgroundRepeat = 'no-repeat, repeat';
+  } else if (style === 'ruled' || style === 'narrow') {
     const gap = style === 'narrow' ? 24 : 32;
     css.backgroundImage = [
-      `linear-gradient(to right, transparent 79px, ${margin} 79px, ${margin} 80px, transparent 80px)`,
+      `linear-gradient(to right, transparent 79px, ${margin} 79px, ${margin} ${79 + lw}px, transparent ${79 + lw}px)`,
       `linear-gradient(${base}, ${base})`,
-      `linear-gradient(to bottom, transparent ${gap - 1}px, ${line} ${gap - 1}px, ${line} ${gap}px)`,
+      `linear-gradient(to bottom, transparent ${gap - lw}px, ${line} ${gap - lw}px, ${line} ${gap}px)`,
     ].join(',');
     css.backgroundSize = `100% 100%, 100% 79px, 100% ${gap}px`;
     css.backgroundPosition = `0 0, 0 0, 0 ${80 - gap}px`;
     css.backgroundRepeat = 'no-repeat, no-repeat, repeat';
   } else if (style === 'grid') {
-    css.backgroundImage = `linear-gradient(to right, ${grid} 1px, transparent 1px), linear-gradient(to bottom, ${grid} 1px, transparent 1px)`;
+    css.backgroundImage = `linear-gradient(to right, ${grid} ${lw}px, transparent ${lw}px), linear-gradient(to bottom, ${grid} ${lw}px, transparent ${lw}px)`;
     css.backgroundSize = '24px 24px';
     css.backgroundPosition = `${-origin.x}px ${-origin.y}px`;
   } else if (style === 'graph') {
-    // Millimetre-style graph paper: fine lines every 12 px, stronger ones every 60 px.
-    const major = dark ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.13)';
+    // Millimetre-style graph paper: fine lines every 12 px, stronger ones every 60 px (only those
+    // when shrunk: the fine ones would fill the thumbnail).
+    const major = dark ? `rgba(255,255,255,${boost(0.16)})` : `rgba(0,0,0,${boost(0.13)})`;
     const minor = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
-    css.backgroundImage = [
-      `linear-gradient(to right, ${major} 1px, transparent 1px)`,
-      `linear-gradient(to bottom, ${major} 1px, transparent 1px)`,
-      `linear-gradient(to right, ${minor} 1px, transparent 1px)`,
-      `linear-gradient(to bottom, ${minor} 1px, transparent 1px)`,
-    ].join(',');
-    css.backgroundSize = '60px 60px, 60px 60px, 12px 12px, 12px 12px';
+    const layers = [
+      `linear-gradient(to right, ${major} ${lw}px, transparent ${lw}px)`,
+      `linear-gradient(to bottom, ${major} ${lw}px, transparent ${lw}px)`,
+    ];
+    if (!small) layers.push(`linear-gradient(to right, ${minor} 1px, transparent 1px)`, `linear-gradient(to bottom, ${minor} 1px, transparent 1px)`);
+    css.backgroundImage = layers.join(',');
+    css.backgroundSize = small ? '60px 60px, 60px 60px' : '60px 60px, 60px 60px, 12px 12px, 12px 12px';
     css.backgroundPosition = `${-origin.x}px ${-origin.y}px`;
   } else if (style === 'dots') {
-    css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} 1.3px, transparent 1.7px)`;
+    const r = small ? Math.min(6, 1.3 / Math.max(scale, 0.25)) : 1.3;
+    css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} ${r}px, transparent ${r + 0.4}px)`;
     css.backgroundSize = '24px 24px';
     css.backgroundPosition = `${12 - origin.x}px ${12 - origin.y}px`;
   }
@@ -146,6 +168,10 @@ const VECTOR_ZOOM = 2.5;
  * the iPad's 2x screen from 125%). Below it the ink is the engine's line, exactly as drawn live.
  */
 const SMOOTH_RATIO = 2.4;
+/** The sharp ink of a pinch is drawn again when the scale has changed by this factor since. */
+const SHARP_REDRAW = 1.25;
+/** Its canvas stays within this many pixels (the visible region plus a margin, at the screen's resolution). */
+const SHARP_MAX_PIXELS = 12_000_000;
 /** Whether ink at `zoom` is drawn as the smooth line (the page canvases' resolution, before its pixel budget). */
 function smoothAt(zoom: number): boolean {
   return Math.min(window.devicePixelRatio || 1, 3) * (Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2) >= SMOOTH_RATIO;
@@ -254,16 +280,40 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
       setSvg('');
       return;
     }
-    const make = () => setSvg(strokesSvg(mine, (s) => paperOf.current(s)));
-    if (!tileWork.paused) {
-      make();
-      return;
-    }
-    tileWork.resume.add(make);
+    // Strokes not modelled yet are modelled first, a few ms at a time (one SVG of a page whose ink
+    // was not modelled froze the page for seconds after zooming in on a just-opened note).
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    const todo = mine.filter((st) => !strokeReady(st));
+    const make = () => {
+      timer = null;
+      if (cancelled) return;
+      if (tileWork.paused) {
+        tileWork.resume.add(make);
+        return;
+      }
+      const until = performance.now() + 6;
+      while (todo.length && performance.now() < until) prepareStroke(todo.pop()!);
+      if (todo.length) {
+        timer = setTimeout(make, 16);
+        return;
+      }
+      setSvg(strokesSvg(mine, (st) => paperOf.current(st)));
+    };
+    make();
     return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
       tileWork.resume.delete(make);
     };
   }, [alive, mine]);
+  // Near the view without its SVG yet: the sharp ink of a pinch stays over it until it has one.
+  const token = useRef({});
+  useLayoutEffect(() => {
+    if (alive && mine.length && !svg) tileWork.pending.add(token.current);
+    else tileWork.pending.delete(token.current);
+  }, [alive, mine.length, svg]);
+  useEffect(() => () => void tileWork.pending.delete(token.current), []);
   // The canvas under this band is hidden while the SVG shows the same ink.
   useLayoutEffect(() => {
     const ink = holderRef.current?.parentElement?.querySelector<HTMLElement>(`[data-ink-key="${inkKey}"]`);
@@ -274,7 +324,7 @@ const VectorTile = React.memo(function VectorTile(props: { top: number; width: n
     };
   }, [svg, inkKey]);
   return (
-    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} data-vector-tile className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
     </div>
   );
@@ -328,8 +378,11 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   /** What the canvas shows now (complete); null when it shows nothing usable. */
   const painted = useRef<TileShown | null>(null);
   const slicing = useRef<number | null>(null);
+  /** In tileWork.pending while this tile repaints for a new zoom. */
+  const token = useRef({});
   useEffect(() => () => {
     if (slicing.current !== null) cancelAnimationFrame(slicing.current);
+    tileWork.pending.delete(token.current);
   }, []);
 
   /**
@@ -373,6 +426,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
+    tileWork.pending.delete(token.current);
     if (slicing.current !== null) {
       cancelAnimationFrame(slicing.current);
       slicing.current = null;
@@ -397,7 +451,9 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       if (!octx) return;
       octx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
       const job = mine;
+      tileWork.pending.add(token.current);
       paintSliced(octx, job, smooth, () => {
+        tileWork.pending.delete(token.current);
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
@@ -719,18 +775,35 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }, [zoom]);
   // Scrolling a long note: every stroke's geometry (the ink engine's model of the line) is built
   // the first time its page is painted, which on a slower tablet stalled scrolling into pages not
-  // seen yet. After the note opens or changes, it is built in the background a few ms at a time,
-  // nearest to the view first, and paused while a pen, finger or gesture is down.
+  // seen yet. After the note opens or changes, it is built in the background, nearest to the view
+  // first: only in idle time (requestIdleCallback where there is one, else a few ms every 50 ms), and
+  // not while a pen, finger or gesture is down or the note is scrolling (native scrolling, which
+  // releases the fingers to the browser, used to share its frames with this work on slow tablets).
   useEffect(() => {
     if (printMode) return;
     const strokes = page.strokes;
     let order: Stroke[] | null = null;
     let i = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const slice = () => {
+    let idleId: number | null = null;
+    let scrolledAt = 0;
+    const onScroll = () => {
+      scrolledAt = performance.now();
+    };
+    const scrollTarget: HTMLElement | Window = scrollRoot ?? window;
+    scrollTarget.addEventListener('scroll', onScroll, { passive: true });
+    // iPadOS has no requestIdleCallback (Android's WebView has).
+    const ric: ((cb: (d: { timeRemaining(): number }) => void, o?: { timeout: number }) => number) | null =
+      typeof (window as { requestIdleCallback?: unknown }).requestIdleCallback === 'function' ? window.requestIdleCallback.bind(window) : null;
+    const next = (delay: number) => {
+      if (ric && delay < 100) idleId = ric((d) => slice(d), { timeout: 1000 });
+      else timer = setTimeout(() => slice(null), delay);
+    };
+    const slice = (deadline: { timeRemaining(): number } | null) => {
       timer = null;
-      if (drawing.current || gestures.inking || gestures.touches > 0) {
-        timer = setTimeout(slice, 200);
+      idleId = null;
+      if (drawing.current || gestures.inking || gestures.touches > 0 || performance.now() - scrolledAt < 300) {
+        timer = setTimeout(() => slice(null), 200);
         return;
       }
       if (!order) {
@@ -745,15 +818,187 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         }));
         order = strokes.slice().sort((a, b) => dist.get(a)! - dist.get(b)!);
       }
-      const until = performance.now() + 4;
-      while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
-      if (i < order.length) timer = setTimeout(slice, 16);
+      const budget = deadline ? Math.min(8, Math.max(1, deadline.timeRemaining() - 1)) : 3;
+      const until = performance.now() + budget;
+      // First every stroke's line, then its smooth line (zoomed in, pinch-zooming, dense screens).
+      while (i < 2 * order.length && performance.now() < until) {
+        const j = i++;
+        if (j < order.length) prepareStroke(order[j]);
+        else prepareStroke(order[j - order.length], true);
+      }
+      if (i < 2 * order.length) next(ric ? 0 : 50);
     };
-    timer = setTimeout(slice, 300);
+    timer = setTimeout(() => slice(null), 300);
     return () => {
       if (timer) clearTimeout(timer);
+      const cic = (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback;
+      if (idleId !== null && cic) cic(idleId);
+      scrollTarget.removeEventListener('scroll', onScroll);
     };
   }, [printMode, page.strokes, scrollRoot]);
+  // ------------------------------------------------------------------ sharp ink while zooming
+  /**
+   * While two fingers zoom, the page (paper, text, images, the ink tiles) is scaled as it is by a
+   * CSS transform: cheap, but the ink went soft as the zoom grew, until the fingers lifted. The ink
+   * is now drawn again at the current scale on a canvas placed INSIDE the page, in page coordinates
+   * (the visible part plus a margin), so it moves and scales with the paper exactly: it cannot
+   * drift, which a screen-sized overlay did on devices (v2.0.6-2.0.8). It is redrawn when the scale
+   * has changed by SHARP_REDRAW since the last drawing, when the view leaves the drawn region, and
+   * when the fingers rest; in between it scales with the page. The ink tiles are hidden under it
+   * ([data-sharp-ink], index.css) until, after the pinch, they have repainted at the new zoom.
+   */
+  useEffect(() => {
+    if (printMode) return;
+    const cont = containerRef.current;
+    if (!cont) return;
+    let sharp: { canvas: HTMLCanvasElement; x0: number; y0: number; x1: number; y1: number; S: number } | null = null;
+    let frame: number | null = null;
+    let rest: ReturnType<typeof setTimeout> | null = null;
+    let handover: number | null = null;
+    let zoomAtStart = zoomRef.current;
+    let pinching = false;
+    /** This pinch shows the stretched page ink (see draw). */
+    let gaveUp = false;
+
+    /** Screen px per page px now (the zoom times the pinch), and the page region on screen. */
+    const view = () => {
+      const c = cont.getBoundingClientRect();
+      const S = c.width / Math.max(1, sizeRef.current.w);
+      const r = scrollRoot?.getBoundingClientRect() ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+      const x0 = Math.max(0, (r.left - c.left) / S), x1 = Math.min(sizeRef.current.w, (r.right - c.left) / S);
+      const y0 = Math.max(0, (r.top - c.top) / S), y1 = Math.min(sizeRef.current.h, (r.bottom - c.top) / S);
+      return { S, x0, y0, x1, y1 };
+    };
+
+    const draw = () => {
+      const v = view();
+      if (v.x1 <= v.x0 || v.y1 <= v.y0) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 3);
+      // The visible region plus a third of it on every side, within a pixel budget.
+      let mx = (v.x1 - v.x0) / 3, my = (v.y1 - v.y0) / 3;
+      const px = (mx2: number, my2: number) => (v.x1 - v.x0 + 2 * mx2) * (v.y1 - v.y0 + 2 * my2) * (v.S * dpr) ** 2;
+      if (px(mx, my) > SHARP_MAX_PIXELS) mx = my = 0;
+      const k = px(mx, my) > SHARP_MAX_PIXELS ? Math.sqrt(SHARP_MAX_PIXELS / px(mx, my)) : 1;
+      const x0 = Math.max(0, v.x0 - mx), y0 = Math.max(0, v.y0 - my);
+      const x1 = Math.min(sizeRef.current.w, v.x1 + mx), y1 = Math.min(sizeRef.current.h, v.y1 + my);
+      const scale = v.S * dpr * k;
+      if (!sharp) {
+        const canvas = document.createElement('canvas');
+        canvas.style.cssText = 'position:absolute;pointer-events:none;z-index:6;';
+        cont.appendChild(canvas);
+        sharp = { canvas, x0, y0, x1, y1, S: v.S };
+      }
+      const c = sharp.canvas;
+      const w = Math.max(1, Math.round((x1 - x0) * scale)), h = Math.max(1, Math.round((y1 - y0) * scale));
+      if (c.width !== w || c.height !== h) {
+        c.width = w;
+        c.height = h;
+      }
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      ctx.setTransform(scale, 0, 0, scale, -x0 * scale, -y0 * scale);
+      // Picked by their height on the page (from the points, cached): their painted bounds would
+      // model every stroke of the note that was not modelled yet.
+      const strokes = shownRef.current.filter((st) => {
+        const r = strokeYRange(st);
+        return r.maxY >= y0 && r.minY <= y1;
+      });
+      // Strokes not modelled yet (just after a long note opened): modelling them mid-pinch froze the
+      // page for seconds, so this pinch keeps the page's own (stretched) ink instead.
+      if (!strokes.every(strokeReady)) {
+        gaveUp = true;
+        remove();
+        return;
+      }
+      drawStrokes(ctx, strokes, { smooth: v.S * dpr >= SMOOTH_RATIO, smoothIfReady: pinching });
+      // Pixels and position change in the same frame: the ink never shows out of place.
+      Object.assign(c.style, { left: `${x0}px`, top: `${y0}px`, width: `${x1 - x0}px`, height: `${y1 - y0}px` });
+      sharp = { canvas: c, x0, y0, x1, y1, S: v.S };
+      cont.setAttribute('data-sharp-ink', '');
+    };
+
+    const update = () => {
+      frame = null;
+      if (gaveUp) return;
+      if (!sharp) return draw();
+      const v = view();
+      const r = v.S / sharp.S;
+      const covered = v.x0 >= sharp.x0 - 0.5 && v.y0 >= sharp.y0 - 0.5 && v.x1 <= sharp.x1 + 0.5 && v.y1 <= sharp.y1 + 0.5;
+      if (!covered || r > SHARP_REDRAW || r < 1 / SHARP_REDRAW) draw();
+    };
+
+    const remove = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (handover !== null) cancelAnimationFrame(handover);
+      if (rest) clearTimeout(rest);
+      frame = handover = null;
+      rest = null;
+      sharp?.canvas.remove();
+      sharp = null;
+      cont.removeAttribute('data-sharp-ink');
+    };
+
+    /** After the pinch: once the tiles have repainted at the new zoom (at most 2.5 s), they are shown again. */
+    const handOver = (since = performance.now()) => {
+      handover = requestAnimationFrame(() => {
+        handover = null;
+        if (pinching) return;
+        if (tileWork.pending.size && performance.now() - since < 2500) return handOver(since);
+        remove();
+      });
+    };
+    sharpHandOver.current = () => {
+      if (!sharp || pinching) return;
+      draw();
+      // Two frames so the tiles' first repaint work is registered before checking it.
+      handover = requestAnimationFrame(() => {
+        handover = null;
+        handOver();
+      });
+    };
+
+    const off = gestures.onPinch((phase) => {
+      if (phase === 'start') {
+        pinching = true;
+        gaveUp = false;
+        zoomAtStart = zoomRef.current;
+        if (handover !== null) cancelAnimationFrame(handover);
+        handover = null;
+        draw();
+      } else if (phase === 'move') {
+        if (frame === null) frame = requestAnimationFrame(update);
+        // Fingers resting: drawn exactly for where they are.
+        if (rest) clearTimeout(rest);
+        rest = setTimeout(() => {
+          rest = null;
+          if (pinching && sharp && Math.abs(view().S / sharp.S - 1) > 0.02) draw();
+        }, 120);
+      } else {
+        pinching = false;
+        if (rest) clearTimeout(rest);
+        rest = null;
+        // The zoom did not change: nothing will repaint, the tiles are as they were.
+        setTimeout(() => {
+          if (!pinching && Math.abs(zoomRef.current - zoomAtStart) < 1e-4) remove();
+        }, 300);
+      }
+    });
+    return () => {
+      off();
+      remove();
+      sharpHandOver.current = null;
+    };
+  }, [printMode, scrollRoot, gestures]); // eslint-disable-line react-hooks/exhaustive-deps
+  const shownRef = useRef(shownStrokes);
+  shownRef.current = shownStrokes;
+  const sharpHandOver = useRef<(() => void) | null>(null);
+  // The zoom changed (a pinch ended): the sharp ink is drawn for it and hands over to the tiles.
+  useLayoutEffect(() => {
+    sharpHandOver.current?.();
+  }, [zoom]);
+
   // Shape tool: the page's snap targets are built ahead of the first shape, and again after edits.
   useEffect(() => {
     if (printMode || tools.tool !== 'shape') return;
@@ -863,8 +1108,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
-      const style = liveStyle('pen');
-      d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
+      // In the app the shell draws the live stroke natively (nativeInk.ts) and keeps it until the
+      // finished stroke is on the page: painting the page's own copy on every frame as well was
+      // most of the frame's work while writing on a slower tablet.
+      if (!d.ink) {
+        const style = liveStyle('pen');
+        d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
+      }
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = paintSnapped(ctx, d);
@@ -1848,6 +2098,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             }}
             onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
             onSilentUpdate={() => undefined}
+            onResize={(patch, phase) => {
+              if (phase === 'start') editor.beginGesture();
+              else if (phase === 'end') editor.endGesture();
+              else editor.previewPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, ...patch } : x)) }));
+            }}
           />
         );
       })}

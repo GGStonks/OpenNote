@@ -102,14 +102,24 @@ export interface LatexBlock {
   createdAt: number;
 }
 
+/** Typeface of a text box (editor/textStyle.ts maps each to the fonts every platform has). */
+export type TextFont = 'sans' | 'serif' | 'mono' | 'script';
+
 export interface TextBlock {
   id: string;
   x: number;
   y: number;
   width: number;
+  /** Minimum height of the box (resized by its handle); the box still grows to fit its text. */
+  height?: number;
   text: string;
   fontSize: number;
   color: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  /** Missing: sans. */
+  fontFamily?: TextFont;
   /** Degrees, clockwise about the block's centre. */
   rotation?: number;
   createdAt: number;

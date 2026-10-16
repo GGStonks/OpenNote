@@ -31,7 +31,7 @@ export const PaperPicker: React.FC<{ value: PaperValues; onChange: (patch: Setup
       <div className="grid grid-cols-3 gap-1.5">
         {PAPER_STYLE_OPTIONS.map((o) => (
           <button key={o.id} onClick={() => onChange({ paperStyle: o.id })} className={chip(value.paperStyle === o.id) + ' p-1.5 flex flex-col items-center gap-1'} title={o.label}>
-            <span className="block w-full h-9 rounded-md border border-black/10 overflow-hidden" style={{ ...paperBackground(o.id, swatchColor), backgroundPosition: undefined }} />
+            <span className="block w-full h-9 rounded-md border border-black/10 overflow-hidden" style={paperBackground(o.id, swatchColor, undefined, 1, true)} />
             <span className="leading-tight text-center">{o.label}</span>
           </button>
         ))}
@@ -51,9 +51,12 @@ export const PaperPicker: React.FC<{ value: PaperValues; onChange: (patch: Setup
       <Label>Orientation</Label>
       <div className="grid grid-cols-2 gap-1.5">
         {(['portrait', 'landscape'] as PageOrientation[]).map((o) => (
-          <button key={o} onClick={() => onChange({ orientation: o })} className={chip(value.orientation === o) + ' px-2 py-2 flex items-center justify-center gap-2'}>
-            <span className={`inline-block flex-shrink-0 border-2 border-current rounded-sm ${o === 'portrait' ? 'w-3 h-4' : 'w-4 h-3'}`} />
-            {o === 'portrait' ? 'Portrait' : 'Landscape'}
+          <button key={o} onClick={() => onChange({ orientation: o })} className={chip(value.orientation === o) + ' min-w-0 px-1 py-2 flex flex-col items-center justify-center gap-1'}>
+            {/* Both shapes in the same 20 px box, so they line up; the label stacked below fits a narrow panel. */}
+            <span className="w-5 h-5 flex-shrink-0 flex items-center justify-center">
+              <span className={`block border-2 border-current rounded-[3px] ${o === 'portrait' ? 'w-3.5 h-[18px]' : 'w-[18px] h-3.5'}`} />
+            </span>
+            <span className="text-[11px] leading-tight max-w-full truncate">{o === 'portrait' ? 'Portrait' : 'Landscape'}</span>
           </button>
         ))}
       </div>

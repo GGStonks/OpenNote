@@ -9,17 +9,37 @@ import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { PAPER_COLORS } from './CanvasPage';
 import { textHeight } from '../editor/selection';
-import { shareFile } from '../platform';
+import { canMakePdf, shareFile } from '../platform';
+import { textCssString } from '../editor/textStyle';
+import type { TextBlock } from '../types';
+
+/** A text box's text with its style as LaTeX / Markdown markup. */
+function texText(t: TextBlock): string {
+  let s = t.text.replace(/([#%&_{}$])/g, '\\$1');
+  if (t.bold) s = `\\textbf{${s}}`;
+  if (t.italic) s = `\\textit{${s}}`;
+  if (t.underline) s = `\\underline{${s}}`;
+  return s;
+}
+function mdText(t: TextBlock): string {
+  if (!t.text.trim()) return t.text;
+  let s = t.text;
+  if (t.bold) s = `**${s}**`;
+  if (t.italic) s = `*${s}*`;
+  if (t.underline) s = `<u>${s}</u>`;
+  return s;
+}
 
 interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   document: NoteDocument;
   onPdf: () => void;
+  onPrint: () => void;
   onError: (msg: string) => void;
 }
 
-function baseName(doc: NoteDocument): string {
+export function baseName(doc: NoteDocument): string {
   return (doc.title || 'OpenNote').replace(/[^\p{L}\p{N}\-_ ]+/gu, '').trim().replace(/\s+/g, '_') || 'OpenNote';
 }
 
@@ -31,7 +51,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
   const body: string[] = [];
   splitIntoPages(doc).forEach(({ page: p }, i) => {
     const items: Item[] = [];
-    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: t.text.replace(/([#%&_{}$])/g, '\\$1') + '\n', md: t.text + '\n' });
+    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: texText(t) + '\n', md: mdText(t) + '\n' });
     for (const b of p.latexBlocks) {
       if (b.isTikz) {
         const prep = prepareTikz(b.latexCode);
@@ -77,7 +97,7 @@ function buildMarkdown(doc: NoteDocument): string {
   let md = `# ${doc.title}\n\n`;
   splitIntoPages(doc).forEach(({ page: p }, i) => {
     const items: Item[] = [];
-    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: t.text + '\n' });
+    for (const t of p.textBlocks ?? []) items.push({ y: t.y, tex: '', md: mdText(t) + '\n' });
     for (const b of p.latexBlocks) {
       if (b.isTikz) items.push({ y: b.y, tex: '', md: '```latex\n' + prepareTikz(b.latexCode).picture + '\n```\n' });
       else {
@@ -123,7 +143,7 @@ function buildSvg(doc: NoteDocument): string {
       }
       if (l.kind === 'text') {
         const t = l.block;
-        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${t.fontSize * 1.4 * (t.text.split('\n').length + 4)}"><xhtml:div style="font:${t.fontSize}px -apple-system,Helvetica,Arial,sans-serif;color:${t.color};white-space:pre-wrap;line-height:1.35">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
+        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, t.fontSize * 1.4 * (t.text.split('\n').length + 4))}"><xhtml:div style="${textCssString(t)};color:${t.color};white-space:pre-wrap">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
         continue;
       }
       const b = l.block;
@@ -141,7 +161,7 @@ function buildSvg(doc: NoteDocument): string {
   return out + '</svg>\n';
 }
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onError }) => {
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onPrint, onError }) => {
   const [includeInk, setIncludeInk] = useState(true);
   const [busy, setBusy] = useState(false);
   if (!isOpen) return null;
@@ -180,7 +200,16 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
           </button>
         </div>
         <div className="p-5 space-y-2.5 max-h-[75vh] overflow-y-auto">
-          <Row icon={<Printer className="w-5 h-5" />} tint="bg-red-100 text-red-600 dark:bg-red-900/40" title="PDF" sub="Vector PDF through the system print dialog (Save as PDF / Save to Files)" onClick={onPdf} />
+          <Row
+            icon={<FileText className="w-5 h-5" />}
+            tint="bg-red-100 text-red-600 dark:bg-red-900/40"
+            title="PDF"
+            sub={canMakePdf() ? 'Vector PDF, every page at its own size and orientation' : 'Vector PDF through the system print dialog (Save as PDF / Save to Files)'}
+            onClick={onPdf}
+          />
+          {canMakePdf() && (
+            <Row icon={<Printer className="w-5 h-5" />} tint="bg-gray-100 text-gray-600 dark:bg-gray-800" title="Print…" sub="System print dialog (one paper size for all pages)" onClick={onPrint} />
+          )}
           <Row icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onClick={() => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml')} />
           <Row icon={<FileCode className="w-5 h-5" />} tint="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40" title="LaTeX (.tex)" sub="Compilable document: math, text, TikZ" onClick={() => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex')} />
           <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 px-2">

@@ -173,6 +173,25 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 
 interface PrintPlugin {
   print(opts: { name: string }): Promise<void>;
+  pdfPage(opts: { name: string; widthPx: number; heightPx: number }): Promise<{ base64: string }>;
+}
+
+/**
+ * The app can make a PDF itself, each page at its own size (Android: the WebView's PDF renderer
+ * run per page, OpenNotePrintPlugin.pdfPage). Elsewhere PDF goes through the print dialog.
+ */
+export function canMakePdf(): boolean {
+  return platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android';
+}
+
+/** The print layout as currently shown, as a one-page PDF of exactly widthPx x heightPx (CSS px). */
+export async function pdfOfPrintLayout(name: string, widthPx: number, heightPx: number): Promise<Uint8Array> {
+  const { registerPlugin } = await import('@capacitor/core');
+  const { base64 } = await registerPlugin<PrintPlugin>('OpenNotePrint').pdfPage({ name, widthPx, heightPx });
+  const bin = atob(base64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 }
 
 /**

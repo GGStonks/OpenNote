@@ -3,16 +3,24 @@ package com.opennote.app;
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.print.OpenNotePdfWriter;
 import android.print.PrintAttributes;
 import android.print.PrintDocumentAdapter;
 import android.print.PrintJob;
 import android.print.PrintManager;
 import android.webkit.WebView;
 
+import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
 
 /**
  * Prints the WebView (the web app switches to its print layout first). The Android print dialog
@@ -40,6 +48,80 @@ public class OpenNotePrintPlugin extends Plugin {
                 call.reject("Printing failed: " + e.getMessage());
             }
         });
+    }
+
+    /**
+     * One page of the note as a PDF of exactly its size (the web app shows only that page in its
+     * print layout first). The WebView's own PDF renderer is run without the print dialog, at a
+     * media size of the page's width x height, so every page of the exported PDF keeps its own size
+     * and orientation; the dialog forces one paper size on all of them. Resolves { base64 }.
+     */
+    @PluginMethod
+    public void pdfPage(PluginCall call) {
+        Double widthPx = call.getDouble("widthPx"), heightPx = call.getDouble("heightPx");
+        String name = call.getString("name", "OpenNote");
+        if (widthPx == null || heightPx == null || widthPx <= 0 || heightPx <= 0) {
+            call.reject("Page size missing");
+            return;
+        }
+        getActivity().runOnUiThread(() -> {
+            try {
+                WebView webView = getBridge().getWebView();
+                PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter(name);
+                // Media sizes are in thousandths of an inch; the page is in CSS px (96 per inch).
+                int wMils = (int) Math.round(widthPx / 96.0 * 1000), hMils = (int) Math.round(heightPx / 96.0 * 1000);
+                PrintAttributes.MediaSize media = new PrintAttributes.MediaSize("opennote_" + wMils + "x" + hMils, "OpenNote page", wMils, hMils);
+                PrintAttributes attributes = new PrintAttributes.Builder()
+                        .setMediaSize(media)
+                        .setResolution(new PrintAttributes.Resolution("opennote", "PDF", 600, 600))
+                        .setMinMargins(PrintAttributes.Margins.NO_MARGINS)
+                        .setColorMode(PrintAttributes.COLOR_MODE_COLOR)
+                        .build();
+                File file = File.createTempFile("opennote-page", ".pdf", getContext().getCacheDir());
+                ParcelFileDescriptor out = ParcelFileDescriptor.open(file,
+                        ParcelFileDescriptor.MODE_READ_WRITE | ParcelFileDescriptor.MODE_CREATE | ParcelFileDescriptor.MODE_TRUNCATE);
+                OpenNotePdfWriter.write(adapter, attributes, out, new OpenNotePdfWriter.Done() {
+                    @Override
+                    public void ok() {
+                        try {
+                            out.close();
+                            byte[] bytes = readAll(file);
+                            JSObject res = new JSObject();
+                            res.put("base64", android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP));
+                            call.resolve(res);
+                        } catch (Exception e) {
+                            call.reject("PDF read failed: " + e.getMessage());
+                        } finally {
+                            //noinspection ResultOfMethodCallIgnored
+                            file.delete();
+                        }
+                    }
+
+                    @Override
+                    public void fail(String message) {
+                        try {
+                            out.close();
+                        } catch (Exception ignored) {
+                            // already closed
+                        }
+                        //noinspection ResultOfMethodCallIgnored
+                        file.delete();
+                        call.reject(message);
+                    }
+                });
+            } catch (Throwable t) {
+                // E.g. a system that refuses the android.print helper: the web app falls back to the print dialog.
+                call.reject("PDF export unavailable: " + t);
+            }
+        });
+    }
+
+    private static byte[] readAll(File file) throws IOException {
+        try (FileInputStream in = new FileInputStream(file); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[64 * 1024];
+            for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+            return out.toByteArray();
+        }
     }
 
     private void waitForJob(PrintJob job, PluginCall call, Handler handler) {

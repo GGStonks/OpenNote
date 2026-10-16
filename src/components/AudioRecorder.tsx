@@ -35,6 +35,10 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
     listRecordings(noteId).then(setList).catch(() => setList([]));
   }, [noteId]);
   useEffect(refresh, [refresh]);
+  // The last recording deleted: the list window closes (it would only show an empty box).
+  useEffect(() => {
+    if (!list.length) setOpen(false);
+  }, [list.length]);
 
   useEffect(() => {
     if (!recording) return;
@@ -134,6 +138,10 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
               </div>
               <button
                 onClick={async () => {
+                  if (playing === r.id) {
+                    audioEl.current?.pause();
+                    setPlaying(null);
+                  }
                   await deleteRecording(r.id);
                   refresh();
                 }}

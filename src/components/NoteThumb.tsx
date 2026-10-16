@@ -7,6 +7,7 @@ import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
 import { paperBackground } from './CanvasPage';
 import { rotationStyle } from './Blocks';
+import { textCss } from '../editor/textStyle';
 
 /**
  * Page thumbnails (library cards: the first page; page manager: every page), drawn with the same content as the editor:
@@ -106,7 +107,7 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
           <div
             key={l.key}
             className="absolute whitespace-pre-wrap break-words"
-            style={{ left: t.x, top: t.y, width: t.width, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...rotationStyle(t.rotation) }}
+            style={{ left: t.x, top: t.y, width: t.width, minHeight: t.height, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...textCss(t), ...rotationStyle(t.rotation) }}
           >
             {t.text}
           </div>
@@ -141,7 +142,7 @@ export const PageThumb: React.FC<{
     <div ref={ref} className="relative overflow-hidden" style={{ width: width * scale, height: height * scale }}>
       <div
         className="relative overflow-hidden pointer-events-none select-none"
-        style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor) }}
+        style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor, undefined, scale) }}
       >
         {near && <ThumbContent page={page} dark={paperColor === 'dark'} scale={scale} width={width} height={height} />}
       </div>

@@ -13,9 +13,17 @@ interface Options {
   onPullCommit?: () => void;
   /** The Pencil scrolls too (hand tool). */
   penScrolls?: () => boolean;
+  /**
+   * What "fit to width" fits: the page on screen (its left edge and width in the unzoomed content).
+   * Without it, the whole content (the widest page and the padding around it).
+   */
+  fitTarget?: () => { left: number; width: number } | null;
 }
 
 export type FitMode = 'width' | 'page' | null;
+
+/** Screen px left between a page fitted to the width and each edge of the screen. */
+const FIT_MARGIN = 4;
 
 /** A content point (unscaled px, relative to the zoomed content) and where it goes on screen. */
 interface Anchor {
@@ -34,7 +42,9 @@ export const PULL_THRESHOLD = 110;
 /** Pull distance per px of finger travel past the end (rubber band). */
 const PULL_RESISTANCE = 0.5;
 
-export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls }: Options) {
+export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget }: Options) {
+  const fitTargetRef = useRef(fitTarget);
+  fitTargetRef.current = fitTarget;
   const penScrollsRef = useRef(penScrolls);
   penScrollsRef.current = penScrolls;
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -109,13 +119,21 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     setZoomState(z);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /** Fits the width of the widest page, keeping the content at the top of the screen in place. */
+  /**
+   * Fits the width of the page on screen (fitTarget), FIT_MARGIN screen px from either edge, keeping
+   * the content at the top of the screen in place. v2.0.10 and earlier fitted the widest page plus
+   * the padding around the surface: wide margins, and too small for narrower pages in a note that
+   * mixes sizes or orientations.
+   */
   const fitWidth = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !el.clientWidth) return;
     setFitMode('width');
+    const t = fitTargetRef.current?.() ?? { left: 0, width: contentWidthRef.current };
+    const z = Math.max(0.05, (el.clientWidth - 2 * FIT_MARGIN) / Math.max(1, t.width));
     const a = anchorAt(0, 0);
-    setView(el.clientWidth / contentWidthRef.current, a && { ...a, cx: 0 });
+    // The page's left edge goes FIT_MARGIN from the screen's.
+    setView(z, a && { ...a, cx: t.left - FIT_MARGIN / z, sx: 0 });
   }, [setView]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /** Fits a rectangle of the content (unscaled px) on screen, centred: "fit page". */
@@ -253,6 +271,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       const p = pinch.current;
       pinch.current = null;
       setTilesPaused(false);
+      if (p?.engaged) gestures.pinch('end');
       // The fingers lifted: the content is drawn at its new scale again (see onMove).
       if (outerRef.current) outerRef.current.style.willChange = '';
       const outer = outerRef.current;
@@ -388,6 +407,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           // text and math again at every new scale, on every frame of the pinch.
           outer.style.willChange = 'transform';
           setTilesPaused(true);
+          gestures.pinch('start');
         }
         if (pz.engaged) {
           const fitW = el.clientWidth / contentWidthRef.current;
@@ -395,6 +415,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.k = z / pz.z0;
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           outer.style.transform = `scale(${pz.k})`;
+          gestures.pinch('move');
         }
       }
       pending.current.x += c.x - last.current.x;

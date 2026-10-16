@@ -161,9 +161,11 @@ export const ColorPicker: React.FC<{ value: string; onChange: (hex: string) => v
   const [custom, setCustom] = useState(false);
   const [editing, setEditing] = useState(false);
   const cur = value.toUpperCase();
-  const dot = size === 'lg' ? 'w-9 h-9' : 'w-7 h-7';
+  // Presets and the custom-colour button are the same circle: same size, same border, same wrapper
+  // (a flex box: an inline button in a block sits on a text line, which pushed it off centre).
+  const dot = size === 'lg' ? 'w-8 h-8' : 'w-6 h-6';
   const swatch = (c: string, removable = false) => (
-    <div key={c} className="relative">
+    <div key={c} className="relative flex">
       <button
         onClick={() => (removable && editing ? setFavorites(favs.filter((f) => f !== c)) : onChange(c))}
         className={`${dot} rounded-full border-2 shadow-sm transition ${cur === c.toUpperCase() ? 'border-blue-500 scale-110 ring-2 ring-blue-500/30' : 'border-black/10 dark:border-white/20'}`}
@@ -181,14 +183,16 @@ export const ColorPicker: React.FC<{ value: string; onChange: (hex: string) => v
     <div>
       <div className="flex flex-wrap gap-2 items-center">
         {presets.map((c) => swatch(c))}
-        <button
-          onClick={() => setCustom((v) => !v)}
-          className={`${dot} rounded-full border-2 border-dashed flex items-center justify-center ${custom ? 'border-blue-500 text-blue-600' : 'border-gray-300 text-gray-400'}`}
-          title="Any colour (spectrum, hex)"
-          style={{ background: custom ? undefined : 'conic-gradient(from 0deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)' }}
-        >
-          {custom ? <X className="w-4 h-4" /> : <Plus className="w-4 h-4 text-white drop-shadow" />}
-        </button>
+        <div className="relative flex">
+          <button
+            onClick={() => setCustom((v) => !v)}
+            className={`${dot} rounded-full border-2 shadow-sm transition flex items-center justify-center ${custom ? 'border-blue-500 text-blue-600 bg-white dark:bg-ui-high' : 'border-black/10 dark:border-white/20'}`}
+            title="Any colour (spectrum, hex)"
+            style={{ background: custom ? undefined : 'conic-gradient(from 0deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)' }}
+          >
+            {custom ? <X className={size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} /> : <Plus className={`${size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} text-white drop-shadow`} />}
+          </button>
+        </div>
       </div>
       <div className="flex items-center justify-between mt-3 mb-1">
         <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1"><Star className="w-3 h-3" /> Favourites</span>

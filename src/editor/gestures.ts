@@ -15,6 +15,17 @@ export class GestureBus {
   /** Pointer type of the stroke in progress ('pen': fingers touching the glass meanwhile are a palm). */
   inkingWith = '';
   private cancelHandlers = new Set<() => void>();
+  private pinchHandlers = new Set<(phase: 'start' | 'move' | 'end') => void>();
+
+  /** Two fingers are zooming: 'start' when the pinch engages, 'move' as the scale changes, 'end' when they lift. */
+  onPinch(fn: (phase: 'start' | 'move' | 'end') => void): () => void {
+    this.pinchHandlers.add(fn);
+    return () => this.pinchHandlers.delete(fn);
+  }
+
+  pinch(phase: 'start' | 'move' | 'end'): void {
+    this.pinchHandlers.forEach((fn) => fn(phase));
+  }
   private dragCancelHandlers = new Set<() => void>();
 
   onCancel(fn: () => void): () => void {

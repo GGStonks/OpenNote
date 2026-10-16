@@ -11,7 +11,8 @@ import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings } from './CanvasPage';
 import { Toolbar } from './Toolbar';
 import { LatexModal, LatexModalState } from './LatexModal';
-import { ExportModal } from './ExportModal';
+import { ExportModal, baseName } from './ExportModal';
+import { TextFormatBar } from './TextFormatBar';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
 import { MAX_ZOOM, PULL_THRESHOLD, useViewport } from '../editor/useViewport';
@@ -30,10 +31,11 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { haptic, printDocument } from '../platform';
+import { canMakePdf, haptic, pdfOfPrintLayout, printDocument, shareFile } from '../platform';
+import { joinPdfPages } from '../services/pdfExport';
 
 /** Margin around the surface (content px). */
-const PAD = 16;
+const PAD = 8;
 /** Space below the last page for the "pull to add a page" hint. */
 const TAIL = 88;
 const PAGES_KEY = 'opennote_pages_panel';
@@ -203,14 +205,18 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     editor.commit((d) => appendBlankSheet(d));
     haptic('success');
   }, [editor]);
+  // Fit to width fits the page on screen (curSheetRef, set below once the current page is known).
+  const curSheetRef = useRef<{ left: number; width: number } | null>(null);
+  const fitTarget = useCallback(() => (curSheetRef.current ? { left: PAD + curSheetRef.current.left, width: curSheetRef.current.width } : null), []);
   const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy } = useViewport({
-    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls,
+    contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget,
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
 
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  const editingText = editingTextId ? (surface.textBlocks ?? []).find((t) => t.id === editingTextId) ?? null : null;
   const [modal, setModal] = useState<LatexModalState | null>(null);
   const [target, setTarget] = useState<ConvTarget | null>(null);
   const [busy, setBusy] = useState<{ label: string; detail?: string } | null>(null);
@@ -227,8 +233,16 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [printMode, setPrintMode] = useState(false);
+  /** PDF export: the one page the print layout shows (null: all pages). */
+  const [printOnly, setPrintOnly] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(0);
   const curSheet = sl.sheets[Math.min(currentPage, pageCount - 1)];
+  curSheetRef.current = curSheet;
+  // Fitted to the width: scrolling onto a page of another width or position refits to that page.
+  const fitKey = `${curSheet.left}|${curSheet.width}`;
+  useEffect(() => {
+    if (fitMode === 'width') fitWidth();
+  }, [fitKey]); // eslint-disable-line react-hooks/exhaustive-deps
   // Infinite roll: new content reaching the bottom of the last page adds one blank page after it (only
   // for edits: not undo / redo, erasing or page operations, so a deleted trailing page stays deleted).
   const rollBase = useRef(surface);
@@ -774,7 +788,47 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     reader.readAsDataURL(file);
   };
 
+  /**
+   * PDF: each page at its own size and orientation (Android: made by the app, page by page, see
+   * services/pdfExport.ts); elsewhere through the print dialog.
+   */
   const exportPdf = async () => {
+    if (!canMakePdf()) return printNote();
+    setExportOpen(false);
+    await editor.flush();
+    const sheets = printedSheets(doc);
+    const pages: Uint8Array[] = [];
+    setBusy({ label: 'Making the PDF…' });
+    try {
+      for (let i = 0; i < sheets.length; i++) {
+        const s = sheets[i];
+        setBusy({ label: 'Making the PDF…', detail: `Page ${i + 1} of ${sheets.length}` });
+        // The print layout shows only this page; the WebView's PDF renderer then makes it a page of exactly its size.
+        flushSync(() => {
+          setPrintOnly(s.id);
+          setPrintMode(true);
+        });
+        // Let TikZ / KaTeX lay out (longer for the first page, which mounts the print layout).
+        await new Promise((r) => setTimeout(r, i === 0 ? 450 : 200));
+        pages.push(await pdfOfPrintLayout(doc.title, s.width, s.height));
+      }
+      const pdf = await joinPdfPages(pages, doc.title);
+      setPrintMode(false);
+      setPrintOnly(null);
+      setBusy(null);
+      await shareFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
+    } catch (err) {
+      setBusy(null);
+      setPrintMode(false);
+      setPrintOnly(null);
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/cancel/i.test(msg)) return;
+      showToast(`PDF export failed (${msg}). Use Print… instead.`, true);
+    }
+  };
+
+  /** Print… : the system print dialog (on Android also "Save as PDF", with one paper size for all pages). */
+  const printNote = async () => {
     setExportOpen(false);
     await editor.flush();
     flushSync(() => setPrintMode(true));
@@ -791,7 +845,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
   // ------------------------------------------------------------------------- render
   const { totalHeight, contentWidth } = layout;
-  const printed = printMode ? printedSheets(doc) : [];
+  const printed = printMode ? printedSheets(doc).filter((s) => !printOnly || s.id === printOnly) : [];
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
   return (
@@ -854,6 +908,14 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           </>
         )}
         <div className="relative flex-1 min-w-0">
+          {/* The text box being edited: its size, style, typeface and colour. */}
+          {editingText && (
+            <div className="absolute top-2 left-0 right-0 z-40 flex justify-center px-3 pointer-events-none">
+              <div className="pointer-events-auto max-w-full">
+                <TextFormatBar block={editingText} onChange={(patch) => editor.commitPage(surface.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === editingText.id ? { ...x, ...patch } : x)) }))} />
+              </div>
+            </div>
+          )}
           <div
             ref={(el) => {
               scrollRef.current = el;
@@ -1067,7 +1129,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           document.body
         )}
 
-      <ExportModal isOpen={exportOpen} onClose={() => setExportOpen(false)} document={doc} onPdf={exportPdf} onError={(m) => showToast(m, true)} />
+      <ExportModal isOpen={exportOpen} onClose={() => setExportOpen(false)} document={doc} onPdf={exportPdf} onPrint={printNote} onError={(m) => showToast(m, true)} />
     </div>
   );
 };

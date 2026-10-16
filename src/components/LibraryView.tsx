@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Clock, Settings as SettingsIcon,
   Grid as GridIcon, List as ListIcon, Copy, FolderInput, Upload, Folder as FolderIcon, FolderPlus,
@@ -49,6 +50,48 @@ type MoveTarget = { kind: 'note'; id: string } | { kind: 'folder'; id: string };
 
 const MENU = 'absolute bg-white dark:bg-ui-raised border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl py-1 z-50 text-sm';
 const MENU_ITEM = 'w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-gray-100 dark:hover:bg-ui-high text-gray-700 dark:text-gray-200';
+
+/**
+ * A menu shown next to the button that opened it, above everything (a portal on the page) and
+ * always wholly on screen: below the button when it fits there, otherwise above, then clamped to
+ * the window. A note's menu used to open inside its card, so on the first row it slid under the
+ * top bar and "Rename" could not be reached. Scrolling or resizing closes it.
+ */
+const AnchoredMenu: React.FC<{ anchor: HTMLElement | null; width: number; onClose: () => void; children: React.ReactNode }> = ({ anchor, width, onClose, children }) => {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!anchor || !el) return;
+    const a = anchor.getBoundingClientRect();
+    const h = el.offsetHeight, m = 8;
+    const below = a.bottom + 4, above = a.top - 4 - h;
+    let top = below + h <= window.innerHeight - m ? below : above >= m ? above : window.innerHeight - m - h;
+    top = Math.max(m, Math.min(top, window.innerHeight - m - h));
+    const left = Math.max(m, Math.min(a.right - width, window.innerWidth - m - width));
+    setPos({ left, top });
+  }, [anchor, width]);
+  useEffect(() => {
+    const close = () => onClose();
+    window.addEventListener('resize', close);
+    window.addEventListener('scroll', close, true);
+    return () => {
+      window.removeEventListener('resize', close);
+      window.removeEventListener('scroll', close, true);
+    };
+  }, [onClose]);
+  return createPortal(
+    <div
+      ref={ref}
+      className={MENU.replace('absolute', 'fixed').replace('z-50', 'z-[1000]')}
+      style={{ width, left: pos?.left ?? -9999, top: pos?.top ?? 0, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }}
+      onClick={(e) => e.stopPropagation()}
+    >
+      {children}
+    </div>,
+    document.body
+  );
+};
 
 function useNarrow(): boolean {
   const q = '(max-width: 767px)';
@@ -458,14 +501,14 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
   // --- Notes --------------------------------------------------------------------------------------
 
-  const NoteMenu: React.FC<{ note: NoteDocument; up?: boolean }> = ({ note, up }) => (
-    <div className={`${MENU} right-0 ${up ? 'bottom-8' : 'top-8'} w-44`} onClick={(e) => e.stopPropagation()}>
+  const NoteMenu: React.FC<{ note: NoteDocument; anchor: HTMLElement | null }> = ({ note, anchor }) => (
+    <AnchoredMenu anchor={anchor} width={176} onClose={() => setMenuNoteId(null)}>
       <button onClick={() => { setRenamingNoteId(note.id); setRenameTitle(note.title); setMenuNoteId(null); }} className={MENU_ITEM}><Edit2 className="w-4 h-4" /> Rename</button>
       <button onClick={() => { setMoveTarget({ kind: 'note', id: note.id }); setMenuNoteId(null); }} className={MENU_ITEM}><FolderInput className="w-4 h-4" /> Move to…</button>
       <button onClick={() => { setTagNoteId(note.id); setMenuNoteId(null); }} className={MENU_ITEM}><TagIcon className="w-4 h-4" /> Tags…</button>
       <button onClick={() => { p.onDuplicateNote(note.id); setMenuNoteId(null); }} className={MENU_ITEM}><Copy className="w-4 h-4" /> Duplicate</button>
       <button onClick={() => confirmDeleteNote(note)} className={`${MENU_ITEM} !text-red-600`}><Trash2 className="w-4 h-4" /> Delete</button>
-    </div>
+    </AnchoredMenu>
   );
 
   const noteTags = (n: NoteDocument) => (n.tagIds ?? []).map((id) => tagById.get(id)).filter((t): t is Tag => !!t);
@@ -477,10 +520,20 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       <div className="font-semibold text-sm truncate">{note.title}</div>
     );
 
-  const menuButton = (note: NoteDocument, up?: boolean) => (
+  const menuAnchors = useRef(new Map<string, HTMLButtonElement>());
+  const menuButton = (note: NoteDocument) => (
     <div className="relative" onClick={(e) => e.stopPropagation()}>
-      <button onClick={() => { closeMenus(); setMenuNoteId(menuNoteId === note.id ? null : note.id); }} className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-lg"><MoreVertical className="w-4 h-4" /></button>
-      {menuNoteId === note.id && <NoteMenu note={note} up={up} />}
+      <button
+        ref={(el) => {
+          if (el) menuAnchors.current.set(note.id, el);
+          else menuAnchors.current.delete(note.id);
+        }}
+        onClick={() => { closeMenus(); setMenuNoteId(menuNoteId === note.id ? null : note.id); }}
+        className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 rounded-lg"
+      >
+        <MoreVertical className="w-4 h-4" />
+      </button>
+      {menuNoteId === note.id && <NoteMenu note={note} anchor={menuAnchors.current.get(note.id) ?? null} />}
     </div>
   );
 
@@ -548,7 +601,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                         </div>
                       )}
                     </div>
-                    {menuButton(note, true)}
+                    {menuButton(note)}
                   </div>
                 </div>
               );
@@ -737,15 +790,18 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   return (
     <div className="relative h-full flex bg-ui-app text-gray-900 dark:text-gray-100 select-none overflow-hidden" onClick={closeMenus}>
       {/* Brand row: the logo toggles the sidebar and stays visible when the sidebar is closed. */}
-      <div className={`absolute left-0 top-0 z-50 flex items-center gap-2 pl-3 pt-[calc(0.6rem+env(safe-area-inset-top))] h-[calc(3.5rem+env(safe-area-inset-top))] ${sidebarShown ? 'w-72' : ''}`}>
-        <button
-          onClick={(e) => { e.stopPropagation(); setPrefs({ sidebarCollapsed: !collapsed }); }}
-          className="rounded-xl active:scale-95 transition shadow-sm"
-          title={collapsed ? 'Show the sidebar' : 'Hide the sidebar'}
-          aria-expanded={!collapsed}
-        >
-          <Logo size={34} />
-        </button>
+      {/* The logo is centred in a header-high square (3.5rem) at the left edge, open or closed. */}
+      <div className={`absolute left-0 top-0 z-50 flex items-center pt-[env(safe-area-inset-top)] h-[calc(3.5rem+env(safe-area-inset-top))] ${sidebarShown ? 'w-72' : ''}`}>
+        <div className="w-14 h-14 flex-shrink-0 flex items-center justify-center">
+          <button
+            onClick={(e) => { e.stopPropagation(); setPrefs({ sidebarCollapsed: !collapsed }); }}
+            className="flex rounded-xl active:scale-95 transition shadow-sm"
+            title={collapsed ? 'Show the sidebar' : 'Hide the sidebar'}
+            aria-expanded={!collapsed}
+          >
+            <Logo size={34} />
+          </button>
+        </div>
         {sidebarShown && (
           <div className="flex items-baseline gap-1.5 min-w-0">
             <span className="font-bold text-lg text-gray-900 dark:text-gray-100">OpenNote</span>

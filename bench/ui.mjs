@@ -102,6 +102,9 @@ await new Promise((r) => setTimeout(r, 1500));
 const browser = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist'] });
 // --dpr: the screen's density (2 = iPad; Android tablets are often 2.6-3.5).
 const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
+// --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
+// so the page leaves the live stroke to it (nativeInk.ts).
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.OpenNoteInk = { post() {} }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 const url = `http://localhost:${PORT}/`;
@@ -318,6 +321,10 @@ if (ONLY.has('zoomshots') && arg('shots')) {
     await fingers([[410 - 50, 600], [410 + 50, 600]], [[410 - spread, 600], [410 + spread, 600]], 500, false);
     await sleep(300);
     await page.screenshot({ path: join(arg('shots'), `zoom-${name}-pinching.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
+    // The same moment with the sharp ink switched off (the stretched tiles): the ink must be in the same place.
+    await page.evaluate(() => document.querySelectorAll('[data-sharp-ink]').forEach((el) => { el.setAttribute('data-bench-off', ''); el.removeAttribute('data-sharp-ink'); el.querySelectorAll(':scope > canvas[style*="z-index: 6"]').forEach((c) => (c.style.visibility = 'hidden')); }));
+    await page.screenshot({ path: join(arg('shots'), `zoom-${name}-pinching-tiles.png`), clip: { x: 260, y: 480, width: 300, height: 240 } });
+    await page.evaluate(() => document.querySelectorAll('[data-bench-off]').forEach((el) => { el.removeAttribute('data-bench-off'); el.setAttribute('data-sharp-ink', ''); el.querySelectorAll(':scope > canvas[style*="z-index: 6"]').forEach((c) => (c.style.visibility = '')); }));
     await touch('touchEnd', []);
     // Right after the fingers lift: the ink must never be missing (the tiles keep their picture
     // while they repaint at the new zoom).

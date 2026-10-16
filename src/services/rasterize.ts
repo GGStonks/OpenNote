@@ -1,6 +1,7 @@
 import { Rect, Stroke, TextBlock } from '../types';
 import { drawStrokes } from '../ink/strokeRenderer';
 import { normalizeHex } from '../components/ColorPicker';
+import { canvasFont } from '../editor/textStyle';
 
 /**
  * Builds the image sent to the VLM.
@@ -63,7 +64,7 @@ export function renderInkImage(strokes: Stroke[], bounds: Rect, textBlocks: Text
 
   for (const t of textBlocks) {
     ctx.fillStyle = '#000000';
-    ctx.font = `${t.fontSize}px -apple-system, Helvetica, Arial, sans-serif`;
+    ctx.font = canvasFont(t);
     ctx.textBaseline = 'top';
     wrapText(ctx, t.text, t.width).forEach((line, i) => ctx.fillText(line, t.x, t.y + i * t.fontSize * 1.35));
   }

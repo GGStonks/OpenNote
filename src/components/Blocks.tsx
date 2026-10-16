@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Pencil, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
 import { ImageBlock, LatexBlock, TextBlock } from '../types';
+import { TEXT_LINE_HEIGHT, textCss } from '../editor/textStyle';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview, renderTikzWithTeX } from '../services/tikzEngine';
 
@@ -211,9 +212,14 @@ interface TextBlockViewProps {
   onCommit: (text: string) => void;
   onDelete: () => void;
   onSilentUpdate: (patch: Partial<TextBlock>) => void;
+  /** Resize handle dragged: 'start' and 'end' bracket one undo step, 'move' previews the size. */
+  onResize?: (patch: { width?: number; height?: number }, phase: 'start' | 'move' | 'end') => void;
 }
 
-export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete }) {
+/** Narrowest a text box can be resized to (page px). */
+const TEXT_MIN_WIDTH = 40;
+
+export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete, onResize }) {
   const [draft, setDraft] = useState(block.text);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => setDraft(block.text), [block.text]);
@@ -234,8 +240,47 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     const el = areaRef.current;
     if (!el) return;
     el.style.height = '0px';
-    el.style.height = `${el.scrollHeight}px`;
+    el.style.height = `${Math.max(el.scrollHeight, block.height ?? 0)}px`;
   });
+  const boxRef = useRef<HTMLDivElement>(null);
+  const resizeRef = useRef(onResize);
+  resizeRef.current = onResize;
+  /**
+   * A resize handle: the right edge sets the width, the bottom edge the (minimum) height, the
+   * corner both. The pointer is captured and the page's own handlers never see it; preventDefault
+   * keeps the keyboard focus in the text being edited.
+   */
+  const startResize = (e: React.PointerEvent, axes: 'x' | 'y' | 'xy') => {
+    e.preventDefault();
+    e.stopPropagation();
+    const handle = e.currentTarget as HTMLElement;
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    const x0 = e.clientX, y0 = e.clientY, w0 = block.width;
+    const h0 = (boxRef.current?.offsetHeight ?? block.fontSize * 1.35) as number;
+    const minH = block.fontSize * 1.35;
+    resizeRef.current?.({}, 'start');
+    const move = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      const patch: { width?: number; height?: number } = {};
+      if (axes !== 'y') patch.width = Math.max(TEXT_MIN_WIDTH, Math.round(w0 + (ev.clientX - x0) / zoom));
+      if (axes !== 'x') patch.height = Math.max(minH, Math.round(h0 + (ev.clientY - y0) / zoom));
+      resizeRef.current?.(patch, 'move');
+    };
+    const up = (ev: PointerEvent) => {
+      if (ev.pointerId !== e.pointerId) return;
+      handle.removeEventListener('pointermove', move);
+      handle.removeEventListener('pointerup', up);
+      handle.removeEventListener('pointercancel', up);
+      resizeRef.current?.({}, 'end');
+    };
+    handle.addEventListener('pointermove', move);
+    handle.addEventListener('pointerup', up);
+    handle.addEventListener('pointercancel', up);
+  };
   useEffect(() => {
     if (editing) {
       const el = areaRef.current;
@@ -244,20 +289,46 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     }
   }, [editing]);
   const color = darkPaper && block.color === '#111827' ? '#F3F4F6' : block.color;
-  const style: React.CSSProperties = { left: block.x, top: block.y, width: block.width, fontSize: block.fontSize, color, lineHeight: 1.35, ...rotationStyle(block.rotation) };
+  const style: React.CSSProperties = {
+    left: block.x, top: block.y, width: block.width, minHeight: block.height, fontSize: block.fontSize, color, lineHeight: TEXT_LINE_HEIGHT,
+    ...textCss(block), ...rotationStyle(block.rotation),
+  };
+  // Handles keep their size on screen whatever the zoom.
+  const hs = 1 / Math.max(0.3, zoom);
+  const handle = (cls: string, css: React.CSSProperties, axes: 'x' | 'y' | 'xy', title: string) =>
+    onResize ? (
+      <div
+        className={`absolute bg-white border-2 border-blue-500 rounded-full shadow ${cls}`}
+        style={{ width: 14 * hs, height: 14 * hs, touchAction: 'none', ...css }}
+        title={title}
+        data-no-pan
+        data-no-pan-strict
+        onPointerDown={(e) => startResize(e, axes)}
+      />
+    ) : null;
 
   if (editing) {
     return (
-      <div className="absolute z-30" style={style} onPointerDown={(e) => e.stopPropagation()}>
+      <div ref={boxRef} className="absolute z-30" style={style} onPointerDown={(e) => e.stopPropagation()}>
         <textarea
           ref={areaRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          onBlur={() => onCommit(draft)}
+          onBlur={(e) => {
+            // Focus taken by the formatting bar (TextFormatBar): keep editing.
+            if ((e.relatedTarget as HTMLElement | null)?.closest?.('[data-text-format]')) {
+              requestAnimationFrame(() => areaRef.current?.focus());
+              return;
+            }
+            onCommit(draft);
+          }}
           className="w-full bg-blue-50/40 outline outline-2 outline-blue-400 rounded resize-none overflow-hidden p-0 m-0 border-0 select-text"
-          style={{ font: 'inherit', color: 'inherit', lineHeight: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}
+          style={{ font: 'inherit', color: 'inherit', lineHeight: 'inherit', textDecoration: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}
           placeholder="Type…"
         />
+        {handle('cursor-ew-resize', { right: -8 * hs, top: '50%', marginTop: -7 * hs }, 'x', 'Drag to change the width')}
+        {handle('cursor-ns-resize', { bottom: -8 * hs, left: '50%', marginLeft: -7 * hs }, 'y', 'Drag to change the height')}
+        {handle('cursor-nwse-resize', { right: -8 * hs, bottom: -8 * hs }, 'xy', 'Drag to resize')}
       </div>
     );
   }
