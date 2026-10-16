@@ -1104,13 +1104,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
-      // In the app the shell draws the live stroke natively (nativeInk.ts) and keeps it until the
-      // finished stroke is on the page: painting the page's own copy on every frame as well was
-      // most of the frame's work while writing on a slower tablet.
-      if (!d.ink) {
-        const style = liveStyle('pen');
-        d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
-      }
+      // Always painted, also in the apps where the shell draws the stroke natively too: leaving the
+      // live ink to the shell alone (v2.1.0-2.1.2) left the ink standing still while the pen moved
+      // on devices where the native layer did not keep up.
+      const style = liveStyle('pen');
+      d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = paintSnapped(ctx, d);
