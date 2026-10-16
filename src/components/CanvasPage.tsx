@@ -168,10 +168,10 @@ const VECTOR_ZOOM = 2.5;
  * the iPad's 2x screen from 125%). Below it the ink is the engine's line, exactly as drawn live.
  */
 const SMOOTH_RATIO = 2.4;
-/** The sharp ink of a pinch is drawn again when the scale has changed by this factor since. */
-const SHARP_REDRAW = 1.25;
-/** Its canvas stays within this many pixels (the visible region plus a margin, at the screen's resolution). */
-const SHARP_MAX_PIXELS = 12_000_000;
+/** The sharp ink of a pinch is drawn when the fingers have rested this long (ms). */
+const SHARP_REST_MS = 150;
+/** Its canvas stays within this many pixels (the visible region plus a margin, at up to 2x). */
+const SHARP_MAX_PIXELS = 6_000_000;
 /** Whether ink at `zoom` is drawn as the smooth line (the page canvases' resolution, before its pixel budget). */
 function smoothAt(zoom: number): boolean {
   return Math.min(window.devicePixelRatio || 1, 3) * (Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2) >= SMOOTH_RATIO;
@@ -820,13 +820,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       const budget = deadline ? Math.min(8, Math.max(1, deadline.timeRemaining() - 1)) : 3;
       const until = performance.now() + budget;
-      // First every stroke's line, then its smooth line (zoomed in, pinch-zooming, dense screens).
-      while (i < 2 * order.length && performance.now() < until) {
-        const j = i++;
-        if (j < order.length) prepareStroke(order[j]);
-        else prepareStroke(order[j - order.length], true);
-      }
-      if (i < 2 * order.length) next(ric ? 0 : 50);
+      while (i < order.length && performance.now() < until) prepareStroke(order[i++]);
+      if (i < order.length) next(ric ? 0 : 50);
     };
     timer = setTimeout(() => slice(null), 300);
     return () => {
@@ -842,10 +837,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * CSS transform: cheap, but the ink went soft as the zoom grew, until the fingers lifted. The ink
    * is now drawn again at the current scale on a canvas placed INSIDE the page, in page coordinates
    * (the visible part plus a margin), so it moves and scales with the paper exactly: it cannot
-   * drift, which a screen-sized overlay did on devices (v2.0.6-2.0.8). It is redrawn when the scale
-   * has changed by SHARP_REDRAW since the last drawing, when the view leaves the drawn region, and
-   * when the fingers rest; in between it scales with the page. The ink tiles are hidden under it
-   * ([data-sharp-ink], index.css) until, after the pinch, they have repainted at the new zoom.
+   * drift, which a screen-sized overlay did on devices (v2.0.6-2.0.8). It is drawn when the fingers
+   * rest (SHARP_REST_MS), never while they move, then scales with the page; the ink tiles are hidden
+   * under it ([data-sharp-ink], index.css) until, after the pinch, they have repainted at the new zoom.
    */
   useEffect(() => {
     if (printMode) return;
@@ -873,7 +867,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const draw = () => {
       const v = view();
       if (v.x1 <= v.x0 || v.y1 <= v.y0) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 3);
+      // At most 2x: on 3x Android screens a 3x canvas of the view cost more than the sharpness was worth.
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
       // The visible region plus a third of it on every side, within a pixel budget.
       let mx = (v.x1 - v.x0) / 3, my = (v.y1 - v.y0) / 3;
       const px = (mx2: number, my2: number) => (v.x1 - v.x0 + 2 * mx2) * (v.y1 - v.y0 + 2 * my2) * (v.S * dpr) ** 2;
@@ -919,14 +914,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       cont.setAttribute('data-sharp-ink', '');
     };
 
+    // While the fingers move nothing is drawn (the page is only scaled, as cheap as it gets); a sharp
+    // drawing made while they rested scales with the page, and is dropped (the tiles shown again)
+    // as soon as the view leaves the region it covers. Redrawing during the movement made pinch
+    // zoom lag on every device (v2.1.0).
     const update = () => {
       frame = null;
-      if (gaveUp) return;
-      if (!sharp) return draw();
+      if (!sharp) return;
       const v = view();
-      const r = v.S / sharp.S;
       const covered = v.x0 >= sharp.x0 - 0.5 && v.y0 >= sharp.y0 - 0.5 && v.x1 <= sharp.x1 + 0.5 && v.y1 <= sharp.y1 + 0.5;
-      if (!covered || r > SHARP_REDRAW || r < 1 / SHARP_REDRAW) draw();
+      if (!covered) remove();
     };
 
     const remove = () => {
@@ -966,15 +963,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         zoomAtStart = zoomRef.current;
         if (handover !== null) cancelAnimationFrame(handover);
         handover = null;
-        draw();
       } else if (phase === 'move') {
         if (frame === null) frame = requestAnimationFrame(update);
-        // Fingers resting: drawn exactly for where they are.
+        // Fingers resting: the ink is drawn sharp for where they are.
         if (rest) clearTimeout(rest);
         rest = setTimeout(() => {
           rest = null;
-          if (pinching && sharp && Math.abs(view().S / sharp.S - 1) > 0.02) draw();
-        }, 120);
+          if (pinching && !gaveUp && (!sharp || Math.abs(view().S / sharp.S - 1) > 0.02)) draw();
+        }, SHARP_REST_MS);
       } else {
         pinching = false;
         if (rest) clearTimeout(rest);
