@@ -242,6 +242,9 @@ public class OpenNoteInkPlugin extends Plugin {
 
         /** Safety net: the page normally clears the ink ("e"); if it never does, do not leave it. */
         void touchEnded() {
+            // The stylus lifted: no lead past the line's end (the line ends where the ink engine ends it).
+            hasRaw = false;
+            invalidate();
             int gen = generation;
             postDelayed(() -> {
                 if (generation == gen && active) {
@@ -438,7 +441,9 @@ public class OpenNoteInkPlugin extends Plugin {
         if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_STYLUS) return;
         switch (ev.getActionMasked()) {
             case MotionEvent.ACTION_MOVE:
-                view.leadTo(ev.getX(i), ev.getY(i));
+                // Not to samples without pressure (the stylus leaving the glass): the ink engine leaves
+                // them out of the ink, and a lead to them made the ink overshoot past its end.
+                if (ev.getPressure(i) > 0.02f) view.leadTo(ev.getX(i), ev.getY(i));
                 break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:

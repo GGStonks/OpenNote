@@ -31,7 +31,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.1.1";
+static NSString *const kVersion = @"2.1.2";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -105,9 +105,14 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
         [js appendString:@"],[])"];
         [view evaluateJavaScript:js completionHandler:nil];
-        // Native live ink: the line reaches the pen's newest position now, not after the page.
+        // Native live ink: the line reaches the pen's newest position now, not after the page. Not
+        // to samples without force: the Pencil leaving the glass, which the ink engine leaves out of
+        // the ink (the line ends where it lifted); drawing the lead to them made the ink overshoot
+        // past its end until the page took the stroke over.
         ONInkView *ink = self.inkView;
-        if (ink.active && phase == 1) [ink leadTo:[samples.lastObject preciseLocationInView:view]];
+        UITouch *newest = samples.lastObject;
+        CGFloat maxForce = newest.maximumPossibleForce > 0 ? newest.maximumPossibleForce : 1;
+        if (ink.active && phase == 1 && newest.force / maxForce > 0.02) [ink leadTo:[newest preciseLocationInView:view]];
         if (phase >= 2) {
             _pencil = nil;
             [ink touchEnded];
@@ -579,6 +584,12 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 }
 
 - (void)touchEnded {
+    // The pen lifted: no lead past the line's end (the line itself ends where the ink engine ends it).
+    _hasRaw = NO;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _lead.path = NULL;
+    [CATransaction commit];
     // Safety net: the page normally clears the layer ("e"); if it never does, do not leave ink.
     NSUInteger gen = _generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
