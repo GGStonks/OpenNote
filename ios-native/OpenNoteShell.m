@@ -31,7 +31,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.1.6";
+static NSString *const kVersion = @"2.1.7";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -855,7 +855,12 @@ static NSString *ONUpdatesDir(void) {
     }
     __weak ONViewController *weakSelf = self;
     __block NSTimer *progressTimer = nil;
-    NSURLSessionDownloadTask *task = [self.session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+    // Its own session: given up after 45 s without data (the shared one waits 5 minutes).
+    NSURLSessionConfiguration *sc = [NSURLSessionConfiguration defaultSessionConfiguration];
+    sc.timeoutIntervalForRequest = 45;
+    sc.timeoutIntervalForResource = 1800;
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:sc];
+    NSURLSessionDownloadTask *task = [session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
         NSString *dest = [ONUpdatesDir() stringByAppendingPathComponent:name];
         NSString *failure = nil;
         NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
@@ -870,15 +875,18 @@ static NSString *ONUpdatesDir(void) {
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             [progressTimer invalidate];
+            [session finishTasksAndInvalidate];
             reply(failure ? @{@"error": failure} : @{@"path": dest}, nil);
         });
     }];
     // Progress for the page (window.__opennoteUpdateProgress(received, total)).
-    progressTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *t) {
+    // In the common run-loop modes: a timer in the default mode stops while a finger is on the screen.
+    progressTimer = [NSTimer timerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *t) {
         NSString *js = [NSString stringWithFormat:@"window.__opennoteUpdateProgress&&window.__opennoteUpdateProgress(%lld,%lld)",
                                                   task.countOfBytesReceived, task.countOfBytesExpectedToReceive];
         [weakSelf.webView evaluateJavaScript:js completionHandler:nil];
     }];
+    [[NSRunLoop mainRunLoop] addTimer:progressTimer forMode:NSRunLoopCommonModes];
     [task resume];
 }
 

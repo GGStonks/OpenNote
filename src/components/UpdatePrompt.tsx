@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Download, Loader2, X, AlertCircle } from 'lucide-react';
-import { AppRelease, canUpdate, cleanupUpdates, downloadUpdate, findUpdate, installUpdate } from '../services/updater';
+import { AppRelease, UpdateProgress, canUpdate, cleanupUpdates, downloadUpdate, findUpdate, installUpdate } from '../services/updater';
 import { platformKind } from '../platform';
 
 type Phase =
   | { kind: 'idle' }
   | { kind: 'offer'; rel: AppRelease }
-  | { kind: 'downloading'; rel: AppRelease; progress: number | null }
+  | { kind: 'downloading'; rel: AppRelease; progress: UpdateProgress }
   | { kind: 'ready'; rel: AppRelease; path: string; note?: string }
   | { kind: 'error'; rel: AppRelease; message: string };
 
@@ -50,7 +50,7 @@ export const UpdatePrompt: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   };
 
   const start = async (rel: AppRelease) => {
-    setPhase({ kind: 'downloading', rel, progress: 0 });
+    setPhase({ kind: 'downloading', rel, progress: { received: 0, total: rel.asset.size || 0 } });
     try {
       const path = await downloadUpdate(rel, (p) => setPhase((cur) => (cur.kind === 'downloading' ? { ...cur, progress: p } : cur)));
       setPhase({ kind: 'ready', rel, path });
@@ -105,11 +105,21 @@ export const UpdatePrompt: React.FC<{ enabled: boolean }> = ({ enabled }) => {
           <div className="font-semibold text-gray-900 dark:text-gray-100">
             {phase.kind === 'downloading' ? `Downloading OpenNote ${phase.rel.version}…` : phase.kind === 'ready' ? `OpenNote ${phase.rel.version} is ready` : 'Update failed'}
           </div>
-          {phase.kind === 'downloading' && (
-            <div className="mt-2 h-1.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
-              <div className={`h-full bg-blue-600 transition-[width] ${phase.progress === null ? 'w-1/3 animate-pulse' : ''}`} style={phase.progress === null ? undefined : { width: `${Math.round(phase.progress * 100)}%` }} />
-            </div>
-          )}
+          {phase.kind === 'downloading' && (() => {
+            const { received, total } = phase.progress;
+            const frac = total > 0 ? Math.min(1, received / total) : null;
+            const mb = (b: number) => (b / 1048576).toFixed(1);
+            return (
+              <>
+                <div className="mt-2 h-1.5 rounded-full bg-gray-200 dark:bg-white/10 overflow-hidden">
+                  <div className={`h-full bg-blue-600 transition-[width] duration-300 ${frac === null ? 'w-1/3 animate-pulse' : ''}`} style={frac === null ? undefined : { width: `${Math.max(2, Math.round(frac * 100))}%` }} />
+                </div>
+                <div className="mt-1 text-xs tabular-nums text-gray-500 dark:text-gray-400">
+                  {received === 0 ? 'Connecting…' : total > 0 ? `${mb(received)} of ${mb(total)} MB · ${Math.round(frac! * 100)}%` : `${mb(received)} MB`}
+                </div>
+              </>
+            );
+          })()}
           {phase.kind === 'ready' && phase.note && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1">{phase.note}</div>}
           {phase.kind === 'error' && <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 break-words">{phase.message}</div>}
           {phase.kind === 'ready' && (

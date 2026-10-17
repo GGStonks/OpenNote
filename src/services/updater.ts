@@ -42,9 +42,14 @@ export function canUpdate(): boolean {
   return target() !== null;
 }
 
+let updatePlugin: UpdatePlugin | null = null;
+/** Registered once: every registration makes a new proxy, and events go to the listeners of one. */
 async function plugin(): Promise<UpdatePlugin> {
-  const { registerPlugin } = await import('@capacitor/core');
-  return registerPlugin<UpdatePlugin>('OpenNoteUpdate');
+  if (!updatePlugin) {
+    const { registerPlugin } = await import('@capacitor/core');
+    updatePlugin = registerPlugin<UpdatePlugin>('OpenNoteUpdate');
+  }
+  return updatePlugin;
 }
 
 /** -1, 0, 1: version a older than, equal to, newer than b ("v2.1.5", "2.1.5"). */
@@ -82,16 +87,20 @@ export async function findUpdate(current = __APP_VERSION__): Promise<AppRelease 
   };
 }
 
-/**
- * Downloads the release's package in the background (progress 0..1, or null when the size is
- * unknown) and returns its path in the update folder.
- */
-export async function downloadUpdate(rel: AppRelease, onProgress: (p: number | null) => void): Promise<string> {
+export interface UpdateProgress {
+  received: number;
+  /** Bytes in all; the release's size when the server does not say (0 if neither is known). */
+  total: number;
+}
+
+/** Downloads the release's package in the background and returns its path in the update folder. */
+export async function downloadUpdate(rel: AppRelease, onProgress: (p: UpdateProgress) => void): Promise<string> {
   const t = target();
   const fileName = `OpenNote-${rel.version}${t === 'android' ? '.apk' : '.ipa'}`;
+  const report = (received: number, total: number) => onProgress({ received: Math.max(0, received), total: total > 0 ? total : rel.asset.size || 0 });
   if (t === 'android') {
     const p = await plugin();
-    const sub = await p.addListener('progress', ({ received, total }) => onProgress(total > 0 ? received / total : null));
+    const sub = await p.addListener('progress', ({ received, total }) => report(received, total));
     try {
       return (await p.download({ url: rel.asset.url, fileName })).path;
     } finally {
@@ -100,7 +109,7 @@ export async function downloadUpdate(rel: AppRelease, onProgress: (p: number | n
   }
   if (t === 'ios') {
     const w = window as unknown as { __opennoteUpdateProgress?: (r: number, total: number) => void };
-    w.__opennoteUpdateProgress = (r, total) => onProgress(total > 0 ? r / total : null);
+    w.__opennoteUpdateProgress = report;
     try {
       const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'updateDownload', url: rel.asset.url, fileName });
       if (res?.error) throw new Error(String(res.error));
