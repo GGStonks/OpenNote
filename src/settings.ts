@@ -20,6 +20,8 @@ export interface AppSettings {
   fingerTapUndo: boolean;
   /** Theme of the interface (never of the note pages, see theme.ts). */
   theme: UiTheme;
+  /** At start, look for a newer release on GitHub and offer to update (services/updater.ts). */
+  checkUpdates: boolean;
 }
 
 const KEY = 'opennote_settings_v2';
@@ -43,6 +45,7 @@ export function defaultSettings(): AppSettings {
     pencilDoubleTapEraser: true,
     fingerTapUndo: true,
     theme: 'light',
+    checkUpdates: true,
   };
 }
 

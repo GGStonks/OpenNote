@@ -17,6 +17,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(OpenNotePrintPlugin.class);
         registerPlugin(OpenNoteInkPlugin.class);
+        registerPlugin(OpenNoteUpdatePlugin.class);
         super.onCreate(savedInstanceState);
         enterImmersive();
     }

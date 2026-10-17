@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { canUpdate } from '../services/updater';
 import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload } from 'lucide-react';
 import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
@@ -170,6 +171,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
             <Toggle checked={draft.pencilDoubleTapEraser} onChange={(v) => set({ pencilDoubleTapEraser: v })} title="Apple Pencil double-tap switches to eraser" />
             <Toggle checked={draft.fingerTapUndo} onChange={(v) => set({ fingerTapUndo: v })} title="Two-finger tap to undo" sub="Three-finger tap redoes" />
           </section>
+
+          {canUpdate() && (
+            <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
+              <div className={label}>Updates</div>
+              <Toggle checked={draft.checkUpdates} onChange={(v) => set({ checkUpdates: v })} title="Check for updates at startup" sub={`Looks for a newer OpenNote release on GitHub (this is v${__APP_VERSION__})`} />
+            </section>
+          )}
 
           <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
             <div className={label}>Library</div>

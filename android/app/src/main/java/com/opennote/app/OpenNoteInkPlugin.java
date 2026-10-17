@@ -7,6 +7,7 @@ import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
+import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -17,6 +18,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.util.ArrayList;
+import java.util.Locale;
 
 /**
  * Native live ink (src/ink/nativeInk.ts): the stroke being written is drawn by a native view above
@@ -34,10 +36,18 @@ public class OpenNoteInkPlugin extends Plugin {
 
     /** The overlay of the running activity (MainActivity feeds it the stylus's raw positions). */
     static InkOverlay overlay;
+    /** The WebView, for the stylus samples sent to the page (forwardStylus). */
+    static WebView web;
+    /** Pointer id of the stylus touch being forwarded (-1: none). */
+    private static int stylusId = -1;
 
     @Override
     public void load() {
         WebView webView = getBridge().getWebView();
+        web = webView;
+        // Content just off screen is kept rendered: scrolling and zooming the note no longer wait
+        // for it to be drawn as it comes into view (Android's own advice for smooth scrolling).
+        webView.getSettings().setOffscreenPreRaster(true);
         InkOverlay view = new InkOverlay(getContext(), webView);
         overlay = view;
         webView.addJavascriptInterface(new Object() {
@@ -434,7 +444,63 @@ public class OpenNoteInkPlugin extends Plugin {
     }
 
     /** Called by MainActivity for every touch event before the WebView gets it. */
+    /**
+     * Every stylus sample to the page (window.__opennotePencil, src/ink/nativePencil.ts), as the iOS
+     * shell does with the Pencil's 240 Hz samples: the WebView's pointer events carry about one sample
+     * per display frame, and the ink engine drew the long gaps of a fast stroke as straight pieces
+     * (a fast swirl came out segmented, live and once finished). A MotionEvent keeps the samples
+     * between frames as its history; all of them are sent, in CSS px of the WebView, with the
+     * pressure (0..1), the time (s, uptime clock), altitude and azimuth (rad).
+     */
+    private static void forwardStylus(MotionEvent ev) {
+        WebView view = web;
+        if (view == null) return;
+        int action = ev.getActionMasked();
+        int idx = ev.getActionIndex();
+        int phase;
+        if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
+            if (ev.getToolType(idx) != MotionEvent.TOOL_TYPE_STYLUS) return;
+            stylusId = ev.getPointerId(idx);
+            phase = 0;
+        } else if (action == MotionEvent.ACTION_MOVE) {
+            phase = 1;
+        } else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+            if (ev.getPointerId(idx) != stylusId) return;
+            phase = 2;
+        } else if (action == MotionEvent.ACTION_CANCEL) {
+            phase = 3;
+        } else {
+            return;
+        }
+        if (stylusId < 0) return;
+        int p = ev.findPointerIndex(stylusId);
+        if (p < 0) return;
+        int[] loc = new int[2];
+        view.getLocationInWindow(loc);
+        float density = view.getResources().getDisplayMetrics().density;
+        StringBuilder js = new StringBuilder(256);
+        js.append("window.__opennotePencil&&window.__opennotePencil(").append(phase).append(',')
+                .append(String.format(Locale.ROOT, "%.5f", SystemClock.uptimeMillis() / 1000.0)).append(",[");
+        int n = ev.getHistorySize();
+        for (int h = 0; h <= n; h++) {
+            boolean cur = h == n;
+            float x = cur ? ev.getX(p) : ev.getHistoricalX(p, h);
+            float y = cur ? ev.getY(p) : ev.getHistoricalY(p, h);
+            float force = cur ? ev.getPressure(p) : ev.getHistoricalPressure(p, h);
+            long t = cur ? ev.getEventTime() : ev.getHistoricalEventTime(h);
+            float tilt = cur ? ev.getAxisValue(MotionEvent.AXIS_TILT, p) : ev.getHistoricalAxisValue(MotionEvent.AXIS_TILT, p, h);
+            float orient = cur ? ev.getAxisValue(MotionEvent.AXIS_ORIENTATION, p) : ev.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, p, h);
+            js.append(String.format(Locale.ROOT, "%.3f,%.3f,%.4f,%.5f,%.4f,%.4f,",
+                    (x - loc[0]) / density, (y - loc[1]) / density, Math.max(0f, Math.min(1f, force)), t / 1000.0,
+                    Math.PI / 2 - tilt, orient));
+        }
+        js.append("],[])");
+        if (phase >= 2) stylusId = -1;
+        view.evaluateJavascript(js.toString(), null);
+    }
+
     static void onTouch(MotionEvent ev) {
+        forwardStylus(ev);
         InkOverlay view = overlay;
         if (view == null || !view.isActive()) return;
         int i = ev.getActionIndex();

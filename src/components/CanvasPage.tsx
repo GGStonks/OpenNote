@@ -1166,7 +1166,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     syncInk(drawing.current);
     gestures.inking = true;
     gestures.inkingWith = e.pointerType;
-    if (e.pointerType === 'pen' && (nativePencil.available || window.OpenNoteNative?.platform === 'ios')) {
+    // The shells send every stylus sample (iOS: the Pencil's 240 Hz; Android: each touch event's
+    // history, OpenNoteInkPlugin.forwardStylus); the page's own events are the fallback.
+    const nativeSamples = nativePencil.available || window.OpenNoteNative?.platform === 'ios' || !!(window as { OpenNoteInk?: unknown }).OpenNoteInk;
+    if (e.pointerType === 'pen' && nativeSamples) {
       const d = drawing.current;
       const listener: PencilListener = (samples, predicted, ended) => nativeInputRef.current(d, samples, predicted, ended);
       d.native = listener;

@@ -31,7 +31,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.1.4";
+static NSString *const kVersion = @"2.1.5";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -776,6 +776,13 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"share"]) {
         [self handleShare:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"updateDownload"]) {
+        [self handleUpdateDownload:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"updateShare"]) {
+        [self handleUpdateShare:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"updateCleanup"]) {
+        [[NSFileManager defaultManager] removeItemAtPath:ONUpdatesDir() error:nil];
+        replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"print"]) {
         [self handlePrint:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"haptic"]) {
@@ -826,6 +833,70 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     }];
     if (rid) self.httpTasks[rid] = task;
     [task resume];
+}
+
+#pragma mark App updates
+
+// App updates from GitHub releases (src/services/updater.ts). iOS lets no app install an app
+// package itself: the release's IPA is downloaded in the background into tmp/opennote-update and
+// then offered in the share sheet, to open in the installer the user sideloads with (AltStore,
+// SideStore, TrollStore, Files...). The folder is deleted when the share sheet closes, and at
+// every start (updateCleanup).
+static NSString *ONUpdatesDir(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"opennote-update"];
+}
+
+- (void)handleUpdateDownload:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    NSURL *url = [NSURL URLWithString:msg[@"url"] ?: @""];
+    NSString *name = [[msg[@"fileName"] description] lastPathComponent] ?: @"OpenNote.ipa";
+    if (!url || ![url.scheme isEqualToString:@"https"]) {
+        reply(@{@"error": @"Invalid download URL"}, nil);
+        return;
+    }
+    __weak ONViewController *weakSelf = self;
+    __block NSTimer *progressTimer = nil;
+    NSURLSessionDownloadTask *task = [self.session downloadTaskWithURL:url completionHandler:^(NSURL *location, NSURLResponse *response, NSError *error) {
+        NSString *dest = [ONUpdatesDir() stringByAppendingPathComponent:name];
+        NSString *failure = nil;
+        NSInteger status = [response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)response).statusCode : 0;
+        if (error) failure = error.localizedDescription ?: @"Download failed";
+        else if (status / 100 != 2) failure = [NSString stringWithFormat:@"HTTP %ld", (long)status];
+        else {
+            NSFileManager *fm = [NSFileManager defaultManager];
+            [fm createDirectoryAtPath:ONUpdatesDir() withIntermediateDirectories:YES attributes:nil error:nil];
+            [fm removeItemAtPath:dest error:nil];
+            NSError *moveError = nil;
+            if (![fm moveItemAtURL:location toURL:[NSURL fileURLWithPath:dest] error:&moveError]) failure = moveError.localizedDescription ?: @"Could not save the update";
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [progressTimer invalidate];
+            reply(failure ? @{@"error": failure} : @{@"path": dest}, nil);
+        });
+    }];
+    // Progress for the page (window.__opennoteUpdateProgress(received, total)).
+    progressTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer *t) {
+        NSString *js = [NSString stringWithFormat:@"window.__opennoteUpdateProgress&&window.__opennoteUpdateProgress(%lld,%lld)",
+                                                  task.countOfBytesReceived, task.countOfBytesExpectedToReceive];
+        [weakSelf.webView evaluateJavaScript:js completionHandler:nil];
+    }];
+    [task resume];
+}
+
+- (void)handleUpdateShare:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    NSString *path = [[msg[@"path"] description] stringByStandardizingPath];
+    if (!path || ![path hasPrefix:[ONUpdatesDir() stringByStandardizingPath]] || ![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        reply(@{@"error": @"Update file missing"}, nil);
+        return;
+    }
+    UIActivityViewController *avc = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:path]] applicationActivities:nil];
+    avc.popoverPresentationController.sourceView = self.view;
+    avc.popoverPresentationController.sourceRect = CGRectMake(CGRectGetMidX(self.view.bounds), 60, 1, 1);
+    avc.completionWithItemsHandler = ^(UIActivityType type, BOOL completed, NSArray *items, NSError *error) {
+        // The receiving app has its copy (or the user closed the sheet): the download is deleted.
+        [[NSFileManager defaultManager] removeItemAtPath:ONUpdatesDir() error:nil];
+        reply(completed ? @{@"ok": @YES} : @{@"error": @"cancelled"}, nil);
+    };
+    [self presentViewController:avc animated:YES completion:nil];
 }
 
 - (void)handleShare:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {

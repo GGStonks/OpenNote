@@ -1,5 +1,7 @@
 /**
- * 240 Hz Apple Pencil input from the iOS shell.
+ * Every stylus sample from the app shells: the Apple Pencil's 240 Hz samples from the iOS shell,
+ * and on Android each touch event's history (OpenNoteInkPlugin.forwardStylus), whose WebView also
+ * delivers about one pointer event per frame (fast strokes came out segmented).
  *
  * WKWebView dispatches pointer events once per display frame (60 or 120 Hz) and does not
  * implement getCoalescedEvents, so a web page sees at most half of the Pencil's 240 samples per

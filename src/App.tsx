@@ -9,6 +9,7 @@ import {
   requestPersistentStorage, saveFolders, saveNote, saveTags,
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
+import { UpdatePrompt } from './components/UpdatePrompt';
 import { shareFile } from './platform';
 import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
@@ -281,6 +282,7 @@ export const App: React.FC = () => {
         />
       )}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
+      <UpdatePrompt enabled={settings.checkUpdates} />
     </div>
   );
 };
