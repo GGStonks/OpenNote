@@ -112,9 +112,12 @@ type InkGeometry = ReturnType<typeof inkGeometry>;
 const geometryCache = new WeakMap<Stroke, InkGeometry>();
 
 /**
- * inkGeometry of a committed stroke, cached per stroke (canvas, SVG and the precision eraser
- * share it; a moved copy reuses its original's, moved). The SVG ink shown above VECTOR_ZOOM used to
- * model every stroke of the note again after each pinch past it.
+ * The line of a committed stroke as it is drawn everywhere (canvas, SVG, eraser), cached per
+ * stroke (a moved copy reuses its original's, moved): the ink engine's line, smoothed except its
+ * last SMOOTH_SETTLE (settledSmooth). The live ink (SmoothLiveStroke, nativeInk.ts) draws the very
+ * same line while the pen moves, so it neither shows straight pieces between samples (fast strokes
+ * on Android looked segmented) nor shifts when the pen lifts. Pieces cut by the precision eraser
+ * ('modeled') are already that line.
  */
 export function strokeGeometry(s: Stroke): InkGeometry {
   let g = geometryCache.get(s);
@@ -123,9 +126,31 @@ export function strokeGeometry(s: Stroke): InkGeometry {
   if (m && m.src.points.length === s.points.length) {
     const o = strokeGeometry(m.src);
     g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
-  } else g = inkGeometry(s.points, styleOf(s));
+  } else {
+    const style = styleOf(s);
+    g = inkGeometry(s.points, style);
+    if (!style.modeled && !s.isShape) g = settledSmooth(g);
+  }
   geometryCache.set(s, g);
   return g;
+}
+
+/**
+ * Index of the first point less than SMOOTH_SETTLE (along the line) from its end: points before it
+ * can no longer change when the line goes on (their smoothing window only reaches settled points).
+ */
+export function settledIndex(pts: readonly XY[]): number {
+  let back = 0, i = pts.length - 1;
+  while (i > 0 && back < SMOOTH_SETTLE) {
+    back += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    i--;
+  }
+  return Math.max(0, i);
+}
+
+/** The line smoothed up to settledIndex: the same for a stroke being written and once finished. */
+export function settledSmooth(g: InkGeometry): InkGeometry {
+  return smoothLine(g, settledIndex(g.pts));
 }
 
 /** Smoothing of the zoomed-in line: Gaussian width along the line (page px). */
@@ -202,18 +227,10 @@ export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry 
   return { pts, widths, width: g.width };
 }
 
-const smoothCache = new WeakMap<Stroke, InkGeometry>();
 /** smoothGeometry of a committed stroke, cached (a moved copy reuses its original's, moved). */
 export function strokeGeometrySmooth(s: Stroke): InkGeometry {
-  let g = smoothCache.get(s);
-  if (g) return g;
-  const m = movedFrom.get(s);
-  if (m && m.src.points.length === s.points.length) {
-    const o = strokeGeometrySmooth(m.src);
-    g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
-  } else g = smoothGeometry(strokeGeometry(s));
-  smoothCache.set(s, g);
-  return g;
+  // Every stroke is drawn as its settled-smooth line now (strokeGeometry): no second smoothing.
+  return strokeGeometry(s);
 }
 
 function polylinePath(pts: XY[], closed = false): Path2D {

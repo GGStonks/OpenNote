@@ -23,8 +23,7 @@
  *   e                                             the page shows the stroke: clear
  *   c                                             cancel: clear now
  */
-import type { LiveStroke } from './engine';
-import { pressureWidth } from './engine';
+import type { SmoothLiveStroke } from './smoothLiveStroke';
 
 type Sender = (msg: string) => void;
 
@@ -79,7 +78,7 @@ export function nativeInkUnit(): number {
 
 /** One stroke's native ink. */
 export class NativeInk {
-  private model: LiveStroke | null = null;
+  private model: SmoothLiveStroke | null = null;
   private key = '';
   private sent = 0;
   private done = false;
@@ -91,8 +90,12 @@ export class NativeInk {
     return !!send;
   }
 
-  /** Sends what the stroke's model added since the last call (restarting if the model or style changed). */
-  update(stroke: LiveStroke, style: InkStyle, tf: InkTransform): void {
+  /**
+   * Sends what the stroke added since the last call (restarting if the stroke or style changed):
+   * the same line the page draws (SmoothLiveStroke.line): its smoothed, final points once each, and
+   * the rest (still changing) every time.
+   */
+  update(stroke: SmoothLiveStroke, style: InkStyle, tf: InkTransform): void {
     if (this.done || !NativeInk.available) return;
     const key = `${style.color}|${style.width}|${style.variable}|${tf.ox}|${tf.oy}|${tf.k}`;
     if (stroke !== this.model || key !== this.key) {
@@ -103,17 +106,14 @@ export class NativeInk {
       send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h)].join(','));
       this.shown = true;
     }
-    const m = stroke.model;
-    const pts = m.points;
-    const tail = m.tail();
-    const out: string[] = ['u', String(Math.max(0, pts.length - this.sent))];
-    const push = (q: { x: number; y: number; p: number }) => {
-      const w = style.variable ? pressureWidth(style.width, q.p) : style.width;
+    const { final, finalW, rest, restW } = stroke.line(style);
+    const out: string[] = ['u', String(Math.max(0, final.length - this.sent))];
+    const push = (q: { x: number; y: number }, w: number) => {
       out.push(f(tf.ox + q.x * tf.k), f(tf.oy + q.y * tf.k), f((w / 2) * tf.k));
     };
-    for (let i = this.sent; i < pts.length; i++) push(pts[i]);
-    this.sent = pts.length;
-    for (const q of tail) push(q);
+    for (let i = this.sent; i < final.length; i++) push(final[i], finalW[i]);
+    this.sent = final.length;
+    rest.forEach((q, i) => push(q, restW[i]));
     send!(out.join(','));
   }
 

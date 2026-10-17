@@ -8,7 +8,7 @@ import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
   strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
 } from '../ink/strokeRenderer';
-import { LiveStroke } from '../ink/engine';
+import { SmoothLiveStroke } from '../ink/smoothLiveStroke';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
@@ -824,7 +824,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** Raw Pencil force of each sample (lift-off trimming). */
     force: number[];
     /** Pen tool: the stroke being written (Nib model + live painter, src/ink/engine). */
-    model: LiveStroke | null;
+    model: SmoothLiveStroke | null;
     realPressure: boolean;
     /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
     native: PencilListener | null;
@@ -1149,7 +1149,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
       force: [pt.pressure],
-      model: tool === 'pen' ? new LiveStroke() : null,
+      model: tool === 'pen' ? new SmoothLiveStroke() : null,
       ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -1363,7 +1363,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
-      d.model = new LiveStroke();
+      d.model = new SmoothLiveStroke();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
       if (d.rec) d.rec = [recSample(pt, first.pressure, d.start)];
       samples = samples.slice(1);
