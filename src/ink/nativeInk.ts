@@ -78,6 +78,12 @@ export function nativeInkUnit(): number {
 
 /** One stroke's native ink. */
 export class NativeInk {
+  /**
+   * The stroke whose ink the shell's layer shows now. A stroke's "e" goes out two frames after the
+   * pen lifts; when the next stroke has begun meanwhile (quick writing, dotting an i), its "b"
+   * already cleared the layer, and that late "e" wiped the new stroke's ink instead.
+   */
+  private static showing: NativeInk | null = null;
   private model: SmoothLiveStroke | null = null;
   private key = '';
   private sent = 0;
@@ -105,6 +111,7 @@ export class NativeInk {
       const [r, g, b, a] = rgba(style.color);
       send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h)].join(','));
       this.shown = true;
+      NativeInk.showing = this;
     }
     const { final, finalW, rest, restW } = stroke.line(style);
     const out: string[] = ['u', String(Math.max(0, final.length - this.sent))];
@@ -124,19 +131,22 @@ export class NativeInk {
     this.key = '';
     send!(`d,${f(tf.clip.x)},${f(tf.clip.y)},${f(tf.clip.w)},${f(tf.clip.h)}${commands ? ',' + commands : ''}`);
     this.shown = true;
+    NativeInk.showing = this;
   }
 
   /** The page now shows the finished stroke (or its replacement): the shell's layer is cleared. */
   end(): void {
     if (this.done) return;
     this.done = true;
-    if (this.shown && NativeInk.available) send!('e');
+    if (this.shown && NativeInk.showing === this && NativeInk.available) send!('e');
+    if (NativeInk.showing === this) NativeInk.showing = null;
   }
 
   /** The stroke was dropped (or became something the shell does not draw): cleared at once. */
   cancel(): void {
     if (this.done) return;
     this.done = true;
-    if (this.shown && NativeInk.available) send!('c');
+    if (this.shown && NativeInk.showing === this && NativeInk.available) send!('c');
+    if (NativeInk.showing === this) NativeInk.showing = null;
   }
 }

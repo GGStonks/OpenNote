@@ -496,6 +496,11 @@ export function prepareStroke(s: Stroke): boolean {
   return true;
 }
 
+/** Whether painting the stroke (as the smooth line or not) can use built geometry (is cheap). */
+export function strokeBuilt(s: Stroke, smooth = false): boolean {
+  return (smooth && !s.isShape ? smoothBuilt : cache).has(s);
+}
+
 /** drawStrokes' fill pass for one stroke (to paint a list of strokes in slices). */
 export function paintStrokeFill(ctx: CanvasRenderingContext2D, s: Stroke, opts: PaintOptions = {}) {
   if (s.points.length) paintFill(ctx, built(s, opts.smooth), styleOf(s), opts);

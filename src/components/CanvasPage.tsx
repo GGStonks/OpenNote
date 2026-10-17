@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt,
 } from '../ink/strokeRenderer';
 import { SmoothLiveStroke } from '../ink/smoothLiveStroke';
 import { SampleDensifier } from '../ink/densify';
@@ -160,8 +160,8 @@ export function paperGrid(style: PaperStyle): number | null {
 }
 
 const MAX_CANVAS_PIXELS = 16_000_000;
-/** Above this zoom committed ink is drawn as SVG (sharp at any zoom) instead of page canvases. */
-const VECTOR_ZOOM = 2.5;
+/** Above this zoom committed ink is drawn by SharpInk (screen resolution at any zoom) over the page canvases. */
+const SHARP_ZOOM = 2.5;
 /**
  * From this zoom page canvases draw handwriting as the smooth line (strokeRenderer.smoothGeometry):
  * the engine's line is straight between Pencil samples, which shows as faint corners when zoomed in.
@@ -211,6 +211,28 @@ const TILE_FULL_REPAINT = 0.5;
 type TilePaint = { strokes: Stroke[]; ratio: number; complete: boolean };
 
 const strokeBoxes = new WeakMap<Stroke, { minY: number; maxY: number }>();
+const strokeAreas = new WeakMap<Stroke, DirtyRect>();
+
+/**
+ * Where a stroke may paint, from its points with a margin for its width and an arrowhead: cheap,
+ * unlike strokePaintBounds, which builds the stroke (runs the ink engine) to know.
+ */
+function strokeArea(s: Stroke): DirtyRect {
+  let r = strokeAreas.get(s);
+  if (!r) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of s.points) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const pad = (s.tool === 'highlighter' ? s.width * 3 : Math.max(9, s.width * 4.6)) + 12;
+    r = { minX: minX - pad, minY: minY - pad, maxX: maxX + pad, maxY: maxY + pad };
+    strokeAreas.set(s, r);
+  }
+  return r;
+}
 
 function strokeYRange(s: Stroke) {
   let r = strokeBoxes.get(s);
@@ -244,65 +266,294 @@ function strokeYRange(s: Stroke) {
  * Strokes crossing a page line are painted by both tiles.
  */
 /**
- * One page band of ink as SVG (zoomed in past VECTOR_ZOOM: sharp at any zoom). Like InkTile it is
- * built only near the view and dropped far from it: one SVG of the whole note was rebuilt and
- * parsed (megabytes of markup on a long note) every time a pinch ended past VECTOR_ZOOM. The page
- * band's canvas (InkTile, `inkKey`) stays under it, as it was, and is hidden only once the SVG is
- * there, so switching to vector ink never shows the page without ink.
+ * Paints `job` on ctx a few ms per frame (not at all while two fingers zoom), in the order
+ * drawStrokes uses (highlighters, then fills, then ink), then calls done. Returns a cancel.
  */
-const VectorTile = React.memo(function VectorTile(props: { top: number; width: number; height: number; strokes: Stroke[]; scrollRoot: HTMLElement | null; paperOf: (s: Stroke) => string; inkKey: string }) {
-  const { top, width: W, height: H, strokes, scrollRoot, inkKey } = props;
-  const paperOf = useRef(props.paperOf);
-  paperOf.current = props.paperOf;
-  const mine = useMemo(() => strokes.filter((s) => {
-    const r = strokeYRange(s);
-    return r.maxY >= top && r.minY <= top + H;
-  }), [strokes, top, H]);
-  const holderRef = useRef<HTMLDivElement>(null);
-  const [alive, setAlive] = useState(false);
-  useEffect(() => {
-    const el = holderRef.current;
-    if (!el) return;
-    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '50% 0px' });
-    const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '150% 0px' });
-    near.observe(el);
-    far.observe(el);
-    return () => {
-      near.disconnect();
-      far.disconnect();
-    };
-  }, [scrollRoot]);
-  // Built after the render, and not while two fingers are zooming (tileWork.paused).
-  const [svg, setSvg] = useState('');
-  useEffect(() => {
-    if (!alive || !mine.length) {
-      setSvg('');
+function paintSliced(ctx: CanvasRenderingContext2D, job: Stroke[], opts: { smooth: boolean }, done: () => void): () => void {
+  const passes: ((s: Stroke) => boolean)[] = [
+    (s) => s.tool === 'highlighter',
+    (s) => s.tool !== 'highlighter' && !!s.fill && s.fill !== 'none',
+    (s) => s.tool !== 'highlighter',
+  ];
+  let pass = 0, i = 0;
+  let frame: number | null = null;
+  const step = () => {
+    frame = null;
+    if (tileWork.paused) {
+      frame = requestAnimationFrame(step);
       return;
     }
-    const make = () => setSvg(strokesSvg(mine, (s) => paperOf.current(s)));
-    if (!tileWork.paused) {
-      make();
+    const until = performance.now() + TILE_SLICE_MS;
+    while (pass < passes.length) {
+      for (; i < job.length; i++) {
+        if (performance.now() > until) {
+          frame = requestAnimationFrame(step);
+          return;
+        }
+        const s = job[i];
+        if (!passes[pass](s) || !s.points.length) continue;
+        if (pass === 0) drawStrokes(ctx, [s], opts);
+        else if (pass === 1) paintStrokeFill(ctx, s, opts);
+        else paintStrokeInk(ctx, s, opts);
+      }
+      pass++;
+      i = 0;
+    }
+    done();
+  };
+  step();
+  return () => {
+    if (frame !== null) cancelAnimationFrame(frame);
+    frame = null;
+  };
+}
+
+/** Most backing-store pixels of a sharp view canvas (one per ink layer, see SharpInk). */
+const SHARP_MAX_PIXELS = 8_000_000;
+/** Share of the view added on each side of the sharp canvas (less where the budget is short). */
+const SHARP_MARGIN = 0.25;
+/** The view has rested this long (ms) after scrolling: the sharp canvas follows it. */
+const SHARP_IDLE_MS = 120;
+/**
+ * Up to this many strokes (whose geometry is built) are painted at once; more, or strokes the ink
+ * engine still has to model (seconds for a page on a slow tablet), off screen a few ms per frame.
+ */
+const SHARP_SYNC_STROKES = 150;
+
+/** The part of the surface a sharp canvas covers (surface px) and its backing scale. */
+type SharpView = { x0: number; y0: number; x1: number; y1: number; r: number };
+
+/**
+ * Committed ink of one layer where the page is zoomed in past what the page canvases hold sharp
+ * (their pixel budget; from about 2x on an iPad), drawn at exactly the screen's resolution.
+ *
+ * It is one canvas over the view and a margin around it, INSIDE the scaled content like the page
+ * canvases, so it moves and scales with the paper by construction (nothing to keep aligned while
+ * scrolling or pinching); while two fingers zoom it is scaled as it is, and once the view rests it
+ * is painted again for the new view at zoom x devicePixelRatio. The page canvases stay under it,
+ * as they were, hidden while it covers the view (their softer ink would show around its edges) and
+ * shown again when a scroll nears its edge or a pinch starts, so the ink is never missing. (A
+ * clip-path hole in them instead made each a masked layer of the whole page at screen density:
+ * a 3 s frame in the pinch benchmark.)
+ *
+ * SVG used to do this, but WebKit rasterises a composited SVG inside a CSS-scaled element at its
+ * unscaled size and stretches it: on the iPad, ink at 500% was a 1x bitmap magnified five times.
+ * A canvas's resolution is the one it is given.
+ */
+const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets: SheetBox[]; layerKey: string; width: number; height: number; zoom: number; scrollRoot: HTMLElement | null }) {
+  const { strokes, layerKey, width: W, height: H, zoom, scrollRoot } = props;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const painted = useRef<{ view: SharpView; strokes: Stroke[] } | null>(null);
+  const cancelJob = useRef<(() => void) | null>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  const opts = { smooth: true };
+
+  /** The page's content element (the canvas's parent), kept for the cleanup at unmount. */
+  const containerRef = useRef<HTMLElement | null>(null);
+  /** Hides or shows this layer's page canvases (every page's, also ones added since). */
+  const tilesHidden = useRef(false);
+  const hideTiles = (hide: boolean) => {
+    const container = containerRef.current;
+    if (!container) return;
+    tilesHidden.current = hide;
+    for (const sh of latest.current.sheets) {
+      const el = container.querySelector<HTMLElement>(`[data-ink-key="${layerKey}:${sh.id}"]`);
+      if (el) el.style.visibility = hide ? 'hidden' : '';
+    }
+  };
+  /**
+   * Whether the painted part `p` covers the visible part with room to spare: half the margin it
+   * was painted with on each side (none needed where it reaches the edge of the surface).
+   */
+  const covers = (p: SharpView | undefined, vis: SharpView) => {
+    if (!p) return false;
+    const { width: w, height: h } = latest.current;
+    const bx = (p.x1 - p.x0 - (vis.x1 - vis.x0)) / 4, by = (p.y1 - p.y0 - (vis.y1 - vis.y0)) / 4;
+    const side = (room: number, need: number, edge: boolean) => room >= -1e-6 && (edge || room >= need);
+    return side(vis.x0 - p.x0, bx, p.x0 <= 1e-6) && side(p.x1 - vis.x1, bx, p.x1 >= w - 1e-6) && side(vis.y0 - p.y0, by, p.y0 <= 1e-6) && side(p.y1 - vis.y1, by, p.y1 >= h - 1e-6);
+  };
+
+  /** The view now (surface px) and the margin and scale to paint it with; null when off the page. */
+  const viewNow = (): { visible: SharpView; view: SharpView } | null => {
+    const container = containerRef.current;
+    if (!container) return null;
+    const { width: w, height: h, scrollRoot: root } = latest.current;
+    const c = container.getBoundingClientRect();
+    const rr = root?.getBoundingClientRect() ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+    const s = c.width / w;
+    if (!(s > 0)) return null;
+    const vx0 = Math.max(0, (rr.left - c.left) / s), vx1 = Math.min(w, (rr.right - c.left) / s);
+    const vy0 = Math.max(0, (rr.top - c.top) / s), vy1 = Math.min(h, (rr.bottom - c.top) / s);
+    if (vx1 <= vx0 || vy1 <= vy0) return null;
+    let r = s * Math.min(window.devicePixelRatio || 1, 3);
+    const px = (vx1 - vx0) * (vy1 - vy0) * r * r;
+    // The margin the budget allows (none, and a lower scale, on a very large screen).
+    const m = Math.max(0, Math.min(SHARP_MARGIN, (Math.sqrt(SHARP_MAX_PIXELS / px) - 1) / 2));
+    if (px > SHARP_MAX_PIXELS) r *= Math.sqrt(SHARP_MAX_PIXELS / px);
+    const mx = (vx1 - vx0) * m, my = (vy1 - vy0) * m;
+    // Whole backing pixels.
+    const q = (v: number, up: boolean) => (up ? Math.ceil(v * r) : Math.floor(v * r)) / r;
+    const view = { x0: q(Math.max(0, vx0 - mx), false), y0: q(Math.max(0, vy0 - my), false), x1: q(Math.min(w, vx1 + mx), true), y1: q(Math.min(h, vy1 + my), true), r };
+    return { visible: { x0: vx0, y0: vy0, x1: vx1, y1: vy1, r }, view };
+  };
+
+  const inView = (list: Stroke[], v: { x0: number; y0: number; x1: number; y1: number }) =>
+    list.filter((st) => {
+      const b = strokeArea(st);
+      return b.maxX >= v.x0 && b.minX <= v.x1 && b.maxY >= v.y0 && b.minY <= v.y1;
+    });
+
+  /** Paints the whole view `v` (at once, or off screen in slices and then copied in at once). */
+  const paintView = (v: SharpView) => {
+    cancelJob.current?.();
+    cancelJob.current = null;
+    const list = latest.current.strokes;
+    const job = inView(list, v);
+    const w = Math.round((v.x1 - v.x0) * v.r), h = Math.round((v.y1 - v.y0) * v.r);
+    const show = (src: HTMLCanvasElement | null) => {
+      const c = canvasRef.current;
+      if (!c) return;
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d');
+      if (!ctx) return;
+      if (src) ctx.drawImage(src, 0, 0);
+      ctx.setTransform(v.r, 0, 0, v.r, -v.x0 * v.r, -v.y0 * v.r);
+      if (!src) drawStrokes(ctx, job, opts);
+      Object.assign(c.style, { left: `${v.x0}px`, top: `${v.y0}px`, width: `${w / v.r}px`, height: `${h / v.r}px`, display: '' });
+      painted.current = { view: v, strokes: list };
+      const now = viewNow();
+      hideTiles(!tileWork.paused && !!now && covers(v, now.visible));
+    };
+    if (job.length <= SHARP_SYNC_STROKES && job.every((st) => strokeBuilt(st, opts.smooth))) {
+      show(null);
       return;
     }
-    tileWork.resume.add(make);
-    return () => {
-      tileWork.resume.delete(make);
-    };
-  }, [alive, mine]);
-  // The canvas under this band is hidden while the SVG shows the same ink.
+    const off = document.createElement('canvas');
+    off.width = w;
+    off.height = h;
+    const octx = off.getContext('2d');
+    if (!octx) return;
+    octx.setTransform(v.r, 0, 0, v.r, -v.x0 * v.r, -v.y0 * v.r);
+    cancelJob.current = paintSliced(octx, job, opts, () => {
+      cancelJob.current = null;
+      // The strokes changed meanwhile: this picture is out of date.
+      if (latest.current.strokes !== list) {
+        off.width = off.height = 0;
+        paintView(v);
+        return;
+      }
+      show(off);
+      off.width = off.height = 0;
+    });
+  };
+
+  /** Follows the view: painted again when it left the painted part or the scale changed. */
+  const update = () => {
+    if (tileWork.paused) {
+      tileWork.resume.add(update);
+      return;
+    }
+    const now = viewNow();
+    if (!now) return;
+    const p = painted.current?.view;
+    if (p && Math.abs(p.r - now.view.r) < 1e-3 * p.r && covers(p, now.visible)) {
+      hideTiles(true);
+      return;
+    }
+    // Until the new view is painted (at once, or in slices) the page canvases show what it misses.
+    if (!covers(p, now.visible)) hideTiles(false);
+    paintView(now.view);
+  };
+
+  // Declared before the effects that use containerRef, so it is set when they run.
   useLayoutEffect(() => {
-    const ink = holderRef.current?.parentElement?.querySelector<HTMLElement>(`[data-ink-key="${inkKey}"]`);
-    if (!ink) return;
-    ink.style.visibility = svg ? 'hidden' : '';
+    const c = canvasRef.current;
+    containerRef.current = c?.parentElement ?? null;
     return () => {
-      ink.style.visibility = '';
+      cancelJob.current?.();
+      hideTiles(false);
+      // WebKit's canvas memory is tight: give the pixels back now.
+      if (c) c.width = c.height = 0;
     };
-  }, [svg, inkKey]);
-  return (
-    <div ref={holderRef} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
-      {svg && <svg className="absolute inset-0" width={W} height={H} viewBox={`0 ${top} ${W} ${H}`} dangerouslySetInnerHTML={{ __html: svg }} />}
-    </div>
-  );
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The view: after a zoom (and its pinch), and once scrolling rests. A new zoom shows the page
+  // canvases at once (zoomed out, the view is larger than the painted part) and is painted on the
+  // next frame, once the viewport has put the scroll position right for it.
+  useLayoutEffect(() => {
+    hideTiles(false);
+    let frame: number | null = requestAnimationFrame(() => {
+      frame = null;
+      update();
+    });
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const later = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(update, SHARP_IDLE_MS);
+    };
+    // Scrolling towards the edge of the painted part: the page canvases show the ink there at once.
+    const scrolled = () => {
+      if (tilesHidden.current) {
+        const now = viewNow();
+        if (!now || !covers(painted.current?.view, now.visible)) hideTiles(false);
+      }
+      later();
+    };
+    // Two fingers zooming out show more than the painted part.
+    const pinching = () => hideTiles(false);
+    const target: HTMLElement | Window = scrollRoot ?? window;
+    target.addEventListener('scroll', scrolled, { passive: true });
+    window.addEventListener('resize', later);
+    tileWork.pause.add(pinching);
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      if (timer) clearTimeout(timer);
+      tileWork.resume.delete(update);
+      tileWork.pause.delete(pinching);
+      target.removeEventListener('scroll', scrolled);
+      window.removeEventListener('resize', later);
+    };
+  }, [zoom, W, H, scrollRoot]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The strokes: like the page canvases, appended strokes are painted on top and any other change
+  // repaints the area of what changed, in the same frame as the edit.
+  useLayoutEffect(() => {
+    const c = canvasRef.current, done = painted.current;
+    if (!c || !done || done.strokes === strokes) return;
+    if (cancelJob.current) {
+      paintView(done.view);
+      return;
+    }
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    const v = done.view, before = done.strokes;
+    painted.current = { view: v, strokes };
+    const n = before.length;
+    if (strokes.length > n && before.every((st, i) => strokes[i] === st) && strokes.slice(n).every((st) => st.tool !== 'highlighter' && (!st.fill || st.fill === 'none'))) {
+      for (const st of inView(strokes.slice(n), v)) drawStroke(ctx, st, opts);
+      return;
+    }
+    const was = new Set(before), now = new Set(strokes);
+    let area: DirtyRect | null = null;
+    for (const st of before) if (!now.has(st)) area = unionRect(area, strokePaintBounds(st));
+    for (const st of strokes) if (!was.has(st)) area = unionRect(area, strokePaintBounds(st));
+    if (!area) area = { minX: v.x0, minY: v.y0, maxX: v.x1, maxY: v.y1 };
+    const x0 = Math.max(v.x0, Math.floor(area.minX * v.r) / v.r), y0 = Math.max(v.y0, Math.floor(area.minY * v.r) / v.r);
+    const x1 = Math.min(v.x1, Math.ceil(area.maxX * v.r) / v.r), y1 = Math.min(v.y1, Math.ceil(area.maxY * v.r) / v.r);
+    if (x1 <= x0 || y1 <= y0) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, y0, x1 - x0, y1 - y0);
+    ctx.clip();
+    ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
+    drawStrokes(ctx, inView(strokes, { x0, y0, x1, y1 }), opts);
+    ctx.restore();
+  }, [strokes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+
+  return <canvas ref={canvasRef} className="absolute pointer-events-none" style={{ display: 'none' }} />;
 });
 
 /** What a tile's canvas shows: its strokes, at what resolution, and whether as the smooth line. */
@@ -352,56 +603,13 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   }, [scrollRoot]);
   /** What the canvas shows now (complete); null when it shows nothing usable. */
   const painted = useRef<TileShown | null>(null);
-  const slicing = useRef<number | null>(null);
-  useEffect(() => () => {
-    if (slicing.current !== null) cancelAnimationFrame(slicing.current);
-  }, []);
-
-  /**
-   * Paints `job` on ctx a few ms per frame (not at all while two fingers zoom), in the order
-   * drawStrokes uses (highlighters, then fills, then ink), then calls done.
-   */
-  const paintSliced = (ctx: CanvasRenderingContext2D, job: Stroke[], sm: boolean, done: () => void) => {
-    const opts = { smooth: sm };
-    const passes: ((s: Stroke) => boolean)[] = [
-      (s) => s.tool === 'highlighter',
-      (s) => s.tool !== 'highlighter' && !!s.fill && s.fill !== 'none',
-      (s) => s.tool !== 'highlighter',
-    ];
-    let pass = 0, i = 0;
-    const step = () => {
-      slicing.current = null;
-      if (tileWork.paused) {
-        slicing.current = requestAnimationFrame(step);
-        return;
-      }
-      const until = performance.now() + TILE_SLICE_MS;
-      while (pass < passes.length) {
-        for (; i < job.length; i++) {
-          if (performance.now() > until) {
-            slicing.current = requestAnimationFrame(step);
-            return;
-          }
-          const s = job[i];
-          if (!passes[pass](s) || !s.points.length) continue;
-          if (pass === 0) drawStrokes(ctx, [s], opts);
-          else if (pass === 1) paintStrokeFill(ctx, s, opts);
-          else paintStrokeInk(ctx, s, opts);
-        }
-        pass++;
-        i = 0;
-      }
-      done();
-    };
-    step();
-  };
+  const cancelSlices = useRef<(() => void) | null>(null);
+  useEffect(() => () => cancelSlices.current?.(), []);
 
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    if (slicing.current !== null) {
-      cancelAnimationFrame(slicing.current);
-      slicing.current = null;
-    }
+    cancelSlices.current?.();
+    cancelSlices.current = null;
     if (!canvas || !alive) {
       painted.current = null;
       return;
@@ -422,7 +630,8 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
       if (!octx) return;
       octx.setTransform(ratio, 0, 0, ratio, 0, -top * ratio);
       const job = mine;
-      paintSliced(octx, job, smooth, () => {
+      cancelSlices.current = paintSliced(octx, job, { smooth }, () => {
+        cancelSlices.current = null;
         canvas.width = w;
         canvas.height = h;
         const ctx = canvas.getContext('2d');
@@ -496,7 +705,8 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     }
     painted.current = null;
     const job = mine;
-    paintSliced(ctx, job, smooth, () => {
+    cancelSlices.current = paintSliced(ctx, job, { smooth }, () => {
+      cancelSlices.current = null;
       painted.current = { strokes: job, ratio, smooth };
     });
   }, [mine, ratio, smooth, alive, top, W, H]);
@@ -634,21 +844,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
-  /** High zoom: the committed ink is drawn as SVG, which stays sharp where canvases hit their budget. */
-  // Vector ink above VECTOR_ZOOM, and also wherever a page canvas would be held below the screen's
-  // resolution by its pixel budget (MAX_CANVAS_PIXELS; on a 3x Android screen from about 1.4x zoom):
-  // those canvases were drawn soft and then stretched.
+  /** High zoom: the committed ink is drawn sharp over the view (SharpInk) where page canvases hit their budget. */
+  // Above SHARP_ZOOM, and also wherever a page canvas would be held below the screen's resolution
+  // by its pixel budget (MAX_CANVAS_PIXELS; from about 2x on an iPad, 1.4x on a 3x Android screen):
+  // those canvases were drawn soft and then stretched. Printing draws SVG.
   const tileArea = Math.max(1, ...layout.sheets.map((sh) => PAGE_W * sh.height));
-  const vector = printMode || zoom > VECTOR_ZOOM || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2;
-  // The page canvases' zoom: the zoom, or while vector ink is shown, the last zoom below it (the
-  // canvases are not repainted for zooms the vector ink covers; they stay under it as they were).
+  const sharp = !printMode && (zoom > SHARP_ZOOM || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
+  // The page canvases' zoom: the zoom, or while sharp ink is shown, the last zoom below it (the
+  // canvases are not repainted for zooms the sharp ink covers; they stay under it as they were).
   const canvasZoom = useRef(zoom);
-  if (!vector) canvasZoom.current = zoom;
+  if (!sharp) canvasZoom.current = zoom;
   const inkZoom = canvasZoom.current;
   /** Paper under a stroke ("hole" fills in SVG). */
   const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
   /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
-  const layerSvgs = useMemo(() => new WeakMap<Stroke[], string>(), [layout, vector]);
+  const layerSvgs = useMemo(() => new WeakMap<Stroke[], string>(), [layout, printMode]);
   const layerSvg = (strokes: Stroke[]) => {
     let svg = layerSvgs.get(strokes);
     if (svg === undefined) layerSvgs.set(strokes, (svg = strokesSvg(strokes, svgPaperOf)));
@@ -1223,9 +1433,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       nativePencil.detach(d.native);
       d.native = null;
-      const lastT = d.points[d.points.length - 1].t ?? 0;
-      events.splice(0, events.length, ...d.webBuffer.filter((w) => eventTime(w) - d.start > lastT));
-      d.webBuffer = [];
+      events.splice(0, events.length, ...webAfterNative(d));
     }
     const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
     ingestSamples(d, retimeWebSamples(d, events), predicted[0] ?? null);
@@ -1265,8 +1473,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     for (const ce of events) {
       const pt = toPoint(ce, d.start, stylusAngles(ce as PointerEvent));
       if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
+      // Pen: the densifier decides about samples where the pen rests (some must reach the engine,
+      // src/ink/densify.ts); other tools skip them.
+      const dense = d.model && d.dense && !d.snapped ? d.dense : null;
       const last = d.points[d.points.length - 1];
-      if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
+      if (!dense && Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
       const lifting = ce.pointerType === 'pen' && !(ce.pressure > 0);
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
@@ -1281,7 +1492,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
       // Pen: wide gaps between samples are filled with points on a smooth curve (src/ink/densify.ts);
       // the stroke keeps them, so the finished stroke is the line drawn live.
-      for (const q of d.model && d.dense && !d.snapped ? d.dense.push(pt) : [pt]) {
+      for (const q of dense ? dense.push(pt) : [pt]) {
         d.force.push(lifting ? 0 : q.pressure);
         d.points.push(q);
         if (d.model && !d.snapped) d.model.add(q.x, q.y, q.t ?? 0, q.pressure);
@@ -1400,13 +1611,35 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
   };
 
+  /**
+   * The web events held back that come after the stroke's last (native) sample. Matched by
+   * position: the shell's sample times and the web events' are different clocks, and by time alone
+   * events the shell had already delivered were added again, so the line went back over itself.
+   * Without a web event near the last sample (the pen moved on far), by time.
+   */
+  function webAfterNative(d: NonNullable<typeof drawing.current>): PointerEvent[] {
+    const buf = d.webBuffer;
+    d.webBuffer = [];
+    const last = d.points[d.points.length - 1];
+    let near = -1, best = 4;
+    buf.forEach((w, i) => {
+      const at = toPoint(w, d.start);
+      const dist = Math.hypot(at.x - last.x, at.y - last.y);
+      if (dist <= best) {
+        best = dist;
+        near = i;
+      }
+    });
+    if (near >= 0) return buf.slice(near + 1);
+    const lastT = last.t ?? 0;
+    return buf.filter((w) => eventTime(w) - d.start > lastT);
+  }
+
   /** The shell's samples stopped: the web events held back since its last delivery continue the stroke. */
   function ingestWebAfterNative(d: NonNullable<typeof drawing.current>) {
     if (d.native) nativePencil.detach(d.native);
     d.native = null;
-    const lastT = d.points[d.points.length - 1].t ?? 0;
-    const rest = d.webBuffer.filter((w) => eventTime(w) - d.start > lastT);
-    d.webBuffer = [];
+    const rest = webAfterNative(d);
     if (rest.length) ingestSamples(d, rest, null);
   }
 
@@ -1810,8 +2043,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       {layers.map((l) => {
         if (l.kind === 'ink') {
           if (!printMode) {
-            // Canvases always (at the last zoom below vector ink, kept while zoomed further in), with
-            // the vector ink over them past it; each canvas is hidden once its band's SVG is there.
+            // Canvases always (at the last zoom below sharp ink, kept while zoomed further in), with
+            // the sharp ink over the view past it.
             return (
               <React.Fragment key={l.key}>
                 {layout.sheets.map((sh) => (
@@ -1828,14 +2061,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     scrollRoot={scrollRoot}
                   />
                 ))}
-                {vector &&
-                  layout.sheets.map((sh) => (
-                    <VectorTile key={`v${sh.id}`} inkKey={`${l.key}:${sh.id}`} top={sh.top} width={PAGE_W} height={sh.height} strokes={l.strokes} scrollRoot={scrollRoot} paperOf={svgPaperOf} />
-                  ))}
+                {sharp && <SharpInk key={`s${l.key}`} layerKey={l.key} strokes={l.strokes} sheets={layout.sheets} width={PAGE_W} height={PAGE_H} zoom={zoom} scrollRoot={scrollRoot} />}
               </React.Fragment>
             );
           }
-          return vector ? (
+          return printMode ? (
             <svg
               key={l.key}
               className="absolute inset-0 pointer-events-none"

@@ -10,7 +10,7 @@
  * Downloads go to an update folder of the app's own temporary files, deleted at every start (so
  * once the updated app runs, the package is gone) and, on iOS, as soon as the share sheet closes.
  */
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { httpRequest, platformKind } from '../platform';
 
 const REPO = 'GGStonks/OpenNote';
@@ -43,12 +43,14 @@ export function canUpdate(): boolean {
 }
 
 let updatePlugin: UpdatePlugin | null = null;
-/** Registered once: every registration makes a new proxy, and events go to the listeners of one. */
-async function plugin(): Promise<UpdatePlugin> {
-  if (!updatePlugin) {
-    const { registerPlugin } = await import('@capacitor/core');
-    updatePlugin = registerPlugin<UpdatePlugin>('OpenNoteUpdate');
-  }
+/**
+ * Registered once: every registration makes a new proxy, and events go to the listeners of one.
+ * Synchronous on purpose: a Capacitor plugin proxy answers every property, `then` included, so
+ * returning it from an async function (or awaiting it) makes the promise wait forever for a
+ * native "then" method. That is what kept the update download from ever starting.
+ */
+function plugin(): UpdatePlugin {
+  if (!updatePlugin) updatePlugin = registerPlugin<UpdatePlugin>('OpenNoteUpdate');
   return updatePlugin;
 }
 
@@ -99,7 +101,7 @@ export async function downloadUpdate(rel: AppRelease, onProgress: (p: UpdateProg
   const fileName = `OpenNote-${rel.version}${t === 'android' ? '.apk' : '.ipa'}`;
   const report = (received: number, total: number) => onProgress({ received: Math.max(0, received), total: total > 0 ? total : rel.asset.size || 0 });
   if (t === 'android') {
-    const p = await plugin();
+    const p = plugin();
     const sub = await p.addListener('progress', ({ received, total }) => report(received, total));
     try {
       return (await p.download({ url: rel.asset.url, fileName })).path;
@@ -128,7 +130,7 @@ export async function downloadUpdate(rel: AppRelease, onProgress: (p: UpdateProg
  */
 export async function installUpdate(path: string): Promise<void> {
   const t = target();
-  if (t === 'android') return (await plugin()).install({ path });
+  if (t === 'android') return plugin().install({ path });
   if (t === 'ios') {
     const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'updateShare', path });
     if (res?.error && res.error !== 'cancelled') throw new Error(String(res.error));
@@ -139,7 +141,7 @@ export async function installUpdate(path: string): Promise<void> {
 export async function cleanupUpdates(): Promise<void> {
   const t = target();
   try {
-    if (t === 'android') await (await plugin()).cleanup();
+    if (t === 'android') await plugin().cleanup();
     else if (t === 'ios') await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'updateCleanup' });
   } catch {
     /* nothing to clean */

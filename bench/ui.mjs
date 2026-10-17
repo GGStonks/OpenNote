@@ -384,6 +384,25 @@ if (ONLY.has('closeup') && arg('shots')) {
     console.log(`closeup  zoom ${z}%, ${strokes.length} strokes from ${file}`);
     await page.screenshot({ path: join(arg('shots'), `closeup-${z}.png`), clip: { x: 0, y: 250, width: 820, height: 800 } });
   }
+  // Zoomed in, the committed ink is a sharp canvas over the view (SharpInk) with a hole in the page
+  // canvases under it. Scrolled: right away the page canvases show the ink there (never blank),
+  // once the view rests it is sharp again.
+  const sharpState = () => page.evaluate(() => {
+    const sharp = [...document.querySelectorAll('canvas')].filter((c) => c.style.display !== 'none' && c.className.includes('absolute') && c.parentElement?.classList.contains('on-page'));
+    const holes = [...document.querySelectorAll("[data-ink-key]")].filter((d) => d.style.visibility === "hidden").length;
+    return sharp.map((c) => `${c.width}x${c.height} at ${c.style.left},${c.style.top} size ${c.style.width}`).join(' ') + ` | page canvases hidden ${holes}`;
+  });
+  console.log(`closeup  sharp canvas: ${await sharpState()}`);
+  await page.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    el.scrollTop += 700;
+    el.scrollLeft -= 300;
+  });
+  await sleep(30);
+  await page.screenshot({ path: join(arg('shots'), 'closeup-scrolled-now.png'), clip: { x: 0, y: 250, width: 820, height: 800 } });
+  await sleep(800);
+  await page.screenshot({ path: join(arg('shots'), 'closeup-scrolled-rested.png'), clip: { x: 0, y: 250, width: 820, height: 800 } });
+  console.log(`closeup  after scrolling: ${await sharpState()}`);
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {

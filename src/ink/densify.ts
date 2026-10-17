@@ -1,6 +1,6 @@
 /**
- * Fills wide gaps between pen samples with points on a smooth curve, before they reach the ink
- * engine (input layer; the engine itself is frozen).
+ * Fills wide gaps between pen samples, in space and in time, before they reach the ink engine
+ * (input layer; the engine itself is frozen).
  *
  * The engine fits each sample with its neighbours, but only with those within NIB.CHORD (6 px):
  * in a very fast stroke, or with a digitiser that samples slowly (older Android tablets, 60-120 Hz),
@@ -12,6 +12,13 @@
  * latency, and nothing already given to the engine ever changes. Where the pen turns sharply
  * (a cusp, a reversal) the gap is a straight piece as before, so corners are not rounded off or
  * overshot.
+ *
+ * Gaps in time are filled too. The engine's fit is a polynomial in time over a window of 14-70 ms;
+ * between two samples further apart than that it is evaluated with samples on one side only, i.e.
+ * extrapolated, and the ink shot out past the pen and came back (up to 50 px in the recordings):
+ * after the pen rested (at touch-down, in a corner: samples that do not move used to be dropped)
+ * and over the digitiser's missed samples. So samples where the pen rests are kept every STILL_MS,
+ * and a gap longer than MAX_DT is filled every FILL_DT along the straight line.
  */
 import type { Point } from '../types';
 
@@ -25,25 +32,58 @@ const BASE = 1.5;
 const MAX_TURN = 45;
 /** How lopsided an arc may be (radians): turn in and out may differ by this, or 60 % of the larger. */
 const MIN_SKEW = (10 * Math.PI) / 180;
+/** A sample this close to the previous one (page px, each axis) is the pen resting... */
+const STILL_PX = 0.2;
+/** ... and is kept only once this long after the previous sample (ms). */
+const STILL_MS = 6;
+/** Gaps in time longer than this are filled (ms)... */
+const MAX_DT = 10;
+/** ... with samples this far apart in time (ms). */
+const FILL_DT = 5;
 
 type V = { x: number; y: number };
 const maxTurn = (MAX_TURN * Math.PI) / 180;
 
 export class SampleDensifier {
   private last: Point | null = null;
+  /** The newest resting sample not given to the engine yet (the pen was still there then). */
+  private held: Point | null = null;
   /** Earlier samples, at least BASE apart (for the direction the pen is turning). */
   private hist: V[] = [];
   /** Unit direction the line arrived at `last` with; null when unknown. */
   private dir: V | null = null;
 
-  /** The points to add for sample `pt`: the filled points, then `pt` itself. */
+  /** The points to add for sample `pt`: the filled points, then `pt` itself (none while the pen rests). */
   push(pt: Point): Point[] {
-    const a = this.last;
-    this.last = pt;
-    if (!a) {
+    const prev = this.last;
+    if (!prev) {
+      this.last = pt;
       this.hist = [pt];
       return [pt];
     }
+    if (Math.abs(pt.x - prev.x) < STILL_PX && Math.abs(pt.y - prev.y) < STILL_PX) {
+      // Resting: one sample every STILL_MS keeps the engine's time window filled.
+      if ((pt.t ?? 0) - (prev.t ?? 0) < STILL_MS) {
+        this.held = pt;
+        return [];
+      }
+      this.held = null;
+      this.last = pt;
+      return [pt];
+    }
+    // Moving again: the pen was still at the last resting sample until then.
+    const lead: Point[] = [];
+    let a = prev;
+    if (this.held && (this.held.t ?? 0) > (prev.t ?? 0)) {
+      a = this.held;
+      lead.push(a);
+    }
+    this.held = null;
+    this.last = pt;
+    return lead.concat(this.fill(a, pt));
+  }
+
+  private fill(a: Point, pt: Point): Point[] {
     const cx = pt.x - a.x, cy = pt.y - a.y, L = Math.hypot(cx, cy);
     if (L < 1e-6) return [pt];
     const chord = { x: cx / L, y: cy / L };
@@ -75,21 +115,25 @@ export class SampleDensifier {
     // The next gap leaves in the direction the pen is moving here (also after a straight piece, so
     // the curve picks up again).
     this.dir = end;
-    if (L <= GAP || !(pt.pressure > 0) || !(a.pressure > 0)) return [pt];
+    const ta = a.t ?? 0, tb = pt.t ?? ta;
+    const inked = pt.pressure > 0 && a.pressure > 0;
+    if ((L <= GAP || !inked) && tb - ta <= MAX_DT) return [pt];
     // A straight gap is filled too, along the straight line: the engine fits unevenly spaced
     // samples badly (dense up to a corner, one wide gap after it: the line overshot the corner).
+    // Landing or lifting (a force-less end: the pen in the air for the engine), only a gap in time
+    // is filled, straight and force-less too, so the engine still leaves it out of the ink.
+    const curved = arc && inked;
     const out: Point[] = [];
-    const n = Math.ceil(L / STEP);
-    const ta = a.t ?? 0, tb = pt.t ?? ta;
+    const n = Math.max(inked ? Math.ceil(L / STEP) : 1, Math.ceil((tb - ta) / FILL_DT));
     for (let k = 1; k < n; k++) {
       const s = k / n, s2 = s * s, s3 = s2 * s;
       const h00 = 2 * s3 - 3 * s2 + 1, h10 = s3 - 2 * s2 + s, h01 = -2 * s3 + 3 * s2, h11 = s3 - s2;
       out.push({
         ...pt,
-        x: arc ? h00 * a.x + h10 * L * start.x + h01 * pt.x + h11 * L * end.x : a.x + cx * s,
-        y: arc ? h00 * a.y + h10 * L * start.y + h01 * pt.y + h11 * L * end.y : a.y + cy * s,
+        x: curved ? h00 * a.x + h10 * L * start.x + h01 * pt.x + h11 * L * end.x : a.x + cx * s,
+        y: curved ? h00 * a.y + h10 * L * start.y + h01 * pt.y + h11 * L * end.y : a.y + cy * s,
         t: ta + (tb - ta) * s,
-        pressure: a.pressure + (pt.pressure - a.pressure) * s,
+        pressure: inked ? a.pressure + (pt.pressure - a.pressure) * s : 0,
       });
     }
     out.push(pt);

@@ -1,7 +1,7 @@
 {
   "name": "opennote",
   "private": true,
-  "version": "2.1.8",
+  "version": "2.1.9",
   "type": "module",
   "scripts": {
     "copy-tikzjax": "node scripts/copy-tikzjax.mjs",
@@ -12,6 +12,7 @@
     "bench:pen": "esbuild bench/pen.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/pen-bench.mjs && node node_modules/.cache/pen-bench.mjs",
     "bench:replay": "esbuild bench/replay.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/pen-replay.mjs && node node_modules/.cache/pen-replay.mjs",
     "test:engine": "esbuild bench/engineGolden.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/engine-golden.mjs && node node_modules/.cache/engine-golden.mjs",
+    "bench:overshoot": "esbuild bench/overshoot.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/overshoot.mjs && node node_modules/.cache/overshoot.mjs",
     "bench:live": "esbuild bench/liveLine.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/live-line.mjs && node node_modules/.cache/live-line.mjs",
     "test:storage": "esbuild bench/storageRoundtrip.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/storage-roundtrip.mjs && node node_modules/.cache/storage-roundtrip.mjs",
     "bench:ui": "vite build --minify false && node bench/ui.mjs"

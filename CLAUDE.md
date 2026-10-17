@@ -30,4 +30,5 @@ if the engine's look ever differed from them, the fix belongs in the shells, nev
   recorded handwriting): frame times and input lag while writing and scrolling; `--profile` / `--trace`
   show where the time goes. Run it before and after changes to rendering, saving or the canvas tiles.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
+- `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release
