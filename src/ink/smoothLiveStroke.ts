@@ -13,9 +13,11 @@
  */
 import { NibModeler, capsulePath, pressureWidth } from './engine';
 import type { LiveStyle, ModeledPoint, Rect } from './engine';
-import { settledIndex, smoothLine } from './strokeRenderer';
+import { SMOOTH_SETTLE, settledIndex, smoothLine } from './strokeRenderer';
 
 const CHUNK = 64;
+/** Line before the new points that their smoothing can depend on (page px, with a margin). */
+const WINDOW = SMOOTH_SETTLE + 3;
 
 const union = (a: Rect | null, b: Rect | null): Rect | null =>
   !a ? b : !b ? a : { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) };
@@ -59,10 +61,20 @@ export class SmoothLiveStroke {
     const done = this.finalPts.length;
     const upTo = Math.max(done, settledIndex(raw));
     if (upTo > done) {
-      const g = smoothLine({ pts: raw.slice(), widths: raw.map(widthOf), width: style.width }, upTo, done);
+      // Only the end of the line can reach the new points (their smoothing window and the corner
+      // test look SMOOTH_SETTLE back at most): smoothing it all every frame cost time growing with
+      // the stroke (2 ms a frame after 3 s of fast writing on a desktop, many times that on a
+      // slow tablet).
+      let from = done, back = 0;
+      while (from > 0 && back < WINDOW) {
+        back += Math.hypot(raw[from].x - raw[from - 1].x, raw[from].y - raw[from - 1].y);
+        from--;
+      }
+      const seg = raw.slice(from);
+      const g = smoothLine({ pts: seg, widths: seg.map(widthOf), width: style.width }, upTo - from, done - from);
       for (let i = done; i < upTo; i++) {
-        this.finalPts.push(g.pts[i]);
-        this.finalW.push(g.widths ? g.widths[i] : widthOf(g.pts[i]));
+        this.finalPts.push(g.pts[i - from]);
+        this.finalW.push(g.widths ? g.widths[i - from] : widthOf(g.pts[i - from]));
       }
     }
     const rest = raw.slice(this.finalPts.length).concat(this.model.tail());

@@ -9,6 +9,7 @@ import {
   strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke,
 } from '../ink/strokeRenderer';
 import { SmoothLiveStroke } from '../ink/smoothLiveStroke';
+import { SampleDensifier } from '../ink/densify';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
@@ -825,6 +826,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     force: number[];
     /** Pen tool: the stroke being written (Nib model + live painter, src/ink/engine). */
     model: SmoothLiveStroke | null;
+    /** Pen tool: fills wide gaps between samples (fast strokes, slow digitisers) before the engine. */
+    dense: SampleDensifier | null;
     realPressure: boolean;
     /** iOS app: 240 Hz samples from the shell replace the web events' positions. */
     native: PencilListener | null;
@@ -1150,6 +1153,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       pressure: pt.pressure,
       force: [pt.pressure],
       model: tool === 'pen' ? new SmoothLiveStroke() : null,
+      dense: tool === 'pen' ? new SampleDensifier() : null,
       ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -1163,6 +1167,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       recFrames: [],
     };
     drawing.current.model?.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+    drawing.current.dense?.push(pt);
     syncInk(drawing.current);
     gestures.inking = true;
     gestures.inkingWith = e.pointerType;
@@ -1264,7 +1269,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
       const lifting = ce.pointerType === 'pen' && !(ce.pressure > 0);
-      d.force.push(lifting ? 0 : pt.pressure);
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
       // outline wobble.
       // pen: the raw force (the engine smooths it with no lag; 0 = lifting, force unknown);
@@ -1274,9 +1278,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
         pt.pressure = d.pressure;
       }
-      d.points.push(pt);
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
-      if (d.model && !d.snapped) d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+      // Pen: wide gaps between samples are filled with points on a smooth curve (src/ink/densify.ts);
+      // the stroke keeps them, so the finished stroke is the line drawn live.
+      for (const q of d.model && d.dense && !d.snapped ? d.dense.push(pt) : [pt]) {
+        d.force.push(lifting ? 0 : q.pressure);
+        d.points.push(q);
+        if (d.model && !d.snapped) d.model.add(q.x, q.y, q.t ?? 0, q.pressure);
+      }
       // The smart curve's ink engine needs to know the pen is in the air (force-less) too.
       if (d.smart) {
         if (!d.snapped) snapTick = moveSmartPen(d.smart, lifting ? { ...pt, pressure: 0 } : pt) || snapTick;
@@ -1365,6 +1374,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
       d.model = new SmoothLiveStroke();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
+      d.dense = new SampleDensifier();
+      d.dense.push(pt);
       if (d.rec) d.rec = [recSample(pt, first.pressure, d.start)];
       samples = samples.slice(1);
     }
