@@ -6,7 +6,10 @@ export interface AppSettings {
   /** Server base URL or full chat-completions URL; normalised by resolveChatUrl(). */
   vlmEndpoint: string;
   modelName: string;
+  /** This device's key for the conversion server, issued by its owner (services/serverAuth.ts). */
   apiKey: string;
+  /** Name of this device as the server's owner sees it; empty = autoDeviceName(). */
+  deviceName: string;
   /** Request timeout. A cold Qwen3-VL start through the switchboard can take ~30-60 s. */
   vlmTimeoutSec: number;
   stylusOnly: boolean;
@@ -36,7 +39,8 @@ export function defaultSettings(): AppSettings {
   return {
     vlmEndpoint: defaultEndpoint(),
     modelName: 'qwen3-vl',
-    apiKey: 'sk-dummy',
+    apiKey: '',
+    deviceName: '',
     vlmTimeoutSec: 180,
     stylusOnly: true,
     penStyle: 'fountain',
@@ -53,7 +57,12 @@ export function loadSettings(): AppSettings {
   const defaults = defaultSettings();
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return { ...defaults, ...JSON.parse(raw) };
+    if (raw) {
+      const s: AppSettings = { ...defaults, ...JSON.parse(raw) };
+      // The old placeholder key; the server now issues real ones.
+      if (s.apiKey === 'sk-dummy') s.apiKey = '';
+      return s;
+    }
     // Migrate the single v1.0 setting.
     const stylus = localStorage.getItem('opennote_stylus_only');
     if (stylus !== null) defaults.stylusOnly = stylus === 'true';

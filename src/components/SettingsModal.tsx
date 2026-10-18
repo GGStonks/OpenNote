@@ -5,6 +5,7 @@ import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
 import { AppSettings, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
+import { autoDeviceName } from '../services/serverAuth';
 import { platformKind, shareFile } from '../platform';
 
 interface SettingsModalProps {
@@ -149,8 +150,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               </div>
             </div>
             <div>
-              <label className={label}>API key (optional)</label>
-              <input className={field} value={draft.apiKey} onChange={(e) => set({ apiKey: e.target.value })} autoCapitalize="off" />
+              <label className={label}>API key</label>
+              <input
+                className={field}
+                value={draft.apiKey}
+                onChange={(e) => set({ apiKey: e.target.value.trim() })}
+                placeholder="Key issued for this device"
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p className="text-[11px] text-gray-400 mt-1">Each device needs its own key from the server’s owner. Without one, Test connection asks the owner to approve this device.</p>
+            </div>
+            <div>
+              <label className={label}>Device name</label>
+              <input className={field} value={draft.deviceName} onChange={(e) => set({ deviceName: e.target.value })} placeholder={autoDeviceName()} maxLength={60} />
+              <p className="text-[11px] text-gray-400 mt-1">How the server’s owner sees this device.</p>
             </div>
             <button onClick={runTest} disabled={test.state === 'busy'} className="flex items-center gap-2 text-sm font-semibold text-blue-600 dark:text-blue-400">
               {test.state === 'busy' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wifi className="w-4 h-4" />}

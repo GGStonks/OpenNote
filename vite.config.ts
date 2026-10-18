@@ -25,10 +25,13 @@ export default defineConfig({
       '/v1': {
         target: 'http://127.0.0.1:9191',
         changeOrigin: true,
+        // Passes the client's address on to the server.
+        xfwd: true,
       },
       '/opennote': {
         target: 'http://127.0.0.1:9191',
         changeOrigin: true,
+        xfwd: true,
       },
     },
   },

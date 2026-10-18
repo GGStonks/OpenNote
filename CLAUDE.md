@@ -23,6 +23,13 @@ In the apps, the stroke being written is also drawn natively above the web view 
 `android/.../OpenNoteInkPlugin.java`. Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 
+## Conversion server access
+
+The conversion server requires a per-device API key. The server side is private and lives outside
+this public repo: never add anything here about how keys are generated, stored, checked or
+metered, or about the server's internals. Every request the app sends to the server must use
+`serverHeaders(settings)` (`src/services/serverAuth.ts`).
+
 ## Useful commands
 
 - `npm run build` — engine test, storage round-trip test, type-check, production build

@@ -1,6 +1,7 @@
 import { httpRequest, HttpAbortError, HttpError } from '../platform';
 import { AppSettings, resolveChatUrl, resolveModelsUrl } from '../settings';
 import { cleanModelOutput } from './latexRender';
+import { authError, describeKeyStatus, KeyStatus, serverHeaders } from './serverAuth';
 import { prepareTikz } from './tikzEngine';
 
 /**
@@ -140,7 +141,7 @@ export async function convertImage(
     res = await httpRequest({
       url,
       method: 'POST',
-      headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {},
+      headers: serverHeaders(settings),
       timeoutMs: settings.vlmTimeoutSec * 1000,
       signal,
       body: {
@@ -174,6 +175,8 @@ export async function convertImage(
     throw new Error(describeError(err, url));
   }
 
+  const refused = authError(res);
+  if (refused) throw new HttpError(refused, res.status, res.text);
   if (res.status === 503) throw new Error('The VLM server answered 503: the model failed to start (see the switchboard / llama-vision service logs).');
   if (res.status < 200 || res.status >= 300) {
     const detail = typeof res.data === 'object' ? res.data?.error?.message ?? JSON.stringify(res.data).slice(0, 300) : res.text.slice(0, 300);
@@ -194,16 +197,36 @@ export async function convertImage(
   };
 }
 
+/** Base URL of the switchboard (without /v1/...). */
+export function serverBaseUrl(settings: AppSettings): string {
+  return resolveChatUrl(settings.vlmEndpoint).replace(/\/v1\/chat\/completions$/, '');
+}
+
 export async function testConnection(settings: AppSettings): Promise<string> {
+  const keyUrl = serverBaseUrl(settings) + '/opennote/key';
   const url = resolveModelsUrl(settings.vlmEndpoint);
+  let res;
+  let keyInfo = '';
   try {
-    const res = await httpRequest({ url, timeoutMs: 60000, headers: settings.apiKey ? { Authorization: `Bearer ${settings.apiKey}` } : {} });
-    if (res.status !== 200) return `HTTP ${res.status} from ${url}`;
-    const ids: string[] = (res.data?.data ?? res.data?.models ?? []).map((m: any) => m.id ?? m.name).filter(Boolean);
-    if (!ids.length) return `Connected to ${url}, but no models were listed.`;
-    const match = ids.includes(settings.modelName);
-    return `Connected. Models: ${ids.join(', ')}${match ? '' : ` — "${settings.modelName}" is not among them`}`;
+    // This device's access (a server without keys answers 404).
+    res = await httpRequest({ url: keyUrl, timeoutMs: 60000, headers: serverHeaders(settings) });
+    const refused = authError(res);
+    if (refused) throw new HttpError(refused, res.status);
+    if (res.status === 200 && typeof res.data === 'object' && res.data?.status) {
+      const s = res.data as KeyStatus;
+      if (s.status === 'limit_reached') throw new HttpError(`This API key has used its token limit (${s.used.toLocaleString()} of ${(s.limit ?? 0).toLocaleString()} tokens). Ask the server's owner to raise it.`, 429);
+      keyInfo = describeKeyStatus(s) + ' ';
+    }
+    res = await httpRequest({ url, timeoutMs: 60000, headers: serverHeaders(settings) });
   } catch (err) {
+    if (err instanceof HttpError && err.status) throw err;
     throw new Error(describeError(err, url));
   }
+  const refused = authError(res);
+  if (refused) throw new HttpError(refused, res.status);
+  if (res.status !== 200) return `HTTP ${res.status} from ${url}`;
+  const ids: string[] = (res.data?.data ?? res.data?.models ?? []).map((m: any) => m.id ?? m.name).filter(Boolean);
+  if (!ids.length) return `${keyInfo}Connected to ${url}, but no models were listed.`;
+  const match = ids.includes(settings.modelName);
+  return `${keyInfo}Connected. Models: ${ids.join(', ')}${match ? '' : ` — "${settings.modelName}" is not among them`}`;
 }
