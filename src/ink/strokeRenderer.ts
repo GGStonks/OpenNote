@@ -28,7 +28,7 @@ export interface InkStyle {
   fill?: FillType;
   arrow?: boolean;
   /** The points are already the modelled centre line (Stroke.modeled). */
-  modeled?: 'variable' | 'uniform';
+  modeled?: 'variable' | 'uniform' | 'proportional';
   /** Start of the dash pattern (Stroke.dashOffset). */
   dashOffset?: number;
   /** Fill only, no outline (Stroke.fillOnly). */
@@ -103,8 +103,9 @@ export function modeledLine(points: Point[], modeled?: InkStyle['modeled']): Mod
 export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoint[]; widths: number[] | null; width: number } {
   const pts = thinModeled(modeledLine(points, style.modeled));
   const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
-  const pressured = style.modeled ? style.modeled === 'variable' : hasRealPressure(points);
-  const widths = isVariableWidth(style) && pressured ? pts.map((p) => pressureWidth(width, p.p)) : null;
+  const pressured = style.modeled ? style.modeled !== 'uniform' : hasRealPressure(points);
+  const share = style.modeled === 'proportional';
+  const widths = isVariableWidth(style) && pressured ? pts.map((p) => (share ? width * Math.max(0.02, p.p) : pressureWidth(width, p.p))) : null;
   return { pts, widths, width };
 }
 
@@ -869,7 +870,7 @@ export function eraseStrokesPartial(
     // Handwriting.
     const closed = !!s.closed && s.points.length > 2;
     const g = strokeGeometry(s);
-    const modeled: Stroke['modeled'] = g.widths ? 'variable' : 'uniform';
+    const modeled: Stroke['modeled'] = s.modeled === 'proportional' && g.widths ? 'proportional' : g.widths ? 'variable' : 'uniform';
     const pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
     const inside = (p: Point) => Math.hypot(p.x - x, p.y - y) <= r;
     if (!pts.some(inside)) {

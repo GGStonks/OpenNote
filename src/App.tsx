@@ -13,6 +13,7 @@ import { UpdatePrompt } from './components/UpdatePrompt';
 import { shareFile } from './platform';
 import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
+import { importNotability } from './import/notability';
 
 /** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
 function readImage(file: File): Promise<{ dataUrl: string; w: number; h: number }> {
@@ -179,15 +180,31 @@ export const App: React.FC = () => {
     for (const n of notesRef.current ?? []) if (n.tagIds?.includes(id)) await updateNoteMeta(n.id, (cur) => ({ tagIds: (cur.tagIds ?? []).filter((t) => t !== id) }), false);
   };
 
-  /** Imports files from outside: .opennote notes / backups, images and text files (each a new note). */
+  /** Imports files from outside: .opennote notes / backups, Notability notes, images and text files (each a new note). */
   const importExternal = async (files: File[]) => {
     let made = 0;
     const failed: string[] = [];
+    const partial: string[] = [];
     let last: NoteDocument | null = null;
     for (const file of files) {
       const name = file.name.replace(/\.[^.]+$/, '') || 'Imported';
       try {
-        if (/\.(opennote|json)$/i.test(file.name) || file.type === 'application/json') {
+        if (/\.note$/i.test(file.name)) {
+          const nb = await importNotability(new Uint8Array(await file.arrayBuffer()), file.name, (blob) => readImage(new File([blob], 'image', { type: blob.type })));
+          const now = Date.now();
+          last = {
+            ...blankNote(nb.title),
+            createdAt: nb.createdAt,
+            updatedAt: now,
+            paperStyle: 'blank',
+            ...(nb.pageSize !== 'letter' ? { pageSize: nb.pageSize } : {}),
+            pages: [nb.surface],
+            sheets: nb.sheets,
+          };
+          upsertLocal(await saveNote(last, false));
+          made++;
+          if (nb.skipped.length) partial.push(`${file.name}: ${nb.skipped.join(', ')}`);
+        } else if (/\.(opennote|json)$/i.test(file.name) || file.type === 'application/json') {
           made += await importBackup(JSON.parse(await file.text()));
         } else if (file.type.startsWith('image/')) {
           const img = await readImage(file);
@@ -208,9 +225,11 @@ export const App: React.FC = () => {
       }
     }
     await reload();
-    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: .opennote, images, .txt / .md / .tex.`);
-    else if (files.length === 1 && last) setOpenNoteId(last.id);
-    else window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
+    const notImported = partial.length ? `\nLeft out:\n${partial.join('\n')}` : '';
+    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: .opennote, Notability .note, images, .txt / .md / .tex.${notImported}`);
+    else if (partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`);
+    if (!failed.length && files.length === 1 && last) setOpenNoteId(last.id);
+    else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
   };
 
   const backup = async () => {

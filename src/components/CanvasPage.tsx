@@ -312,33 +312,39 @@ function paintSliced(ctx: CanvasRenderingContext2D, job: Stroke[], opts: { smoot
   };
 }
 
-/** Most backing-store pixels of a sharp view canvas (one per ink layer, see SharpInk). */
-const SHARP_MAX_PIXELS = 8_000_000;
-/** Share of the view added on each side of the sharp canvas (less where the budget is short). */
+/** Side of a sharp tile in backing pixels (a tile is 1 MB: always GPU backed, cheap to keep). */
+const SHARP_TILE = 512;
+/** Most sharp tiles kept per ink layer (the view and its margin; farthest dropped first). */
+const SHARP_MAX_TILES = 48;
+/** Share of the view added on each side, painted ahead for scrolling. */
 const SHARP_MARGIN = 0.25;
-/** The view has rested this long (ms) after scrolling: the sharp canvas follows it. */
+/** The view has rested this long (ms) after scrolling: the tiles it needs are painted. */
 const SHARP_IDLE_MS = 120;
-/**
- * Up to this many strokes (whose geometry is built) are painted at once; more, or strokes the ink
- * engine still has to model (seconds for a page on a slow tablet), off screen a few ms per frame.
- */
-const SHARP_SYNC_STROKES = 150;
+/** Painting tiles takes at most this long (ms) per frame; the rest follow on the next frames. */
+const SHARP_FRAME_MS = 8;
+/** The margin's tiles (only needed for the next scroll) wait until the view has rested this long (ms). */
+const SHARP_MARGIN_DELAY_MS = 300;
 
-/** The part of the surface a sharp canvas covers (surface px) and its backing scale. */
-type SharpView = { x0: number; y0: number; x1: number; y1: number; r: number };
+/** A part of the surface (surface px). */
+type SurfRect = { x0: number; y0: number; x1: number; y1: number };
+type SharpTile = { i: number; j: number; canvas: HTMLCanvasElement; painted: Stroke[] | null };
 
 /**
  * Committed ink of one layer where the page is zoomed in past what the page canvases hold sharp
  * (their pixel budget; from about 2x on an iPad), drawn at exactly the screen's resolution.
  *
- * It is one canvas over the view and a margin around it, INSIDE the scaled content like the page
- * canvases, so it moves and scales with the paper by construction (nothing to keep aligned while
- * scrolling or pinching); while two fingers zoom it is scaled as it is, and once the view rests it
- * is painted again for the new view at zoom x devicePixelRatio. The page canvases stay under it,
- * as they were, hidden while it covers the view (their softer ink would show around its edges) and
- * shown again when a scroll nears its edge or a pinch starts, so the ink is never missing. (A
- * clip-path hole in them instead made each a masked layer of the whole page at screen density:
- * a 3 s frame in the pinch benchmark.)
+ * Like Notability's ink view, it is a grid of small tiles (SHARP_TILE backing px each, at zoom x
+ * devicePixelRatio): only the tiles over the view and a margin exist, each holding the strokes
+ * that reach into it. Tiles are painted nearest first a few per frame, so the view sharpens
+ * progressively and never allocates one large canvas (WebKit gives a canvas a GPU backing only up
+ * to 5120x2880 px, and a 4 GB iPad runs short of GPU memory sooner); scrolling paints only the
+ * tiles coming into view, and an edit repaints only the tiles it touches.
+ *
+ * The tiles are INSIDE the scaled content like the page canvases, so they move and scale with the
+ * paper by construction; while two fingers zoom they are scaled as they are, and once the view
+ * rests they are painted again for the new scale. The page canvases stay under them, hidden while
+ * the painted tiles cover the view (their softer ink would show around the edges) and shown again
+ * when a scroll reaches unpainted tiles or a pinch starts, so the ink is never missing.
  *
  * SVG used to do this, but WebKit rasterises a composited SVG inside a CSS-scaled element at its
  * unscaled size and stretches it: on the iPad, ink at 500% was a 1x bitmap magnified five times.
@@ -346,40 +352,38 @@ type SharpView = { x0: number; y0: number; x1: number; y1: number; r: number };
  */
 const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets: SheetBox[]; layerKey: string; width: number; height: number; zoom: number; scrollRoot: HTMLElement | null }) {
   const { strokes, layerKey, width: W, height: H, zoom, scrollRoot } = props;
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const painted = useRef<{ view: SharpView; strokes: Stroke[] } | null>(null);
-  const cancelJob = useRef<(() => void) | null>(null);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const tiles = useRef(new Map<string, SharpTile>());
+  /** Backing px per surface px of the tiles there are. */
+  const scale = useRef(0);
+  /**
+   * Where the tile grid starts (surface px, within half a backing px of the page's corner): on a
+   * whole screen pixel, so every tile is composited at whole pixels (at a fraction its edges
+   * were blended with the transparent outside: a faint seam every SHARP_TILE px).
+   */
+  const origin = useRef({ x: 0, y: 0 });
+  const frame = useRef<number | null>(null);
+  const marginTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef(props);
   latest.current = props;
   const opts = { smooth: true };
 
-  /** The page's content element (the canvas's parent), kept for the cleanup at unmount. */
+  /** The page's content element (the holder's parent), kept for the cleanup at unmount. */
   const containerRef = useRef<HTMLElement | null>(null);
   /** Hides or shows this layer's page canvases (every page's, also ones added since). */
   const tilesHidden = useRef(false);
-  const hideTiles = (hide: boolean) => {
+  const hidePages = (hide: boolean) => {
     const container = containerRef.current;
-    if (!container) return;
+    if (!container || tilesHidden.current === hide) return;
     tilesHidden.current = hide;
     for (const sh of latest.current.sheets) {
       const el = container.querySelector<HTMLElement>(`[data-ink-key="${layerKey}:${sh.id}"]`);
       if (el) el.style.visibility = hide ? 'hidden' : '';
     }
   };
-  /**
-   * Whether the painted part `p` covers the visible part with room to spare: half the margin it
-   * was painted with on each side (none needed where it reaches the edge of the surface).
-   */
-  const covers = (p: SharpView | undefined, vis: SharpView) => {
-    if (!p) return false;
-    const { width: w, height: h } = latest.current;
-    const bx = (p.x1 - p.x0 - (vis.x1 - vis.x0)) / 4, by = (p.y1 - p.y0 - (vis.y1 - vis.y0)) / 4;
-    const side = (room: number, need: number, edge: boolean) => room >= -1e-6 && (edge || room >= need);
-    return side(vis.x0 - p.x0, bx, p.x0 <= 1e-6) && side(p.x1 - vis.x1, bx, p.x1 >= w - 1e-6) && side(vis.y0 - p.y0, by, p.y0 <= 1e-6) && side(p.y1 - vis.y1, by, p.y1 >= h - 1e-6);
-  };
 
-  /** The view now (surface px) and the margin and scale to paint it with; null when off the page. */
-  const viewNow = (): { visible: SharpView; view: SharpView } | null => {
+  /** The visible part of the surface, the scale for it and the page's corner on screen (device px); null when off the page. */
+  const viewNow = (): { visible: SurfRect; r: number; corner: { x: number; y: number } } | null => {
     const container = containerRef.current;
     if (!container) return null;
     const { width: w, height: h, scrollRoot: root } = latest.current;
@@ -387,177 +391,248 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     const rr = root?.getBoundingClientRect() ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
     const s = c.width / w;
     if (!(s > 0)) return null;
-    const vx0 = Math.max(0, (rr.left - c.left) / s), vx1 = Math.min(w, (rr.right - c.left) / s);
-    const vy0 = Math.max(0, (rr.top - c.top) / s), vy1 = Math.min(h, (rr.bottom - c.top) / s);
-    if (vx1 <= vx0 || vy1 <= vy0) return null;
-    let r = s * Math.min(window.devicePixelRatio || 1, 3);
-    const px = (vx1 - vx0) * (vy1 - vy0) * r * r;
-    // The margin the budget allows (none, and a lower scale, on a very large screen).
-    const m = Math.max(0, Math.min(SHARP_MARGIN, (Math.sqrt(SHARP_MAX_PIXELS / px) - 1) / 2));
-    if (px > SHARP_MAX_PIXELS) r *= Math.sqrt(SHARP_MAX_PIXELS / px);
-    const mx = (vx1 - vx0) * m, my = (vy1 - vy0) * m;
-    // Whole backing pixels.
-    const q = (v: number, up: boolean) => (up ? Math.ceil(v * r) : Math.floor(v * r)) / r;
-    const view = { x0: q(Math.max(0, vx0 - mx), false), y0: q(Math.max(0, vy0 - my), false), x1: q(Math.min(w, vx1 + mx), true), y1: q(Math.min(h, vy1 + my), true), r };
-    return { visible: { x0: vx0, y0: vy0, x1: vx1, y1: vy1, r }, view };
+    const visible = { x0: Math.max(0, (rr.left - c.left) / s), x1: Math.min(w, (rr.right - c.left) / s), y0: Math.max(0, (rr.top - c.top) / s), y1: Math.min(h, (rr.bottom - c.top) / s) };
+    if (visible.x1 <= visible.x0 || visible.y1 <= visible.y0) return null;
+    // Scale and corner as the tiles' own holder (exactly the surface's width) is drawn: the
+    // content element's box and the zoom value both differ from it a little, enough to put every
+    // tile off whole pixels.
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const o = holderRef.current?.getBoundingClientRect();
+    const hs = o && o.width > 0 ? o.width / w : s;
+    return { visible, r: hs * dpr, corner: { x: (o ?? c).left * dpr, y: (o ?? c).top * dpr } };
   };
 
-  const inView = (list: Stroke[], v: { x0: number; y0: number; x1: number; y1: number }) =>
+  /** Tile index ranges over `v` at scale r (Notability's TileRange). */
+  const tileRange = (v: SurfRect, r: number) => {
+    const t = SHARP_TILE / r, o = origin.current;
+    const { width: w, height: h } = latest.current;
+    return {
+      i0: Math.max(Math.floor(-o.x / t), Math.floor((v.x0 - o.x) / t)),
+      i1: Math.min(Math.ceil((w - o.x) / t) - 1, Math.floor((v.x1 - o.x - 1e-6) / t)),
+      j0: Math.max(Math.floor(-o.y / t), Math.floor((v.y0 - o.y) / t)),
+      j1: Math.min(Math.ceil((h - o.y) / t) - 1, Math.floor((v.y1 - o.y - 1e-6) / t)),
+    };
+  };
+  const tileRect = (i: number, j: number, r: number): SurfRect => {
+    const t = SHARP_TILE / r, o = origin.current;
+    return { x0: o.x + i * t, y0: o.y + j * t, x1: o.x + (i + 1) * t, y1: o.y + (j + 1) * t };
+  };
+
+  const inRect = (list: Stroke[], v: SurfRect) =>
     list.filter((st) => {
       const b = strokeArea(st);
       return b.maxX >= v.x0 && b.minX <= v.x1 && b.maxY >= v.y0 && b.minY <= v.y1;
     });
 
-  /** Paints the whole view `v` (at once, or off screen in slices and then copied in at once). */
-  const paintView = (v: SharpView) => {
-    cancelJob.current?.();
-    cancelJob.current = null;
-    const list = latest.current.strokes;
-    const job = inView(list, v);
-    const w = Math.round((v.x1 - v.x0) * v.r), h = Math.round((v.y1 - v.y0) * v.r);
-    const show = (src: HTMLCanvasElement | null) => {
-      const c = canvasRef.current;
-      if (!c) return;
-      c.width = w;
-      c.height = h;
-      const ctx = c.getContext('2d');
-      if (!ctx) return;
-      if (src) ctx.drawImage(src, 0, 0);
-      ctx.setTransform(v.r, 0, 0, v.r, -v.x0 * v.r, -v.y0 * v.r);
-      if (!src) drawStrokes(ctx, job, opts);
-      Object.assign(c.style, { left: `${v.x0}px`, top: `${v.y0}px`, width: `${w / v.r}px`, height: `${h / v.r}px`, display: '' });
-      painted.current = { view: v, strokes: list };
-      const now = viewNow();
-      hideTiles(!tileWork.paused && !!now && covers(v, now.visible));
-    };
-    if (job.length <= SHARP_SYNC_STROKES && job.every((st) => strokeBuilt(st, opts.smooth))) {
-      show(null);
-      return;
+  const dropAll = () => {
+    for (const t of tiles.current.values()) {
+      t.canvas.width = t.canvas.height = 0;
+      t.canvas.remove();
     }
-    const off = document.createElement('canvas');
-    off.width = w;
-    off.height = h;
-    const octx = off.getContext('2d');
-    if (!octx) return;
-    octx.setTransform(v.r, 0, 0, v.r, -v.x0 * v.r, -v.y0 * v.r);
-    cancelJob.current = paintSliced(octx, job, opts, () => {
-      cancelJob.current = null;
-      // The strokes changed meanwhile: this picture is out of date.
-      if (latest.current.strokes !== list) {
-        off.width = off.height = 0;
-        paintView(v);
-        return;
-      }
-      show(off);
-      off.width = off.height = 0;
-    });
+    tiles.current.clear();
   };
 
-  /** Follows the view: painted again when it left the painted part or the scale changed. */
-  const update = () => {
+  const paintTile = (t: SharpTile, list: Stroke[]) => {
+    const r = scale.current;
+    const rect = tileRect(t.i, t.j, r);
+    const ctx = t.canvas.getContext('2d');
+    if (!ctx) return;
+    if (t.canvas.width !== SHARP_TILE) {
+      t.canvas.width = t.canvas.height = SHARP_TILE;
+    } else {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, SHARP_TILE, SHARP_TILE);
+    }
+    ctx.setTransform(r, 0, 0, r, -rect.x0 * r, -rect.y0 * r);
+    drawStrokes(ctx, inRect(list, rect), opts);
+    t.painted = list;
+    t.canvas.style.visibility = '';
+  };
+
+  /** Whether every tile over the visible part is painted with the current strokes. */
+  const covered = (visible: SurfRect) => {
+    const r = scale.current;
+    const g = tileRange(visible, r);
+    for (let j = g.j0; j <= g.j1; j++)
+      for (let i = g.i0; i <= g.i1; i++) if (tiles.current.get(`${i},${j}`)?.painted !== latest.current.strokes) return false;
+    return true;
+  };
+
+  /** Paints the tiles the view needs, visible ones first and nearest first, SHARP_FRAME_MS per frame. */
+  const paintNeeded = () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    if (marginTimer.current !== null) clearTimeout(marginTimer.current);
+    frame.current = marginTimer.current = null;
     if (tileWork.paused) {
-      tileWork.resume.add(update);
+      tileWork.resume.add(paintNeeded);
       return;
     }
+    if (holderRef.current) holderRef.current.style.visibility = '';
     const now = viewNow();
     if (!now) return;
-    const p = painted.current?.view;
-    if (p && Math.abs(p.r - now.view.r) < 1e-3 * p.r && covers(p, now.visible)) {
-      hideTiles(true);
-      return;
+    if (Math.abs(scale.current - now.r) > 1e-3 * now.r) {
+      // A new zoom: the old tiles are the wrong scale (the page canvases show the ink meanwhile).
+      hidePages(false);
+      dropAll();
+      scale.current = now.r;
+      origin.current = { x: (Math.round(now.corner.x) - now.corner.x) / now.r, y: (Math.round(now.corner.y) - now.corner.y) / now.r };
     }
-    // Until the new view is painted (at once, or in slices) the page canvases show what it misses.
-    if (!covers(p, now.visible)) hideTiles(false);
-    paintView(now.view);
+    const r = scale.current, v = now.visible;
+    const mx = (v.x1 - v.x0) * SHARP_MARGIN, my = (v.y1 - v.y0) * SHARP_MARGIN;
+    const want = tileRange({ x0: v.x0 - mx, y0: v.y0 - my, x1: v.x1 + mx, y1: v.y1 + my }, r);
+    const cx = (v.x0 + v.x1) / 2, cy = (v.y0 + v.y1) / 2, t = SHARP_TILE / r;
+    const dist = (i: number, j: number) => Math.hypot((i + 0.5) * t - cx, (j + 0.5) * t - cy);
+    // Tiles away from the view go, then the farthest while there are too many (memory stays
+    // bounded however far the view travels).
+    const drop = (key: string, tile: SharpTile) => {
+      tile.canvas.width = tile.canvas.height = 0;
+      tile.canvas.remove();
+      tiles.current.delete(key);
+    };
+    for (const [key, tile] of [...tiles.current]) if (tile.i < want.i0 || tile.i > want.i1 || tile.j < want.j0 || tile.j > want.j1) drop(key, tile);
+    const byDistance = [...tiles.current].sort((a, b) => dist(b[1].i, b[1].j) - dist(a[1].i, a[1].j));
+    while (tiles.current.size > SHARP_MAX_TILES) drop(...byDistance.shift()!);
+    const list = latest.current.strokes;
+    const seen = tileRange(v, r);
+    const todo: { i: number; j: number; d: number; margin: boolean }[] = [];
+    for (let j = want.j0; j <= want.j1; j++)
+      for (let i = want.i0; i <= want.i1; i++)
+        if (tiles.current.get(`${i},${j}`)?.painted !== list) todo.push({ i, j, d: dist(i, j), margin: i < seen.i0 || i > seen.i1 || j < seen.j0 || j > seen.j1 });
+    todo.sort((a, b) => Number(a.margin) - Number(b.margin) || a.d - b.d).splice(SHARP_MAX_TILES);
+    const holder = holderRef.current;
+    let rested = false;
+    const step = () => {
+      frame.current = null;
+      if (!holder || latest.current.strokes !== list || Math.abs(scale.current - r) > 1e-9) return;
+      if (!rested && todo[0]?.margin) {
+        rested = true;
+        marginTimer.current = setTimeout(() => {
+          marginTimer.current = null;
+          frame.current = requestAnimationFrame(step);
+        }, SHARP_MARGIN_DELAY_MS);
+        return;
+      }
+      const until = performance.now() + SHARP_FRAME_MS;
+      while (todo.length && performance.now() < until && (rested || !todo[0].margin)) {
+        const { i, j } = todo.shift()!;
+        const key = `${i},${j}`;
+        let tile = tiles.current.get(key);
+        if (!tile) {
+          const canvas = document.createElement('canvas');
+          const rect = tileRect(i, j, r);
+          // Placed by a transform, not left / width: layout rounds those to 1/64 px before the zoom
+          // scales them, which put the tiles off whole screen pixels again (a seam at each edge).
+          Object.assign(canvas.style, {
+            position: 'absolute', left: '0', top: '0', width: `${SHARP_TILE}px`, height: `${SHARP_TILE}px`,
+            transformOrigin: '0 0', transform: `matrix(${1 / r}, 0, 0, ${1 / r}, ${rect.x0}, ${rect.y0})`, visibility: 'hidden',
+          });
+          holder.appendChild(canvas);
+          tile = { i, j, canvas, painted: null };
+          tiles.current.set(key, tile);
+        }
+        paintTile(tile, list);
+      }
+      const cur = viewNow();
+      if (cur && Math.abs(cur.r - r) <= 1e-3 * r) hidePages(!tileWork.paused && covered(cur.visible));
+      if (todo.length) frame.current = requestAnimationFrame(step);
+    };
+    step();
   };
 
   // Declared before the effects that use containerRef, so it is set when they run.
   useLayoutEffect(() => {
-    const c = canvasRef.current;
-    containerRef.current = c?.parentElement ?? null;
+    containerRef.current = holderRef.current?.parentElement ?? null;
     return () => {
-      cancelJob.current?.();
-      hideTiles(false);
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+      if (marginTimer.current !== null) clearTimeout(marginTimer.current);
+      tileWork.resume.delete(paintNeeded);
+      tilesHidden.current = true;
+      hidePages(false);
       // WebKit's canvas memory is tight: give the pixels back now.
-      if (c) c.width = c.height = 0;
+      dropAll();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // The view: after a zoom (and its pinch), and once scrolling rests. A new zoom shows the page
-  // canvases at once (zoomed out, the view is larger than the painted part) and is painted on the
-  // next frame, once the viewport has put the scroll position right for it.
+  // canvases at once and is painted on the next frame, once the viewport has put the scroll
+  // position right for it.
   useLayoutEffect(() => {
-    hideTiles(false);
-    let frame: number | null = requestAnimationFrame(() => {
-      frame = null;
-      update();
+    hidePages(false);
+    let first: number | null = requestAnimationFrame(() => {
+      first = null;
+      paintNeeded();
     });
     let timer: ReturnType<typeof setTimeout> | null = null;
     const later = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(update, SHARP_IDLE_MS);
+      timer = setTimeout(paintNeeded, SHARP_IDLE_MS);
     };
-    // Scrolling towards the edge of the painted part: the page canvases show the ink there at once.
+    // Scrolling onto tiles not painted yet: the page canvases show the ink there at once.
     const scrolled = () => {
       if (tilesHidden.current) {
         const now = viewNow();
-        if (!now || !covers(painted.current?.view, now.visible)) hideTiles(false);
+        if (!now || Math.abs(now.r - scale.current) > 1e-3 * now.r || !covered(now.visible)) hidePages(false);
       }
       later();
     };
-    // Two fingers zooming out show more than the painted part.
-    const pinching = () => hideTiles(false);
+    // Two fingers zooming out show more than the painted tiles; the page canvases carry the ink
+    // while they move (dozens of tile layers re-composited every frame of a pinch cost frames).
+    const pinching = () => {
+      hidePages(false);
+      if (holderRef.current) holderRef.current.style.visibility = 'hidden';
+    };
     const target: HTMLElement | Window = scrollRoot ?? window;
     target.addEventListener('scroll', scrolled, { passive: true });
     window.addEventListener('resize', later);
     tileWork.pause.add(pinching);
     return () => {
-      if (frame !== null) cancelAnimationFrame(frame);
+      if (first !== null) cancelAnimationFrame(first);
       if (timer) clearTimeout(timer);
-      tileWork.resume.delete(update);
+      tileWork.resume.delete(paintNeeded);
       tileWork.pause.delete(pinching);
       target.removeEventListener('scroll', scrolled);
       window.removeEventListener('resize', later);
     };
   }, [zoom, W, H, scrollRoot]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The strokes: like the page canvases, appended strokes are painted on top and any other change
-  // repaints the area of what changed, in the same frame as the edit.
+  // The strokes: like the page canvases, appended strokes are painted on top of the tiles they
+  // reach and any other change repaints the tiles of what changed, in the same frame as the edit.
+  const prevStrokes = useRef(strokes);
   useLayoutEffect(() => {
-    const c = canvasRef.current, done = painted.current;
-    if (!c || !done || done.strokes === strokes) return;
-    if (cancelJob.current) {
-      paintView(done.view);
-      return;
-    }
-    const ctx = c.getContext('2d');
-    if (!ctx) return;
-    const v = done.view, before = done.strokes;
-    painted.current = { view: v, strokes };
+    const before = prevStrokes.current;
+    prevStrokes.current = strokes;
+    if (before === strokes || !tiles.current.size) return;
+    const r = scale.current;
     const n = before.length;
-    if (strokes.length > n && before.every((st, i) => strokes[i] === st) && strokes.slice(n).every((st) => st.tool !== 'highlighter' && (!st.fill || st.fill === 'none'))) {
-      for (const st of inView(strokes.slice(n), v)) drawStroke(ctx, st, opts);
-      return;
-    }
-    const was = new Set(before), now = new Set(strokes);
+    const appended = strokes.length > n && before.every((st, i) => strokes[i] === st) && strokes.slice(n).every((st) => st.tool !== 'highlighter' && (!st.fill || st.fill === 'none'));
     let area: DirtyRect | null = null;
-    for (const st of before) if (!now.has(st)) area = unionRect(area, strokePaintBounds(st));
-    for (const st of strokes) if (!was.has(st)) area = unionRect(area, strokePaintBounds(st));
-    if (!area) area = { minX: v.x0, minY: v.y0, maxX: v.x1, maxY: v.y1 };
-    const x0 = Math.max(v.x0, Math.floor(area.minX * v.r) / v.r), y0 = Math.max(v.y0, Math.floor(area.minY * v.r) / v.r);
-    const x1 = Math.min(v.x1, Math.ceil(area.maxX * v.r) / v.r), y1 = Math.min(v.y1, Math.ceil(area.maxY * v.r) / v.r);
-    if (x1 <= x0 || y1 <= y0) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(x0, y0, x1 - x0, y1 - y0);
-    ctx.clip();
-    ctx.clearRect(x0, y0, x1 - x0, y1 - y0);
-    drawStrokes(ctx, inView(strokes, { x0, y0, x1, y1 }), opts);
-    ctx.restore();
+    if (!appended) {
+      const was = new Set(before), now = new Set(strokes);
+      for (const st of before) if (!now.has(st)) area = unionRect(area, strokePaintBounds(st));
+      for (const st of strokes) if (!was.has(st)) area = unionRect(area, strokePaintBounds(st));
+    }
+    const added = appended ? strokes.slice(n) : [];
+    for (const tile of tiles.current.values()) {
+      if (tile.painted !== before) continue;
+      const rect = tileRect(tile.i, tile.j, r);
+      if (appended) {
+        const mine = inRect(added, rect);
+        if (mine.length) {
+          const ctx = tile.canvas.getContext('2d');
+          if (ctx) for (const st of mine) drawStroke(ctx, st, opts);
+        }
+        tile.painted = strokes;
+      } else if (!area || (area.maxX >= rect.x0 && area.minX <= rect.x1 && area.maxY >= rect.y0 && area.minY <= rect.y1)) {
+        paintTile(tile, strokes);
+      } else {
+        tile.painted = strokes;
+      }
+    }
+    // Tiles still being painted for the old strokes: start over with these.
+    if (frame.current !== null || marginTimer.current !== null) paintNeeded();
   }, [strokes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-
-  return <canvas ref={canvasRef} className="absolute pointer-events-none" style={{ display: 'none' }} />;
+  return <div ref={holderRef} className="absolute left-0 top-0 pointer-events-none" style={{ width: W, height: 0 }} />;
 });
 
 /** What a tile's canvas shows: its strokes, at what resolution, and whether as the smooth line. */
@@ -872,42 +947,48 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // ------------------------------------------------------------------ live layer
   const dirty = useRef<DirtyRect | null>(null);
   /** Part of the surface the live canvas covers (surface px) and its backing scale. */
-  const live = useRef<{ top: number; height: number; ratio: number } | null>(null);
+  const live = useRef<{ left: number; top: number; width: number; height: number; ratio: number } | null>(null);
 
   /**
-   * The live canvas covers the visible part of the surface plus a margin (not whole page bands),
-   * so it stays small, and it is placed ahead of time, when scrolling stops (see below): a stroke
-   * starting after a scroll used to allocate and clear a canvas of up to 16 Mpx on pen-down. When
-   * the view moved but the size did not, the canvas is only moved and cleared. Ink drawn on it
-   * uses surface coordinates.
+   * The live canvas covers the visible part of the surface plus a margin (not whole page bands,
+   * nor the whole width when zoomed in), so it stays small, and it is placed ahead of time, when
+   * scrolling stops (see below): a stroke starting after a scroll used to allocate and clear a
+   * canvas of up to 16 Mpx on pen-down. When the view moved but the size did not, the canvas is
+   * only moved and cleared. Ink drawn on it uses surface coordinates.
    */
   const claimLive = useCallback((): CanvasRenderingContext2D | null => {
     const canvas = activeCanvasRef.current, cont = containerRef.current;
     if (!canvas || !cont) return null;
     const { w: W, h: H } = sizeRef.current;
     const c = cont.getBoundingClientRect();
-    const root = scrollRoot?.getBoundingClientRect() ?? { top: 0, bottom: window.innerHeight };
+    const root = scrollRoot?.getBoundingClientRect() ?? { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight };
     const scale = c.height / H || 1;
     const v0 = Math.max(0, (root.top - c.top) / scale), v1 = Math.min(H, (root.bottom - c.top) / scale);
-    const view = Math.max(1, (root.bottom - root.top) / scale);
-    const height = Math.min(H, Math.ceil(view * 1.5));
-    const r = canvasRatio(zoomRef.current, W * height);
+    const u0 = Math.max(0, (root.left - c.left) / scale), u1 = Math.min(W, (root.right - c.left) / scale);
+    const height = Math.min(H, Math.ceil(Math.max(1, (root.bottom - root.top) / scale) * 1.5));
+    const width = Math.min(W, Math.ceil(Math.max(1, (root.right - root.left) / scale) * 1.5));
+    const r = canvasRatio(zoomRef.current, width * height);
     const cur = live.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    if (cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.height === height && Math.abs(cur.ratio - r) < 1e-6 && canvas.width === Math.round(W * r)) return ctx;
+    if (
+      cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.left <= u0 && cur.left + cur.width >= u1 &&
+      cur.height === height && cur.width === width && Math.abs(cur.ratio - r) < 1e-6 && canvas.width === Math.round(width * r)
+    ) return ctx;
     const top = Math.max(0, Math.min(H - height, (v0 + v1) / 2 - height / 2));
-    const w = Math.round(W * r), h = Math.round(height * r);
+    const left = Math.max(0, Math.min(W - width, (u0 + u1) / 2 - width / 2));
+    const w = Math.round(width * r), h = Math.round(height * r);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
-      canvas.style.width = `${W}px`;
+      canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
     }
     canvas.style.top = `${top}px`;
-    ctx.setTransform(r, 0, 0, r, 0, -top * r);
-    ctx.clearRect(0, top, W, height);
-    live.current = { top, height, ratio: r };
+    canvas.style.left = `${left}px`;
+    ctx.setTransform(r, 0, 0, r, -left * r, -top * r);
+    ctx.clearRect(left, top, width, height);
+    live.current = { left, top, width, height, ratio: r };
     dirty.current = null;
     return ctx;
   }, [scrollRoot]);
@@ -2169,7 +2250,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       )}
 
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
-      {!printMode && <canvas ref={activeCanvasRef} className="absolute left-0 z-10 pointer-events-none" style={{ top: 0, width: PAGE_W, height: 0 }} />}
+      {!printMode && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" style={{ left: 0, top: 0, width: PAGE_W, height: 0 }} />}
       {visible && !printMode && (
         <div
           ref={inputRef}

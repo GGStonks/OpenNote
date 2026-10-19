@@ -908,7 +908,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
           ref={importRef}
           type="file"
           multiple
-          accept=".opennote,.json,application/json,image/*,.txt,.md,.tex,text/plain,text/markdown"
+          accept=".opennote,.note,.json,application/json,application/zip,image/*,.txt,.md,.tex,text/plain,text/markdown"
           className="hidden"
           onChange={(e) => {
             const files = Array.from(e.target.files ?? []);

@@ -30,6 +30,15 @@ this public repo: never add anything here about how keys are generated, stored, 
 metered, or about the server's internals. Every request the app sends to the server must use
 `serverHeaders(settings)` (`src/services/serverAuth.ts`).
 
+## Notability import
+
+`src/import/notability.ts` (with `zip.ts`, `plist.ts`) turns a Notability `.note` (ZIP with a keyed-archive
+`Session.plist`) into a note. The format was taken from Notability 16.12.5's GLInkKit
+(`InkObjectEncoder batchDecode`): each curve is a chain of cubic Béziers with one fractional width per
+segment end; drawn width = curveswidth x fractional width. Imported ink becomes ordinary strokes with
+`modeled: 'proportional'` (each point's pressure = its width / the widest), so it is editable and exact
+at any zoom. `bench/notabilityImport.ts` checks widths against the file (see its header for the command).
+
 ## Useful commands
 
 - `npm run build` — engine test, storage round-trip test, type-check, production build

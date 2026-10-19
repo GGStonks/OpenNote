@@ -60,9 +60,11 @@ export interface Stroke {
   /**
    * Handwriting whose points are already the ink engine's modelled centre line (pressure = the
    * modelled pressure), drawn as they are: the pieces left by the precision eraser. 'variable':
-   * fountain-pen width from the pressure; 'uniform': constant width. Missing: raw pen samples.
+   * fountain-pen width from the pressure; 'uniform': constant width; 'proportional': each point's
+   * pressure is its width as a share of the widest (ink imported from other apps, whose widths
+   * vary more than the pen's pressure range). Missing: raw pen samples.
    */
-  modeled?: 'variable' | 'uniform';
+  modeled?: 'variable' | 'uniform' | 'proportional';
   /** Degrees this item has been rotated from how it was made (0 = original orientation). */
   rotation?: number;
   /**
