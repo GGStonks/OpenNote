@@ -9,6 +9,7 @@ import {
   strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt,
 } from '../ink/strokeRenderer';
 import { SmoothLiveStroke, pixelAligned } from '../ink/smoothLiveStroke';
+import { crashLog } from '../services/crashLog';
 import { SampleDensifier } from '../ink/densify';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
@@ -451,12 +452,19 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     return v;
   };
 
-  const dropAll = () => {
-    for (const t of tiles.current.values()) {
+  /** The previous zoom's tiles, kept on screen (scaled) until the new zoom's visible tiles are painted. */
+  const retiring = useRef<Map<string, SharpTile> | null>(null);
+  const dropTiles = (map: Map<string, SharpTile>) => {
+    for (const t of map.values()) {
       t.canvas.width = t.canvas.height = 0;
       t.canvas.remove();
     }
-    tiles.current.clear();
+    map.clear();
+  };
+  const dropAll = () => {
+    dropTiles(tiles.current);
+    if (retiring.current) dropTiles(retiring.current);
+    retiring.current = null;
   };
 
   const paintTile = (t: SharpTile, list: Stroke[]) => {
@@ -501,9 +509,22 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     const now = viewNow();
     if (!now) return;
     if (Math.abs(scale.current - now.r) > 1e-3 * now.r) {
-      // A new zoom: the old tiles are the wrong scale (the page canvases show the ink meanwhile).
+      // A new zoom: the old tiles stay on screen, scaled, until this zoom's visible tiles are all
+      // painted (in this frame, below), then they go; the page canvases show what they miss.
       hidePages(false);
-      dropAll();
+      if (retiring.current) dropTiles(retiring.current);
+      // Only the old tiles on screen are kept (the transition costs little memory).
+      const old = new Map<string, SharpTile>();
+      for (const [key, tile] of tiles.current) {
+        const b = tileRect(tile.i, tile.j, scale.current), vis = now.visible;
+        if (b.x1 > vis.x0 && b.x0 < vis.x1 && b.y1 > vis.y0 && b.y0 < vis.y1) {
+          old.set(key, tile);
+          tiles.current.delete(key);
+        }
+      }
+      dropTiles(tiles.current);
+      retiring.current = old;
+      tiles.current = new Map();
       scale.current = now.r;
       origin.current = { x: (Math.round(now.corner.x) - now.corner.x) / now.r, y: (Math.round(now.corner.y) - now.corner.y) / now.r };
     }
@@ -534,6 +555,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     const step = () => {
       frame.current = null;
       if (!holder || latest.current.strokes !== list || Math.abs(scale.current - r) > 1e-9) return;
+      if (retiring.current && (!todo.length || todo[0].margin)) {
+        dropTiles(retiring.current);
+        retiring.current = null;
+      }
       if (!rested && todo[0]?.margin) {
         rested = true;
         marginTimer.current = setTimeout(() => {
@@ -542,8 +567,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         }, SHARP_MARGIN_DELAY_MS);
         return;
       }
+      // The visible tiles all at once (no softer picture first, after a zoom or a scroll), the
+      // margin's a few ms per frame.
       const until = performance.now() + SHARP_FRAME_MS;
-      while (todo.length && performance.now() < until && (rested || !todo[0].margin)) {
+      while (todo.length && (rested || !todo[0].margin) && (!todo[0].margin || performance.now() < until)) {
         const { i, j } = todo.shift()!;
         const key = `${i},${j}`;
         let tile = tiles.current.get(key);
@@ -561,6 +588,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
           tiles.current.set(key, tile);
         }
         paintTile(tile, list);
+      }
+      if (retiring.current && (!todo.length || todo[0].margin)) {
+        dropTiles(retiring.current);
+        retiring.current = null;
       }
       const cur = viewNow();
       if (cur && Math.abs(cur.r - r) <= 1e-3 * r) hidePages(!tileWork.paused && covered(cur.visible));
@@ -972,6 +1003,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const sharp = !printMode && (zoom > pageZoom * 1.02 || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
   // The page canvases' zoom: never above the fitting zoom (zooming further in never reallocates them).
   const inkZoom = Math.min(zoom, pageZoom);
+  useEffect(() => {
+    if (printMode) return;
+    crashLog.set('zoom', Math.round(zoom * 100) / 100);
+    crashLog.event('zoom', { zoom: Math.round(zoom * 100) / 100, sharp });
+  }, [zoom]); // eslint-disable-line react-hooks/exhaustive-deps
   // Their line (smoothAt) as it was before the sharp ink took over: a pinch crossing SMOOTH_ZOOM
   // repainted every page canvas under the sharp ink for nothing.
   const pageSmooth = useRef(smoothAt(inkZoom));
@@ -1055,7 +1091,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     let idle: ReturnType<typeof setTimeout> | null = null;
     const place = () => {
       idle = null;
-      if (!drawing.current && !handleDrag.current) claimLive();
+      // In the apps pen strokes are drawn by the shell: no live canvas is held for them.
+      if (!drawing.current && !handleDrag.current && !NativeInk.available) claimLive();
     };
     const onMove = () => {
       rectCache.current = null;
@@ -1478,7 +1515,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       /* ignore */
     }
     rectCache.current = null;
-    claimLive();
+    // In the apps the shell draws pen strokes (NativeInk): the live canvas is not needed for them
+    // (the Draw tool still shows its measurements there).
+    if (!(tool === 'pen' && NativeInk.available)) claimLive();
     const start = eventTime(e.nativeEvent);
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
     paperStyleRef.current = sheetAt(pt.y).paperStyle;
@@ -1787,6 +1826,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawing.current = null;
     gestures.inking = false;
     retireInk(d);
+    // In the apps the live canvas served only this gesture (lasso, highlighter, eraser): its
+    // memory goes back once the frame showing the result is drawn.
+    if (NativeInk.available) requestAnimationFrame(() => requestAnimationFrame(() => {
+      const c = activeCanvasRef.current;
+      if (c && !drawing.current && !handleDrag.current) {
+        c.width = c.height = 0;
+        live.current = null;
+        dirty.current = null;
+      }
+    }));
     if (d.ink) {
       const ink = d.ink;
       // The finished stroke is painted with React's commit below; the shell's layer is cleared
@@ -1944,6 +1993,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       rot: 0, startAngle: mode === 'rotate' ? angleTo(e, centreOf(selection.bounds)) : 0, base,
     };
     gestures.dragging = true;
+    crashLog.event('drag-start', { mode, strokes: selection.strokeIds.length, latex: selection.latexIds.length, zoom });
     setDrag({ sel: selection, dx: 0, dy: 0, f: 1, rot: 0, base });
     if (selection.strokeIds.length) setHiddenIds(new Set(selection.strokeIds));
   };
@@ -1985,6 +2035,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (!t || e.pointerId !== t.pointerId) return;
     transform.current = null;
     gestures.dragging = false;
+    crashLog.event('drag-end', { mode: t.mode, f: Math.round(t.f * 100) / 100, cancelled });
     if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
     dragFrame.current = null;
     const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.f - 1) > 1e-4 || Math.abs(t.rot) > 1e-3;

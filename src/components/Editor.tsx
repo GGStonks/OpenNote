@@ -19,6 +19,7 @@ import { MAX_ZOOM, PULL_THRESHOLD, useViewport } from '../editor/useViewport';
 import { Selection, computeBounds, isEmptySelection, removeSelection } from '../editor/selection';
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
+import { crashLog } from '../services/crashLog';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
 import { restamp } from '../editor/zorder';
 import { DEFAULT_INKS, InkColorInfo, colorHint, enforceColors, inkColors } from '../services/inkColors';
@@ -622,6 +623,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   const onModalInsert = (code: string, isTikz: boolean, replaceInk: boolean) => {
+    crashLog.event('latex-insert', { isTikz, replaceInk, chars: code.length });
     const t = target;
     setModal(null);
     setTarget(null);

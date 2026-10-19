@@ -3,6 +3,7 @@ import { canUpdate } from '../services/updater';
 import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload } from 'lucide-react';
 import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
+import { crashLog } from '../services/crashLog';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
@@ -25,6 +26,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [test, setTest] = useState<{ state: 'idle' | 'busy' | 'ok' | 'error'; msg?: string }>({ state: 'idle' });
   const [rec, setRec] = useState({ on: penRecorder.enabled, count: penRecorder.count });
   const [recMsg, setRecMsg] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [crash, setCrash] = useState(crashLog.lastCrash);
+  const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
+  useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
 
   useEffect(() => {
@@ -224,6 +228,40 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               </div>
             )}
             {recMsg && <p className={`text-xs mt-2 break-all ${recMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{recMsg.msg}</p>}
+            <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">Crash report</div>
+            <p className="text-[11px] text-gray-400">
+              {crash
+                ? `The app ended unexpectedly on ${new Date(crash.lastAt).toLocaleString()} (${crash.reason}). The report holds what it was doing just before, to find the cause.`
+                : 'No unexpected end recorded. The report still holds what the app did recently.'}
+            </p>
+            <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
+              <button
+                onClick={async () => {
+                  setCrashMsg({ ok: true, msg: 'Sending…' });
+                  try {
+                    setCrashMsg({ ok: true, msg: `Saved on the PC: ${await crashLog.sendToPc(draft)}` });
+                  } catch (err) {
+                    setCrashMsg({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+                  }
+                }}
+              >
+                Send to PC
+              </button>
+              <button
+                onClick={async () => {
+                  try {
+                    await shareFile(`opennote-crash-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`, new Blob([JSON.stringify(crashLog.report())], { type: 'application/json' }));
+                  } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (!/cancel/i.test(msg)) setCrashMsg({ ok: false, msg });
+                  }
+                }}
+              >
+                Share file
+              </button>
+              {crash && <button onClick={() => crashLog.clear()} className="text-red-500">Clear</button>}
+            </div>
+            {crashMsg && <p className={`text-xs mt-2 break-all ${crashMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{crashMsg.msg}</p>}
           </section>
         </div>
 

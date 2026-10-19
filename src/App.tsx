@@ -14,6 +14,7 @@ import { shareFile } from './platform';
 import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
+import { crashLog } from './services/crashLog';
 
 /** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
 function readImage(file: File): Promise<{ dataUrl: string; w: number; h: number }> {
@@ -73,6 +74,8 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => applyTheme(settings.theme), [settings.theme]);
+  useEffect(() => crashLog.start(), []);
+  useEffect(() => crashLog.set('note', openNoteId ? 'open' : 'library'), [openNoteId]);
 
   const upsertLocal = useCallback((n: NoteDocument) => {
     setNotes((prev) => {

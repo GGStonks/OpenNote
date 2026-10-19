@@ -39,6 +39,13 @@ segment end; drawn width = curveswidth x fractional width. Imported ink becomes 
 `modeled: 'proportional'` (each point's pressure = its width / the widest), so it is editable and exact
 at any zoom. `bench/notabilityImport.ts` checks widths against the file (see its header for the command).
 
+## Crashes on the iPad
+
+WebKit can end the web view without an error the page sees (content process: the shell reloads;
+GPU process: canvases go black). `src/services/crashLog.ts` keeps a rolling log (zoom, canvases,
+events) and keeps an abnormal end as a report: Settings > Diagnostics > Crash report > Send to PC
+(saved on the PC in `/home/ds/AI/opennote_diagnostics/`). Ask for one before guessing at a crash.
+
 ## Useful commands
 
 - `npm run build` — engine test, storage round-trip test, type-check, production build
