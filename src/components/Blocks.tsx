@@ -25,12 +25,29 @@ export function rotationStyle(deg?: number): React.CSSProperties {
  * pixelated when zoomed further in. This layer's scale on screen is always 1, so it is drawn at
  * exactly the screen's resolution at any zoom (laid out again when the zoom changes).
  */
+/** Most screen pixels of one block's layer (16 MB). */
+const BLOCK_MAX_PIXELS = 4_000_000;
+
+/**
+ * The zoom a block of `w` x `h` page px is laid out at: the page's zoom, unless that makes its
+ * layer larger than BLOCK_MAX_PIXELS (then it is drawn a little under the screen's resolution and
+ * scaled up). Without a limit, a large formula zoomed in, or a block enlarged with its handle
+ * while zoomed in (a new layer every frame of the drag), took tens of MB per layer and WebKit's
+ * GPU process ran out of memory: a black screen.
+ */
+function layoutZoom(zoom: number, w: number, h: number): number {
+  const z = zoom > 0 ? zoom : 1;
+  const dpr = Math.min(window.devicePixelRatio || 1, 3);
+  return Math.min(z, Math.sqrt(BLOCK_MAX_PIXELS / Math.max(1, w * h)) / dpr);
+}
+
 const ScreenScaled: React.FC<{ zoom: number; width?: number; height?: number; children: React.ReactNode }> = ({ zoom, width, height, children }) => (
   <div
     className="absolute left-0 top-0"
     style={{
       width: width === undefined ? undefined : width * zoom,
       height: height === undefined ? undefined : height * zoom,
+      // `zoom` here is the layout zoom (layoutZoom), at most the page's: 1/zoom brings it back.
       transform: `scale(${1 / zoom})`,
       transformOrigin: '0 0',
       willChange: 'transform',
@@ -102,7 +119,7 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   const textual = rendered.html.includes('<p>') || rendered.html.includes('on-h');
   const contentRef = useRef<HTMLDivElement>(null);
   const scale = block.scale ?? 1;
-  const z = zoom > 0 ? zoom : 1;
+  const z = layoutZoom(zoom, block.width, block.height);
 
   // Keep the stored box equal to the rendered size (used by lasso hit-testing and export). The
   // content is laid out at screen size (ScreenScaled): page size = measured / zoom.
@@ -210,7 +227,7 @@ const TikzBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, darkPap
       }}
     >
       {selected && <ActionPill zoom={zoom} onEdit={onEdit} onCopy={() => navigator.clipboard?.writeText(block.latexCode)} onDelete={onDelete} />}
-      <ScreenScaled zoom={zoom > 0 ? zoom : 1} width={block.width} height={block.height}>
+      <ScreenScaled zoom={layoutZoom(zoom, block.width, block.height)} width={block.width} height={block.height}>
         <div
           className={`on-tikz w-full h-full ${cachedOk && darkPaper ? 'on-tikz-dark' : ''}`}
           dangerouslySetInnerHTML={{ __html: svg }}

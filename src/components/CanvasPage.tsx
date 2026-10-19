@@ -1226,17 +1226,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       next = unionRect(next, drawLiveStroke(ctx, edit.last.points, styleOf(edit.last)));
       if (edit.snapDot) next = unionRect(next, drawSnapDot(ctx, edit.snapDot, false, k));
     }
+    // In the apps the shell's native layer draws the stroke or shape being made (d.ink, above the
+    // web view, as vectors at the screen's resolution): it is not drawn here as well. Two copies of
+    // the same line from two rasterisers, a fraction of a pixel and a frame apart, made the ink
+    // look blurry while the pen was down (and cost the page a canvas repaint every frame).
     if (d && d.smart) {
-      next = paintSmart(ctx, d, k);
+      next = d.ink ? null : paintSmart(ctx, d, k);
       const m = smartPenMeasure(d.smart);
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
       const style = liveStyle('pen');
-      d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
+      if (!d.ink) d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
-        next = paintSnapped(ctx, d);
+        next = d.ink ? null : paintSnapped(ctx, d);
       } else {
         next = drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
       }
