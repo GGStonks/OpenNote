@@ -2308,7 +2308,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
               interactive={blocksInteractive && !printMode}
               selected={selectedBlockId === b.id}
               zoom={zoom}
-              measure={!printMode}
+              // Not while it is being dragged: what is shown then is a moved / scaled copy, and
+              // writing its measured size into the block made the next copy scale it again (an
+              // endless update loop that took the editor down: a black screen while resizing).
+              measure={!printMode && !drag?.sel.latexIds.includes(b.id)}
               {...latexHandlers(b)}
             />
           );

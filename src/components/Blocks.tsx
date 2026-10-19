@@ -118,6 +118,8 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   const rendered = useMemo(() => renderLatexContent(block.latexCode), [block.latexCode]);
   const textual = rendered.html.includes('<p>') || rendered.html.includes('on-h');
   const contentRef = useRef<HTMLDivElement>(null);
+  /** The size last written: measuring that same size again writes nothing (no feedback loop). */
+  const written = useRef<{ w: number; h: number; key: string } | null>(null);
   const scale = block.scale ?? 1;
   const z = layoutZoom(zoom, block.width, block.height);
 
@@ -129,7 +131,12 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
     if (!el || !measure || el.offsetParent === null) return;
     const w = Math.ceil(textual ? block.width : el.scrollWidth / z);
     const h = Math.ceil(el.scrollHeight / z);
-    if (Math.abs(w - block.width) > 2 || Math.abs(h - block.height) > 2) onSilentUpdate({ width: w, height: h });
+    if (Math.abs(w - block.width) <= 2 && Math.abs(h - block.height) <= 2) return;
+    const key = `${block.latexCode}|${scale}|${textual ? block.width : ''}`;
+    const last = written.current;
+    if (last && last.key === key && Math.abs(last.w - w) <= 2 && Math.abs(last.h - h) <= 2) return;
+    written.current = { w, h, key };
+    onSilentUpdate({ width: w, height: h });
   });
 
   return (

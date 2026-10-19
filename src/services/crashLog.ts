@@ -128,6 +128,8 @@ export const crashLog = {
     push({ kind: 'start' });
     timer = setInterval(snapshot, SNAPSHOT_MS);
     document.addEventListener('contextlost', () => canvasesLost('contextlost event'), true);
+    window.addEventListener('error', (e) => push({ kind: 'js-error', message: String(e.message).slice(0, 400), at: `${e.filename ?? ''}:${e.lineno ?? ''}:${e.colno ?? ''}`, stack: String((e.error as Error | undefined)?.stack ?? '').slice(0, 1500) }));
+    window.addEventListener('unhandledrejection', (e) => push({ kind: 'js-rejection', message: String((e.reason as Error | undefined)?.message ?? e.reason).slice(0, 400), stack: String((e.reason as Error | undefined)?.stack ?? '').slice(0, 1500) }));
     document.addEventListener('visibilitychange', () => push({ kind: document.visibilityState }));
     listeners.forEach((l) => l());
   },
@@ -137,6 +139,13 @@ export const crashLog = {
   },
   event(kind: string, data: Record<string, unknown> = {}) {
     push({ kind, ...data });
+  },
+  /** The app hit an error it recovered from: this session is the crash report right away. */
+  fail(reason: string, data: Record<string, unknown> = {}) {
+    push({ kind: 'error', reason, ...data });
+    if (session) store.crash = { ...session, crumbs: session.crumbs.slice(), detectedAt: Date.now(), reason };
+    save();
+    listeners.forEach((l) => l());
   },
   get lastCrash() {
     return store.crash ?? null;

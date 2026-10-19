@@ -15,6 +15,7 @@ import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
 import { crashLog } from './services/crashLog';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 /** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
 function readImage(file: File): Promise<{ dataUrl: string; w: number; h: number }> {
@@ -269,15 +270,16 @@ export const App: React.FC = () => {
     <div className="h-full flex flex-col bg-ui-desk dark:bg-ui-app text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
       {loadError && <div className="bg-red-600 text-white text-xs px-3 py-1.5">Storage error: {loadError}</div>}
       {openNote ? (
-        <Editor
-          key={openNote.id}
-          note={openNote}
-          settings={settings}
-          setSettings={setSettings}
-          onSaved={upsertLocal}
-          onBack={() => setOpenNoteId(null)}
-          onOpenSettings={() => setSettingsOpen(true)}
-        />
+        <ErrorBoundary key={openNote.id} onBack={() => setOpenNoteId(null)}>
+          <Editor
+            note={openNote}
+            settings={settings}
+            setSettings={setSettings}
+            onSaved={upsertLocal}
+            onBack={() => setOpenNoteId(null)}
+            onOpenSettings={() => setSettingsOpen(true)}
+          />
+        </ErrorBoundary>
       ) : (
         <LibraryView
           notes={notes}
