@@ -18,6 +18,28 @@ export function rotationStyle(deg?: number): React.CSSProperties {
   return deg ? { transform: `rotate(${deg}deg)`, transformOrigin: '50% 50%' } : {};
 }
 
+/**
+ * Content laid out at its size on screen (`zoom` times its page size) and scaled back by 1/zoom,
+ * as a compositing layer of its own: the page's zoom is a CSS scale, and WebKit kept rasterising
+ * a layer inside it at the scale it first had, so a formula inserted at 2x was a fixed bitmap,
+ * pixelated when zoomed further in. This layer's scale on screen is always 1, so it is drawn at
+ * exactly the screen's resolution at any zoom (laid out again when the zoom changes).
+ */
+const ScreenScaled: React.FC<{ zoom: number; width?: number; height?: number; children: React.ReactNode }> = ({ zoom, width, height, children }) => (
+  <div
+    className="absolute left-0 top-0"
+    style={{
+      width: width === undefined ? undefined : width * zoom,
+      height: height === undefined ? undefined : height * zoom,
+      transform: `scale(${1 / zoom})`,
+      transformOrigin: '0 0',
+      willChange: 'transform',
+    }}
+  >
+    {children}
+  </div>
+);
+
 function sameData<P extends object>(a: P, b: P): boolean {
   for (const k of Object.keys(b) as (keyof P)[]) {
     if (typeof b[k] === 'function') continue;
@@ -80,21 +102,23 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   const textual = rendered.html.includes('<p>') || rendered.html.includes('on-h');
   const contentRef = useRef<HTMLDivElement>(null);
   const scale = block.scale ?? 1;
+  const z = zoom > 0 ? zoom : 1;
 
-  // Keep the stored box equal to the rendered size (used by lasso hit-testing and export).
+  // Keep the stored box equal to the rendered size (used by lasso hit-testing and export). The
+  // content is laid out at screen size (ScreenScaled): page size = measured / zoom.
   useLayoutEffect(() => {
     const el = contentRef.current;
     // Hidden copies (print layout portal) measure 0x0 and must not overwrite the stored size.
     if (!el || !measure || el.offsetParent === null) return;
-    const w = Math.ceil(textual ? block.width : el.scrollWidth);
-    const h = Math.ceil(el.scrollHeight);
+    const w = Math.ceil(textual ? block.width : el.scrollWidth / z);
+    const h = Math.ceil(el.scrollHeight / z);
     if (Math.abs(w - block.width) > 2 || Math.abs(h - block.height) > 2) onSilentUpdate({ width: w, height: h });
   });
 
   return (
     <div
       className={`absolute ${interactive ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none'} ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4 rounded' : ''}`}
-      style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? inkColor, ...rotationStyle(block.rotation) }}
+      style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? inkColor, ...rotationStyle(block.rotation) }}
       onPointerDown={(e) => {
         if (!interactive) return;
         e.stopPropagation();
@@ -102,12 +126,14 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
       }}
     >
       {selected && <ActionPill zoom={zoom} onEdit={onEdit} onCopy={() => navigator.clipboard?.writeText(block.latexCode)} onDelete={onDelete} />}
-      <div
-        ref={contentRef}
-        className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
-        style={{ fontSize: BASE_MATH_PX * scale }}
-        dangerouslySetInnerHTML={{ __html: rendered.html }}
-      />
+      <ScreenScaled zoom={z} width={textual ? block.width : undefined}>
+        <div
+          ref={contentRef}
+          className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
+          style={{ fontSize: BASE_MATH_PX * scale * z }}
+          dangerouslySetInnerHTML={{ __html: rendered.html }}
+        />
+      </ScreenScaled>
       {rendered.error && selected && (
         <div className="absolute top-full left-0 mt-1 text-[11px] text-red-600 bg-red-50 border border-red-200 rounded px-1.5 py-0.5 max-w-xs" style={{ transform: `scale(${1 / zoom})`, transformOrigin: 'top left' }}>
           {rendered.error}
@@ -184,10 +210,12 @@ const TikzBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, darkPap
       }}
     >
       {selected && <ActionPill zoom={zoom} onEdit={onEdit} onCopy={() => navigator.clipboard?.writeText(block.latexCode)} onDelete={onDelete} />}
-      <div
-        className={`on-tikz w-full h-full ${cachedOk && darkPaper ? 'on-tikz-dark' : ''}`}
-        dangerouslySetInnerHTML={{ __html: svg }}
-      />
+      <ScreenScaled zoom={zoom > 0 ? zoom : 1} width={block.width} height={block.height}>
+        <div
+          className={`on-tikz w-full h-full ${cachedOk && darkPaper ? 'on-tikz-dark' : ''}`}
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      </ScreenScaled>
       {status !== 'idle' && (
         <div
           className={`absolute -top-2 -right-2 rounded-full p-1 shadow ${status === 'error' ? 'bg-amber-100 text-amber-700' : 'bg-white text-blue-600'}`}

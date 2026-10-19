@@ -78,9 +78,14 @@ function seedNote() {
     }
   }
   const now = Date.now();
+  // --latex: a converted formula on the first page, made halfway through the writing (the ink is
+  // then two layers, under and over the formula, as after a LaTeX conversion).
+  const latexBlocks = process.argv.includes('--latex')
+    ? [{ id: 'latex_bench', x: 120, y: 300, width: 300, height: 60, latexCode: '\\int_0^1 x^2\\,dx = \\frac{1}{3}', createdAt: 1700000000000 + Math.floor(strokes.length / 2) }]
+    : [];
   return {
     id: 'doc_bench', title: 'Bench note', createdAt: now, updatedAt: now, paperStyle: 'ruled', paperColor: 'white', schemaVersion: 3,
-    pages: [{ id: 'page_bench', pageNumber: 1, strokes, latexBlocks: [], textBlocks: [], imageBlocks: [] }],
+    pages: [{ id: 'page_bench', pageNumber: 1, strokes, latexBlocks, textBlocks: [], imageBlocks: [] }],
   };
 }
 
@@ -101,7 +106,9 @@ await new Promise((r) => setTimeout(r, 1500));
 
 const browser = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist'] });
 // --dpr: the screen's density (2 = iPad; Android tablets are often 2.6-3.5).
-const ctx = await browser.newContext({ viewport: { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
+// --landscape: an iPad held sideways (the page fits the width at about 140%).
+const LANDSCAPE = process.argv.includes('--landscape');
+const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, height: 820 } : { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
 if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.OpenNoteInk = { post() {} }; });
@@ -464,6 +471,113 @@ if (ONLY.has('selshots') && arg('shots')) {
     await page.screenshot({ path: join(arg('shots'), 'sel-zoomed.png') });
     console.log(`selshots enlarged and zoomed to ${z}%`);
   }
+}
+// Not in the default run: --only stress zooms in and out and scrolls around 40 times, then reports
+// canvases, canvas memory, JS heap and page errors: nothing may pile up.
+if (ONLY.has('stress')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const errors = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const snap = () => page.evaluate(() => {
+    const cs = [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1);
+    return { canvases: cs.length, mb: Math.round(cs.reduce((a, c) => a + c.width * c.height * 4, 0) / 1048576), heap: Math.round((performance.memory?.usedJSHeapSize ?? 0) / 1048576) };
+  });
+  const scroller = () => page.evaluate((f) => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    el.scrollTop = f * (el.scrollHeight - el.clientHeight);
+    el.scrollLeft = (f * 7919 % 1) * (el.scrollWidth - el.clientWidth);
+  }, Math.random());
+  const before = await snap();
+  for (let i = 0; i < 40; i++) {
+    const steps = 2 + (i % 6);
+    for (let k = 0; k < steps; k++) await page.keyboard.press('Control+Equal');
+    await sleep(60 + (i % 3) * 120);
+    await scroller();
+    await sleep(40);
+    await scroller();
+    await sleep(150);
+    for (let k = 0; k < steps; k++) await page.keyboard.press('Control+Minus');
+    await sleep(60);
+  }
+  // Back where it started, so both snapshots see the same pages.
+  await page.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+  });
+  await sleep(2000);
+  await cdp.send('HeapProfiler.collectGarbage').catch(() => {});
+  await sleep(500);
+  const after = await snap();
+  console.log(`stress    before ${JSON.stringify(before)}  after ${JSON.stringify(after)}  page errors ${errors.length ? errors.join(' | ') : 'none'}`);
+}
+// Not in the default run: --only dragshots --shots <dir> zooms in, lassoes some handwriting and
+// enlarges it with the corner handle: saved while the finger is still down and after it lifts.
+if (ONLY.has('dragshots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press('Control+Equal');
+    await sleep(150);
+  }
+  await sleep(1500);
+  await page.locator('button[title^="Lasso"]').click();
+  await sleep(300);
+  const loop = Array.from({ length: 60 }, (_, i) => {
+    const a = (i / 59) * Math.PI * 2;
+    return [330 + Math.cos(a) * 150, 600 + Math.sin(a) * 60];
+  });
+  await mouse('mousePressed', loop[0][0], loop[0][1]);
+  for (const [x, y] of loop.slice(1)) {
+    await mouse('mouseMoved', x, y);
+    await sleep(8);
+  }
+  await mouse('mouseReleased', loop[59][0], loop[59][1]);
+  await sleep(800);
+  const h = await page.locator('.cursor-nwse-resize').boundingBox();
+  if (h) {
+    const hx = h.x + h.width / 2, hy = h.y + h.height / 2;
+    await mouse('mousePressed', hx, hy);
+    for (let i = 1; i <= 20; i++) {
+      await mouse('mouseMoved', hx + i * 6, hy + i * 3);
+      await sleep(16);
+    }
+    await sleep(300);
+    await page.screenshot({ path: join(arg('shots'), 'drag-down.png'), clip: { x: 160, y: 480, width: 500, height: 300 } });
+    await mouse('mouseReleased', hx + 120, hy + 60);
+    await sleep(800);
+    await page.screenshot({ path: join(arg('shots'), 'drag-up.png'), clip: { x: 160, y: 480, width: 500, height: 300 } });
+  }
+  console.log(`dragshots zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%${h ? '' : ' (no handle)'}`);
+}
+// Not in the default run: --only liveshots --shots <dir> writes a stroke zoomed in and saves it
+// while the pen is down (the live ink) and after it lifts (the finished ink): they must look the same.
+if (ONLY.has('liveshots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  for (let i = 0; i < 6; i++) {
+    await page.keyboard.press('Control+Equal');
+    await sleep(150);
+  }
+  await sleep(1500);
+  const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+  // A loop with samples about 6 screen px apart (a quick stroke at 120 Hz).
+  const pts = Array.from({ length: 70 }, (_, i) => {
+    const a = (i / 69) * Math.PI * 3.2;
+    return [300 + Math.cos(a) * 140 + i * 2, 640 + Math.sin(a) * 90];
+  });
+  await mouse('mousePressed', pts[0][0], pts[0][1]);
+  for (const [x, y] of pts.slice(1)) {
+    await mouse('mouseMoved', x, y, 0.4 + 0.3 * Math.sin(x / 40));
+    await sleep(8);
+  }
+  await sleep(300);
+  await page.screenshot({ path: join(arg('shots'), 'live-down.png'), clip: { x: 120, y: 520, width: 480, height: 260 } });
+  await mouse('mouseReleased', pts[pts.length - 1][0], pts[pts.length - 1][1]);
+  await sleep(600);
+  await page.screenshot({ path: join(arg('shots'), 'live-up.png'), clip: { x: 120, y: 520, width: 480, height: 260 } });
+  console.log(`liveshots zoom ${z}%`);
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {

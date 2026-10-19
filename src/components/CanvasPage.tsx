@@ -8,7 +8,7 @@ import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
   strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt,
 } from '../ink/strokeRenderer';
-import { SmoothLiveStroke } from '../ink/smoothLiveStroke';
+import { SmoothLiveStroke, pixelAligned } from '../ink/smoothLiveStroke';
 import { SampleDensifier } from '../ink/densify';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
@@ -164,8 +164,17 @@ export function paperGrid(style: PaperStyle): number | null {
  * a larger one is drawn without the GPU, and a 4 GB iPad runs short of GPU memory sooner.
  */
 const MAX_CANVAS_PIXELS = 14_500_000;
-/** Above this zoom committed ink is drawn by SharpInk (screen resolution at any zoom) over the page canvases. */
-const SHARP_ZOOM = 2.5;
+/**
+ * The page canvases' zoom is the zoom that fits the page's width on this screen (100% with an
+ * iPad upright, about 150% sideways; at most this), whatever the user zooms to; above it committed
+ * ink is drawn by SharpInk (screen resolution at any zoom) over them. The page canvases are
+ * page-sized: following the zoom cost tens of MB per page and per ink layer, reallocated (and
+ * briefly doubled while repainting) at every zoom; a quick pinch on a 4 GB iPad, after a LaTeX
+ * conversion added a second ink layer, ran the GPU out of memory: a black screen. Like
+ * Notability, zooming in costs memory for the screen, not for the zoom, and never repaints the
+ * pages; the usual reading view (and scrolling it) stays on the page canvases.
+ */
+const PAGE_CANVAS_MAX_ZOOM = 1.5;
 /**
  * From this zoom page canvases draw handwriting as the smooth line (strokeRenderer.smoothGeometry):
  * the engine's line is straight between Pencil samples, which shows as faint corners when zoomed in.
@@ -366,7 +375,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
   const marginTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latest = useRef(props);
   latest.current = props;
-  const opts = { smooth: true };
+  const opts = { smooth: smoothAt(zoom) };
 
   /** The page's content element (the holder's parent), kept for the cleanup at unmount. */
   const containerRef = useRef<HTMLElement | null>(null);
@@ -424,6 +433,24 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       return b.maxX >= v.x0 && b.minX <= v.x1 && b.maxY >= v.y0 && b.minY <= v.y1;
     });
 
+  /** Whether any stroke reaches into tile (i, j): a tile without ink gets no canvas at all. */
+  const inkCache = useRef<{ list: Stroke[] | null; r: number; has: Map<string, boolean> }>({ list: null, r: 0, has: new Map() });
+  const hasInk = (i: number, j: number) => {
+    const list = latest.current.strokes, r = scale.current, c = inkCache.current;
+    if (c.list !== list || c.r !== r) inkCache.current = { list, r, has: new Map() };
+    const key = `${i},${j}`;
+    let v = inkCache.current.has.get(key);
+    if (v === undefined) {
+      const rect = tileRect(i, j, r);
+      v = list.some((st) => {
+        const b = strokeArea(st);
+        return b.maxX >= rect.x0 && b.minX <= rect.x1 && b.maxY >= rect.y0 && b.minY <= rect.y1;
+      });
+      inkCache.current.has.set(key, v);
+    }
+    return v;
+  };
+
   const dropAll = () => {
     for (const t of tiles.current.values()) {
       t.canvas.width = t.canvas.height = 0;
@@ -454,7 +481,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     const r = scale.current;
     const g = tileRange(visible, r);
     for (let j = g.j0; j <= g.j1; j++)
-      for (let i = g.i0; i <= g.i1; i++) if (tiles.current.get(`${i},${j}`)?.painted !== latest.current.strokes) return false;
+      for (let i = g.i0; i <= g.i1; i++) {
+        const t = tiles.current.get(`${i},${j}`);
+        if (t ? t.painted !== latest.current.strokes : hasInk(i, j)) return false;
+      }
     return true;
   };
 
@@ -497,7 +527,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     const todo: { i: number; j: number; d: number; margin: boolean }[] = [];
     for (let j = want.j0; j <= want.j1; j++)
       for (let i = want.i0; i <= want.i1; i++)
-        if (tiles.current.get(`${i},${j}`)?.painted !== list) todo.push({ i, j, d: dist(i, j), margin: i < seen.i0 || i > seen.i1 || j < seen.j0 || j > seen.j1 });
+        if (tiles.current.get(`${i},${j}`)?.painted !== list && hasInk(i, j)) todo.push({ i, j, d: dist(i, j), margin: i < seen.i0 || i > seen.i1 || j < seen.j0 || j > seen.j1 });
     todo.sort((a, b) => Number(a.margin) - Number(b.margin) || a.d - b.d).splice(SHARP_MAX_TILES);
     const holder = holderRef.current;
     let rested = false;
@@ -567,7 +597,8 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       if (timer) clearTimeout(timer);
       timer = setTimeout(paintNeeded, SHARP_IDLE_MS);
     };
-    // Scrolling onto tiles not painted yet: the page canvases show the ink there at once.
+    // Scrolling onto tiles not painted yet: the page canvases show the ink there at once (painting
+    // tiles while it scrolls cost frames: they are painted once it rests).
     const scrolled = () => {
       if (tilesHidden.current) {
         const now = viewNow();
@@ -579,7 +610,6 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     // while they move (dozens of tile layers re-composited every frame of a pinch cost frames).
     const pinching = () => {
       hidePages(false);
-      if (holderRef.current) holderRef.current.style.visibility = 'hidden';
     };
     const target: HTMLElement | Window = scrollRoot ?? window;
     target.addEventListener('scroll', scrolled, { passive: true });
@@ -628,8 +658,9 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         tile.painted = strokes;
       }
     }
-    // Tiles still being painted for the old strokes: start over with these.
-    if (frame.current !== null || marginTimer.current !== null) paintNeeded();
+    // Tiles still being painted for the old strokes, or ink where there was none (no tile yet):
+    // the tiles the view still needs.
+    if (frame.current !== null || marginTimer.current !== null || added.length || area) paintNeeded();
   }, [strokes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return <div ref={holderRef} className="absolute left-0 top-0 pointer-events-none" style={{ width: W, height: 0 }} />;
@@ -756,8 +787,10 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
         // Same strokes in another order: repaint all of them.
         area = { minX: 0, minY: top, maxX: W, maxY: top + H };
       }
-      const x0 = Math.max(0, Math.floor(area.minX * ratio) / ratio), y0 = Math.max(top, Math.floor(area.minY * ratio) / ratio);
-      const x1 = Math.min(W, Math.ceil(area.maxX * ratio) / ratio), y1 = Math.min(top + H, Math.ceil(area.maxY * ratio) / ratio);
+      // Whole pixels of this canvas (its own origin is the page's top, not the surface's).
+      const px = pixelAligned(ctx, area);
+      const x0 = Math.max(0, px.minX), y0 = Math.max(top, px.minY);
+      const x1 = Math.min(W, px.maxX), y1 = Math.min(top + H, px.maxY);
       if (x1 <= x0 || y1 <= y0) return;
       if ((x1 - x0) * (y1 - y0) < TILE_FULL_REPAINT * W * H) {
         const hit = mine.filter((s) => {
@@ -924,16 +957,25 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn sharp over the view (SharpInk) where page canvases hit their budget. */
-  // Above SHARP_ZOOM, and also wherever a page canvas would be held below the screen's resolution
+  // Above the page canvases' zoom, and also wherever a page canvas would be held below the screen's resolution
   // by its pixel budget (MAX_CANVAS_PIXELS; from about 2x on an iPad, 1.4x on a 3x Android screen):
   // those canvases were drawn soft and then stretched. Printing draws SVG.
   const tileArea = Math.max(1, ...layout.sheets.map((sh) => PAGE_W * sh.height));
-  const sharp = !printMode && (zoom > SHARP_ZOOM || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
-  // The page canvases' zoom: the zoom, or while sharp ink is shown, the last zoom below it (the
-  // canvases are not repainted for zooms the sharp ink covers; they stay under it as they were).
-  const canvasZoom = useRef(zoom);
-  if (!sharp) canvasZoom.current = zoom;
-  const inkZoom = canvasZoom.current;
+  const fitZoom = () => Math.max(1, Math.min(PAGE_CANVAS_MAX_ZOOM, Math.round(((scrollRoot?.clientWidth || window.innerWidth) / PAGE_W) * 4) / 4));
+  const [pageZoom, setPageZoom] = useState(fitZoom);
+  useEffect(() => {
+    const onResize = () => setPageZoom(fitZoom());
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [scrollRoot, PAGE_W]); // eslint-disable-line react-hooks/exhaustive-deps
+  const sharp = !printMode && (zoom > pageZoom * 1.02 || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
+  // The page canvases' zoom: never above the fitting zoom (zooming further in never reallocates them).
+  const inkZoom = Math.min(zoom, pageZoom);
+  // Their line (smoothAt) as it was before the sharp ink took over: a pinch crossing SMOOTH_ZOOM
+  // repainted every page canvas under the sharp ink for nothing.
+  const pageSmooth = useRef(smoothAt(inkZoom));
+  if (!sharp) pageSmooth.current = smoothAt(inkZoom);
   /** Paper under a stroke ("hole" fills in SVG). */
   const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
   /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
@@ -967,7 +1009,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const u0 = Math.max(0, (root.left - c.left) / scale), u1 = Math.min(W, (root.right - c.left) / scale);
     const height = Math.min(H, Math.ceil(Math.max(1, (root.bottom - root.top) / scale) * 1.5));
     const width = Math.min(W, Math.ceil(Math.max(1, (root.right - root.left) / scale) * 1.5));
-    const r = canvasRatio(zoomRef.current, width * height);
+    // Exactly the screen's resolution (rounding the zoom up, as the page canvases do, cost up to
+    // twice the memory for nothing).
+    const r = Math.max(1, Math.min(zoomRef.current * Math.min(window.devicePixelRatio || 1, 3), Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height))));
     const cur = live.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
@@ -1170,7 +1214,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (!ctx) return;
     const prev = unionRect(dirty.current, staleInk.current);
     staleInk.current = null;
-    if (prev) ctx.clearRect(prev.minX - 3, prev.minY - 3, prev.maxX - prev.minX + 6, prev.maxY - prev.minY + 6);
+    if (prev) {
+      const c = pixelAligned(ctx, { minX: prev.minX - 3, minY: prev.minY - 3, maxX: prev.maxX + 3, maxY: prev.maxY + 3 });
+      ctx.clearRect(c.minX, c.minY, c.maxX - c.minX, c.maxY - c.minY);
+    }
     let next: DirtyRect | null = null;
     const d = drawing.current;
     const k = 1 / Math.max(0.3, zoomRef.current);
@@ -1991,11 +2038,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const FLOAT_PAD = 24;
   const layerSel = drag?.sel ?? null;
   const glowSel = !drag && selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null;
-  const paintSelection = (c: HTMLCanvasElement | null, sel: Selection, glowOnly: boolean) => {
+  /**
+   * glowOnly: the idle glow (any resolution will do). Otherwise the dragged ink, at the screen's
+   * resolution for this zoom and `k`, the scale the drag has reached (the canvas is CSS-scaled by
+   * it): a bitmap at the page canvases' resolution, stretched while resizing, looked blurry until
+   * the drag ended.
+   */
+  const paintSelection = (c: HTMLCanvasElement | null, sel: Selection, glowOnly: boolean, k = 1) => {
     if (!c) return;
     const b = sel.bounds;
     const w = b.width + FLOAT_PAD * 2, h = b.height + FLOAT_PAD * 2;
-    const r = Math.min(ratio, Math.sqrt(MAX_CANVAS_PIXELS / (glowOnly ? 4 : 2) / Math.max(1, w * h)));
+    const screen = zoom * Math.min(window.devicePixelRatio || 1, 3) * k;
+    const r = Math.min(glowOnly ? ratio : screen, Math.sqrt(MAX_CANVAS_PIXELS / (glowOnly ? 4 : 2) / Math.max(1, w * h)));
     c.width = Math.max(1, Math.round(w * r));
     c.height = Math.max(1, Math.round(h * r));
     const ctx = c.getContext('2d');
@@ -2013,9 +2067,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     ctx.restore();
     if (!glowOnly) drawStrokes(ctx, strokes);
   };
+  // Resizing: drawn again from the vectors each time the scale has moved by 8%, so it stays sharp.
+  const dragScale = drag && drag.f !== 1 ? Math.pow(1.08, Math.round(Math.log(drag.f) / Math.log(1.08))) : 1;
   useLayoutEffect(() => {
-    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, false);
-  }, [layerSel, ratio, page.strokes]);
+    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, false, dragScale);
+  }, [layerSel, ratio, zoom, dragScale, page.strokes]);
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
@@ -2166,7 +2222,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     height={sh.height}
                     strokes={l.strokes}
                     ratio={canvasRatio(inkZoom, PAGE_W * sh.height)}
-                    smooth={smoothAt(inkZoom)}
+                    smooth={pageSmooth.current}
                     scrollRoot={scrollRoot}
                   />
                 ))}

@@ -46,7 +46,13 @@ at any zoom. `bench/notabilityImport.ts` checks widths against the file (see its
   recorded handwriting): frame times and input lag while writing and scrolling; `--profile` / `--trace`
   show where the time goes. Run it before and after changes to rendering, saving or the canvas tiles.
   Extra scenarios: `--only canvasmem` (canvas backing memory per zoom; keep every canvas under
-  WebKit's GPU limit, 5120x2880 px), `--only selshots --shots <dir>` (an enlarged selection, zoomed in).
+  WebKit's GPU limit, 5120x2880 px), `--only stress` (40 zoom/scroll rounds: nothing may pile up),
+  and with `--shots <dir>`: `selshots` (an enlarged selection, zoomed in), `dragshots` (resizing a
+  selection, zoomed in), `liveshots` (a stroke while the pen is down and after: they must match).
+  `--latex` adds a LaTeX block (two ink layers, as after a conversion); `--landscape` an iPad
+  held sideways (the page fits at about 140%).
+- Zoomed in, memory must follow the screen, not the zoom (Notability's model): page canvases stay
+  at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release

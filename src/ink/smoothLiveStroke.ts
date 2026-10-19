@@ -19,6 +19,22 @@ const CHUNK = 64;
 /** Line before the new points that their smoothing can depend on (page px, with a margin). */
 const WINDOW = SMOOTH_SETTLE + 3;
 
+/**
+ * `r` grown to whole device pixels of `ctx`'s canvas. Clearing and clipping a rectangle that ends
+ * inside a pixel cleared that pixel only partly, and the antialiased refill over what was left
+ * showed as a faint line through the ink along the rectangle's edge (plain to see zoomed in).
+ */
+export function pixelAligned(ctx: CanvasRenderingContext2D, r: Rect): Rect {
+  const { a, d, e, f } = ctx.getTransform();
+  if (!(a > 0) || !(d > 0)) return r;
+  return {
+    minX: (Math.floor(r.minX * a + e) - e) / a,
+    maxX: (Math.ceil(r.maxX * a + e) - e) / a,
+    minY: (Math.floor(r.minY * d + f) - f) / d,
+    maxY: (Math.ceil(r.maxY * d + f) - f) / d,
+  };
+}
+
 const union = (a: Rect | null, b: Rect | null): Rect | null =>
   !a ? b : !b ? a : { minX: Math.min(a.minX, b.minX), minY: Math.min(a.minY, b.minY), maxX: Math.max(a.maxX, b.maxX), maxY: Math.max(a.maxY, b.maxY) };
 const intersects = (a: Rect, b: Rect) => a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
@@ -132,6 +148,7 @@ export class SmoothLiveStroke {
     this.tailRect = tail.length ? grow(null, tail) : null;
     changed = union(changed, this.tailRect);
     if (!changed) return;
+    changed = pixelAligned(ctx, changed);
 
     const all = new Path2D();
     for (const c of this.chunks) if (c.rect && intersects(c.rect, changed)) all.addPath(c.path);
