@@ -404,6 +404,67 @@ if (ONLY.has('closeup') && arg('shots')) {
   await page.screenshot({ path: join(arg('shots'), 'closeup-scrolled-rested.png'), clip: { x: 0, y: 250, width: 820, height: 800 } });
   console.log(`closeup  after scrolling: ${await sharpState()}`);
 }
+// Not in the default run: --only canvasmem reports the canvases' backing memory at a few zooms
+// (zoomed with the buttons, view on the first page). WebKit gives a canvas a GPU backing only up to
+// 5120x2880 px, and a 4 GB iPad runs short of that memory long before a newer one.
+if (ONLY.has('canvasmem')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const report = () => page.evaluate(() => {
+    const cs = [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1);
+    const px = cs.map((c) => c.width * c.height);
+    const mb = (n) => ((n * 4) / 1048576).toFixed(0);
+    const z = document.body.innerText.match(/(\d+)%/)?.[1];
+    const big = cs.filter((c) => c.width * c.height > 5120 * 2880).map((c) => `${c.width}x${c.height} (css ${c.style.width} x ${c.style.height}, ${c.parentElement?.dataset.inkKey ? 'page tile' : c.className || 'canvas'})`);
+    return `zoom ${z}%: ${cs.length} canvases, ${mb(px.reduce((a, b) => a + b, 0))} MB, largest ${mb(Math.max(0, ...px))} MB, ${big.length} over the GPU limit${big.length ? ': ' + big.join(', ') : ''}`;
+  });
+  console.log(`canvasmem ${await report()}`);
+  for (let i = 0; i < 9; i++) {
+    await page.keyboard.press('Control+Equal');
+    await sleep(900);
+    console.log(`canvasmem ${await report()}`);
+  }
+}
+// Not in the default run: --only selshots --shots <dir> lassoes some handwriting, enlarges the
+// selection with its corner handle, then zooms in: the selected ink must stay as sharp as the rest.
+if (ONLY.has('selshots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.locator('button[title^="Lasso"]').click();
+  await sleep(300);
+  const loop = Array.from({ length: 60 }, (_, i) => {
+    const a = (i / 59) * Math.PI * 2;
+    return [300 + Math.cos(a) * 120, 470 + Math.sin(a) * 45];
+  });
+  await mouse('mousePressed', loop[0][0], loop[0][1]);
+  for (const [x, y] of loop.slice(1)) {
+    await mouse('mouseMoved', x, y);
+    await sleep(8);
+  }
+  await mouse('mouseReleased', loop[59][0], loop[59][1]);
+  await sleep(800);
+  const h = await page.locator('.cursor-nwse-resize').boundingBox();
+  if (!h) console.log('selshots (no resize handle)');
+  else {
+    const hx = h.x + h.width / 2, hy = h.y + h.height / 2;
+    await mouse('mousePressed', hx, hy);
+    for (let i = 1; i <= 30; i++) {
+      await mouse('mouseMoved', hx + i * 7, hy + i * 3);
+      await sleep(10);
+    }
+    await mouse('mouseReleased', hx + 210, hy + 90);
+    await sleep(1200);
+    await page.screenshot({ path: join(arg('shots'), 'sel-100.png'), clip: { x: 0, y: 330, width: 820, height: 420 } });
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press('Control+Equal');
+      await sleep(200);
+    }
+    await sleep(1500);
+    const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    await page.screenshot({ path: join(arg('shots'), 'sel-zoomed.png') });
+    console.log(`selshots enlarged and zoomed to ${z}%`);
+  }
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();

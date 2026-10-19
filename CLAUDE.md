@@ -36,6 +36,8 @@ metered, or about the server's internals. Every request the app sends to the ser
 - `npm run bench:ui` — slow-device UI benchmark in headless Chromium (CPU 4x slower, 8-page note of
   recorded handwriting): frame times and input lag while writing and scrolling; `--profile` / `--trace`
   show where the time goes. Run it before and after changes to rendering, saving or the canvas tiles.
+  Extra scenarios: `--only canvasmem` (canvas backing memory per zoom; keep every canvas under
+  WebKit's GPU limit, 5120x2880 px), `--only selshots --shots <dir>` (an enlarged selection, zoomed in).
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release

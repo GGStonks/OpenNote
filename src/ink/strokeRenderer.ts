@@ -337,6 +337,8 @@ export interface PaintOptions {
   holeColor?: string;
   /** Handwriting as the smooth line (smoothGeometry): page canvases zoomed in past SMOOTH_ZOOM. */
   smooth?: boolean;
+  /** Every stroke in this colour instead of its own (the selection glow). */
+  color?: string;
 }
 
 const HATCH_SPACING = 8;
@@ -538,9 +540,10 @@ export function drawLiveStroke(ctx: CanvasRenderingContext2D, points: Point[], s
  */
 export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], opts: PaintOptions = {}) {
   const sm = opts.smooth;
-  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s, sm), styleOf(s), opts);
-  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s, sm), styleOf(s), s.opacity ?? 1);
+  const style = (s: Stroke) => (opts.color ? { ...styleOf(s), color: opts.color } : styleOf(s));
+  for (const s of strokes) if (s.tool === 'highlighter') paintInk(ctx, built(s, sm), style(s), s.opacity ?? 1);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) paintFill(ctx, built(s, sm), style(s), opts);
+  for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) paintInk(ctx, built(s, sm), style(s), s.opacity ?? 1);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -29,10 +29,15 @@ export interface AppSettings {
 
 const KEY = 'opennote_settings_v2';
 
+/** The conversion server, reachable from any device with internet access. */
+export const DEFAULT_SERVER = 'https://darksoul.tailf66262.ts.net:10000';
+/** The default before v2.2.1 (Tailscale only): moved to DEFAULT_SERVER unless it was changed. */
+const OLD_DEFAULT_SERVER = 'http://100.77.212.97:9191';
+
 function defaultEndpoint(): string {
   // In the Vite dev server the /v1 path is proxied to 127.0.0.1:9191.
   if (platformKind() === 'web' && location.port === '5173') return '/v1/chat/completions';
-  return 'http://100.77.212.97:9191';
+  return DEFAULT_SERVER;
 }
 
 export function defaultSettings(): AppSettings {
@@ -61,6 +66,7 @@ export function loadSettings(): AppSettings {
       const s: AppSettings = { ...defaults, ...JSON.parse(raw) };
       // The old placeholder key; the server now issues real ones.
       if (s.apiKey === 'sk-dummy') s.apiKey = '';
+      if (s.vlmEndpoint.trim().replace(/\/+$/, '') === OLD_DEFAULT_SERVER) s.vlmEndpoint = DEFAULT_SERVER;
       return s;
     }
     // Migrate the single v1.0 setting.
@@ -88,7 +94,7 @@ export function resolveChatUrl(endpoint: string): string {
   let e = endpoint.trim();
   if (!e) e = defaultEndpoint();
   if (e.startsWith('/')) {
-    if (platformKind() !== 'web') e = 'http://100.77.212.97:9191' + e;
+    if (platformKind() !== 'web') e = DEFAULT_SERVER + e;
     else return e.includes('/chat/completions') ? e : e.replace(/\/+$/, '') + '/v1/chat/completions';
   }
   if (!/^https?:\/\//i.test(e)) e = 'http://' + e;

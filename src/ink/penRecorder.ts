@@ -108,6 +108,7 @@ export const penRecorder = {
     const res = await httpRequest({ url, method: 'POST', body: this.snapshot(platform), timeoutMs: 30000, headers: serverHeaders(settings) });
     const refused = authError(res);
     if (refused) throw new Error(refused);
+    if (res.status === 404) throw new Error('This server address does not accept pen recordings. Use “Share file” instead.');
     if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} from ${url}: ${res.text.slice(0, 200)}`);
     return typeof res.data === 'object' && res.data?.saved ? String(res.data.saved) : 'sent';
   },

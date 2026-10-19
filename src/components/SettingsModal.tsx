@@ -3,7 +3,7 @@ import { canUpdate } from '../services/updater';
 import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload } from 'lucide-react';
 import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
-import { AppSettings, resolveChatUrl } from '../settings';
+import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
 import { platformKind, shareFile } from '../platform';
@@ -133,10 +133,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
           <section className="space-y-3 border-t border-gray-100 dark:border-gray-800 pt-3">
             <div>
               <label className={label}>Qwen3-VL server</label>
-              <input className={field} value={draft.vlmEndpoint} onChange={(e) => set({ vlmEndpoint: e.target.value })} placeholder="http://100.77.212.97:9191" autoCapitalize="off" autoCorrect="off" />
+              <input className={field} value={draft.vlmEndpoint} onChange={(e) => set({ vlmEndpoint: e.target.value })} placeholder={DEFAULT_SERVER} autoCapitalize="off" autoCorrect="off" />
               <p className="text-[11px] text-gray-400 mt-1">
-                Base URL of the llama.cpp / switchboard server (port 9191). Requests go to <code className="font-mono">{resolveChatUrl(draft.vlmEndpoint)}</code>.
-                {platformKind() !== 'web' && ' Use the PC’s LAN or Tailscale IP — “localhost” is the phone itself.'}
+                The default, <code className="font-mono break-all">{DEFAULT_SERVER}</code>, works from any device with internet access, no VPN needed. Requests go to <code className="font-mono break-all">{resolveChatUrl(draft.vlmEndpoint)}</code>.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">

@@ -159,7 +159,11 @@ export function paperGrid(style: PaperStyle): number | null {
   return style === 'grid' || style === 'dots' ? 24 : style === 'graph' ? 12 : null;
 }
 
-const MAX_CANVAS_PIXELS = 16_000_000;
+/**
+ * Largest canvas backing store (px). Just under WebKit's limit for a GPU-backed canvas (5120x2880):
+ * a larger one is drawn without the GPU, and a 4 GB iPad runs short of GPU memory sooner.
+ */
+const MAX_CANVAS_PIXELS = 14_500_000;
 /** Above this zoom committed ink is drawn by SharpInk (screen resolution at any zoom) over the page canvases. */
 const SHARP_ZOOM = 2.5;
 /**
@@ -252,7 +256,7 @@ function strokeYRange(s: Stroke) {
 /**
  * Committed ink of one page of the surface (its height, the surface's whole width: ink may go
  * beside a narrower page). Tiles exist only near the viewport (a canvas
- * is up to 16 Mpx and WebKit has a tight total canvas budget), and each one is the cached bitmap of
+ * is up to 14.5 Mpx and WebKit has a tight total canvas budget), and each one is the cached bitmap of
  * its band: it is painted once and then only where something changed.
  *
  *  - Strokes appended on top (the common case while writing) are painted on top.
@@ -1781,6 +1785,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; f: number; rot: number; base: number | null } | null>(null);
   const dragFrame = useRef<number | null>(null);
   const floatCanvasRef = useRef<HTMLCanvasElement>(null);
+  const glowCanvasRef = useRef<HTMLCanvasElement>(null);
   const [liveBounds, setLiveBounds] = useState<Selection['bounds'] | null>(null);
   const shownBounds = drag
     ? { x: drag.sel.bounds.x + drag.dx, y: drag.sel.bounds.y + drag.dy, width: drag.sel.bounds.width * drag.f, height: drag.sel.bounds.height * drag.f }
@@ -1896,33 +1901,40 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     [gestures, requestRender]
   );
 
-  // Selection layer: the selected ink drawn again on its own canvas with a blue glow (Notability
-  // style). While dragging, the same canvas carries the ink (hidden on the page canvas) and moves
-  // as a CSS transform, so picking a selection up costs nothing extra.
+  // Selection layers (Notability style blue glow). Idle: only the glow, on a canvas under the
+  // page ink, so the selected strokes themselves are always the page's sharp ink (a glow looks the
+  // same at any resolution; ink drawn again on top at this canvas's capped resolution was blurry
+  // after enlarging a selection or zooming in). While dragging, a canvas over the page carries the
+  // ink (hidden on the page canvas) and moves as a CSS transform, so picking a selection up costs
+  // nothing extra; on release the page draws the moved ink again at full resolution.
   const FLOAT_PAD = 24;
-  const layerSel = drag?.sel ?? (selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null);
-  const dragging = !!drag;
-  useLayoutEffect(() => {
-    const c = floatCanvasRef.current;
-    if (!c || !layerSel) return;
-    const b = layerSel.bounds;
+  const layerSel = drag?.sel ?? null;
+  const glowSel = !drag && selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null;
+  const paintSelection = (c: HTMLCanvasElement | null, sel: Selection, glowOnly: boolean) => {
+    if (!c) return;
+    const b = sel.bounds;
     const w = b.width + FLOAT_PAD * 2, h = b.height + FLOAT_PAD * 2;
-    const r = Math.min(ratio, Math.sqrt(MAX_CANVAS_PIXELS / 2 / Math.max(1, w * h)));
+    const r = Math.min(ratio, Math.sqrt(MAX_CANVAS_PIXELS / (glowOnly ? 4 : 2) / Math.max(1, w * h)));
     c.width = Math.max(1, Math.round(w * r));
     c.height = Math.max(1, Math.round(h * r));
     const ctx = c.getContext('2d');
     if (!ctx) return;
     ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
-    const ids = new Set(layerSel.strokeIds);
+    const ids = new Set(sel.strokeIds);
     // Idle: highlighters stay on the page only (drawing them twice would darken them).
-    const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id) && (dragging || s.tool !== 'highlighter'));
+    const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id) && (!glowOnly || s.tool !== 'highlighter'));
     ctx.save();
     ctx.shadowColor = 'rgba(37, 99, 235, 0.9)';
     ctx.shadowBlur = 7 * r;
-    drawStrokes(ctx, strokes);
+    // Glow only: the strokes themselves in the glow's colour (the page's ink covers them, and
+    // where this lower-resolution copy shows at their edge it is just more glow).
+    drawStrokes(ctx, strokes, glowOnly ? { color: 'rgba(37, 99, 235, 0.9)' } : {});
     ctx.restore();
-    drawStrokes(ctx, strokes);
-  }, [layerSel, dragging, ratio, page.strokes]);
+    if (!glowOnly) drawStrokes(ctx, strokes);
+  };
+  useLayoutEffect(() => {
+    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, false);
+  }, [layerSel, ratio, page.strokes]);
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
@@ -1932,6 +1944,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   /** The content in stacking order (editor/zorder.ts); unchanged ink layers keep their arrays. */
   const layersRef = useRef<ZLayer[] | undefined>(undefined);
   const layers = useMemo(() => (layersRef.current = zLayers({ ...blockPage, strokes: shownStrokes }, layersRef.current)), [blockPage, shownStrokes]);
+  /** The ink layer the idle selection glow goes under: the lowest one with selected strokes. */
+  const glowLayerKey = useMemo(() => {
+    if (!glowSel) return null;
+    const ids = new Set(glowSel.strokeIds);
+    return layers.find((l) => l.kind === 'ink' && l.strokes.some((st) => ids.has(st.id)))?.key ?? null;
+  }, [glowSel, layers]);
+  useLayoutEffect(() => {
+    if (glowSel && glowLayerKey) paintSelection(glowCanvasRef.current, glowSel, true);
+  }, [glowSel, glowLayerKey, ratio, page.strokes]);
 
   // ------------------------------------------------------------------ shape editing (handles)
   // Same idea for reshaping: the edited shape is drawn on the live layer while dragging and
@@ -2047,6 +2068,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             // the sharp ink over the view past it.
             return (
               <React.Fragment key={l.key}>
+                {glowSel && l.key === glowLayerKey && (
+                  <canvas
+                    ref={glowCanvasRef}
+                    className="absolute pointer-events-none"
+                    style={{ left: glowSel.bounds.x - FLOAT_PAD, top: glowSel.bounds.y - FLOAT_PAD, width: glowSel.bounds.width + FLOAT_PAD * 2, height: glowSel.bounds.height + FLOAT_PAD * 2 }}
+                  />
+                )}
                 {layout.sheets.map((sh) => (
                   <InkTile
                     key={sh.id}
