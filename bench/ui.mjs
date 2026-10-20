@@ -385,6 +385,13 @@ if (ONLY.has('zpinch')) {
   const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
   for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);
 }
+// Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
+if (ONLY.has('probe')) {
+  await reopen();
+  await page.waitForFunction(() => window.__opennoteFrameProbe);
+  const r = await page.evaluate(() => window.__opennoteFrameProbe.run());
+  console.log(`probe    ${Object.entries(r.phases).map(([k, v]) => `${k} ${v ? `${v.fps} fps (p50 ${v.p50} ms)` : '-'}`).join('  ')}  (${CPU}x slower CPU)`);
+}
 // Not in the default run (run it alone: it installs a stand-in shell): --only nativepinch, the
 // messages the iOS shell's pinch snapshot gets (nativePinch.ts), and where its last transform puts a
 // page against where the page really is once drawn at the new zoom (they must match: no jump when

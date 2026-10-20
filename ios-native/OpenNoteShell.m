@@ -34,7 +34,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.7";
+static NSString *const kVersion = @"2.3.8";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;

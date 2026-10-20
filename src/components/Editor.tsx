@@ -927,7 +927,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             className="absolute inset-0 overflow-auto bg-ui-desk dark:bg-ui-desk"
             style={{ touchAction: 'pan-x pan-y', overscrollBehavior: 'contain' }}
           >
-            <div ref={outerRef} style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
+            <div ref={outerRef} data-note-content style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
               <div style={{ width: contentWidth, height: totalHeight, transform: `scale(${zoom})`, transformOrigin: '0 0', position: 'relative' }}>
                 <div style={{ position: 'absolute', left: PAD, top: PAD }}>
                   <CanvasPage

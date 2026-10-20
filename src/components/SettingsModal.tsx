@@ -4,6 +4,7 @@ import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Downloa
 import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
 import { crashLog } from '../services/crashLog';
+import { frameProbe } from '../services/frameProbe';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
@@ -27,6 +28,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [rec, setRec] = useState({ on: penRecorder.enabled, count: penRecorder.count });
   const [recMsg, setRecMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   const [crash, setCrash] = useState(crashLog.lastCrash);
+  const probe = isOpen ? frameProbe.last : null;
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -262,6 +264,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               {crash && <button onClick={() => crashLog.clear()} className="text-red-500">Clear</button>}
             </div>
             {crashMsg && <p className={`text-xs mt-2 break-all ${crashMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{crashMsg.msg}</p>}
+            <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">Frame-rate test</div>
+            <p className="text-[11px] text-gray-400">
+              Measures how fast this device draws the open note, WebGL and canvas drawing (7 s; open a note first). The result goes into the crash report.
+              {probe && ` Last: ${Object.entries(probe.phases).map(([k, v]) => `${k} ${v ? v.fps + ' fps' : '–'}`).join(', ')}.`}
+            </p>
+            <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
+              <button
+                onClick={() => {
+                  onClose();
+                  setTimeout(() => void frameProbe.run(), 500);
+                }}
+              >
+                Run test
+              </button>
+            </div>
           </section>
         </div>
 
