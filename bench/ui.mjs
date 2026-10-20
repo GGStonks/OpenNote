@@ -111,7 +111,7 @@ const LANDSCAPE = process.argv.includes('--landscape');
 const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, height: 820 } : { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
-if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.OpenNoteInk = { post() {} }; });
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 const url = `http://localhost:${PORT}/`;
@@ -793,6 +793,14 @@ for (const pass of ONLY.has('scroll') ? ['scroll 1', 'scroll 2'] : []) {
   frameStats(pass, (await stop()).frames);
 }
 
+// With --native: the shell's native ink messages while writing (each stroke's "b" and its "e" by id).
+if (process.argv.includes('--native') && ONLY.has('pen')) {
+  const msgs = await page.evaluate(() => window.__inkMsgs ?? []);
+  const begun = new Set(msgs.filter((m) => m.startsWith('b:')).map((m) => m.slice(2)));
+  const ended = new Set(msgs.filter((m) => m.startsWith('e:')).map((m) => m.slice(2)));
+  const open = [...begun].filter((id) => !ended.has(id));
+  console.log(`nativeink strokes begun ${begun.size}, ended by id ${ended.size}, never ended: ${open.length ? open.join(' ') : 'none'}`);
+}
 await browser.close();
 cleanup();
 process.exit(0);

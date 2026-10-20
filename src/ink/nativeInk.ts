@@ -16,11 +16,16 @@
  * once the finished stroke has been painted by the page).
  *
  * Messages (one string each, numbers with up to 2 decimals):
- *   b,r,g,b,a,variable,clipX,clipY,clipW,clipH   begin / restart (clears the layer)
+ *   b,r,g,b,a,variable,clipX,clipY,clipW,clipH,id   begin / restart: a stroke shown before stays
+ *                                                 until its own e,id (the next stroke often
+ *                                                 begins before the page has drawn the last)
  *   u,n,x,y,r,...                                 n new settled points, then the tail (x, y, radius)
  *   d,clipX,clipY,clipW,clipH,<commands>         a whole drawing (Draw tool shapes, snapped shapes):
  *                                                 replaces what is shown (commands: inkRecorder.ts)
- *   e                                             the page shows the stroke: clear
+ *   e,id                                          the page shows stroke id: the shell removes its
+ *                                                 copy a few frames later (the page's frame
+ *                                                 reaches the screen after it is drawn)
+ *   e                                             the page shows the drawing: clear
  *   c                                             cancel: clear now
  */
 import type { SmoothLiveStroke } from './smoothLiveStroke';
@@ -84,6 +89,11 @@ export class NativeInk {
    * already cleared the layer, and that late "e" wiped the new stroke's ink instead.
    */
   private static showing: NativeInk | null = null;
+  private static nextId = 1;
+  /** This stroke's id in the shell ("b" and "e"). */
+  private readonly id = NativeInk.nextId++;
+  /** The shell shows a whole drawing ("d") for it, not a stroke. */
+  private scene = false;
   private model: SmoothLiveStroke | null = null;
   private key = '';
   private sent = 0;
@@ -109,8 +119,9 @@ export class NativeInk {
       this.key = key;
       this.sent = 0;
       const [r, g, b, a] = rgba(style.color);
-      send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h)].join(','));
+      send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h), this.id].join(','));
       this.shown = true;
+      this.scene = false;
       NativeInk.showing = this;
     }
     const { final, finalW, rest, restW } = stroke.line(style);
@@ -131,6 +142,7 @@ export class NativeInk {
     this.key = '';
     send!(`d,${f(tf.clip.x)},${f(tf.clip.y)},${f(tf.clip.w)},${f(tf.clip.h)}${commands ? ',' + commands : ''}`);
     this.shown = true;
+    this.scene = true;
     NativeInk.showing = this;
   }
 
@@ -138,7 +150,10 @@ export class NativeInk {
   end(): void {
     if (this.done) return;
     this.done = true;
-    if (this.shown && NativeInk.showing === this && NativeInk.available) send!('e');
+    // A stroke is removed by its id, also when the next one is shown already; a drawing only while
+    // it is the one shown.
+    if (this.shown && !this.scene && NativeInk.available) send!(`e,${this.id}`);
+    else if (this.shown && NativeInk.showing === this && NativeInk.available) send!('e');
     if (NativeInk.showing === this) NativeInk.showing = null;
   }
 

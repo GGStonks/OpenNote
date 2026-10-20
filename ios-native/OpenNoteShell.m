@@ -36,7 +36,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.10";
+static NSString *const kVersion = @"2.3.11";
 /** NSUserDefaults: lift WebKit's "near 60 fps" page rendering (Settings > Diagnostics; applies at the next start). */
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 
@@ -476,7 +476,18 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     CGPoint _raw;
     NSUInteger _generation;
     ONSceneView *_scene;
+    /** The page's id of the stroke shown ("b"'s last field; 0: none or a drawing). */
+    NSInteger _currentId;
+    /** Finished strokes kept on screen while the next is written, until their own "e,id". */
+    NSMutableDictionary<NSNumber *, CALayer *> *_retired;
 }
+
+/**
+ * A finished stroke stays this long after the page says its own copy is drawn ("e"): that copy
+ * reaches the screen a frame or two after the page's frame (it is composited by other processes),
+ * and clearing at once let the stroke blink out and back, at 60 fps above all.
+ */
+static const double kInkHoldSeconds = 0.06;
 
 - (instancetype)initWithFrame:(CGRect)frame {
     if ((self = [super initWithFrame:frame])) {
@@ -489,6 +500,7 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
         _scene = [[ONSceneView alloc] initWithFrame:self.bounds];
         [self addSubview:_scene];
         _chunks = [NSMutableArray array];
+        _retired = [NSMutableDictionary dictionary];
         _settled = [NSMutableData data];
         _tailPts = [NSMutableData data];
     }
@@ -551,6 +563,53 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     _hasRaw = NO;
     _active = NO;
     [_scene clearScene];
+}
+
+/**
+ * The next stroke begins while this one is still shown: it stays on screen, in a layer of its own,
+ * until its own "e,id" (clearing it here, before the page had drawn it, made quick writing blink).
+ */
+- (void)retire {
+    if (!_active || !_currentId || (!_chunks.count && !_tail)) return;
+    CALayer *held = [CALayer layer];
+    held.frame = _clip.frame;
+    held.masksToBounds = YES;
+    held.sublayerTransform = _clip.sublayerTransform;
+    for (CAShapeLayer *l in _chunks) {
+        [l removeFromSuperlayer];
+        [held addSublayer:l];
+    }
+    if (_tail) {
+        [_tail removeFromSuperlayer];
+        [held addSublayer:_tail];
+    }
+    [_lead removeFromSuperlayer];
+    [_chunks removeAllObjects];
+    _tail = _lead = nil;
+    [self.layer insertSublayer:held below:_clip];
+    NSNumber *key = @(_currentId);
+    [_retired[key] removeFromSuperlayer];
+    _retired[key] = held;
+    // Safety net, as touchEnded's.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (self->_retired[key] == held) [self releaseStroke:key.integerValue];
+    });
+}
+
+/** Stroke `sid` is on screen in the page: its ink here goes. */
+- (void)releaseStroke:(NSInteger)sid {
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    CALayer *held = _retired[@(sid)];
+    if (held) {
+        [held removeFromSuperlayer];
+        [_retired removeObjectForKey:@(sid)];
+    } else if (_active && _currentId == sid) {
+        _generation++;
+        [self clear];
+        _currentId = 0;
+    }
+    [CATransaction commit];
 }
 
 - (const ONInkPt *)settled {
@@ -616,8 +675,12 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     if ([kind isEqualToString:@"b"] && f.count >= 10) {
+        // The same id again: the stroke restarts (its style or place changed), nothing to keep.
+        NSInteger sid = f.count > 10 ? f[10].integerValue : 0;
+        if (sid != _currentId) [self retire];
         [self clear];
         _generation++;
+        _currentId = sid;
         if (_color) CGColorRelease(_color);
         _color = CGColorRetain([UIColor colorWithRed:f[1].doubleValue / 255 green:f[2].doubleValue / 255 blue:f[3].doubleValue / 255 alpha:f[4].doubleValue].CGColor);
         _variable = f[5].intValue != 0;
@@ -669,9 +732,16 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
         _active = YES;
         CGRect clip = CGRectMake(f[1].doubleValue, f[2].doubleValue, f[3].doubleValue, f[4].doubleValue);
         [_scene showCommands:f from:5 clip:clip];
+    } else if ([kind isEqualToString:@"e"] && f.count > 1) {
+        NSInteger sid = f[1].integerValue;
+        __weak ONInkView *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kInkHoldSeconds * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [weakSelf releaseStroke:sid];
+        });
     } else if ([kind isEqualToString:@"e"] || [kind isEqualToString:@"c"]) {
         _generation++;
         [self clear];
+        _currentId = 0;
     }
     [CATransaction commit];
 }

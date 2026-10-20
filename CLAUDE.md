@@ -20,7 +20,11 @@ has said it must never be changed again. Tag: `nib-engine-v1`.
 
 In the apps, the stroke being written is also drawn natively above the web view (lower pen latency):
 `src/ink/nativeInk.ts` sends LiveStroke's points to `ios-native/OpenNoteShell.m` (`ONInkView`) and
-`android/.../OpenNoteInkPlugin.java`. Both shells mirror the engine's capsule geometry (`addCapsule`);
+`android/.../OpenNoteInkPlugin.java`. Each stroke has an id: the shells keep a finished stroke on
+screen (also while the next is written) until its own `e,id`, plus ~60 ms, as the page's copy
+reaches the screen after the page's frame (clearing earlier made ink blink at 60 fps).
+`npm run bench:ui -- --native --only pen` checks every stroke is ended by id.
+Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 
 ## Native pinch (iOS)

@@ -73,6 +73,37 @@ public class OpenNoteInkPlugin extends Plugin {
     static class InkOverlay extends View {
         /** Settled ink is split into paths of this many points: a full one is never rebuilt. */
         private static final int CHUNK = 64;
+        /**
+         * A finished stroke stays this long after the page says its own copy is drawn ("e"): that
+         * copy reaches the screen a frame or two after the page's frame, and clearing at once let
+         * the stroke blink out and back.
+         */
+        private static final long HOLD_MS = 60;
+
+        /**
+         * A finished stroke kept on screen while the next is written, until its own "e,id": the next
+         * stroke's "b" used to clear it, before the page had drawn it (quick writing blinked).
+         */
+        private static final class Retired {
+            final int id;
+            final ArrayList<Path> chunks;
+            final ArrayList<Float> widths;
+            final Path tail;
+            final float tailWidth;
+            final int color;
+            final boolean variable;
+            final RectF clip;
+
+            Retired(int id, ArrayList<Path> chunks, ArrayList<Float> widths, Path tail, float tailWidth, int color, boolean variable, RectF clip) {
+                this.id = id; this.chunks = chunks; this.widths = widths; this.tail = tail; this.tailWidth = tailWidth;
+                this.color = color; this.variable = variable; this.clip = clip;
+            }
+        }
+
+        private final ArrayList<Retired> retired = new ArrayList<>();
+        /** The page's id of the stroke being shown ("b"'s last field; 0: none or a drawing). */
+        private int currentId;
+        private int color;
 
         private final WebView webView;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -169,9 +200,13 @@ public class OpenNoteInkPlugin extends Plugin {
             switch (f[0]) {
                 case "b":
                     if (f.length < 10) return;
+                    // The same id again: the stroke restarts (its style or place changed), nothing to keep.
+                    int sid = f.length > 10 ? Integer.parseInt(f[10]) : 0;
+                    if (sid != currentId) retire();
                     clear();
                     generation++;
-                    paint.setColor(Color.argb(Math.round(Float.parseFloat(f[4]) * 255), Math.round(Float.parseFloat(f[1])), Math.round(Float.parseFloat(f[2])), Math.round(Float.parseFloat(f[3]))));
+                    currentId = sid;
+                    color = Color.argb(Math.round(Float.parseFloat(f[4]) * 255), Math.round(Float.parseFloat(f[1])), Math.round(Float.parseFloat(f[2])), Math.round(Float.parseFloat(f[3])));
                     variable = !"0".equals(f[5]);
                     clip.set(Float.parseFloat(f[6]), Float.parseFloat(f[7]), Float.parseFloat(f[6]) + Float.parseFloat(f[8]), Float.parseFloat(f[7]) + Float.parseFloat(f[9]));
                     active = true;
@@ -231,14 +266,52 @@ public class OpenNoteInkPlugin extends Plugin {
                     break;
                 }
                 case "e":
+                    if (f.length > 1) {
+                        int id = Integer.parseInt(f[1]);
+                        postDelayed(() -> release(id), HOLD_MS);
+                        return;
+                    }
+                    generation++;
+                    clear();
+                    currentId = 0;
+                    break;
                 case "c":
                     generation++;
                     clear();
+                    currentId = 0;
                     break;
                 default:
                     return;
             }
             invalidate();
+        }
+
+        /** Keeps the shown stroke on screen (as Retired) until its "e,id", while the next is written. */
+        private void retire() {
+            if (!active || scene != null || currentId == 0 || (chunks.isEmpty() && tail.length == 0)) return;
+            Retired r = new Retired(currentId, new ArrayList<>(chunks), new ArrayList<>(chunkWidths), tailPath, tailWidth, color, variable, new RectF(clip));
+            retired.add(r);
+            // Safety net, as touchEnded's.
+            postDelayed(() -> {
+                if (retired.remove(r)) invalidate();
+            }, 2000);
+        }
+
+        /** Stroke `id` is on screen in the page: its ink here goes. */
+        private void release(int id) {
+            for (int i = 0; i < retired.size(); i++) {
+                if (retired.get(i).id == id) {
+                    retired.remove(i);
+                    invalidate();
+                    return;
+                }
+            }
+            if (active && currentId == id) {
+                generation++;
+                clear();
+                currentId = 0;
+                invalidate();
+            }
         }
 
         /** The stylus's newest raw position (window px), straight from the touch event. */
@@ -264,7 +337,7 @@ public class OpenNoteInkPlugin extends Plugin {
             }, 2000);
         }
 
-        private void drawPath(Canvas canvas, Path path, float width) {
+        private void drawPath(Canvas canvas, Path path, float width, boolean variable) {
             if (variable) {
                 paint.setStyle(Paint.Style.FILL);
             } else {
@@ -409,11 +482,27 @@ public class OpenNoteInkPlugin extends Plugin {
 
         @Override
         protected void onDraw(Canvas canvas) {
-            if (!active) return;
+            if (!active && retired.isEmpty()) return;
             webView.getLocationInWindow(wvLoc);
             getLocationInWindow(myLoc);
             canvas.save();
             canvas.translate(wvLoc[0] - myLoc[0], wvLoc[1] - myLoc[1]);
+            for (Retired r : retired) {
+                int saved = canvas.save();
+                canvas.clipRect(r.clip);
+                paint.setColor(r.color);
+                for (int i = 0; i < r.chunks.size(); i++) {
+                    Path p = r.chunks.get(i);
+                    if (p != null) drawPath(canvas, p, r.widths.get(i), r.variable);
+                }
+                drawPath(canvas, r.tail, r.tailWidth, r.variable);
+                canvas.restoreToCount(saved);
+            }
+            if (!active) {
+                canvas.restore();
+                return;
+            }
+            paint.setColor(color);
             if (scene != null) {
                 drawScene(canvas, scene);
                 canvas.restore();
@@ -422,9 +511,9 @@ public class OpenNoteInkPlugin extends Plugin {
             canvas.clipRect(clip);
             for (int i = 0; i < chunks.size(); i++) {
                 Path p = chunks.get(i);
-                if (p != null) drawPath(canvas, p, chunkWidths.get(i));
+                if (p != null) drawPath(canvas, p, chunkWidths.get(i), variable);
             }
-            drawPath(canvas, tailPath, tailWidth);
+            drawPath(canvas, tailPath, tailWidth, variable);
             int n = tail.length / 3;
             float ex, ey, er;
             if (n > 0) {
@@ -437,7 +526,7 @@ public class OpenNoteInkPlugin extends Plugin {
             }
             if (hasRaw) {
                 float[] seg = { ex, ey, er, rawX, rawY, er };
-                drawPath(canvas, build(seg, 0, 2), er * 2);
+                drawPath(canvas, build(seg, 0, 2), er * 2, variable);
             }
             canvas.restore();
         }
