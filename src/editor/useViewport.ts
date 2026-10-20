@@ -283,6 +283,14 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
      * fired every scroll listener and a layout on every frame of the pinch.
      */
     let pinchFrame: number | null = null;
+    /** The scroll view's background (the desk), as r,g,b, for the shell's snapshot to sit on. */
+    const deskColor = (): [number, number, number] | undefined => {
+      for (let e: HTMLElement | null = el; e; e = e.parentElement) {
+        const m = getComputedStyle(e).backgroundColor.match(/[\d.]+/g);
+        if (m && (m.length < 4 || Number(m[3]) > 0)) return [Number(m[0]), Number(m[1]), Number(m[2])];
+      }
+      return undefined;
+    };
     /** The pinch's scale and centre from the fingers now (on every finger event: the shell's snapshot follows each). */
     const trackPinch = (pz: NonNullable<typeof pinch.current>) => {
       const fitW = el.clientWidth / contentWidthRef.current;
@@ -294,7 +302,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
     const applyPinch = () => {
       pinchFrame = null;
       const pz = pinch.current, outer = outerRef.current;
-      if (!pz || !pz.engaged || !outer || pointers.current.size !== 2) return;
+      if (!pz || !pz.engaged || !outer || pointers.current.size !== 2 || pz.native !== null) return;
       outer.style.transform = `translate(${pz.c.x - pz.c0.x}px, ${pz.c.y - pz.c0.y}px) scale(${pz.k})`;
       for (const fn of tileWork.moved) fn();
     };
@@ -495,14 +503,16 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           pz.c0 = pz.c = c;
           pz.o = { x: el.scrollLeft + c.x - outer.offsetLeft, y: el.scrollTop + c.y - outer.offsetTop };
           releasePull();
+          // The shell's snapshot is the only picture while the fingers move (the page scaled
+          // under it as well, at the page's own slower frame rate, showed beside it out of step).
+          pz.native = nativePinch.begin(gestureRect ?? el.getBoundingClientRect(), c, deskColor());
           outer.style.transition = '';
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           // Scaled as it is while the fingers move: without this the browser drew the paper,
           // text and math again at every new scale, on every frame of the pinch.
-          outer.style.willChange = 'transform';
+          if (pz.native === null) outer.style.willChange = 'transform';
           setTilesPaused(true);
           timePinch();
-          pz.native = nativePinch.begin(gestureRect ?? el.getBoundingClientRect(), c);
         }
         if (pz.engaged) {
           if (pinchTimes) pinchTimes.events++;

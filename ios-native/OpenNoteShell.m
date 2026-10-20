@@ -34,7 +34,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.6";
+static NSString *const kVersion = @"2.3.7";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -686,11 +686,12 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 // Here likewise: when the page starts a pinch, a snapshot of the canvas area (what is on screen,
 // taken by the system compositor without waiting for the page) is laid over it and scaled on
 // every finger event the page forwards; the page draws the new zoom once the fingers lift and then
-// says so ("e"), and the snapshot goes. The page keeps scaling its own content under the snapshot,
-// so whatever the snapshot does not cover (zooming out) is still the note.
+// says so ("e"), and the snapshot goes. The page stays still under it and the snapshot sits on the
+// desk's colour: it is the only picture while the fingers move (the page scaled under it too, at
+// its own slower rate, showed out of step beside it).
 //
-// Messages: b,id,x,y,w,h,c0x,c0y   begin: the canvas area (points) and the point first between the
-//                                  fingers (relative to the area)
+// Messages: b,id,x,y,w,h,c0x,c0y[,r,g,b]   begin: the canvas area (points), the point first between
+//                                  the fingers (relative to the area), the desk's colour
 //           m,id,k,cx,cy           the scale so far and the point between the fingers now
 //           e,id[,k,cx,cy]         the page shows the new zoom: remove (after gliding to the scale
 //                                  and place of the first centre the page really has)
@@ -751,6 +752,9 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
             UIView *clip = [[UIView alloc] initWithFrame:r];
             clip.clipsToBounds = YES;
             clip.userInteractionEnabled = NO;
+            clip.backgroundColor = t.count >= 11
+                ? [UIColor colorWithRed:t[8].doubleValue / 255 green:t[9].doubleValue / 255 blue:t[10].doubleValue / 255 alpha:1]
+                : [UIColor systemGroupedBackgroundColor];
             snap.userInteractionEnabled = NO;
             snap.layer.anchorPoint = CGPointZero;
             snap.bounds = CGRectMake(0, 0, r.size.width, r.size.height);

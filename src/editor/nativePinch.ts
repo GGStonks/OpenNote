@@ -6,9 +6,10 @@
  * the pinch went at half speed. While two fingers zoom, the shell lays a snapshot of the canvas
  * area over the page and scales it on every finger event sent here (the events still arrive at the
  * display's rate), as Notability's scroll view does; once the page has drawn the new zoom, the
- * snapshot goes. useViewport keeps the gesture's logic and its own transform under the snapshot.
+ * snapshot goes. useViewport keeps the gesture's logic; the page stays still under the snapshot,
+ * which sits on the desk's colour (what the snapshot does not cover, zooming out, is desk).
  *
- * Messages (see ONPinchOverlay): b,id,x,y,w,h,c0x,c0y  m,id,k,cx,cy  e,id[,k,cx,cy]
+ * Messages (see ONPinchOverlay): b,id,x,y,w,h,c0x,c0y[,r,g,b]  m,id,k,cx,cy  e,id[,k,cx,cy]
  */
 type Post = (msg: string) => void;
 
@@ -26,12 +27,12 @@ function poster(): Post | null {
 const n = (v: number) => Math.round(v * 100) / 100;
 
 export const nativePinch = {
-  /** Starts a pinch over `area` (viewport px) about `c0` (relative to it); null without the shell. */
-  begin(area: { left: number; top: number; width: number; height: number }, c0: { x: number; y: number }): number | null {
+  /** Starts a pinch over `area` (viewport px) about `c0` (relative to it) on `desk` (r, g, b); null without the shell. */
+  begin(area: { left: number; top: number; width: number; height: number }, c0: { x: number; y: number }, desk?: [number, number, number]): number | null {
     const p = poster();
     if (!p) return null;
     const id = nextId++;
-    p(`b,${id},${n(area.left)},${n(area.top)},${n(area.width)},${n(area.height)},${n(c0.x)},${n(c0.y)}`);
+    p(`b,${id},${n(area.left)},${n(area.top)},${n(area.width)},${n(area.height)},${n(c0.x)},${n(c0.y)}${desk ? ',' + desk.map(Math.round).join(',') : ''}`);
     return id;
   },
   /** The scale so far and the point between the fingers now (relative to the area). */

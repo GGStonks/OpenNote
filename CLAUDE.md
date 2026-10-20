@@ -25,12 +25,14 @@ if the engine's look ever differed from them, the fix belongs in the shells, nev
 
 ## Native pinch (iOS)
 
-WebKit draws the page at 30 fps in Low Power Mode or when the iPad is hot (no setting lifts it;
-native scrolling is unaffected). So while two fingers zoom, the iOS shell shows a snapshot of the
-canvas area and scales it on every finger event (`src/editor/nativePinch.ts` → `ONPinchOverlay` in
-`ios-native/OpenNoteShell.m`), as Notability's scroll view does; the page keeps the gesture logic,
-draws the new zoom when the fingers lift, then tells the shell where the content really landed (the
-snapshot glides there and goes). `npm run bench:ui -- --only nativepinch` (alone) checks the
+On the iPad the page redrew a pinch at only ~30 fps (33 ms frames in crash reports, also with Low
+Power Mode off; WebKit also forces 30 fps in Low Power Mode / under heat), while native scrolling
+is unaffected. So while two fingers zoom, the iOS shell shows a snapshot of the canvas area and
+scales it on every finger event (`src/editor/nativePinch.ts` → `ONPinchOverlay` in
+`ios-native/OpenNoteShell.m`), as Notability's scroll view does. The snapshot, on the desk's colour,
+is the only picture: the page stays still under it (scaling it too showed it out of step at the
+edges). The page keeps the gesture logic, draws the new zoom when the fingers lift, then tells the
+shell where the content really landed (the snapshot glides there and goes). `npm run bench:ui -- --only nativepinch` (alone) checks the
 messages and that the snapshot's last position matches the drawn page.
 
 ## Conversion server access
