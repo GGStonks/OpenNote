@@ -36,7 +36,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.11";
+static NSString *const kVersion = @"2.3.12";
 /** NSUserDefaults: lift WebKit's "near 60 fps" page rendering (Settings > Diagnostics; applies at the next start). */
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 

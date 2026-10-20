@@ -546,6 +546,130 @@ export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], op
 }
 
 // ---------------------------------------------------------------------------------------------
+// GPU geometry (glInk.ts): the same ink as round-ended pieces.
+
+/**
+ * What a stroke paints, for the GPU renderer that draws the ink while two fingers zoom (glInk.ts):
+ * `caps`, its ink as round-ended pieces (ax, ay, ra, bx, by, rb per piece, a circle of radius ra at
+ * a to one of rb at b and the lines tangent to both: the engine's addCapsule); `area`, the polygon
+ * a fill covers (even-odd); `arrow`, the arrowhead. Follows build() and paintInk() exactly: a
+ * fountain line is its capsules, a stroked line round-capped and round-joined pieces of its width
+ * (dashes and dots as pieces of their own), a highlighter 5.5 x its width.
+ */
+export function strokeGlGeometry(s: Stroke, smooth = false): { caps: number[]; area: XY[] | null; arrow: [XY, XY, XY] | null } {
+  const style = styleOf(s);
+  const points = s.points;
+  const closed = !!style.closed && points.length > 2;
+  const fillable = closed && !!style.fill && style.fill !== 'none';
+  const caps: number[] = [];
+  let area: XY[] | null = null;
+  const highlighter = style.tool === 'highlighter';
+  const stroked = (pts: XY[]) => strokeCaps(caps, pts, highlighter ? style.width * 5.5 : strokeWidth(style), highlighter ? 'solid' : style.lineStyle ?? 'solid', style);
+  if (style.shapeKind === 'point') {
+    const p = points[0], r = Math.max(2.5, style.width * 1.7);
+    caps.push(p.x, p.y, r, p.x, p.y, r);
+  } else if (style.shapeKind === 'curve') {
+    const line = flattenBeziers(curveSegments(points, closed));
+    if (closed && line.length > 1 && (line[0].x !== line[line.length - 1].x || line[0].y !== line[line.length - 1].y)) line.push(line[0]);
+    stroked(line);
+    if (fillable) area = line;
+  } else if (!style.isShape) {
+    const g = smooth ? strokeGeometrySmooth(s) : strokeGeometry(s);
+    if (g.widths && !highlighter) chainCaps(caps, g.pts, g.widths.map((w) => w / 2));
+    else stroked(g.pts);
+    if (fillable) area = g.pts;
+  } else {
+    stroked(closed ? [...points, points[0]] : points);
+    if (fillable) area = points;
+  }
+  const arrow = style.arrow && !closed && style.shapeKind !== 'point' && points.length > 1 ? arrowHead(points, style) : null;
+  if (style.fillOnly && !highlighter) caps.length = 0;
+  return { caps, area, arrow };
+}
+
+/**
+ * How far (surface px) a merged piece may stray from the points it replaces, in place and width:
+ * half a screen pixel at the highest zoom (5 x, 2 x pixel ratio).
+ */
+const GL_TOLERANCE = 0.05;
+
+/**
+ * The pieces from point to point, with the points that a straight piece passes within
+ * GL_TOLERANCE of (place and radius) merged: the GPU computes each pixel of a piece, and the dense
+ * points of handwriting under a wide pen made every pixel of ink computed many times over.
+ */
+function chainCaps(out: number[], pts: XY[], radii: number[]) {
+  const n = pts.length;
+  if (!n) return;
+  if (n === 1) {
+    out.push(pts[0].x, pts[0].y, radii[0], pts[0].x, pts[0].y, radii[0]);
+    return;
+  }
+  const keep = new Uint8Array(n);
+  keep[0] = keep[n - 1] = 1;
+  const stack: [number, number][] = [[0, n - 1]];
+  while (stack.length) {
+    const [i, j] = stack.pop()!;
+    const a = pts[i], b = pts[j];
+    const dx = b.x - a.x, dy = b.y - a.y, len2 = dx * dx + dy * dy;
+    let worst = -1, at = -1;
+    for (let k = i + 1; k < j; k++) {
+      const t = len2 > 0 ? Math.max(0, Math.min(1, ((pts[k].x - a.x) * dx + (pts[k].y - a.y) * dy) / len2)) : 0;
+      const ex = a.x + dx * t - pts[k].x, ey = a.y + dy * t - pts[k].y;
+      const er = radii[i] + (radii[j] - radii[i]) * t - radii[k];
+      const e = Math.max(Math.hypot(ex, ey), Math.abs(er));
+      if (e > worst) [worst, at] = [e, k];
+    }
+    if (worst > GL_TOLERANCE) {
+      keep[at] = 1;
+      stack.push([i, at], [at, j]);
+    }
+  }
+  let prev = 0;
+  for (let k = 1; k < n; k++) {
+    if (!keep[k]) continue;
+    out.push(pts[prev].x, pts[prev].y, radii[prev], pts[k].x, pts[k].y, radii[k]);
+    prev = k;
+  }
+}
+
+/** A line `width` wide through pts, round-capped and round-joined, dashed as paintInk dashes it. */
+function strokeCaps(out: number[], pts: XY[], width: number, ls: LineStyle, style: InkStyle) {
+  if (!pts.length) return;
+  let r = width / 2;
+  if (pts.length === 1) {
+    out.push(pts[0].x, pts[0].y, r, pts[0].x + 0.01, pts[0].y, r);
+    return;
+  }
+  if (ls === 'solid') {
+    chainCaps(out, pts, pts.map(() => r));
+    return;
+  }
+  // Dashes: the canvas's pattern ([on, off], shifted by dashOffset) walked along the line.
+  const on = ls === 'dashed' ? style.width * 4 : 0.1;
+  const off = style.width * 3;
+  if (ls === 'dotted') r = (style.width * 1.8) / 2;
+  const period = on + off;
+  let at = (((style.dashOffset ?? 0) % period) + period) % period;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    let d = 0;
+    while (d < len) {
+      const inOn = at < on;
+      const step = Math.min(len - d, (inOn ? on : period) - at);
+      if (inOn) {
+        const t0 = d / len, t1 = (d + step) / len;
+        out.push(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0, r, a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1, r);
+      }
+      d += step;
+      at = (at + step) % period;
+      if (step <= 0) break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
 // SVG export (same geometry as the canvas renderer).
 
 const f2 = (v: number) => v.toFixed(2);

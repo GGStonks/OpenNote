@@ -81,6 +81,15 @@ show the iPad's compositing cost).
   `--only zpinch` (pinching from an already zoomed-in page: frames, and the ink canvases on screen mid-pinch).
   `--latex` adds a LaTeX block (two ink layers, as after a conversion); `--landscape` an iPad
   held sideways (the page fits at about 140%).
+- While two fingers zoom, the ink is drawn by the GPU from its vectors on every frame
+  (`src/ink/glInk.ts`, `src/editor/usePinchInk.ts`; geometry: `strokeGlGeometry` in strokeRenderer.ts,
+  which must follow build()/paintInk()), the page's ink hidden; after the pinch it hands back once
+  the sharp tiles in view are painted. `--only glcompare` compares the GPU and canvas ink for
+  every kind of stroke; keep it close when changing either. Headless Chromium draws WebGL in
+  software (far slower than any GPU): for GPU timings run the bench on this PC's integrated AMD GPU
+  (tablet-class): `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json BENCH_GPU=1
+  BENCH_GPU_ARGS="--use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface"`.
+  `--only glwarm`: how soon after opening the GPU ink is ready (a pinch before that uses the bitmaps).
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)

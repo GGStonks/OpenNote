@@ -25,20 +25,21 @@ export function rotationStyle(deg?: number): React.CSSProperties {
  * pixelated when zoomed further in. This layer's scale on screen is always 1, so it is drawn at
  * exactly the screen's resolution at any zoom (laid out again when the zoom changes).
  */
-/** Most screen pixels of one block's layer (16 MB). */
-const BLOCK_MAX_PIXELS = 4_000_000;
-
 /**
- * The zoom a block of `w` x `h` page px is laid out at: the page's zoom, unless that makes its
- * layer larger than BLOCK_MAX_PIXELS (then it is drawn a little under the screen's resolution and
- * scaled up). Without a limit, a large formula zoomed in, or a block enlarged with its handle
- * while zoomed in (a new layer every frame of the drag), took tens of MB per layer and WebKit's
- * GPU process ran out of memory: a black screen.
+ * Longest side of one block's layer in screen pixels. A layer over about 2000 px a side is tiled by
+ * the browser (WebKit, Chromium): only its tiles near the screen hold pixels, so a block enlarged a
+ * lot or zoomed far in costs memory for what is on screen. Earlier the whole layer was capped at
+ * 4 M px, and a formula enlarged a lot while zoomed in was drawn under the screen's resolution and
+ * scaled up: pixelated. (The black screens that cap was meant for came from a measuring loop while
+ * resizing, fixed in 2.3.4.) This limit only keeps the layout sane at absurd sizes.
  */
+const BLOCK_MAX_SIDE = 32_000;
+
+/** The zoom a block of `w` x `h` page px is laid out at: the page's zoom, within BLOCK_MAX_SIDE. */
 function layoutZoom(zoom: number, w: number, h: number): number {
   const z = zoom > 0 ? zoom : 1;
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  return Math.min(z, Math.sqrt(BLOCK_MAX_PIXELS / Math.max(1, w * h)) / dpr);
+  return Math.min(z, BLOCK_MAX_SIDE / Math.max(1, w, h) / dpr);
 }
 
 const ScreenScaled: React.FC<{ zoom: number; width?: number; height?: number; children: React.ReactNode }> = ({ zoom, width, height, children }) => (

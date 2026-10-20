@@ -519,6 +519,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           // Scaled as it is while the fingers move: without this the browser drew the paper,
           // text and math again at every new scale, on every frame of the pinch.
           if (pz.native === null) outer.style.willChange = 'transform';
+          tileWork.shell = pz.native !== null;
           setTilesPaused(true);
           timePinch();
         }

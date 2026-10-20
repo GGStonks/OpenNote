@@ -1,0 +1,577 @@
+import { Stroke } from '../types';
+import { XY } from './spline';
+import { strokeGlGeometry } from './strokeRenderer';
+
+/**
+ * The ink drawn by the GPU, from its vectors, on every frame of a pinch (usePinchInk.ts): sharp at
+ * every zoom while the fingers move, where the page's canvases and tiles were bitmaps stretched
+ * until the fingers lifted. The geometry is prepared once (a buffer of round-ended pieces, see
+ * strokeGlGeometry) and every frame only changes one transform.
+ *
+ * A piece (two circles and the lines tangent to both) is a quad whose fragments measure their
+ * distance to its outline: the edge is antialiased at the screen's resolution, whatever the zoom.
+ * Ink is drawn as coverage into a texture first, keeping the most of its pieces at each pixel, then
+ * laid on in its colour: blended one over another, the soft edges of a stroke's many overlapping
+ * pieces darkened each other and the line looked bolder than the canvas's. Opaque strokes of one
+ * colour in a row go together (a note in one ink is one pass); a see-through stroke (highlighter,
+ * opacity) goes alone, as the canvas draws it (overlapping strokes darken, a stroke does not). Fills
+ * (even-odd) go through the stencil: solid, hatched, or holes that clear what is under them.
+ * Order as drawStrokes: highlighters, fills, ink.
+ */
+
+export interface GlTransform {
+  /** Canvas px per surface px. */
+  scale: number;
+  /** Canvas px of the surface's origin. */
+  ox: number;
+  oy: number;
+}
+
+type RGBA = [number, number, number, number];
+interface Box {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+}
+type Op =
+  | { k: 'see'; first: number; count: number; rgba: RGBA; box: Box }
+  | { k: 'fill'; first: number; count: number; mode: 'solid' | 'hole' | 'hatch'; rgba: RGBA; box: Box; hatchFirst: number; hatchCount: number }
+  | { k: 'tri'; first: number; count: number; rgba: RGBA };
+
+/** Floats per piece: ax, ay, ra, bx, by, rb, r, g, b, a. */
+const CAP = 10;
+const HATCH_SPACING = 8;
+
+const VS_CAPS = `#version 300 es
+layout(location = 0) in vec2 corner;
+layout(location = 1) in vec3 a;
+layout(location = 2) in vec3 b;
+layout(location = 3) in vec4 col;
+uniform vec3 u_tf;
+uniform vec2 u_size;
+out vec2 v_p;
+flat out vec3 v_a;
+flat out vec3 v_b;
+flat out vec4 v_col;
+void main() {
+  // A quad along the piece, just around it (an axis-aligned box drew up to twice the pixels).
+  float R = max(a.z, b.z) + 1.5 / u_tf.x;
+  vec2 ab = b.xy - a.xy;
+  float L = length(ab);
+  vec2 u = L > 1e-6 ? ab / L : vec2(1.0, 0.0);
+  v_p = a.xy + u * mix(-R, L + R, corner.x) + vec2(-u.y, u.x) * mix(-R, R, corner.y);
+  v_a = a;
+  v_b = b;
+  v_col = col;
+  vec2 d = v_p * u_tf.x + u_tf.yz;
+  gl_Position = vec4(d.x / u_size.x * 2.0 - 1.0, 1.0 - d.y / u_size.y * 2.0, 0.0, 1.0);
+}`;
+
+const FS_CAPS = `#version 300 es
+precision highp float;
+in vec2 v_p;
+flat in vec3 v_a;
+flat in vec3 v_b;
+flat in vec4 v_col;
+uniform vec3 u_tf;
+uniform int u_cov;
+out vec4 o;
+float cro(vec2 x, vec2 y) { return x.x * y.y - x.y * y.x; }
+// Distance to the outline of two circles and the lines tangent to both (negative inside).
+float sdPiece(vec2 p, vec2 pa, vec2 pb, float ra, float rb) {
+  vec2 ba = pb - pa;
+  float h = dot(ba, ba);
+  float dr = ra - rb;
+  if (h <= dr * dr + 1e-9) return ra >= rb ? length(p - pa) - ra : length(p - pb) - rb;
+  p -= pa;
+  vec2 q = vec2(dot(p, vec2(ba.y, -ba.x)), dot(p, ba)) / h;
+  q.x = abs(q.x);
+  vec2 c = vec2(sqrt(h - dr * dr), dr);
+  float k = cro(c, q);
+  float m = dot(c, q);
+  float n = dot(q, q);
+  if (k < 0.0) return sqrt(h * n) - ra;
+  if (k > c.x) return sqrt(h * (n + 1.0 - 2.0 * q.y)) - rb;
+  return m - ra;
+}
+void main() {
+  float d = sdPiece(v_p, v_a.xy, v_b.xy, v_a.z, v_b.z);
+  float cov = clamp(0.5 - d * u_tf.x, 0.0, 1.0);
+  if (cov <= 0.0) discard;
+  o = u_cov == 1 ? vec4(cov, 0.0, 0.0, cov) : vec4(v_col.rgb * v_col.a * cov, v_col.a * cov);
+}`;
+
+const VS_FLAT = `#version 300 es
+layout(location = 0) in vec2 pos;
+uniform vec3 u_tf;
+uniform vec2 u_size;
+void main() {
+  vec2 d = pos * u_tf.x + u_tf.yz;
+  gl_Position = vec4(d.x / u_size.x * 2.0 - 1.0, 1.0 - d.y / u_size.y * 2.0, 0.0, 1.0);
+}`;
+
+const FS_FLAT = `#version 300 es
+precision highp float;
+uniform vec4 u_col;
+out vec4 o;
+void main() { o = u_col; }`;
+
+const VS_FULL = `#version 300 es
+layout(location = 0) in vec2 pos;
+void main() { gl_Position = vec4(pos, 0.0, 1.0); }`;
+
+const FS_COMPOSE = `#version 300 es
+precision highp float;
+uniform sampler2D u_tex;
+uniform vec4 u_col;
+out vec4 o;
+void main() { o = u_col * texelFetch(u_tex, ivec2(gl_FragCoord.xy), 0).r; }`;
+
+let rgbaCtx: CanvasRenderingContext2D | null = null;
+const parsed = new Map<string, RGBA>();
+/** Any CSS colour as r, g, b, a (0-1), times `alpha`. */
+function rgba(color: string, alpha: number): RGBA {
+  let c = parsed.get(color);
+  if (!c) {
+    rgbaCtx ??= document.createElement('canvas').getContext('2d');
+    if (!rgbaCtx) return [0, 0, 0, alpha];
+    rgbaCtx.fillStyle = '#000';
+    rgbaCtx.fillStyle = color;
+    const v = String(rgbaCtx.fillStyle);
+    const m = v.startsWith('#') ? [parseInt(v.slice(1, 3), 16), parseInt(v.slice(3, 5), 16), parseInt(v.slice(5, 7), 16), 1] : (v.match(/[\d.]+/g)?.map(Number) ?? [0, 0, 0, 1]);
+    parsed.set(color, (c = [(m[0] ?? 0) / 255, (m[1] ?? 0) / 255, (m[2] ?? 0) / 255, m[3] ?? 1]));
+  }
+  return [c[0], c[1], c[2], c[3] * alpha];
+}
+
+function boxOfCaps(caps: number[], from: number, to: number): Box {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (let i = from; i < to; i += 6) {
+    const r = Math.max(caps[i + 2], caps[i + 5]);
+    x0 = Math.min(x0, caps[i] - r, caps[i + 3] - r);
+    y0 = Math.min(y0, caps[i + 1] - r, caps[i + 4] - r);
+    x1 = Math.max(x1, caps[i] + r, caps[i + 3] + r);
+    y1 = Math.max(y1, caps[i + 1] + r, caps[i + 4] + r);
+  }
+  return { x0, y0, x1, y1 };
+}
+
+function boxOfPoints(pts: XY[]): Box {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const p of pts) {
+    x0 = Math.min(x0, p.x);
+    y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x);
+    y1 = Math.max(y1, p.y);
+  }
+  return { x0, y0, x1, y1 };
+}
+
+type Geo = ReturnType<typeof strokeGlGeometry>;
+/** Each stroke's GPU geometry, as the engine's line and as the smooth one (strokes are immutable). */
+const geoCache = [new WeakMap<Stroke, Geo>(), new WeakMap<Stroke, Geo>()];
+
+function geometry(s: Stroke, smooth: boolean): Geo {
+  const cache = geoCache[smooth ? 1 : 0];
+  let g = cache.get(s);
+  if (!g) cache.set(s, (g = strokeGlGeometry(s, smooth)));
+  return g;
+}
+
+/**
+ * Prepares the geometry of `strokes` for at most `budgetMs` (ahead of a pinch, a slice at a time);
+ * true once all of it is ready.
+ */
+export function prepareGlGeometry(strokes: Stroke[], smooth: boolean, budgetMs: number): boolean {
+  const cache = geoCache[smooth ? 1 : 0];
+  const until = performance.now() + budgetMs;
+  for (const s of strokes) {
+    if (!s.points.length || cache.has(s)) continue;
+    if (budgetMs <= 0 || performance.now() > until) return false;
+    cache.set(s, strokeGlGeometry(s, smooth));
+  }
+  return true;
+}
+
+/** The strokes as GPU work: the buffers' contents and the draw order. */
+function prepare(strokes: Stroke[], smooth: boolean): { caps: Float32Array; flat: Float32Array; ops: Op[] } {
+  // Sizes first, then the typed arrays filled in place (a long note has ~100 000 pieces).
+  let nCaps = 0, nFlat = 0;
+  const hatch = new Map<Stroke, number[]>();
+  for (const s of strokes) {
+    if (!s.points.length) continue;
+    const g = geometry(s, smooth);
+    nCaps += g.caps.length / 6;
+    if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && g.area && g.area.length >= 3) {
+      nFlat += g.area.length;
+      if (s.fill !== 'solid' && s.fill !== 'hole') {
+        const box = boxOfPoints(g.area), h = box.y1 - box.y0, lines: number[] = [];
+        for (let x = box.x0 - h; x < box.x1 + h; x += HATCH_SPACING) {
+          if (s.fill === 'northEast' || s.fill === 'crosshatch') lines.push(x, box.y1, 0.55, x + h, box.y0, 0.55);
+          if (s.fill === 'northWest' || s.fill === 'crosshatch') lines.push(x, box.y0, 0.55, x + h, box.y1, 0.55);
+        }
+        hatch.set(s, lines);
+        nCaps += lines.length / 6;
+      }
+    }
+    if (g.arrow) nFlat += 3;
+  }
+  const caps = new Float32Array(nCaps * CAP);
+  const flat = new Float32Array(nFlat * 2);
+  let ci = 0, fi = 0;
+  const ops: Op[] = [];
+  const pushCaps = (c: number[], col: RGBA) => {
+    const first = ci;
+    for (let i = 0; i < c.length; i += 6, ci++) {
+      const o = ci * CAP;
+      caps[o] = c[i];
+      caps[o + 1] = c[i + 1];
+      caps[o + 2] = c[i + 2];
+      caps[o + 3] = c[i + 3];
+      caps[o + 4] = c[i + 4];
+      caps[o + 5] = c[i + 5];
+      caps[o + 6] = col[0];
+      caps[o + 7] = col[1];
+      caps[o + 8] = col[2];
+      caps[o + 9] = col[3];
+    }
+    return { first, count: ci - first };
+  };
+  const pushFlat = (pts: XY[]) => {
+    const first = fi;
+    for (const p of pts) {
+      flat[fi * 2] = p.x;
+      flat[fi * 2 + 1] = p.y;
+      fi++;
+    }
+    return first;
+  };
+  // Highlighters: each laid on as one see-through shape.
+  for (const s of strokes) {
+    if (s.tool !== 'highlighter' || !s.points.length) continue;
+    const { caps: c } = geometry(s, smooth);
+    if (!c.length) continue;
+    const { first, count } = pushCaps(c, [0, 0, 0, 1]);
+    ops.push({ k: 'see', first, count, rgba: rgba(s.color, 0.35), box: boxOfCaps(c, 0, c.length) });
+  }
+  // Fills.
+  for (const s of strokes) {
+    if (s.tool === 'highlighter' || !s.fill || s.fill === 'none' || !s.points.length) continue;
+    const { area } = geometry(s, smooth);
+    if (!area || area.length < 3) continue;
+    const first = pushFlat(area);
+    const box = boxOfPoints(area);
+    const mode = s.fill === 'solid' ? 'solid' : s.fill === 'hole' ? 'hole' : 'hatch';
+    let hatchFirst = 0, hatchCount = 0;
+    if (mode === 'hatch') ({ first: hatchFirst, count: hatchCount } = pushCaps(hatch.get(s) ?? [], rgba(s.color, 0.5)));
+    ops.push({ k: 'fill', first, count: area.length, mode, rgba: mode === 'solid' ? rgba(s.color, 0.22) : rgba(s.color, 1), box, hatchFirst, hatchCount });
+  }
+  // Ink, in order: opaque strokes of one colour in a row together, see-through ones each alone.
+  let run: Extract<Op, { k: 'see' }> | null = null;
+  const closeRun = () => {
+    if (run && run.count) ops.push(run);
+    run = null;
+  };
+  const same = (a: RGBA, b: RGBA) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
+  for (const s of strokes) {
+    if (s.tool === 'highlighter' || !s.points.length) continue;
+    const { caps: c, arrow } = geometry(s, smooth);
+    const col = rgba(s.color, s.opacity ?? 1);
+    if (c.length) {
+      const opaque = col[3] >= 0.999;
+      if (!opaque || !run || !same(run.rgba, col)) closeRun();
+      const at = pushCaps(c, [0, 0, 0, 1]);
+      const box = boxOfCaps(c, 0, c.length);
+      if (!run) run = { k: 'see', first: at.first, count: 0, rgba: col, box };
+      run.count += at.count;
+      run.box = { x0: Math.min(run.box.x0, box.x0), y0: Math.min(run.box.y0, box.y0), x1: Math.max(run.box.x1, box.x1), y1: Math.max(run.box.y1, box.y1) };
+      if (!opaque) closeRun();
+    }
+    if (arrow) {
+      closeRun();
+      ops.push({ k: 'tri', first: pushFlat(arrow), count: 3, rgba: col });
+    }
+  }
+  closeRun();
+  return { caps, flat, ops };
+}
+
+function compile(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram | null {
+  const prog = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]] as const) {
+    const sh = gl.createShader(type);
+    if (!sh || !prog) return null;
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      console.warn('glInk shader:', gl.getShaderInfoLog(sh));
+      return null;
+    }
+    gl.attachShader(prog, sh);
+  }
+  gl.linkProgram(prog!);
+  return gl.getProgramParameter(prog!, gl.LINK_STATUS) ? prog : null;
+}
+
+export class GlInk {
+  readonly canvas: HTMLCanvasElement;
+  private gl: WebGL2RenderingContext;
+  private caps: WebGLProgram;
+  private flatProg: WebGLProgram;
+  private compose: WebGLProgram;
+  private capVao: WebGLVertexArrayObject;
+  private capBuf: WebGLBuffer;
+  private flatVao: WebGLVertexArrayObject;
+  private flatBuf: WebGLBuffer;
+  private fullVao: WebGLVertexArrayObject;
+  private quadBuf: WebGLBuffer;
+  private ops: Op[] = [];
+  private flatCount = 0;
+  private fbo: WebGLFramebuffer | null = null;
+  private tex: WebGLTexture | null = null;
+  private texSize = { w: 0, h: 0 };
+  private built: { strokes: Stroke[]; smooth: boolean } | null = null;
+  /** The browser took the GPU context away (the app in the background, GPU memory): make a new one. */
+  lost = false;
+
+  /** null where WebGL 2 is not available. */
+  static create(): GlInk | null {
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 1;
+    const gl = canvas.getContext('webgl2', { alpha: true, premultipliedAlpha: true, antialias: false, stencil: true, depth: false, preserveDrawingBuffer: false });
+    if (!gl) return null;
+    const caps = compile(gl, VS_CAPS, FS_CAPS), flat = compile(gl, VS_FLAT, FS_FLAT), compose = compile(gl, VS_FULL, FS_COMPOSE);
+    if (!caps || !flat || !compose) return null;
+    return new GlInk(canvas, gl, caps, flat, compose);
+  }
+
+  private constructor(canvas: HTMLCanvasElement, gl: WebGL2RenderingContext, caps: WebGLProgram, flat: WebGLProgram, compose: WebGLProgram) {
+    this.canvas = canvas;
+    this.gl = gl;
+    canvas.addEventListener('webglcontextlost', () => (this.lost = true));
+    this.caps = caps;
+    this.flatProg = flat;
+    this.compose = compose;
+    // The quad's corners, shared by the pieces (per instance) and the full-canvas pass.
+    this.quadBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+    this.capVao = gl.createVertexArray()!;
+    gl.bindVertexArray(this.capVao);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    this.capBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
+    for (const loc of [1, 2, 3]) {
+      gl.enableVertexAttribArray(loc);
+      gl.vertexAttribDivisor(loc, 1);
+    }
+    this.flatVao = gl.createVertexArray()!;
+    gl.bindVertexArray(this.flatVao);
+    this.flatBuf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuf);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    this.fullVao = gl.createVertexArray()!;
+    gl.bindVertexArray(this.fullVao);
+    const full = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, full);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+  }
+
+  /** Pieces in the buffer (for the benchmark). */
+  pieces = 0;
+
+  /** Prepares `strokes` (again only when they or the line variant changed). */
+  setStrokes(strokes: Stroke[], smooth: boolean) {
+    if (this.built && this.built.strokes === strokes && this.built.smooth === smooth) return;
+    this.built = { strokes, smooth };
+    const { caps, flat, ops } = prepare(strokes, smooth);
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, caps.length ? caps : new Float32Array(CAP), gl.STATIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuf);
+    // A box's corners follow the polygons (the fills' cover pass).
+    const withBox = new Float32Array(flat.length + 8);
+    withBox.set(flat);
+    gl.bufferData(gl.ARRAY_BUFFER, withBox.length ? withBox : new Float32Array(8), gl.DYNAMIC_DRAW);
+    this.flatCount = flat.length / 2;
+    this.ops = ops;
+    this.pieces = caps.length / CAP;
+  }
+
+  /** The canvas's size in its pixels (0 x 0 frees its memory between pinches). */
+  resize(w: number, h: number) {
+    w = Math.max(1, Math.round(w));
+    h = Math.max(1, Math.round(h));
+    if (this.canvas.width !== w || this.canvas.height !== h) {
+      this.canvas.width = w;
+      this.canvas.height = h;
+    }
+    if (w === 1 && h === 1) this.dropCoverage();
+  }
+
+  private dropCoverage() {
+    const gl = this.gl;
+    if (this.fbo) gl.deleteFramebuffer(this.fbo);
+    if (this.tex) gl.deleteTexture(this.tex);
+    this.fbo = this.tex = null;
+    this.texSize = { w: 0, h: 0 };
+  }
+
+  private coverage(): boolean {
+    const gl = this.gl, w = this.canvas.width, h = this.canvas.height;
+    if (this.fbo && this.texSize.w === w && this.texSize.h === h) return true;
+    this.dropCoverage();
+    this.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R8, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    this.fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.tex, 0);
+    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!ok) this.dropCoverage();
+    this.texSize = { w, h };
+    return ok;
+  }
+
+  private pointCaps(first: number) {
+    const gl = this.gl, stride = CAP * 4, base = first * stride;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
+    gl.vertexAttribPointer(1, 3, gl.FLOAT, false, stride, base);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, stride, base + 12);
+    gl.vertexAttribPointer(3, 4, gl.FLOAT, false, stride, base + 24);
+  }
+
+  /** The box in canvas px (y up, for the scissor), clipped to the canvas; null when off it. */
+  private scissor(b: Box, tf: GlTransform): [number, number, number, number] | null {
+    const w = this.canvas.width, h = this.canvas.height;
+    const x0 = Math.max(0, Math.floor(b.x0 * tf.scale + tf.ox) - 2), x1 = Math.min(w, Math.ceil(b.x1 * tf.scale + tf.ox) + 2);
+    const y0 = Math.max(0, Math.floor(b.y0 * tf.scale + tf.oy) - 2), y1 = Math.min(h, Math.ceil(b.y1 * tf.scale + tf.oy) + 2);
+    if (x1 <= x0 || y1 <= y0) return null;
+    return [x0, h - y1, x1 - x0, y1 - y0];
+  }
+
+  private uniforms(prog: WebGLProgram, tf: GlTransform) {
+    const gl = this.gl;
+    gl.useProgram(prog);
+    gl.uniform3f(gl.getUniformLocation(prog, 'u_tf'), tf.scale, tf.ox, tf.oy);
+    gl.uniform2f(gl.getUniformLocation(prog, 'u_size'), this.canvas.width, this.canvas.height);
+  }
+
+  /**
+   * Every kind of draw once, on a 1 x 1 canvas: the GPU driver compiles each pipeline (blending,
+   * stencil) the first time it is used, which held up the first frame of the first pinch.
+   */
+  warm() {
+    const ops = this.ops, built = this.built;
+    if (!built) return;
+    const piece = { first: 0, count: Math.min(1, this.pieces) };
+    const box = { x0: -1, y0: -1, x1: 2, y1: 2 };
+    this.ops = [
+      { k: 'see', ...piece, rgba: [0, 0, 0, 1], box },
+      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'solid', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
+      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'hole', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: 0 },
+      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'hatch', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
+      { k: 'tri', first: 0, count: Math.min(3, this.flatCount), rgba: [0, 0, 0, 1] },
+    ];
+    this.resize(1, 1);
+    this.draw({ scale: 1, ox: 0, oy: 0 });
+    this.gl.finish();
+    this.ops = ops;
+  }
+
+  draw(tf: GlTransform) {
+    const gl = this.gl;
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.STENCIL_TEST);
+    gl.colorMask(true, true, true, true);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clearStencil(0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
+    gl.enable(gl.BLEND);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    for (const op of this.ops) {
+      if (op.k === 'see') {
+        const sc = this.scissor(op.box, tf);
+        if (!sc || !this.coverage()) continue;
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(...sc);
+        // Coverage: the most of the stroke's pieces at each pixel.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.blendEquation(gl.MAX);
+        this.uniforms(this.caps, tf);
+        gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 1);
+        gl.bindVertexArray(this.capVao);
+        this.pointCaps(op.first);
+        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, op.count);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.blendEquation(gl.FUNC_ADD);
+        // Laid on in its colour.
+        gl.useProgram(this.compose);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.tex);
+        gl.uniform1i(gl.getUniformLocation(this.compose, 'u_tex'), 0);
+        const [r, g, b, a] = op.rgba;
+        gl.uniform4f(gl.getUniformLocation(this.compose, 'u_col'), r * a, g * a, b * a, a);
+        gl.bindVertexArray(this.fullVao);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        gl.disable(gl.SCISSOR_TEST);
+      } else if (op.k === 'fill') {
+        const sc = this.scissor(op.box, tf);
+        if (!sc) continue;
+        gl.enable(gl.SCISSOR_TEST);
+        gl.scissor(...sc);
+        gl.enable(gl.STENCIL_TEST);
+        // Even-odd: each triangle of a fan from the first corner flips the stencil.
+        this.uniforms(this.flatProg, tf);
+        gl.bindVertexArray(this.flatVao);
+        gl.colorMask(false, false, false, false);
+        gl.stencilFunc(gl.ALWAYS, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.KEEP, gl.INVERT);
+        gl.drawArrays(gl.TRIANGLE_FAN, op.first, op.count);
+        gl.colorMask(true, true, true, true);
+        gl.stencilFunc(gl.NOTEQUAL, 0, 0xff);
+        gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+        if (op.mode === 'hatch') {
+          this.uniforms(this.caps, tf);
+          gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 0);
+          gl.bindVertexArray(this.capVao);
+          this.pointCaps(op.hatchFirst);
+          gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, op.hatchCount);
+        } else {
+          const b = op.box;
+          gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuf);
+          gl.bufferSubData(gl.ARRAY_BUFFER, this.flatCount * 8, new Float32Array([b.x0, b.y0, b.x1, b.y0, b.x0, b.y1, b.x1, b.y1]));
+          const [r, g, bl, a] = op.rgba;
+          if (op.mode === 'hole') {
+            gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
+            gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), 0, 0, 0, 1);
+          } else gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), r * a, g * a, bl * a, a);
+          gl.drawArrays(gl.TRIANGLE_STRIP, this.flatCount, 4);
+          gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        }
+        gl.clear(gl.STENCIL_BUFFER_BIT);
+        gl.disable(gl.STENCIL_TEST);
+        gl.disable(gl.SCISSOR_TEST);
+      } else {
+        this.uniforms(this.flatProg, tf);
+        const [r, g, b, a] = op.rgba;
+        gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), r * a, g * a, b * a, a);
+        gl.bindVertexArray(this.flatVao);
+        gl.drawArrays(gl.TRIANGLES, op.first, op.count);
+      }
+    }
+    gl.bindVertexArray(null);
+  }
+}

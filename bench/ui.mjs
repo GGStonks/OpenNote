@@ -104,7 +104,9 @@ const cleanup = () => server.kill();
 process.on('exit', cleanup);
 await new Promise((r) => setTimeout(r, 1500));
 
-const browser = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist'] });
+// BENCH_GPU=1: WebGL on this PC's GPU (ANGLE over Vulkan) instead of the software renderer.
+const gpuArgs = process.env.BENCH_GPU ? (process.env.BENCH_GPU_ARGS ?? '--use-angle=vulkan --enable-features=Vulkan').split(' ') : [];
+const browser = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist', ...gpuArgs] });
 // --dpr: the screen's density (2 = iPad; Android tablets are often 2.6-3.5).
 // --landscape: an iPad held sideways (the page fits the width at about 140%).
 const LANDSCAPE = process.argv.includes('--landscape');
@@ -114,6 +116,7 @@ const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, heig
 if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
+if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
 const url = `http://localhost:${PORT}/`;
 await page.goto(url);
 await page.evaluate(async (note) => {
@@ -382,8 +385,80 @@ if (ONLY.has('zpinch')) {
     }
   });
   console.log(`zpinch   canvases on screen: resting ${before}, zooming in ${midIn}, zooming out ${midOut}`);
+  console.log(`zpinch   GPU ink pieces: ${await page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 'none')}`);
   const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
   for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);
+}
+// --only glinfo: which WebGL renderer the benchmark's browser has.
+if (ONLY.has('glinfo')) {
+  console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));
+}
+// --only glwarm: how long after opening the note the GPU ink of a pinch is ready (usePinchInk's
+// preparation, at the benchmark's CPU slowdown).
+if (ONLY.has('glwarm')) {
+  await reopen();
+  const t0 = Date.now();
+  await page.waitForFunction(() => (window.__opennoteGlInk?.shared()?.pieces ?? 0) > 0, null, { timeout: 120000, polling: 100 }).catch(() => null);
+  console.log(`glwarm   ready ${((Date.now() - t0) / 1000 + 2.5).toFixed(1)} s after opening (${CPU}x slower CPU), ${await page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 'none')} pieces`);
+}
+// Not in the default run: --only glcompare, every kind of stroke drawn by the GPU renderer of a
+// pinch (glInk.ts) and by the canvas, at three scales: how far apart they are (mean difference of
+// the composited pixels, 0-255, and the share of pixels off by more than 64).
+if (ONLY.has('glcompare')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.waitForFunction(() => window.__opennoteGlInk);
+  const out = await page.evaluate(() => {
+    const { GlInk, drawStrokes } = window.__opennoteGlInk;
+    const pts = (f, n = 60) => Array.from({ length: n }, (_, i) => { const t = i / (n - 1); const [x, y, p] = f(t); return { x, y, pressure: p ?? 0.5, t: i * 8 }; });
+    const wave = (y0, amp = 12) => (t) => [20 + t * 160, y0 + Math.sin(t * 9) * amp, 0.25 + 0.75 * Math.sin(t * 3.1) ** 2];
+    let n = 0;
+    const S = (o) => ({ id: 's' + n++, tool: 'pen', color: '#1f2937', width: 2, opacity: 1, penStyle: 'fountain', ...o });
+    const rect = (x, y, w, h) => [{ x, y, pressure: 0.5 }, { x: x + w, y, pressure: 0.5 }, { x: x + w, y: y + h, pressure: 0.5 }, { x, y: y + h, pressure: 0.5 }];
+    const cases = {
+      fountain: [S({ points: pts(wave(40)), modeled: 'proportional' })],
+      fountainRaw: [S({ points: pts(wave(40)) })],
+      ballpoint: [S({ penStyle: 'ballpoint', points: pts(wave(40)) })],
+      highlighter: [S({ tool: 'highlighter', color: '#facc15', width: 3, penStyle: 'ballpoint', points: pts(wave(40, 4)) })],
+      translucent: [S({ penStyle: 'ballpoint', width: 4, opacity: 0.5, points: pts((t) => [40 + 120 * Math.cos(t * 6.28 * 1.5), 40 + 25 * Math.sin(t * 6.28 * 1.5)], 80) })],
+      dashed: [S({ isShape: true, lineStyle: 'dashed', points: pts((t) => [20 + t * 160, 20 + t * 40], 2) })],
+      dotted: [S({ isShape: true, lineStyle: 'dotted', points: pts((t) => [20 + t * 160, 60 - t * 40], 2) })],
+      arrow: [S({ isShape: true, arrow: true, width: 3, points: pts((t) => [20 + t * 150, 40], 2) })],
+      solidFill: [S({ isShape: true, closed: true, fill: 'solid', color: '#2563eb', points: rect(30, 10, 120, 60) })],
+      hatch: [S({ isShape: true, closed: true, fill: 'crosshatch', color: '#dc2626', points: rect(30, 10, 120, 60) })],
+      hole: [S({ tool: 'highlighter', color: '#22c55e', width: 6, penStyle: 'ballpoint', points: pts((t) => [10 + t * 180, 40], 2) }), S({ isShape: true, closed: true, fill: 'hole', points: rect(60, 15, 60, 50) })],
+      curve: [S({ isShape: true, shapeKind: 'curve', closed: true, fill: 'solid', color: '#7c3aed', points: [{ x: 30, y: 40, pressure: 0.5 }, { x: 100, y: 10, pressure: 0.5 }, { x: 170, y: 40, pressure: 0.5 }, { x: 100, y: 70, pressure: 0.5 }] })],
+      point: [S({ isShape: true, shapeKind: 'point', width: 3, points: [{ x: 100, y: 40, pressure: 0.5 }] })],
+    };
+    const gl = GlInk.create();
+    if (!gl) return { error: 'no webgl2' };
+    const res = {};
+    for (const [name, strokes] of Object.entries(cases)) {
+      res[name] = [];
+      for (const k of [1.5, 4, 10]) {
+        const W = Math.round(200 * k), H = Math.round(80 * k);
+        const c2 = document.createElement('canvas'); c2.width = W; c2.height = H;
+        const ctx = c2.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawStrokes(ctx, strokes, {});
+        gl.setStrokes(strokes, false); gl.resize(W, H); gl.draw({ scale: k, ox: 0, oy: 0 });
+        const c3 = document.createElement('canvas'); c3.width = W; c3.height = H;
+        const x3 = c3.getContext('2d'); x3.drawImage(gl.canvas, 0, 0);
+        const a = ctx.getImageData(0, 0, W, H).data, b = x3.getImageData(0, 0, W, H).data;
+        let sum = 0, big = 0, inked = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          // Composited over white.
+          let d = 0;
+          for (let ch = 0; ch < 3; ch++) {
+            const va = 255 - (a[i + 3] / 255) * (255 - a[i + ch]), vb = 255 - (b[i + 3] / 255) * (255 - b[i + ch]);
+            d = Math.max(d, Math.abs(va - vb));
+          }
+          if (a[i + 3] > 0 || b[i + 3] > 0) { inked++; sum += d; if (d > 64) big++; }
+        }
+        res[name].push(`x${k}: ${(sum / Math.max(1, inked)).toFixed(1)} / ${((100 * big) / Math.max(1, inked)).toFixed(1)}%`);
+      }
+    }
+    return res;
+  });
+  for (const [k, v] of Object.entries(out)) console.log(`glcompare ${k.padEnd(12)} ${Array.isArray(v) ? v.join('   ') : v}`);
 }
 // Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
 if (ONLY.has('probe')) {

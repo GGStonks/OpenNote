@@ -31,6 +31,7 @@ import {
 import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
+import { usePinchInk } from '../editor/usePinchInk';
 
 export interface ToolSettings {
   tool: ToolType;
@@ -460,6 +461,8 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
 
   /** The previous zoom's tiles, kept on screen (scaled) until the new zoom's visible tiles are painted. */
   const retiring = useRef<Map<string, SharpTile> | null>(null);
+  /** This layer in tileWork.painting while tiles in view are still to be painted. */
+  const paintToken = useRef({}).current;
   const dropTiles = (map: Map<string, SharpTile>) => {
     for (const t of map.values()) {
       t.canvas.width = t.canvas.height = 0;
@@ -557,11 +560,16 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       for (let i = want.i0; i <= want.i1; i++)
         if (tiles.current.get(`${i},${j}`)?.painted !== list && hasInk(i, j)) todo.push({ i, j, d: dist(i, j), margin: i < seen.i0 || i > seen.i1 || j < seen.j0 || j > seen.j1 });
     todo.sort((a, b) => Number(a.margin) - Number(b.margin) || a.d - b.d).splice(SHARP_MAX_TILES);
+    if (todo.length && !todo[0].margin) tileWork.painting.add(paintToken);
+    else tileWork.painting.delete(paintToken);
     const holder = holderRef.current;
     let rested = false;
     const step = () => {
       frame.current = null;
-      if (!holder || latest.current.strokes !== list || Math.abs(scale.current - r) > 1e-9) return;
+      if (!holder || latest.current.strokes !== list || Math.abs(scale.current - r) > 1e-9) {
+        tileWork.painting.delete(paintToken);
+        return;
+      }
       if (retiring.current && (!todo.length || todo[0].margin)) {
         // This zoom's visible tiles are all painted: shown, and the old ones gone, in one frame.
         dropTiles(retiring.current);
@@ -597,6 +605,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         }
         paintTile(tile, list);
       }
+      if (!todo.length || todo[0].margin) tileWork.painting.delete(paintToken);
       if (retiring.current && (!todo.length || todo[0].margin)) {
         // This zoom's visible tiles are all painted: shown, and the old ones gone, in one frame.
         dropTiles(retiring.current);
@@ -617,6 +626,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       if (marginTimer.current !== null) clearTimeout(marginTimer.current);
       tileWork.resume.delete(paintNeeded);
+      tileWork.painting.delete(paintToken);
       tilesHidden.current = true;
       hidePages(false);
       // WebKit's canvas memory is tight: give the pixels back now.
@@ -710,7 +720,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     if (frame.current !== null || marginTimer.current !== null || added.length || area) paintNeeded();
   }, [strokes]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return <div ref={holderRef} className="absolute left-0 top-0 pointer-events-none" style={{ width: W, height: 0 }} />;
+  return <div ref={holderRef} data-ink-layer className="absolute left-0 top-0 pointer-events-none" style={{ width: W, height: 0 }} />;
 });
 
 /** What a tile's canvas shows: its strokes, at what resolution, and whether as the smooth line. */
@@ -878,7 +888,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     });
   }, [mine, ratio, smooth, alive, top, W, H]);
   return (
-    <div ref={holderRef} data-ink-key={inkKey} className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
+    <div ref={holderRef} data-ink-key={inkKey} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
       {alive && mine.length > 0 && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
     </div>
   );
@@ -1009,6 +1019,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
+  // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
+  usePinchInk(containerRef, scrollRoot ?? null, shownStrokes, PAGE_W, smoothAt(zoom), !printMode);
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn sharp over the view (SharpInk) where page canvases hit their budget. */
@@ -2133,17 +2145,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     c.height = Math.max(1, Math.round(h * r));
     const ctx = c.getContext('2d');
     if (!ctx) return;
-    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
+    // Glow only: just the shadow, the strokes drawn outside the canvas (`away` to the left, their
+    // shadow cast back by as much). A copy of the strokes in the glow's colour showed its hard,
+    // lower-resolution edge around the page's sharp ink when zoomed in; a blur stretches smoothly.
+    const away = glowOnly ? w + FLOAT_PAD : 0;
+    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD + away) * r, -(b.y - FLOAT_PAD) * r);
     const ids = new Set(sel.strokeIds);
     // Idle: highlighters stay on the page only (drawing them twice would darken them).
     const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id) && (!glowOnly || s.tool !== 'highlighter'));
     ctx.save();
     ctx.shadowColor = 'rgba(37, 99, 235, 0.9)';
     ctx.shadowBlur = 7 * r;
-    // Glow only: the strokes themselves in the glow's colour (the page's ink covers them, and
-    // where this lower-resolution copy shows at their edge it is just more glow).
-    drawStrokes(ctx, strokes, glowOnly ? { color: 'rgba(37, 99, 235, 0.9)' } : {});
+    ctx.shadowOffsetX = away * r;
+    drawStrokes(ctx, strokes, glowOnly ? { color: 'rgba(37, 99, 235, 1)' } : {});
     ctx.restore();
+    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
     if (!glowOnly) drawStrokes(ctx, strokes);
   };
   // Resizing: drawn again from the vectors each time the scale has moved by 8%, so it stays sharp.
