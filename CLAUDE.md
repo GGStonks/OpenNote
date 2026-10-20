@@ -27,6 +27,15 @@ reaches the screen after the page's frame (clearing earlier made ink blink at 60
 Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 
+## Frame rate
+
+Never assume 60 fps. `src/services/frameRate.ts` measures the rate the page actually gets (the
+highest run of frames seen, after start-up and on each return to the screen); work done a slice per
+frame (tile painting, GPU ink preparation) is sized from `frameRate.frameMs`, and animations use
+elapsed time. iOS: the shell lifts WebKit's "near 60 fps" cap where the display is faster than
+60 Hz (`OpenNotePageRate` "auto"); if the page then measures under 50 fps (outside Low Power Mode)
+it is recorded and the next start keeps the cap. Settings > Diagnostics > Page frame rate overrides.
+
 ## Native pinch (iOS)
 
 On a 120 Hz iPad Pro every page drew at 30 fps, even an idle one (Settings > Diagnostics >

@@ -8,7 +8,8 @@ import { frameProbe } from '../services/frameProbe';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
-import { platformKind, setPage120, shareFile } from '../platform';
+import { PageRate, platformKind, setPageRate, shareFile } from '../platform';
+import { frameRate } from '../services/frameRate';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -29,7 +30,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [recMsg, setRecMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   const [crash, setCrash] = useState(crashLog.lastCrash);
   const probe = isOpen ? frameProbe.last : null;
-  const [page120, setPage120State] = useState(!!window.OpenNoteNative?.page120);
+  const [pageRate, setPageRateState] = useState<PageRate>(window.OpenNoteNative?.pageRate ?? 'auto');
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -265,17 +266,31 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               {crash && <button onClick={() => crashLog.clear()} className="text-red-500">Clear</button>}
             </div>
             {crashMsg && <p className={`text-xs mt-2 break-all ${crashMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{crashMsg.msg}</p>}
-            {platformKind() === 'ios' && (
-              <Toggle
-                checked={page120}
-                onChange={(v) => {
-                  setPage120State(v);
-                  void setPage120(v).catch(() => undefined);
-                }}
-                title="Unlocked page frame rate (experimental)"
-                sub={`Lifts WebKit's 60 fps page rendering, as before 2.3.9. On a 120 Hz iPad it made the page draw at 30 fps. Applies after restarting the app (now ${window.OpenNoteNative?.fullFrameRate ? 'on' : 'off'}).`}
-              />
-            )}
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm text-gray-800 dark:text-gray-200">Page frame rate</div>
+                <p className="text-[11px] text-gray-400">
+                  {`Now ${frameRate.measured ? Math.round(frameRate.hz) + ' fps' : 'not measured yet'}${window.OpenNoteNative?.maxFps ? `, display ${window.OpenNoteNative.maxFps} Hz` : ''}.`}
+                  {platformKind() === 'ios' &&
+                    ` Automatic uses the display's rate where it is faster than 60 Hz and the page keeps up${window.OpenNoteNative?.unlockFailed ? ' (it did not here: 60 Hz)' : ''}. Applies after restarting the app.`}
+                </p>
+              </div>
+              {platformKind() === 'ios' && (
+                <select
+                  value={pageRate}
+                  onChange={(e) => {
+                    const v = e.target.value as PageRate;
+                    setPageRateState(v);
+                    void setPageRate(v).catch(() => undefined);
+                  }}
+                  className="text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-ui-raised px-2 py-1"
+                >
+                  <option value="auto">Automatic</option>
+                  <option value="60">60 Hz</option>
+                  <option value="max">Display maximum</option>
+                </select>
+              )}
+            </div>
             <div className="mt-3 text-sm text-gray-800 dark:text-gray-200">Frame-rate test</div>
             <p className="text-[11px] text-gray-400">
               Measures how fast this device draws the open note, WebGL and canvas drawing (7 s; open a note first). The result goes into the crash report.

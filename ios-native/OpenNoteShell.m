@@ -21,9 +21,10 @@
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
 //  - Full refresh rate: while the screen is touched, a display link asks for the display's maximum
-//    rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones). Lifting WebKit's "near 60 fps"
-//    page rendering is now off by default (kPage120Key): on a 120 Hz iPad Pro it left every page
-//    drawing at 30 fps, even a page doing nothing (Settings > Diagnostics > Frame-rate test).
+//    rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones). WebKit's "near 60 fps" page
+//    rendering is lifted only where the display is faster than 60 Hz (kPageRateKey "auto"): lifted
+//    on a 60 Hz iPad it left every page drawing at 30 fps. If the page then measures under 50 fps
+//    (src/services/frameRate.ts), it says so (kPageUnlockFailedKey) and the next start keeps the cap.
 //  - Pinch zoom at the display's rate (ONPinchOverlay): WebKit draws the page at 30 fps in Low Power
 //    Mode or when the iPad is hot, so while two fingers zoom the shell shows a snapshot of the
 //    canvas and scales it itself (src/editor/nativePinch.ts).
@@ -36,8 +37,12 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.12";
-/** NSUserDefaults: lift WebKit's "near 60 fps" page rendering (Settings > Diagnostics; applies at the next start). */
+static NSString *const kVersion = @"2.3.13";
+/** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
+static NSString *const kPageRateKey = @"OpenNotePageRate";
+/** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
+static NSString *const kPageUnlockFailedKey = @"OpenNotePageUnlockFailed";
+/** Before 2.3.13: the "unlocked page frame rate" switch (on = "max"). */
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 
 @interface ONFrameRateBooster : NSObject
@@ -906,13 +911,17 @@ static const double kInkHoldSeconds = 0.06;
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
-    BOOL page120 = [[NSUserDefaults standardUserDefaults] boolForKey:kPage120Key];
-    BOOL fullFrameRate = page120 && ONEnableFullFrameRate(config.preferences);
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    NSString *pageRate = [defaults stringForKey:kPageRateKey];
+    if (!pageRate) pageRate = [defaults boolForKey:kPage120Key] ? @"max" : @"auto";
+    BOOL unlockFailed = [defaults boolForKey:kPageUnlockFailedKey];
+    BOOL unlock = [pageRate isEqualToString:@"max"] || ([pageRate isEqualToString:@"auto"] && ONMaxFramesPerSecond() > 60 && !unlockFailed);
+    BOOL fullFrameRate = unlock && ONEnableFullFrameRate(config.preferences);
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, page120: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
-                                                     kVersion, fullFrameRate ? @"true" : @"false", page120 ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
+                                                     kVersion, fullFrameRate ? @"true" : @"false", pageRate, unlockFailed ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
                                                      info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
@@ -1017,8 +1026,16 @@ static const double kInkHoldSeconds = 0.06;
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"print"]) {
         [self handlePrint:msg reply:replyHandler];
-    } else if ([cmd isEqualToString:@"setPage120"]) {
-        [[NSUserDefaults standardUserDefaults] setBool:[msg[@"on"] boolValue] forKey:kPage120Key];
+    } else if ([cmd isEqualToString:@"setPageRate"]) {
+        NSString *rate = [msg[@"rate"] description];
+        if ([@[ @"auto", @"60", @"max" ] containsObject:rate]) {
+            [[NSUserDefaults standardUserDefaults] setObject:rate forKey:kPageRateKey];
+            // Choosing again also tries the display's rate again.
+            [[NSUserDefaults standardUserDefaults] removeObjectForKey:kPageUnlockFailedKey];
+        }
+        replyHandler(@{}, nil);
+    } else if ([cmd isEqualToString:@"pageUnlockFailed"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:kPageUnlockFailedKey];
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"haptic"]) {
         NSString *style = msg[@"style"];

@@ -3,6 +3,7 @@ import { Stroke } from '../types';
 import { GlInk, prepareGlGeometry } from '../ink/glInk';
 import { drawStrokes } from '../ink/strokeRenderer';
 import { tileWork } from './tileWork';
+import { frameRate } from '../services/frameRate';
 
 /**
  * The ink while two fingers zoom, drawn by the GPU from its vectors on every frame (glInk.ts), as
@@ -22,7 +23,7 @@ import { tileWork } from './tileWork';
 const HANDOFF_MAX_MS = 1500;
 /** The note still this long: the next pinch's geometry is prepared, PREPARE_SLICE_MS at a time. */
 const PREPARE_AFTER_MS = 800;
-const PREPARE_SLICE_MS = 6;
+const PREPARE_SLICE_MS = () => frameRate.frameMs * 0.36;
 
 let shared: GlInk | null | undefined;
 /** Renderers whose pipelines have been through GlInk.warm. */
@@ -52,7 +53,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     let timer: ReturnType<typeof setTimeout> | null = setTimeout(function slice() {
       timer = null;
       if (tileWork.paused) return;
-      if (!prepareGlGeometry(strokes, smooth, PREPARE_SLICE_MS)) {
+      if (!prepareGlGeometry(strokes, smooth, PREPARE_SLICE_MS())) {
         timer = setTimeout(slice, 4);
         return;
       }

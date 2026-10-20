@@ -15,6 +15,7 @@ import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
 import { crashLog } from './services/crashLog';
+import { startFrameRate } from './services/frameRate';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
 /** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
@@ -75,7 +76,10 @@ export const App: React.FC = () => {
   }, []);
 
   useEffect(() => applyTheme(settings.theme), [settings.theme]);
-  useEffect(() => crashLog.start(), []);
+  useEffect(() => {
+    crashLog.start();
+    startFrameRate();
+  }, []);
   useEffect(() => crashLog.set('note', openNoteId ? 'open' : 'library'), [openNoteId]);
 
   const upsertLocal = useCallback((n: NoteDocument) => {

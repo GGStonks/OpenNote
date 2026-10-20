@@ -385,6 +385,7 @@ if (ONLY.has('zpinch')) {
     }
   });
   console.log(`zpinch   canvases on screen: resting ${before}, zooming in ${midIn}, zooming out ${midOut}`);
+  console.log(`zpinch   frame rate measured: ${await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'frame-rate').map((c) => c.hz).join(', ') || 'none')} Hz`);
   console.log(`zpinch   GPU ink pieces: ${await page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 'none')}`);
   const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
   for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);

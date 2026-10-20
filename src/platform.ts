@@ -23,10 +23,12 @@ declare global {
     OpenNoteNative?: {
       platform: 'ios';
       version: string;
-      /** WebKit's "near 60 fps" page rendering is lifted in this run (page120 was set at start-up). */
+      /** WebKit's "near 60 fps" page rendering is lifted in this run (decided at start-up from pageRate). */
       fullFrameRate?: boolean;
-      /** The setting for that (Settings > Diagnostics, setPage120): it applies at the next start. */
-      page120?: boolean;
+      /** The page frame rate setting (Settings > Diagnostics, setPageRate; applies at the next start). */
+      pageRate?: PageRate;
+      /** Lifting the cap left the page under 50 fps on this device ("auto" keeps the cap since). */
+      unlockFailed?: boolean;
       /** The display's maximum refresh rate (Hz). */
       maxFps?: number;
       /** Low Power Mode, and the thermal state (0 nominal … 3 critical), kept current by the shell. */
@@ -265,13 +267,22 @@ export async function shareFile(filename: string, blob: Blob): Promise<void> {
 }
 
 /**
- * iOS shell: lift WebKit's "near 60 fps" page rendering from the next start. Off by default: on a
- * 120 Hz iPad Pro it left the page drawing at 30 fps (Settings > Diagnostics > Frame-rate test).
+ * iOS shell: the page's frame rate from the next start. 'auto': the display's (WebKit's "near 60 fps"
+ * cap lifted) where it is faster than 60 Hz and that worked; '60': the cap; 'max': always lifted.
  */
-export async function setPage120(on: boolean): Promise<void> {
+export type PageRate = 'auto' | '60' | 'max';
+
+export async function setPageRate(rate: PageRate): Promise<void> {
   if (platformKind() !== 'ios') return;
-  await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setPage120', on });
-  window.OpenNoteNative!.page120 = on;
+  await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setPageRate', rate });
+  window.OpenNoteNative!.pageRate = rate;
+}
+
+/** iOS shell: the page measured under 50 fps with the cap lifted; 'auto' keeps it from the next start. */
+export async function pageUnlockFailed(): Promise<void> {
+  if (platformKind() !== 'ios') return;
+  await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'pageUnlockFailed' });
+  window.OpenNoteNative!.unlockFailed = true;
 }
 
 /**

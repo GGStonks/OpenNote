@@ -32,6 +32,7 @@ import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
 import { usePinchInk } from '../editor/usePinchInk';
+import { frameRate } from '../services/frameRate';
 
 export interface ToolSettings {
   tool: ToolType;
@@ -218,8 +219,8 @@ function strokesSvg(strokes: Stroke[], paperOf: (s: Stroke) => string): string {
   return [...strokes.filter((s) => s.tool === 'highlighter'), ...strokes.filter((s) => s.tool !== 'highlighter')].map(one).join('');
 }
 
-/** Painting a tile that is not on screen yet is spread over frames, this many ms per frame. */
-const TILE_SLICE_MS = 6;
+/** Painting a tile that is not on screen yet is spread over frames, this many ms per frame (a third of one, frameRate.ts). */
+const TILE_SLICE_MS = () => frameRate.frameMs * 0.36;
 /** A change covering more than this share of a tile repaints the whole tile. */
 const TILE_FULL_REPAINT = 0.5;
 
@@ -298,7 +299,7 @@ function paintSliced(ctx: CanvasRenderingContext2D, job: Stroke[], opts: { smoot
       frame = requestAnimationFrame(step);
       return;
     }
-    const until = performance.now() + TILE_SLICE_MS;
+    const until = performance.now() + TILE_SLICE_MS();
     while (pass < passes.length) {
       for (; i < job.length; i++) {
         if (performance.now() > until) {
@@ -331,14 +332,14 @@ const SHARP_MAX_TILES = 48;
 const SHARP_MARGIN = 0.25;
 /** The view has rested this long (ms) after scrolling: the tiles it needs are painted. */
 const SHARP_IDLE_MS = 120;
-/** Painting tiles takes at most this long (ms) per frame; the rest follow on the next frames. */
-const SHARP_FRAME_MS = 8;
+/** Painting tiles takes at most this long (ms) per frame (half of one at this device's rate); the rest follow on the next frames. */
+const SHARP_FRAME_MS = () => frameRate.frameMs / 2;
 /**
  * The same for the tiles in view after a zoom: they are painted hidden, the previous zoom's tiles
  * staying on screen, and shown all at once when done (no softer picture first). All in one frame
- * froze a slower tablet for hundreds of ms at the end of every pinch.
+ * froze a slower tablet for hundreds of ms at the end of every pinch. One frame's time each frame.
  */
-const SHARP_VISIBLE_FRAME_MS = 16;
+const SHARP_VISIBLE_FRAME_MS = () => frameRate.frameMs;
 /** The margin's tiles (only needed for the next scroll) wait until the view has rested this long (ms). */
 const SHARP_MARGIN_DELAY_MS = 300;
 
@@ -585,7 +586,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         return;
       }
       // The visible tiles first (SHARP_VISIBLE_FRAME_MS a frame), the margin's after a rest.
-      const until = performance.now() + (todo[0]?.margin ? SHARP_FRAME_MS : SHARP_VISIBLE_FRAME_MS);
+      const until = performance.now() + (todo[0]?.margin ? SHARP_FRAME_MS() : SHARP_VISIBLE_FRAME_MS());
       while (todo.length && (rested || !todo[0].margin) && performance.now() < until) {
         const { i, j } = todo.shift()!;
         const key = `${i},${j}`;
