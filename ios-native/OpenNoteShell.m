@@ -22,6 +22,9 @@
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
 //  - Full refresh rate: WebKit's 60 fps cap is lifted and, while the screen is touched, a display link
 //    asks for the display's maximum rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones).
+//  - Pinch zoom at the display's rate (ONPinchOverlay): WebKit draws the page at 30 fps in Low Power
+//    Mode or when the iPad is hot, so while two fingers zoom the shell shows a snapshot of the
+//    canvas and scales it itself (src/editor/nativePinch.ts).
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
 #import <UIKit/UIKit.h>
@@ -31,7 +34,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.5";
+static NSString *const kVersion = @"2.3.6";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -673,11 +676,144 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 
 #pragma mark - View controller
 
+#pragma mark - Native pinch
+
+// Two fingers zooming the note (src/editor/nativePinch.ts). WebKit renders the page at 30 fps in
+// Low Power Mode and under thermal pressure (ThrottlingReason::LowPowerMode / ThermalMitigation,
+// read by the web content process itself: no setting turns it off), while native scrolling stays
+// at the display's rate; the pinch, drawn by the page, went at half speed. Notability zooms with a
+// UIScrollView: the rendered page is scaled while the fingers move, drawn again once they lift.
+// Here likewise: when the page starts a pinch, a snapshot of the canvas area (what is on screen,
+// taken by the system compositor without waiting for the page) is laid over it and scaled on
+// every finger event the page forwards; the page draws the new zoom once the fingers lift and then
+// says so ("e"), and the snapshot goes. The page keeps scaling its own content under the snapshot,
+// so whatever the snapshot does not cover (zooming out) is still the note.
+//
+// Messages: b,id,x,y,w,h,c0x,c0y   begin: the canvas area (points) and the point first between the
+//                                  fingers (relative to the area)
+//           m,id,k,cx,cy           the scale so far and the point between the fingers now
+//           e,id[,k,cx,cy]         the page shows the new zoom: remove (after gliding to the scale
+//                                  and place of the first centre the page really has)
+@interface ONPinchOverlay : NSObject
+- (instancetype)initWithHost:(UIView *)host;
+- (void)handleMessage:(NSString *)msg;
+@end
+
+@implementation ONPinchOverlay {
+    __weak UIView *_host;
+    UIView *_clip;
+    UIView *_snap;
+    CGAffineTransform _base;
+    CGPoint _c0;
+    NSInteger _id;
+    NSTimer *_watchdog;
+}
+
+- (instancetype)initWithHost:(UIView *)host {
+    if ((self = [super init])) _host = host;
+    return self;
+}
+
+- (void)remove {
+    [_watchdog invalidate];
+    _watchdog = nil;
+    [_clip removeFromSuperview];
+    _clip = nil;
+    _snap = nil;
+}
+
+// A pinch whose end never arrives (the page reloaded, an error): the page under the snapshot shows
+// the same thing, so removing it is safe.
+- (void)arm {
+    [_watchdog invalidate];
+    __weak ONPinchOverlay *weakSelf = self;
+    _watchdog = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:NO block:^(NSTimer *t) { [weakSelf remove]; }];
+}
+
+- (void)handleMessage:(NSString *)msg {
+    NSArray<NSString *> *t = [msg componentsSeparatedByString:@","];
+    if (t.count < 2) return;
+    NSString *kind = t[0];
+    NSInteger pid = t[1].integerValue;
+    UIView *host = _host;
+    if ([kind isEqualToString:@"b"] && t.count >= 8 && host) {
+        CGRect r = CGRectMake(t[2].doubleValue, t[3].doubleValue, t[4].doubleValue, t[5].doubleValue);
+        _c0 = CGPointMake(t[6].doubleValue, t[7].doubleValue);
+        _id = pid;
+        if (_clip && CGRectEqualToRect(_clip.frame, r)) {
+            // A pinch right after the last, before the page drew it: the snapshot is still shown
+            // (a new one would contain it); this pinch continues from where it is.
+            _base = _snap.transform;
+        } else {
+            [self remove];
+            UIView *snap = [host resizableSnapshotViewFromRect:r afterScreenUpdates:NO withCapInsets:UIEdgeInsetsZero];
+            if (!snap) return;
+            UIView *clip = [[UIView alloc] initWithFrame:r];
+            clip.clipsToBounds = YES;
+            clip.userInteractionEnabled = NO;
+            snap.userInteractionEnabled = NO;
+            snap.layer.anchorPoint = CGPointZero;
+            snap.bounds = CGRectMake(0, 0, r.size.width, r.size.height);
+            snap.layer.position = CGPointZero;
+            [clip addSubview:snap];
+            [host addSubview:clip];
+            _clip = clip;
+            _snap = snap;
+            _base = CGAffineTransformIdentity;
+        }
+        [self arm];
+    } else if ([kind isEqualToString:@"m"] && t.count >= 5 && pid == _id && _snap) {
+        CGFloat k = t[2].doubleValue, cx = t[3].doubleValue, cy = t[4].doubleValue;
+        // The point first between the fingers goes where they are now, scaled k about it.
+        CGAffineTransform pinch = CGAffineTransformMake(k, 0, 0, k, cx - k * _c0.x, cy - k * _c0.y);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        _snap.transform = CGAffineTransformConcat(_base, pinch);
+        [CATransaction commit];
+        [self arm];
+    } else if ([kind isEqualToString:@"e"] && pid == _id && _snap) {
+        // The page's new frame is committed; it reaches the screen with the next display frame.
+        __weak ONPinchOverlay *weakSelf = self;
+        void (^removeSoon)(void) = ^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.034 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                ONPinchOverlay *me = weakSelf;
+                if (me && me->_id == pid) [me remove];
+            });
+        };
+        if (t.count < 5) {
+            removeSoon();
+            return;
+        }
+        // Where the page really put the first centre (the scroll range can stop it short of the
+        // fingers): the snapshot glides there first, like a scroll view settling after a zoom.
+        CGFloat k = t[2].doubleValue, cx = t[3].doubleValue, cy = t[4].doubleValue;
+        CGAffineTransform settled = CGAffineTransformConcat(_base, CGAffineTransformMake(k, 0, 0, k, cx - k * _c0.x, cy - k * _c0.y));
+        CGAffineTransform now = _snap.transform;
+        if (fabs(settled.tx - now.tx) < 0.5 && fabs(settled.ty - now.ty) < 0.5 && fabs(settled.a - now.a) < 0.001 * now.a) {
+            removeSoon();
+            return;
+        }
+        [self arm];
+        UIView *snap = _snap;
+        [UIView animateWithDuration:0.18 delay:0 options:UIViewAnimationOptionCurveEaseOut | UIViewAnimationOptionBeginFromCurrentState
+                         animations:^{ snap.transform = settled; }
+                         completion:^(BOOL finished) {
+                             ONPinchOverlay *me = weakSelf;
+                             if (me && me->_id == pid) [me remove];
+                         }];
+    }
+}
+
+@end
+
+#pragma mark - View controller
+
 @interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) ONInkView *inkView;
+@property (nonatomic, strong) ONPinchOverlay *pinchOverlay;
 /** In-flight bridge HTTP requests by the page's request id (main thread only), for httpCancel. */
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionTask *> *httpTasks;
 @end
@@ -696,12 +832,15 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     BOOL fullFrameRate = ONEnableFullFrameRate(config.preferences);
 
     WKUserContentController *ucc = config.userContentController;
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, maxFps: %ld };",
-                                                     kVersion, fullFrameRate ? @"true" : @"false", (long)ONMaxFramesPerSecond()];
+    NSProcessInfo *info = [NSProcessInfo processInfo];
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
+                                                     kVersion, fullFrameRate ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
+                                                     info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
     // Native live ink (fire and forget: no reply, so no round trip).
     [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennoteInk"];
+    [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennotePinch"];
 
     self.webView = [[WKWebView alloc] initWithFrame:CGRectZero configuration:config];
     self.webView.UIDelegate = self;
@@ -719,6 +858,7 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     self.view = self.webView;
     self.inkView = [[ONInkView alloc] initWithFrame:self.webView.bounds];
     [self.webView addSubview:self.inkView];
+    self.pinchOverlay = [[ONPinchOverlay alloc] initWithHost:self.webView];
 
     UIPencilInteraction *pencil = [[UIPencilInteraction alloc] init];
     pencil.delegate = self;
@@ -734,6 +874,8 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(powerChanged) name:NSProcessInfoPowerStateDidChangeNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(powerChanged) name:NSProcessInfoThermalStateDidChangeNotification object:nil];
     NSURL *url = [NSURL URLWithString:[NSString stringWithFormat:@"%@://%@/index.html", kScheme, kHost]];
     [self.webView loadRequest:[NSURLRequest requestWithURL:url]];
 }
@@ -759,7 +901,19 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 #pragma mark Bridge
 
 - (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)message {
-    if ([message.name isEqualToString:@"opennoteInk"] && [message.body isKindOfClass:[NSString class]]) [self.inkView handleMessage:message.body];
+    if (![message.body isKindOfClass:[NSString class]]) return;
+    if ([message.name isEqualToString:@"opennoteInk"]) [self.inkView handleMessage:message.body];
+    else if ([message.name isEqualToString:@"opennotePinch"]) [self.pinchOverlay handleMessage:message.body];
+}
+
+// Low Power Mode and heat (they make WebKit draw the page at 30 fps), for the crash report.
+- (void)powerChanged {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSProcessInfo *info = [NSProcessInfo processInfo];
+        NSString *js = [NSString stringWithFormat:@"window.OpenNoteNative&&(OpenNoteNative.lowPower=%@,OpenNoteNative.thermal=%ld)",
+                                                  info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
+        [self.webView evaluateJavaScript:js completionHandler:nil];
+    });
 }
 
 - (void)userContentController:(WKUserContentController *)ucc
@@ -966,6 +1120,7 @@ static void ONRemoveScribble(UIView *view) {
 
 - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
     ONRemoveScribble(webView);
+    [self powerChanged];
 }
 
 - (void)pencilInteractionDidTap:(UIPencilInteraction *)interaction {

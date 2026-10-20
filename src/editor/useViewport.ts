@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { GestureBus } from './gestures';
 import { setTilesPaused, tileWork } from './tileWork';
-import { crashLog } from '../services/crashLog';
+import { crashLog, powerState } from '../services/crashLog';
+import { nativePinch } from './nativePinch';
 
 interface Options {
   contentWidth: number;
@@ -71,7 +72,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
   const tap = useRef<{ start: number; fingers: number; moved: boolean; origins: Map<number, { x: number; y: number }> } | null>(null);
   /** Two fingers down: o = the point between them in the zoomed content's px when the pinch started. */
   /** o: the content point first between the fingers (outer px); c0 / c: the fingers' centre then / now (scroll view px). */
-  const pinch = useRef<{ d0: number; z0: number; o: { x: number; y: number }; c0: { x: number; y: number }; c: { x: number; y: number }; engaged: boolean; k: number } | null>(null);
+  /** native: the shell's pinch (nativePinch.ts) while it shows this one. */
+  const pinch = useRef<{ d0: number; z0: number; o: { x: number; y: number }; c0: { x: number; y: number }; c: { x: number; y: number }; engaged: boolean; k: number; native: number | null } | null>(null);
   /** Finger travel past the end of the note. */
   const pullRaw = useRef(0);
   const cb = useRef({ onFingerTap, onPull, onPullCommit });
@@ -271,7 +273,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
 
     const beginPinch = () => {
       const d = spread();
-      pinch.current = d > 0 ? { d0: d, z0: zoomRef.current, o: { x: 0, y: 0 }, c0: { x: 0, y: 0 }, c: { x: 0, y: 0 }, engaged: false, k: 1 } : null;
+      pinch.current = d > 0 ? { d0: d, z0: zoomRef.current, o: { x: 0, y: 0 }, c0: { x: 0, y: 0 }, c: { x: 0, y: 0 }, engaged: false, k: 1, native: null } : null;
     };
 
     /**
@@ -281,14 +283,18 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
      * fired every scroll listener and a layout on every frame of the pinch.
      */
     let pinchFrame: number | null = null;
-    const applyPinch = () => {
-      pinchFrame = null;
-      const pz = pinch.current, outer = outerRef.current;
-      if (!pz || !pz.engaged || !outer || pointers.current.size !== 2) return;
+    /** The pinch's scale and centre from the fingers now (on every finger event: the shell's snapshot follows each). */
+    const trackPinch = (pz: NonNullable<typeof pinch.current>) => {
       const fitW = el.clientWidth / contentWidthRef.current;
       const z = Math.max(Math.min(MIN_ZOOM, fitW), Math.min(MAX_ZOOM, pz.z0 * (spread() / pz.d0)));
       pz.k = z / pz.z0;
       pz.c = centroid();
+      if (pz.native !== null) nativePinch.move(pz.native, pz.k, pz.c);
+    };
+    const applyPinch = () => {
+      pinchFrame = null;
+      const pz = pinch.current, outer = outerRef.current;
+      if (!pz || !pz.engaged || !outer || pointers.current.size !== 2) return;
       outer.style.transform = `translate(${pz.c.x - pz.c0.x}px, ${pz.c.y - pz.c0.y}px) scale(${pz.k})`;
       for (const fn of tileWork.moved) fn();
     };
@@ -306,7 +312,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       };
       pt.loop = requestAnimationFrame(tick);
     };
-    const logPinch = (z0: number, z: number) => {
+    const logPinch = (z0: number, z: number, native: boolean) => {
       const pt = pinchTimes;
       pinchTimes = null;
       if (!pt) return;
@@ -326,6 +332,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           redrawMs: Math.round(performance.now() - lifted),
           z0: Math.round(z0 * 100) / 100,
           z: Math.round(z * 100) / 100,
+          native,
+          ...powerState(),
         });
       }));
     };
@@ -340,6 +348,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       // The fingers lifted: the content is drawn at its new scale again (see onMove).
       if (outerRef.current) outerRef.current.style.willChange = '';
       const outer = outerRef.current;
+      if (p?.native != null && !(p.engaged && outer)) nativePinch.end(p.native);
       if (!p || !p.engaged || !outer) return;
       // No momentum after a pinch (the fingers' last movement was zooming, not a fling).
       jsScrolled = false;
@@ -348,7 +357,20 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       const a = { cx: p.o.x / p.z0, cy: p.o.y / p.z0, sx: p.c.x, sy: p.c.y };
       setFitMode(null);
       setView(z, a);
-      logPinch(p.z0, z);
+      logPinch(p.z0, z, p.native !== null);
+      // The shell's snapshot stays until the new zoom is on screen (the second frame from now). It
+      // is told where the point first between the fingers really is: the scroll range can keep
+      // the page from going where the fingers took it (zoomed out to the page's width), and the
+      // snapshot then glides there rather than jumping.
+      const id = p.native;
+      if (id !== null) {
+        requestAnimationFrame(() => {
+          const o = outerRef.current, r = gestureRect ?? el.getBoundingClientRect();
+          const b = o?.getBoundingClientRect(), z1 = zoomRef.current;
+          const at = b ? { k: z1 / p.z0, x: b.left - r.left + (p.o.x / p.z0) * z1, y: b.top - r.top + (p.o.y / p.z0) * z1 } : undefined;
+          requestAnimationFrame(() => nativePinch.end(id, at));
+        });
+      }
     };
 
     /** When the Pencil last came down (Chromium's touch events do not say which touches are a stylus). */
@@ -462,11 +484,12 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (pz && pointers.current.size === 2 && outer) {
         const s = spread() / pz.d0;
         if (!pz.engaged && Math.abs(s - 1) > PINCH_START) {
-          // The pinch starts here, about the point between the fingers.
-          if (scrollFrame.current !== null) {
-            cancelAnimationFrame(scrollFrame.current);
-            flushScroll();
-          }
+          // The pinch starts here, about the point between the fingers. Movement not scrolled yet
+          // is dropped (a frame's worth at most): the page stays as it is on screen, which the
+          // shell's snapshot (nativePinch.ts) shows.
+          if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+          scrollFrame.current = null;
+          pending.current = { x: 0, y: 0 };
           pz.engaged = true;
           pz.d0 = spread();
           pz.c0 = pz.c = c;
@@ -479,9 +502,11 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           outer.style.willChange = 'transform';
           setTilesPaused(true);
           timePinch();
+          pz.native = nativePinch.begin(gestureRect ?? el.getBoundingClientRect(), c);
         }
         if (pz.engaged) {
           if (pinchTimes) pinchTimes.events++;
+          trackPinch(pz);
           if (pinchFrame === null) pinchFrame = requestAnimationFrame(applyPinch);
           last.current = { x: c.x, y: c.y, t: now };
           return;
@@ -613,6 +638,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
       if (pinchFrame !== null) cancelAnimationFrame(pinchFrame);
       if (pinchTimes?.loop != null) cancelAnimationFrame(pinchTimes.loop);
+      if (pinch.current?.native != null) nativePinch.end(pinch.current.native);
       setTilesPaused(false);
     };
   }, [fingersNavigate, gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps

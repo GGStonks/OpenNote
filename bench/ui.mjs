@@ -385,6 +385,40 @@ if (ONLY.has('zpinch')) {
   const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
   for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);
 }
+// Not in the default run (run it alone: it installs a stand-in shell): --only nativepinch, the
+// messages the iOS shell's pinch snapshot gets (nativePinch.ts), and where its last transform puts a
+// page against where the page really is once drawn at the new zoom (they must match: no jump when
+// the snapshot goes).
+if (ONLY.has('nativepinch')) {
+  await page.addInitScript(() => {
+    window.__pinchMsgs = [];
+    // The page where it is when the snapshot is taken ('b').
+    const sheet = () => { const r = document.querySelector('[data-ink-key]').getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width }; };
+    window.webkit = { messageHandlers: { opennotePinch: { postMessage: (m) => { if (m[0] === 'b') window.__pinchAt = sheet(); window.__pinchMsgs.push([performance.now(), m]); } } } };
+  });
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const sheet = () => page.evaluate(() => { const r = document.querySelector('[data-ink-key]').getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width }; });
+  for (const [a, b] of [[[[360, 640], [460, 640]], [[420, 420], [760, 520]]], [[[300, 600], [520, 600]], [[380, 700], [440, 700]]]]) {
+    await page.evaluate(() => (window.__pinchMsgs = []));
+    await fingers(a, b, 500, false);
+    await touch('touchEnd', []);
+    await sleep(1200);
+    const after = await sheet();
+    const msgs = await page.evaluate(() => window.__pinchMsgs);
+    const before = await page.evaluate(() => window.__pinchAt);
+    const kinds = msgs.map(([, m]) => m[0]).join('');
+    const B = msgs.find(([, m]) => m[0] === 'b')[1].split(',').map(Number);
+    const M = msgs.filter(([, m]) => m[0] === 'm').pop()[1].split(',').map(Number);
+    const [ax, ay, c0x, c0y] = [B[2], B[3], B[6], B[7]], [k, cx, cy] = [M[2], M[3], M[4]];
+    // The snapshot maps a point p (relative to the area) to c + k (p - c0).
+    const px = ax + cx + k * (before.x - ax - c0x), py = ay + cy + k * (before.y - ay - c0y);
+    const E = msgs.find(([, m]) => m[0] === 'e'), lastMove = msgs.filter(([, m]) => m[0] === 'm').pop()[0];
+    const e = E?.[1].split(',').map(Number) ?? [];
+    const settled = e.length >= 5 ? `, settles at (${(ax + e[3] + e[2] * (before.x - ax - c0x)).toFixed(1)}, ${(ay + e[4] + e[2] * (before.y - ay - c0y)).toFixed(1)}) w ${(before.w * e[2]).toFixed(1)}` : '';
+    console.log(`nativepinch ${kinds[0]} m x${(kinds.match(/m/g) ?? []).length} ${kinds.slice(-1)}  fingers leave the page at (${px.toFixed(1)}, ${py.toFixed(1)}) w ${(before.w * k).toFixed(1)}${settled}; drawn at (${after.x.toFixed(1)}, ${after.y.toFixed(1)}) w ${after.w.toFixed(1)}  end ${E ? (E[0] - lastMove).toFixed(0) + ' ms after the last move' : 'MISSING'}`);
+  }
+}
 // Not in the default run: --only panpinch --shots <dir>: two fingers zoom in while moving across
 // the screen; the page must be where the fingers left it, while they move and after they lift.
 if (ONLY.has('panpinch') && arg('shots')) {

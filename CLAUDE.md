@@ -23,6 +23,16 @@ In the apps, the stroke being written is also drawn natively above the web view 
 `android/.../OpenNoteInkPlugin.java`. Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 
+## Native pinch (iOS)
+
+WebKit draws the page at 30 fps in Low Power Mode or when the iPad is hot (no setting lifts it;
+native scrolling is unaffected). So while two fingers zoom, the iOS shell shows a snapshot of the
+canvas area and scales it on every finger event (`src/editor/nativePinch.ts` → `ONPinchOverlay` in
+`ios-native/OpenNoteShell.m`), as Notability's scroll view does; the page keeps the gesture logic,
+draws the new zoom when the fingers lift, then tells the shell where the content really landed (the
+snapshot glides there and goes). `npm run bench:ui -- --only nativepinch` (alone) checks the
+messages and that the snapshot's last position matches the drawn page.
+
 ## Conversion server access
 
 The conversion server requires a per-device API key. The server side is private and lives outside

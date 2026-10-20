@@ -85,11 +85,20 @@ function canvasStats() {
   return { canvases: n, canvasMB: Math.round((px * 4) / 1048576), lost };
 }
 
+/**
+ * Low Power Mode and heat, from the iOS shell (thermal: 0 nominal, 1 fair, 2 serious, 3 critical):
+ * under either WebKit draws the page at 30 fps.
+ */
+export function powerState(): { lowPower?: boolean; thermal?: number } {
+  const n = (window as unknown as { OpenNoteNative?: { lowPower?: boolean; thermal?: number } }).OpenNoteNative;
+  return n && typeof n.lowPower === 'boolean' ? { lowPower: n.lowPower, thermal: n.thermal } : {};
+}
+
 function snapshot() {
   if (!session || document.visibilityState === 'hidden') return;
   const c = canvasStats();
   const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
-  push({ kind: 'snap', ...state, ...c, latex: document.querySelectorAll('.on-math, .on-tikz').length, ...(mem ? { heapMB: Math.round(mem.usedJSHeapSize / 1048576) } : {}) });
+  push({ kind: 'snap', ...state, ...powerState(), ...c, latex: document.querySelectorAll('.on-math, .on-tikz').length, ...(mem ? { heapMB: Math.round(mem.usedJSHeapSize / 1048576) } : {}) });
   if (c.lost) canvasesLost('isContextLost');
 }
 
