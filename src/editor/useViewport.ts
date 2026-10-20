@@ -40,6 +40,29 @@ const TAP_SLOP = 14;
 export const MIN_ZOOM = 0.5;
 export const MAX_ZOOM = 5;
 const PINCH_START = 0.05;
+
+/**
+ * Which draws a pinch on iOS: the page (its own transform: the real note all round, zooming out
+ * too) or the shell's snapshot (nativePinch.ts: fluid where the page is not). A pinch drawn by the
+ * page is timed; while those frames take longer than PAGE_PINCH_MAX_MS the shell draws them. Kept
+ * per WebKit frame-rate mode (Settings > Diagnostics), which decides how fast the page draws.
+ */
+const PAGE_PINCH_MAX_MS = 25;
+const pinchTimeKey = () => `opennote_page_pinch_ms_${window.OpenNoteNative?.fullFrameRate ? 'unlocked' : 'default'}`;
+function pagePinchMs(): number {
+  try {
+    return Number(localStorage.getItem(pinchTimeKey())) || 0;
+  } catch {
+    return 0;
+  }
+}
+function setPagePinchMs(ms: number) {
+  try {
+    localStorage.setItem(pinchTimeKey(), String(ms));
+  } catch {
+    /* storage unavailable */
+  }
+}
 export const PULL_THRESHOLD = 110;
 /** Pull distance per px of finger travel past the end (rubber band). */
 const PULL_RESISTANCE = 0.5;
@@ -327,6 +350,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
       if (pt.loop !== null) cancelAnimationFrame(pt.loop);
       const f = pt.frames, gaps = f.slice(1).map((t, i) => t - f[i]).sort((a, b) => a - b);
       const lifted = performance.now();
+      // How fast the page draws a pinch itself (see PAGE_PINCH_MAX_MS).
+      if (!native && gaps.length >= 6) setPagePinchMs(Math.round(gaps[gaps.length >> 1]));
       // The second frame after the new zoom is set: React's commit and the browser's drawing done.
       requestAnimationFrame(() => requestAnimationFrame(() => {
         crashLog.event('pinch', {
@@ -505,7 +530,7 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           releasePull();
           // The shell's snapshot is the only picture while the fingers move (the page scaled
           // under it as well, at the page's own slower frame rate, showed beside it out of step).
-          pz.native = nativePinch.begin(gestureRect ?? el.getBoundingClientRect(), c, deskColor());
+          pz.native = pagePinchMs() > PAGE_PINCH_MAX_MS ? nativePinch.begin(gestureRect ?? el.getBoundingClientRect(), c, deskColor()) : null;
           outer.style.transition = '';
           outer.style.transformOrigin = `${pz.o.x}px ${pz.o.y}px`;
           // Scaled as it is while the fingers move: without this the browser drew the paper,

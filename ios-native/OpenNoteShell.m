@@ -20,8 +20,10 @@
 //    the ink itself.
 //  - iPadOS Scribble is removed from the web view: it holds back Pencil strokes while deciding
 //    whether they are handwriting for a text field, which dropped/delayed ink on the canvas.
-//  - Full refresh rate: WebKit's 60 fps cap is lifted and, while the screen is touched, a display link
-//    asks for the display's maximum rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones).
+//  - Full refresh rate: while the screen is touched, a display link asks for the display's maximum
+//    rate (120 Hz on ProMotion iPads, nothing to do on 60 Hz ones). Lifting WebKit's "near 60 fps"
+//    page rendering is now off by default (kPage120Key): on a 120 Hz iPad Pro it left every page
+//    drawing at 30 fps, even a page doing nothing (Settings > Diagnostics > Frame-rate test).
 //  - Pinch zoom at the display's rate (ONPinchOverlay): WebKit draws the page at 30 fps in Low Power
 //    Mode or when the iPad is hot, so while two fingers zoom the shell shows a snapshot of the
 //    canvas and scales it itself (src/editor/nativePinch.ts).
@@ -34,7 +36,9 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.8";
+static NSString *const kVersion = @"2.3.9";
+/** NSUserDefaults: lift WebKit's "near 60 fps" page rendering (Settings > Diagnostics; applies at the next start). */
+static NSString *const kPage120Key = @"OpenNotePage120Hz";
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -833,12 +837,13 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     config.mediaTypesRequiringUserActionForPlayback = WKAudiovisualMediaTypeNone;
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
-    BOOL fullFrameRate = ONEnableFullFrameRate(config.preferences);
+    BOOL page120 = [[NSUserDefaults standardUserDefaults] boolForKey:kPage120Key];
+    BOOL fullFrameRate = page120 && ONEnableFullFrameRate(config.preferences);
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
-                                                     kVersion, fullFrameRate ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, page120: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
+                                                     kVersion, fullFrameRate ? @"true" : @"false", page120 ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
                                                      info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
@@ -943,6 +948,9 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"print"]) {
         [self handlePrint:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"setPage120"]) {
+        [[NSUserDefaults standardUserDefaults] setBool:[msg[@"on"] boolValue] forKey:kPage120Key];
+        replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"haptic"]) {
         NSString *style = msg[@"style"];
         if ([style isEqualToString:@"success"]) {

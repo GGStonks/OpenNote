@@ -399,6 +399,8 @@ if (ONLY.has('probe')) {
 if (ONLY.has('nativepinch')) {
   await page.addInitScript(() => {
     window.__pinchMsgs = [];
+    // A page measured too slow for its own pinch (useViewport, PAGE_PINCH_MAX_MS): the shell draws it.
+    localStorage.setItem('opennote_page_pinch_ms_default', '33');
     // The page where it is when the snapshot is taken ('b').
     const sheet = () => { const r = document.querySelector('[data-ink-key]').getBoundingClientRect(); return { x: r.left, y: r.top, w: r.width }; };
     window.webkit = { messageHandlers: { opennotePinch: { postMessage: (m) => { if (m[0] === 'b') window.__pinchAt = sheet(); window.__pinchMsgs.push([performance.now(), m]); } } } };

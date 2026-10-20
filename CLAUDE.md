@@ -25,9 +25,12 @@ if the engine's look ever differed from them, the fix belongs in the shells, nev
 
 ## Native pinch (iOS)
 
-On the iPad the page redrew a pinch at only ~30 fps (33 ms frames in crash reports, also with Low
-Power Mode off; WebKit also forces 30 fps in Low Power Mode / under heat), while native scrolling
-is unaffected. So while two fingers zoom, the iOS shell shows a snapshot of the canvas area and
+On a 120 Hz iPad Pro every page drew at 30 fps, even an idle one (Settings > Diagnostics >
+Frame-rate test), while native scrolling was unaffected. The suspected cause is the shell lifting
+WebKit's "near 60 fps" page rendering (WebKit then labels refreshes 120/s and serves the page every
+other one); since 2.3.9 that is opt-in (Diagnostics toggle, next start). WebKit also forces 30 fps in
+Low Power Mode / under heat. A pinch is drawn by the page while it keeps up (timed per pinch,
+`PAGE_PINCH_MAX_MS` in useViewport.ts); otherwise the iOS shell shows a snapshot of the canvas area and
 scales it on every finger event (`src/editor/nativePinch.ts` → `ONPinchOverlay` in
 `ios-native/OpenNoteShell.m`), as Notability's scroll view does. The snapshot, on the desk's colour,
 is the only picture: the page stays still under it (scaling it too showed it out of step at the

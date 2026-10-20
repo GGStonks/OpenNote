@@ -20,7 +20,16 @@ interface IosBridge {
 
 declare global {
   interface Window {
-    OpenNoteNative?: { platform: 'ios'; version: string; fullFrameRate?: boolean; /** The display's maximum refresh rate (Hz). */ maxFps?: number };
+    OpenNoteNative?: {
+      platform: 'ios';
+      version: string;
+      /** WebKit's "near 60 fps" page rendering is lifted in this run (page120 was set at start-up). */
+      fullFrameRate?: boolean;
+      /** The setting for that (Settings > Diagnostics, setPage120): it applies at the next start. */
+      page120?: boolean;
+      /** The display's maximum refresh rate (Hz). */
+      maxFps?: number;
+    };
     webkit?: { messageHandlers?: { opennote?: IosBridge } };
   }
 }
@@ -250,6 +259,16 @@ export async function shareFile(filename: string, blob: Blob): Promise<void> {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+/**
+ * iOS shell: lift WebKit's "near 60 fps" page rendering from the next start. Off by default: on a
+ * 120 Hz iPad Pro it left the page drawing at 30 fps (Settings > Diagnostics > Frame-rate test).
+ */
+export async function setPage120(on: boolean): Promise<void> {
+  if (platformKind() !== 'ios') return;
+  await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setPage120', on });
+  window.OpenNoteNative!.page120 = on;
 }
 
 /**

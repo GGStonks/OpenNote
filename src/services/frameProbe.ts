@@ -152,7 +152,7 @@ export const frameProbe = {
       label.remove();
     }
     const result = { at: Date.now(), phases };
-    crashLog.event('probe', { ...Object.fromEntries(Object.entries(phases).map(([k, v]) => [k, v])), dpr: window.devicePixelRatio, w: innerWidth, h: innerHeight, maxFps: (window as unknown as { OpenNoteNative?: { maxFps?: number } }).OpenNoteNative?.maxFps });
+    crashLog.event('probe', { ...Object.fromEntries(Object.entries(phases).map(([k, v]) => [k, v])), dpr: window.devicePixelRatio, w: innerWidth, h: innerHeight, maxFps: window.OpenNoteNative?.maxFps, fullFrameRate: window.OpenNoteNative?.fullFrameRate });
     try {
       localStorage.setItem(KEY, JSON.stringify(result));
     } catch {
