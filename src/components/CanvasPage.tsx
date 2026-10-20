@@ -332,6 +332,12 @@ const SHARP_MARGIN = 0.25;
 const SHARP_IDLE_MS = 120;
 /** Painting tiles takes at most this long (ms) per frame; the rest follow on the next frames. */
 const SHARP_FRAME_MS = 8;
+/**
+ * The same for the tiles in view after a zoom: they are painted hidden, the previous zoom's tiles
+ * staying on screen, and shown all at once when done (no softer picture first). All in one frame
+ * froze a slower tablet for hundreds of ms at the end of every pinch.
+ */
+const SHARP_VISIBLE_FRAME_MS = 16;
 /** The margin's tiles (only needed for the next scroll) wait until the view has rested this long (ms). */
 const SHARP_MARGIN_DELAY_MS = 300;
 
@@ -481,7 +487,8 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     ctx.setTransform(r, 0, 0, r, -rect.x0 * r, -rect.y0 * r);
     drawStrokes(ctx, inRect(list, rect), opts);
     t.painted = list;
-    t.canvas.style.visibility = '';
+    // While the previous zoom's tiles are still shown, new ones wait to be shown together.
+    if (!retiring.current) t.canvas.style.visibility = '';
   };
 
   /** Whether every tile over the visible part is painted with the current strokes. */
@@ -556,8 +563,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       frame.current = null;
       if (!holder || latest.current.strokes !== list || Math.abs(scale.current - r) > 1e-9) return;
       if (retiring.current && (!todo.length || todo[0].margin)) {
+        // This zoom's visible tiles are all painted: shown, and the old ones gone, in one frame.
         dropTiles(retiring.current);
         retiring.current = null;
+        for (const t of tiles.current.values()) if (t.painted) t.canvas.style.visibility = '';
       }
       if (!rested && todo[0]?.margin) {
         rested = true;
@@ -567,10 +576,9 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         }, SHARP_MARGIN_DELAY_MS);
         return;
       }
-      // The visible tiles all at once (no softer picture first, after a zoom or a scroll), the
-      // margin's a few ms per frame.
-      const until = performance.now() + SHARP_FRAME_MS;
-      while (todo.length && (rested || !todo[0].margin) && (!todo[0].margin || performance.now() < until)) {
+      // The visible tiles first (SHARP_VISIBLE_FRAME_MS a frame), the margin's after a rest.
+      const until = performance.now() + (todo[0]?.margin ? SHARP_FRAME_MS : SHARP_VISIBLE_FRAME_MS);
+      while (todo.length && (rested || !todo[0].margin) && performance.now() < until) {
         const { i, j } = todo.shift()!;
         const key = `${i},${j}`;
         let tile = tiles.current.get(key);
@@ -590,8 +598,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         paintTile(tile, list);
       }
       if (retiring.current && (!todo.length || todo[0].margin)) {
+        // This zoom's visible tiles are all painted: shown, and the old ones gone, in one frame.
         dropTiles(retiring.current);
         retiring.current = null;
+        for (const t of tiles.current.values()) if (t.painted) t.canvas.style.visibility = '';
       }
       const cur = viewNow();
       if (cur && Math.abs(cur.r - r) <= 1e-3 * r) hidePages(!tileWork.paused && covered(cur.visible));
@@ -637,20 +647,26 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       }
       later();
     };
-    // Two fingers zooming out show more than the painted tiles; the page canvases carry the ink
-    // while they move (dozens of tile layers re-composited every frame of a pinch cost frames).
+    // While two fingers zoom, only the tiles are on screen as long as they cover the view (the
+    // page canvases under them as well were twice the layers to composite on every frame of the
+    // pinch); once zooming out or moving shows more than the painted tiles, the page canvases
+    // come back under them.
     const pinching = () => {
-      hidePages(false);
+      if (!tilesHidden.current) return;
+      const now = viewNow();
+      if (!now || !covered(now.visible)) hidePages(false);
     };
     const target: HTMLElement | Window = scrollRoot ?? window;
     target.addEventListener('scroll', scrolled, { passive: true });
     window.addEventListener('resize', later);
     tileWork.pause.add(pinching);
+    tileWork.moved.add(pinching);
     return () => {
       if (first !== null) cancelAnimationFrame(first);
       if (timer) clearTimeout(timer);
       tileWork.resume.delete(paintNeeded);
       tileWork.pause.delete(pinching);
+      tileWork.moved.delete(pinching);
       target.removeEventListener('scroll', scrolled);
       window.removeEventListener('resize', later);
     };
@@ -719,7 +735,14 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
-    const near = new IntersectionObserver((en) => en.some((e) => e.isIntersecting) && setAlive(true), { root: scrollRoot, rootMargin: '100% 0px' });
+    // A page coming near while two fingers zoom (zooming out) is made once they lift: painting it
+    // in the middle of the pinch (a whole page at once) stalled the gesture on slower tablets.
+    const wake = () => setAlive(true);
+    const near = new IntersectionObserver((en) => {
+      if (!en.some((e) => e.isIntersecting)) return;
+      if (tileWork.paused) tileWork.resume.add(wake);
+      else wake();
+    }, { root: scrollRoot, rootMargin: '100% 0px' });
     const far = new IntersectionObserver((en) => !en.some((e) => e.isIntersecting) && setAlive(false), { root: scrollRoot, rootMargin: '250% 0px' });
     const view = new IntersectionObserver((en) => (onScreen.current = en.some((e) => e.isIntersecting)), { root: scrollRoot, rootMargin: '0px' });
     // A painted tile that is off screen keeps its pixels but leaves the rendering (display: none):
@@ -736,6 +759,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     view.observe(el);
     show.observe(el);
     return () => {
+      tileWork.resume.delete(wake);
       near.disconnect();
       far.disconnect();
       view.disconnect();

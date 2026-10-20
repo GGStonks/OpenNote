@@ -345,6 +345,59 @@ if (ONLY.has('zoomshots') && arg('shots')) {
     console.log(`zoomshots ${name}: zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
   }
 }
+// Not in the default run: --only pinchwork: the main thread's work while two fingers zoom and move
+// (layouts, style recalculations, script time), from Chrome's performance counters.
+if (ONLY.has('pinchwork')) {
+  await reopen();
+  await cdp.send('Performance.enable');
+  const metrics = async () => Object.fromEntries((await cdp.send('Performance.getMetrics')).metrics.map((m) => [m.name, m.value]));
+  const a = await metrics();
+  await fingers([[360, 640], [460, 640]], [[420, 420], [760, 520]], 1000, false);
+  const b = await metrics();
+  await touch('touchEnd', []);
+  await sleep(500);
+  const d = (k) => b[k] - a[k];
+  console.log(`pinchwork layouts ${d('LayoutCount')}  style recalcs ${d('RecalcStyleCount')}  layout ${(d('LayoutDuration') * 1000).toFixed(0)} ms  style ${(d('RecalcStyleDuration') * 1000).toFixed(0)} ms  script ${(d('ScriptDuration') * 1000).toFixed(0)} ms  (1 s gesture, ${CPU}x slower CPU)`);
+}
+// Not in the default run: --only zpinch: two fingers zooming in and out from an already zoomed-in
+// page (its sharp tiles painted): frames, and the ink canvases on screen in the middle of the pinch
+// (only one set of them should be composited while they cover the view).
+if (ONLY.has('zpinch')) {
+  await reopen();
+  await fingers([[360, 600], [460, 600]], [[210, 600], [610, 600]], 400);
+  await sleep(2500);
+  const shown = () => page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1 && c.checkVisibility({ visibilityProperty: true }) && c.getBoundingClientRect().bottom > 0 && c.getBoundingClientRect().top < innerHeight).length);
+  const before = await shown();
+  let midIn = 0, midOut = 0;
+  await report('zpinch', async () => {
+    for (let i = 0; i < 2; i++) {
+      await fingers([[360, 600], [460, 600]], [[300, 600], [520, 600]], 300, false);
+      midIn = await shown();
+      await touch('touchEnd', []);
+      await sleep(1500);
+      await fingers([[300, 600], [520, 600]], [[360, 600], [460, 600]], 300, false);
+      midOut = await shown();
+      await touch('touchEnd', []);
+      await sleep(1500);
+    }
+  });
+  console.log(`zpinch   canvases on screen: resting ${before}, zooming in ${midIn}, zooming out ${midOut}`);
+  const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
+  for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);
+}
+// Not in the default run: --only panpinch --shots <dir>: two fingers zoom in while moving across
+// the screen; the page must be where the fingers left it, while they move and after they lift.
+if (ONLY.has('panpinch') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await fingers([[360, 640], [460, 640]], [[420, 420], [760, 520]], 500, false);
+  await sleep(300);
+  await page.screenshot({ path: join(arg('shots'), 'panpinch-moving.png'), clip: { x: 300, y: 300, width: 400, height: 300 } });
+  await touch('touchEnd', []);
+  await sleep(1200);
+  await page.screenshot({ path: join(arg('shots'), 'panpinch-after.png'), clip: { x: 300, y: 300, width: 400, height: 300 } });
+  console.log(`panpinch zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
+}
 // Not in the default run: --only closeup --shots <dir> zooms to 500% with the buttons (no pinch) and
 // saves the ink at full resolution, to judge how handwriting looks zoomed in.
 if (ONLY.has('closeup') && arg('shots')) {

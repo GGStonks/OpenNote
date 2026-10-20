@@ -45,6 +45,9 @@ WebKit can end the web view without an error the page sees (content process: the
 GPU process: canvases go black). `src/services/crashLog.ts` keeps a rolling log (zoom, canvases,
 events) and keeps an abnormal end as a report: Settings > Diagnostics > Crash report > Send to PC
 (saved on the PC in `/home/ds/AI/opennote_diagnostics/`). Ask for one before guessing at a crash.
+Every pinch is logged there too (`kind: 'pinch'`: frame gaps while the fingers zoom, `redrawMs` after
+they lift): ask for a report before guessing at pinch lag on a device (headless Chromium does not
+show the iPad's compositing cost).
 
 ## Useful commands
 
@@ -56,6 +59,7 @@ events) and keeps an abnormal end as a report: Settings > Diagnostics > Crash re
   WebKit's GPU limit, 5120x2880 px), `--only stress` (40 zoom/scroll rounds: nothing may pile up),
   and with `--shots <dir>`: `selshots` (an enlarged selection, zoomed in), `dragshots` (resizing a
   selection, zoomed in), `liveshots` (a stroke while the pen is down and after: they must match).
+  `--only zpinch` (pinching from an already zoomed-in page: frames, and the ink canvases on screen mid-pinch).
   `--latex` adds a LaTeX block (two ink layers, as after a conversion); `--landscape` an iPad
   held sideways (the page fits at about 140%).
 - Zoomed in, memory must follow the screen, not the zoom (Notability's model): page canvases stay
