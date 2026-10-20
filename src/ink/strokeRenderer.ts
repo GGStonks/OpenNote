@@ -6,9 +6,7 @@ import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, pres
 /**
  * Ink renderer.
  *
- * Notability stores every curve as variable-width Bezier data (points + per-point fractional
- * width/force/altitude/azimuth, see InkObjectEncoder) and renders it with Metal. We keep the raw
- * samples and render with Canvas2D. Handwriting (pen and highlighter) goes through the smart pen's
+ * We keep the raw samples and render with Canvas2D. Handwriting (pen and highlighter) goes through the smart pen's
  * spline engine (inkEngine.ts): thinned samples, centripetal Catmull-Rom curve, pressure-driven
  * width for the fountain pen. Shapes are drawn from their exact geometry.
  * Smart-pen curves (PDEDraw) are centripetal Catmull-Rom splines through their stored points;

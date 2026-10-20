@@ -20,8 +20,7 @@ export type PageSize = 'letter' | 'legal' | 'a3' | 'a4' | 'a5' | 'b5';
 export type PageOrientation = 'portrait' | 'landscape';
 
 /**
- * One ink sample. Mirrors what Notability's InkObjectEncoder stores per point
- * (position, force, altitude angle, azimuth) plus a timestamp.
+ * One ink sample: position, force, altitude angle, azimuth and a timestamp.
  */
 export interface Point {
   x: number;

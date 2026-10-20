@@ -29,6 +29,9 @@ declare global {
       page120?: boolean;
       /** The display's maximum refresh rate (Hz). */
       maxFps?: number;
+      /** Low Power Mode, and the thermal state (0 nominal … 3 critical), kept current by the shell. */
+      lowPower?: boolean;
+      thermal?: number;
     };
     webkit?: { messageHandlers?: { opennote?: IosBridge } };
   }

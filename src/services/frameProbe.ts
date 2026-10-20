@@ -4,7 +4,7 @@ import { crashLog } from './crashLog';
  * Frame-rate test (Settings > Diagnostics): how fast this device's web view draws, for choosing
  * how zooming is drawn. Pinches on the iPad ran at 33 ms a frame with the note moving; whether
  * that is the web view's ceiling or the cost of moving the note decides whether ink drawn on the
- * GPU in the page (WebGL, as Notability draws with Metal) could be fluid, or only the shell can.
+ * GPU in the page (WebGL) could be fluid, or only the shell can.
  *
  * Each phase runs PHASE_MS and its frame gaps go into the crash report ('probe'):
  *   idle    nothing changes

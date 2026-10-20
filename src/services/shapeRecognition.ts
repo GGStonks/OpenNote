@@ -6,11 +6,8 @@ import { latexForDocument } from './latexRender';
 /**
  * Shape snapping.
  *
- * Modelled on Notability's ShapeDetection.framework (observed in the shipped binary): several
- * independent detectors (line, arrow, ellipse, polygon, open polyline) each produce a candidate
- * with a confidence; the best candidate wins and is only accepted above a threshold
- * (Notability uses confidence > 0.2 in ShapeDetector.detectShape()). The detectors below are an
- * independent implementation; Notability's exact fitting maths is not reproduced.
+ * Several independent detectors (line, arrow, ellipse, polygon, open polyline) each produce a
+ * candidate with a confidence; the best candidate wins and is only accepted above a threshold.
  */
 
 export interface SnappedShape {

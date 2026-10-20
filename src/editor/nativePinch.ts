@@ -5,7 +5,7 @@
  * or the shell can set lifts that; native scrolling is not affected, so scrolling stayed fluid and
  * the pinch went at half speed. While two fingers zoom, the shell lays a snapshot of the canvas
  * area over the page and scales it on every finger event sent here (the events still arrive at the
- * display's rate), as Notability's scroll view does; once the page has drawn the new zoom, the
+ * display's rate), as a native scroll view zooms; once the page has drawn the new zoom, the
  * snapshot goes. useViewport keeps the gesture's logic; the page stays still under the snapshot,
  * which sits on the desk's colour (what the snapshot does not cover, zooming out, is desk).
  *

@@ -171,8 +171,8 @@ const MAX_CANVAS_PIXELS = 14_500_000;
  * ink is drawn by SharpInk (screen resolution at any zoom) over them. The page canvases are
  * page-sized: following the zoom cost tens of MB per page and per ink layer, reallocated (and
  * briefly doubled while repainting) at every zoom; a quick pinch on a 4 GB iPad, after a LaTeX
- * conversion added a second ink layer, ran the GPU out of memory: a black screen. Like
- * Notability, zooming in costs memory for the screen, not for the zoom, and never repaints the
+ * conversion added a second ink layer, ran the GPU out of memory: a black screen. Here zooming
+ * in costs memory for the screen, not for the zoom, and never repaints the
  * pages; the usual reading view (and scrolling it) stays on the page canvases.
  */
 const PAGE_CANVAS_MAX_ZOOM = 1.5;
@@ -349,7 +349,7 @@ type SharpTile = { i: number; j: number; canvas: HTMLCanvasElement; painted: Str
  * Committed ink of one layer where the page is zoomed in past what the page canvases hold sharp
  * (their pixel budget; from about 2x on an iPad), drawn at exactly the screen's resolution.
  *
- * Like Notability's ink view, it is a grid of small tiles (SHARP_TILE backing px each, at zoom x
+ * It is a grid of small tiles (SHARP_TILE backing px each, at zoom x
  * devicePixelRatio): only the tiles over the view and a margin exist, each holding the strokes
  * that reach into it. Tiles are painted nearest first a few per frame, so the view sharpens
  * progressively and never allocates one large canvas (WebKit gives a canvas a GPU backing only up
@@ -418,7 +418,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     return { visible, r: hs * dpr, corner: { x: (o ?? c).left * dpr, y: (o ?? c).top * dpr } };
   };
 
-  /** Tile index ranges over `v` at scale r (Notability's TileRange). */
+  /** Tile index ranges over `v` at scale r. */
   const tileRange = (v: SurfRect, r: number) => {
     const t = SHARP_TILE / r, o = origin.current;
     const { width: w, height: h } = latest.current;

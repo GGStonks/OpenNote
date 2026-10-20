@@ -5,21 +5,10 @@ import { KeyedArchive, PlistDate, PlistValue, parsePlist } from './plist';
 import { ZipEntry, readZip } from './zip';
 
 /**
- * Notability notes (.note): a ZIP of one folder holding Session.plist (a keyed archive written by
- * Notability's GLKeyedArchiver), Images/, PDFs/, Recordings/, metadata.plist and thumbnails.
- *
- * Session.plist: root NoteTakingSession { name, creationDate, richText: FormattedString { "Handwriting
- * Overlay": HandwritingObject { SpatialHash: InkedSpatialHash { the ink } }, attributedString (typed
- * text), mediaObjects, pdfFiles, pageLayoutArray, reflowState { pageWidthInDocumentCoordsKey } } }.
- *
- * The ink (GLInkKit's InkObjectEncoder): numcurves, numpoints, numfractionalwidths and little-endian
- * arrays: curvesnumpoints (int32 per curve), curvespoints (float32 x, y per point), curveswidth
- * (float32 per curve), curvescolors (RGBA bytes per curve), curvesstyles (one byte per curve),
- * curvesfractionalwidths (float32). A curve of N points is a chain of cubic Béziers (start, two
- * controls, end, ...) with (N - 1) / 3 + 1 fractional widths, one per segment end: the line is
- * curveswidth x fractional width wide there. Shapes: "shapes", a binary property list (Swift
- * Codable) of kinds, indices and shapes. Coordinates: page points, pages pageWidth wide and stacked
- * top to bottom.
+ * Notability notes (.note) into OpenNote notes. The parts of the file read here are described in
+ * docs/notability-note-format.md: a ZIP holding Session.plist (a keyed archive: title, date, the
+ * ink's curve store, typed text, pictures, page layout) and the pictures' files. Each curve is a
+ * chain of cubic Béziers with one width factor per segment end.
  */
 
 export interface NotabilityImport {
@@ -37,7 +26,7 @@ export interface NotabilityImport {
 
 export type ImageReader = (blob: Blob) => Promise<{ dataUrl: string; w: number; h: number }>;
 
-// InkObjectStyle (GLInkKit): 1 selection, 2 partial eraser, 3 pen, 4 highlighter, 5 pencil, 6 review, 7 whole eraser.
+// curvesstyles: 1 selection, 2 partial eraser, 3 pen, 4 highlighter, 5 pencil, 6 review, 7 whole-object eraser.
 const STYLE_HIGHLIGHTER = 4;
 const STYLE_NOT_INK: Record<number, string> = { 1: 'selection', 2: 'partial eraser', 6: 'review', 7: 'eraser' };
 /** Default page width of the note in Notability's page points (Notability 7, iPad). */
@@ -183,7 +172,7 @@ function curvesToStrokes(ar: KeyedArchive, store: { [k: string]: PlistValue }, s
     p0 += Math.max(0, n);
     f0 += Math.max(0, k);
     if (n <= 0 || p0 > nPoints) continue;
-    const style = styles && c < styles.length && styles[c] <= 6 ? styles[c] : 3;
+    const style = styles && c < styles.length && styles[c] >= 1 && styles[c] <= 7 ? styles[c] : 3;
     if (STYLE_NOT_INK[style]) {
       notInk[STYLE_NOT_INK[style]] = (notInk[STYLE_NOT_INK[style]] ?? 0) + 1;
       continue;

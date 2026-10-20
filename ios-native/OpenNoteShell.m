@@ -36,7 +36,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.9";
+static NSString *const kVersion = @"2.3.10";
 /** NSUserDefaults: lift WebKit's "near 60 fps" page rendering (Settings > Diagnostics; applies at the next start). */
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 
@@ -685,9 +685,8 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
 // Two fingers zooming the note (src/editor/nativePinch.ts). WebKit renders the page at 30 fps in
 // Low Power Mode and under thermal pressure (ThrottlingReason::LowPowerMode / ThermalMitigation,
 // read by the web content process itself: no setting turns it off), while native scrolling stays
-// at the display's rate; the pinch, drawn by the page, went at half speed. Notability zooms with a
-// UIScrollView: the rendered page is scaled while the fingers move, drawn again once they lift.
-// Here likewise: when the page starts a pinch, a snapshot of the canvas area (what is on screen,
+// at the display's rate; the pinch, drawn by the page, went at half speed. As a native scroll view
+// zooms (the rendered content scaled while the fingers move, drawn again once they lift): when the page starts a pinch, a snapshot of the canvas area (what is on screen,
 // taken by the system compositor without waiting for the page) is laid over it and scaled on
 // every finger event the page forwards; the page draws the new zoom once the fingers lift and then
 // says so ("e"), and the snapshot goes. The page stays still under it and the snapshot sits on the

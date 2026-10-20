@@ -177,7 +177,7 @@ export class KeyedArchive {
     this.top = (p.$top as { [k: string]: PlistValue }) ?? {};
   }
 
-  /** The archive's root object (NSKeyedArchiver: "root"; GLKeyedArchiver: "$0"). */
+  /** The archive's root object (under "$top": "root", or "$0" in Notability notes). */
   root(): PlistValue {
     const t = this.top.root ?? this.top.$0 ?? Object.values(this.top)[0];
     return this.get(t);
@@ -220,7 +220,7 @@ export class KeyedArchive {
     return typeof o === 'number' ? o : null;
   }
 
-  /** NSArray / NSSet (NS.objects or GLKeyedArchiver's NS.object.N), resolved. */
+  /** NSArray / NSSet (NS.objects, or NS.object.N in Notability notes), resolved. */
   array(v: PlistValue): PlistValue[] {
     const o = this.get(v);
     if (Array.isArray(o)) return o.map((x) => this.get(x));
