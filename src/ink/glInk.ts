@@ -169,13 +169,12 @@ function boxOfPoints(pts: XY[]): Box {
 }
 
 type Geo = ReturnType<typeof strokeGlGeometry>;
-/** Each stroke's GPU geometry, as the engine's line and as the smooth one (strokes are immutable). */
-const geoCache = [new WeakMap<Stroke, Geo>(), new WeakMap<Stroke, Geo>()];
+/** Each stroke's GPU geometry (strokes are immutable; the engine's line and the smooth one are the same). */
+const geoCache = new WeakMap<Stroke, Geo>();
 
-function geometry(s: Stroke, smooth: boolean): Geo {
-  const cache = geoCache[smooth ? 1 : 0];
-  let g = cache.get(s);
-  if (!g) cache.set(s, (g = strokeGlGeometry(s, smooth)));
+function geometry(s: Stroke): Geo {
+  let g = geoCache.get(s);
+  if (!g) geoCache.set(s, (g = strokeGlGeometry(s)));
   return g;
 }
 
@@ -183,48 +182,51 @@ function geometry(s: Stroke, smooth: boolean): Geo {
  * Prepares the geometry of `strokes` for at most `budgetMs` (ahead of a pinch, a slice at a time);
  * true once all of it is ready.
  */
-export function prepareGlGeometry(strokes: Stroke[], smooth: boolean, budgetMs: number): boolean {
-  const cache = geoCache[smooth ? 1 : 0];
+export function prepareGlGeometry(strokes: Stroke[], budgetMs: number): boolean {
   const until = performance.now() + budgetMs;
   for (const s of strokes) {
-    if (!s.points.length || cache.has(s)) continue;
+    if (!s.points.length || geoCache.has(s)) continue;
     if (budgetMs <= 0 || performance.now() > until) return false;
-    cache.set(s, strokeGlGeometry(s, smooth));
+    geoCache.set(s, strokeGlGeometry(s));
   }
   return true;
 }
 
-/** The strokes as GPU work: the buffers' contents and the draw order. */
-function prepare(strokes: Stroke[], smooth: boolean): { caps: Float32Array; flat: Float32Array; ops: Op[] } {
-  // Sizes first, then the typed arrays filled in place (a long note has ~100 000 pieces).
-  let nCaps = 0, nFlat = 0;
-  const hatch = new Map<Stroke, number[]>();
-  for (const s of strokes) {
-    if (!s.points.length) continue;
-    const g = geometry(s, smooth);
-    nCaps += g.caps.length / 6;
-    if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && g.area && g.area.length >= 3) {
-      nFlat += g.area.length;
-      if (s.fill !== 'solid' && s.fill !== 'hole') {
-        const box = boxOfPoints(g.area), h = box.y1 - box.y0, lines: number[] = [];
-        for (let x = box.x0 - h; x < box.x1 + h; x += HATCH_SPACING) {
-          if (s.fill === 'northEast' || s.fill === 'crosshatch') lines.push(x, box.y1, 0.55, x + h, box.y0, 0.55);
-          if (s.fill === 'northWest' || s.fill === 'crosshatch') lines.push(x, box.y0, 0.55, x + h, box.y1, 0.55);
-        }
-        hatch.set(s, lines);
-        nCaps += lines.length / 6;
-      }
+/** Vertices at the start of the flat buffer: the box a fill's cover pass draws (set per fill). */
+const BOX_VERTICES = 4;
+
+/**
+ * The strokes as GPU work: the buffers' contents (growing arrays) and the draw order. Strokes
+ * added at the end of the note (what writing does) are added to it, not built again from the
+ * start (`ink`); anything else builds it anew.
+ */
+class Builder {
+  caps = new Float32Array(CAP * 4096);
+  pieces = 0;
+  flat = new Float32Array(2 * 256);
+  verts = BOX_VERTICES;
+  ops: Op[] = [];
+  /** The ink run still open (the last op): opaque strokes of its colour that follow join it. */
+  private run: Extract<Op, { k: 'see' }> | null = null;
+
+  private room(nPieces: number, nVerts: number) {
+    if ((this.pieces + nPieces) * CAP > this.caps.length) {
+      const grown = new Float32Array(Math.max((this.pieces + nPieces) * CAP, Math.ceil(this.caps.length * 1.5)));
+      grown.set(this.caps.subarray(0, this.pieces * CAP));
+      this.caps = grown;
     }
-    if (g.arrow) nFlat += 3;
+    if ((this.verts + nVerts) * 2 > this.flat.length) {
+      const grown = new Float32Array(Math.max((this.verts + nVerts) * 2, Math.ceil(this.flat.length * 1.5)));
+      grown.set(this.flat.subarray(0, this.verts * 2));
+      this.flat = grown;
+    }
   }
-  const caps = new Float32Array(nCaps * CAP);
-  const flat = new Float32Array(nFlat * 2);
-  let ci = 0, fi = 0;
-  const ops: Op[] = [];
-  const pushCaps = (c: number[], col: RGBA) => {
-    const first = ci;
-    for (let i = 0; i < c.length; i += 6, ci++) {
-      const o = ci * CAP;
+
+  private pushCaps(c: number[], col: RGBA) {
+    this.room(c.length / 6, 0);
+    const first = this.pieces, caps = this.caps;
+    for (let i = 0; i < c.length; i += 6) {
+      const o = this.pieces++ * CAP;
       caps[o] = c[i];
       caps[o + 1] = c[i + 1];
       caps[o + 2] = c[i + 2];
@@ -236,65 +238,93 @@ function prepare(strokes: Stroke[], smooth: boolean): { caps: Float32Array; flat
       caps[o + 8] = col[2];
       caps[o + 9] = col[3];
     }
-    return { first, count: ci - first };
-  };
-  const pushFlat = (pts: XY[]) => {
-    const first = fi;
+    return { first, count: this.pieces - first };
+  }
+
+  private pushFlat(pts: XY[]) {
+    this.room(0, pts.length);
+    const first = this.verts;
     for (const p of pts) {
-      flat[fi * 2] = p.x;
-      flat[fi * 2 + 1] = p.y;
-      fi++;
+      this.flat[this.verts * 2] = p.x;
+      this.flat[this.verts * 2 + 1] = p.y;
+      this.verts++;
     }
     return first;
-  };
-  // Highlighters: each laid on as one see-through shape.
-  for (const s of strokes) {
-    if (s.tool !== 'highlighter' || !s.points.length) continue;
-    const { caps: c } = geometry(s, smooth);
-    if (!c.length) continue;
-    const { first, count } = pushCaps(c, [0, 0, 0, 1]);
-    ops.push({ k: 'see', first, count, rgba: rgba(s.color, 0.35), box: boxOfCaps(c, 0, c.length) });
   }
-  // Fills.
-  for (const s of strokes) {
-    if (s.tool === 'highlighter' || !s.fill || s.fill === 'none' || !s.points.length) continue;
-    const { area } = geometry(s, smooth);
-    if (!area || area.length < 3) continue;
-    const first = pushFlat(area);
+
+  /** A highlighter, laid on as one see-through shape. */
+  highlighter(s: Stroke) {
+    const { caps: c } = geometry(s);
+    if (!c.length) return;
+    const { first, count } = this.pushCaps(c, [0, 0, 0, 1]);
+    this.ops.push({ k: 'see', first, count, rgba: rgba(s.color, 0.35), box: boxOfCaps(c, 0, c.length) });
+    this.run = null;
+  }
+
+  /** A stroke's fill (even-odd, through the stencil). */
+  fill(s: Stroke) {
+    const { area } = geometry(s);
+    if (!area || area.length < 3) return;
+    const first = this.pushFlat(area);
     const box = boxOfPoints(area);
     const mode = s.fill === 'solid' ? 'solid' : s.fill === 'hole' ? 'hole' : 'hatch';
     let hatchFirst = 0, hatchCount = 0;
-    if (mode === 'hatch') ({ first: hatchFirst, count: hatchCount } = pushCaps(hatch.get(s) ?? [], rgba(s.color, 0.5)));
-    ops.push({ k: 'fill', first, count: area.length, mode, rgba: mode === 'solid' ? rgba(s.color, 0.22) : rgba(s.color, 1), box, hatchFirst, hatchCount });
+    if (mode === 'hatch') {
+      const h = box.y1 - box.y0, lines: number[] = [];
+      for (let x = box.x0 - h; x < box.x1 + h; x += HATCH_SPACING) {
+        if (s.fill === 'northEast' || s.fill === 'crosshatch') lines.push(x, box.y1, 0.55, x + h, box.y0, 0.55);
+        if (s.fill === 'northWest' || s.fill === 'crosshatch') lines.push(x, box.y0, 0.55, x + h, box.y1, 0.55);
+      }
+      ({ first: hatchFirst, count: hatchCount } = this.pushCaps(lines, rgba(s.color, 0.5)));
+    }
+    this.ops.push({ k: 'fill', first, count: area.length, mode, rgba: mode === 'solid' ? rgba(s.color, 0.22) : rgba(s.color, 1), box, hatchFirst, hatchCount });
+    this.run = null;
   }
-  // Ink, in order: opaque strokes of one colour in a row together, see-through ones each alone.
-  let run: Extract<Op, { k: 'see' }> | null = null;
-  const closeRun = () => {
-    if (run && run.count) ops.push(run);
-    run = null;
-  };
-  const same = (a: RGBA, b: RGBA) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2] && a[3] === b[3];
-  for (const s of strokes) {
-    if (s.tool === 'highlighter' || !s.points.length) continue;
-    const { caps: c, arrow } = geometry(s, smooth);
+
+  /** A stroke's ink: opaque strokes of one colour in a row together, a see-through one alone. */
+  ink(s: Stroke) {
+    const { caps: c, arrow } = geometry(s);
     const col = rgba(s.color, s.opacity ?? 1);
     if (c.length) {
       const opaque = col[3] >= 0.999;
-      if (!opaque || !run || !same(run.rgba, col)) closeRun();
-      const at = pushCaps(c, [0, 0, 0, 1]);
+      const r = this.run;
+      const join = opaque && r && this.ops[this.ops.length - 1] === r && r.rgba[0] === col[0] && r.rgba[1] === col[1] && r.rgba[2] === col[2] && r.rgba[3] === col[3];
+      const at = this.pushCaps(c, [0, 0, 0, 1]);
       const box = boxOfCaps(c, 0, c.length);
-      if (!run) run = { k: 'see', first: at.first, count: 0, rgba: col, box };
-      run.count += at.count;
-      run.box = { x0: Math.min(run.box.x0, box.x0), y0: Math.min(run.box.y0, box.y0), x1: Math.max(run.box.x1, box.x1), y1: Math.max(run.box.y1, box.y1) };
-      if (!opaque) closeRun();
+      if (join && r) {
+        r.count += at.count;
+        r.box = { x0: Math.min(r.box.x0, box.x0), y0: Math.min(r.box.y0, box.y0), x1: Math.max(r.box.x1, box.x1), y1: Math.max(r.box.y1, box.y1) };
+      } else {
+        const op: Extract<Op, { k: 'see' }> = { k: 'see', first: at.first, count: at.count, rgba: col, box };
+        this.ops.push(op);
+        this.run = opaque ? op : null;
+      }
     }
     if (arrow) {
-      closeRun();
-      ops.push({ k: 'tri', first: pushFlat(arrow), count: 3, rgba: col });
+      this.ops.push({ k: 'tri', first: this.pushFlat(arrow), count: 3, rgba: col });
+      this.run = null;
     }
   }
-  closeRun();
-  return { caps, flat, ops };
+
+  /** All of `strokes`, in drawStrokes' order: highlighters, fills, ink. */
+  static of(strokes: Stroke[]): Builder {
+    const b = new Builder();
+    for (const s of strokes) if (s.tool === 'highlighter' && s.points.length) b.highlighter(s);
+    for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) b.fill(s);
+    for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) b.ink(s);
+    return b;
+  }
+}
+
+/** Whether `next` is `prev` with strokes added at its end that only add ink (no highlighter, no fill). */
+function appendsInk(prev: Stroke[], next: Stroke[]): boolean {
+  if (next.length <= prev.length) return false;
+  for (let i = 0; i < prev.length; i++) if (prev[i] !== next[i]) return false;
+  for (let i = prev.length; i < next.length; i++) {
+    const s = next[i];
+    if (s.tool === 'highlighter' || (s.fill && s.fill !== 'none')) return false;
+  }
+  return true;
 }
 
 function compile(gl: WebGL2RenderingContext, vs: string, fs: string): WebGLProgram | null {
@@ -326,12 +356,14 @@ export class GlInk {
   private flatBuf: WebGLBuffer;
   private fullVao: WebGLVertexArrayObject;
   private quadBuf: WebGLBuffer;
+  private builder: Builder | null = null;
+  /** What of the builder's arrays the GPU buffers hold, and how much they can hold. */
+  private sent = { pieces: 0, verts: 0, capsRoom: 0, flatRoom: 0 };
   private ops: Op[] = [];
-  private flatCount = 0;
   private fbo: WebGLFramebuffer | null = null;
   private tex: WebGLTexture | null = null;
   private texSize = { w: 0, h: 0 };
-  private built: { strokes: Stroke[]; smooth: boolean } | null = null;
+  private built: Stroke[] | null = null;
   /** The browser took the GPU context away (the app in the background, GPU memory): make a new one. */
   lost = false;
 
@@ -386,22 +418,39 @@ export class GlInk {
   /** Pieces in the buffer (for the benchmark). */
   pieces = 0;
 
-  /** Prepares `strokes` (again only when they or the line variant changed). */
-  setStrokes(strokes: Stroke[], smooth: boolean) {
-    if (this.built && this.built.strokes === strokes && this.built.smooth === smooth) return;
-    this.built = { strokes, smooth };
-    const { caps, flat, ops } = prepare(strokes, smooth);
-    const gl = this.gl;
+  /**
+   * Prepares `strokes` for drawing. Strokes added at the end (writing) are added to what is there,
+   * sending the GPU only the new part; any other change builds it all again.
+   */
+  setStrokes(strokes: Stroke[]) {
+    if (this.built === strokes) return;
+    let b = this.builder;
+    if (b && this.built && appendsInk(this.built, strokes)) {
+      for (let i = this.built.length; i < strokes.length; i++) if (strokes[i].points.length) b.ink(strokes[i]);
+    } else {
+      b = this.builder = Builder.of(strokes);
+      this.sent = { pieces: 0, verts: 0, capsRoom: 0, flatRoom: 0 };
+    }
+    this.built = strokes;
+    const gl = this.gl, sent = this.sent;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, caps.length ? caps : new Float32Array(CAP), gl.STATIC_DRAW);
+    if (b.caps.length > sent.capsRoom) {
+      gl.bufferData(gl.ARRAY_BUFFER, b.caps, gl.DYNAMIC_DRAW);
+      sent.capsRoom = b.caps.length;
+    } else if (b.pieces > sent.pieces) {
+      gl.bufferSubData(gl.ARRAY_BUFFER, sent.pieces * CAP * 4, b.caps, sent.pieces * CAP, (b.pieces - sent.pieces) * CAP);
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuf);
-    // A box's corners follow the polygons (the fills' cover pass).
-    const withBox = new Float32Array(flat.length + 8);
-    withBox.set(flat);
-    gl.bufferData(gl.ARRAY_BUFFER, withBox.length ? withBox : new Float32Array(8), gl.DYNAMIC_DRAW);
-    this.flatCount = flat.length / 2;
-    this.ops = ops;
-    this.pieces = caps.length / CAP;
+    if (b.flat.length > sent.flatRoom) {
+      gl.bufferData(gl.ARRAY_BUFFER, b.flat, gl.DYNAMIC_DRAW);
+      sent.flatRoom = b.flat.length;
+    } else if (b.verts > sent.verts) {
+      gl.bufferSubData(gl.ARRAY_BUFFER, sent.verts * 8, b.flat, sent.verts * 2, (b.verts - sent.verts) * 2);
+    }
+    sent.pieces = b.pieces;
+    sent.verts = b.verts;
+    this.ops = b.ops;
+    this.pieces = b.pieces;
   }
 
   /** The canvas's size in its pixels (0 x 0 frees its memory between pinches). */
@@ -471,16 +520,16 @@ export class GlInk {
    * stencil) the first time it is used, which held up the first frame of the first pinch.
    */
   warm() {
-    const ops = this.ops, built = this.built;
-    if (!built) return;
+    const ops = this.ops;
+    if (!this.builder) return;
     const piece = { first: 0, count: Math.min(1, this.pieces) };
     const box = { x0: -1, y0: -1, x1: 2, y1: 2 };
     this.ops = [
       { k: 'see', ...piece, rgba: [0, 0, 0, 1], box },
-      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'solid', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
-      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'hole', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: 0 },
-      { k: 'fill', first: 0, count: Math.min(3, this.flatCount), mode: 'hatch', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
-      { k: 'tri', first: 0, count: Math.min(3, this.flatCount), rgba: [0, 0, 0, 1] },
+      { k: 'fill', first: 0, count: 3, mode: 'solid', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
+      { k: 'fill', first: 0, count: 3, mode: 'hole', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: 0 },
+      { k: 'fill', first: 0, count: 3, mode: 'hatch', rgba: [0, 0, 0, 1], box, hatchFirst: 0, hatchCount: piece.count },
+      { k: 'tri', first: 0, count: 3, rgba: [0, 0, 0, 1] },
     ];
     this.resize(1, 1);
     this.draw({ scale: 1, ox: 0, oy: 0 });
@@ -552,13 +601,13 @@ export class GlInk {
         } else {
           const b = op.box;
           gl.bindBuffer(gl.ARRAY_BUFFER, this.flatBuf);
-          gl.bufferSubData(gl.ARRAY_BUFFER, this.flatCount * 8, new Float32Array([b.x0, b.y0, b.x1, b.y0, b.x0, b.y1, b.x1, b.y1]));
+          gl.bufferSubData(gl.ARRAY_BUFFER, 0, new Float32Array([b.x0, b.y0, b.x1, b.y0, b.x0, b.y1, b.x1, b.y1]));
           const [r, g, bl, a] = op.rgba;
           if (op.mode === 'hole') {
             gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
             gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), 0, 0, 0, 1);
           } else gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), r * a, g * a, bl * a, a);
-          gl.drawArrays(gl.TRIANGLE_STRIP, this.flatCount, 4);
+          gl.drawArrays(gl.TRIANGLE_STRIP, 0, BOX_VERTICES);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         }
         gl.clear(gl.STENCIL_BUFFER_BIT);

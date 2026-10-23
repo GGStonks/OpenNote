@@ -117,6 +117,8 @@ if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
+// BENCH_NO_GL=1: pinches without the GPU ink (the bitmaps), to compare.
+if (process.env.BENCH_NO_GL) await page.addInitScript(() => localStorage.setItem('opennote_gl', 'off'));
 const url = `http://localhost:${PORT}/`;
 await page.goto(url);
 await page.evaluate(async (note) => {
@@ -389,6 +391,35 @@ if (ONLY.has('zpinch')) {
   console.log(`zpinch   GPU ink pieces: ${await page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 'none')}`);
   const logged = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-2));
   for (const c of logged ?? []) console.log(`zpinch   crash log: ${JSON.stringify(c)}`);
+}
+// --only glwrite: a stroke written, then two fingers zoom 150 ms later, three times: each pinch
+// must be drawn by the GPU (crash log 'pinch' gl) with the new stroke added, not rebuilt.
+if (ONLY.has('glwrite')) {
+  await reopen();
+  await page.waitForFunction(() => (window.__opennoteGlInk?.shared()?.pieces ?? 0) > 0, null, { timeout: 120000, polling: 100 }).catch(() => null);
+  const pieces = () => page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 0);
+  const p0 = await pieces();
+  for (let r = 0; r < 3; r++) {
+    const y = 420 + r * 60;
+    await mouse('mouseMoved', 200, y, 0);
+    await mouse('mousePressed', 200, y);
+    for (let i = 1; i <= 24; i++) {
+      await mouse('mouseMoved', 200 + i * 9, y + Math.sin(i / 3) * 14);
+      await sleep(8);
+    }
+    await mouse('mouseReleased', 416, y, 0);
+    await sleep(150);
+    const last = r === 2 && arg('shots');
+    await fingers([[360, 640], [460, 640]], [[300, 640], [520, 640]], 300, !last);
+    if (last) {
+      // Mid-pinch: the strokes just written must be there (drawn by the GPU).
+      await page.screenshot({ path: join(arg('shots'), 'glwrite-pinching.png') });
+      await touch('touchEnd', []);
+    }
+    await sleep(1200);
+  }
+  const log = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-3));
+  console.log(`glwrite  pieces ${p0} -> ${await pieces()}; pinches: ${(log ?? []).map((c) => `${c.gl}${c.glStartMs !== undefined ? ' ' + c.glStartMs + ' ms' : ''}`).join(', ')}`);
 }
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {

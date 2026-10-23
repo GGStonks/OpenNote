@@ -4,6 +4,7 @@ import { GlInk, prepareGlGeometry } from '../ink/glInk';
 import { drawStrokes } from '../ink/strokeRenderer';
 import { tileWork } from './tileWork';
 import { frameRate } from '../services/frameRate';
+import { crashLog } from '../services/crashLog';
 
 /**
  * The ink while two fingers zoom, drawn by the GPU from its vectors on every frame (glInk.ts), as
@@ -22,7 +23,12 @@ import { frameRate } from '../services/frameRate';
 /** The GPU ink stays at most this long after the fingers lift. */
 const HANDOFF_MAX_MS = 1500;
 /** The note still this long: the next pinch's geometry is prepared, PREPARE_SLICE_MS at a time. */
-const PREPARE_AFTER_MS = 800;
+const PREPARE_AFTER_MS = 300;
+/**
+ * A pinch starting with strokes not prepared yet (just written, or the note just opened) prepares
+ * them for up to this many frames; with more left than that it uses the bitmaps.
+ */
+const START_FRAMES = 1.5;
 const PREPARE_SLICE_MS = () => frameRate.frameMs * 0.36;
 
 let shared: GlInk | null | undefined;
@@ -34,6 +40,12 @@ function glInk(): GlInk | null {
     shared = undefined;
   }
   if (shared === undefined) {
+    // For comparisons (benchmark, diagnostics): localStorage opennote_gl = 'off' keeps the bitmaps.
+    try {
+      if (localStorage.getItem('opennote_gl') === 'off') return null;
+    } catch {
+      /* storage unavailable */
+    }
     try {
       shared = GlInk.create();
     } catch {
@@ -43,9 +55,10 @@ function glInk(): GlInk | null {
   return shared;
 }
 
-export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, strokes: Stroke[], pageWidth: number, smooth: boolean, enabled: boolean) {
-  const latest = useRef({ strokes, pageWidth, smooth, enabled });
-  latest.current = { strokes, pageWidth, smooth, enabled };
+export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, strokes: Stroke[], pageWidth: number, enabled: boolean) {
+  const latest = useRef({ strokes, pageWidth, enabled });
+  latest.current = { strokes, pageWidth, enabled };
+  const mountedAt = useRef(performance.now());
 
   // Ahead of the next pinch.
   useEffect(() => {
@@ -53,23 +66,24 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     let timer: ReturnType<typeof setTimeout> | null = setTimeout(function slice() {
       timer = null;
       if (tileWork.paused) return;
-      if (!prepareGlGeometry(strokes, smooth, PREPARE_SLICE_MS())) {
+      if (!prepareGlGeometry(strokes, PREPARE_SLICE_MS())) {
         timer = setTimeout(slice, 4);
         return;
       }
       const g = glInk();
       if (!g) return;
       const first = !warmed.has(g);
-      g.setStrokes(strokes, smooth);
+      g.setStrokes(strokes);
       if (first) {
         warmed.add(g);
         g.warm();
+        crashLog.event('gl-ready', { ms: Math.round(performance.now() - mountedAt.current), pieces: g.pieces, strokes: strokes.length });
       }
     }, PREPARE_AFTER_MS);
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [strokes, smooth, enabled]);
+  }, [strokes, enabled]);
 
   useEffect(() => {
     if (!scrollRoot) return;
@@ -96,13 +110,21 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     };
     const start = () => {
       const c = container.current, parent = scrollRoot.parentElement;
-      const { strokes: list, smooth: sm } = latest.current;
+      const list = latest.current.strokes;
+      const t0 = performance.now();
+      tileWork.gl = tileWork.shell ? 'shell' : 'off';
       if (!c || !parent || tileWork.shell || !latest.current.enabled || !list.length) return;
-      // Only once the geometry is prepared (a long note, the first seconds after opening it):
-      // preparing it here held the first frame of the pinch up for a second.
-      if (!prepareGlGeometry(list, sm, 0)) return;
+      // Strokes not prepared yet are prepared now, a frame and a half at most (preparing a whole
+      // long note here held the first frame of the pinch up for a second): with more left, bitmaps.
+      if (!prepareGlGeometry(list, frameRate.frameMs * START_FRAMES)) {
+        tileWork.gl = 'preparing';
+        return;
+      }
       const g = glInk();
-      if (!g) return;
+      if (!g) {
+        tileWork.gl = 'no-webgl';
+        return;
+      }
       if (loop !== null) cancelAnimationFrame(loop);
       loop = null;
       Object.assign(g.canvas.style, {
@@ -110,10 +132,12 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
         width: `${scrollRoot.clientWidth}px`, height: `${scrollRoot.clientHeight}px`, pointerEvents: 'none', zIndex: '1', display: '',
       });
       if (g.canvas.parentElement !== parent || g.canvas.previousSibling !== scrollRoot) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
-      g.setStrokes(list, sm);
+      g.setStrokes(list);
       draw();
       c.classList.add('on-gl-ink');
       on = true;
+      tileWork.gl = 'gpu';
+      tileWork.glStartMs = Math.round(performance.now() - t0);
     };
     const moved = () => {
       if (on) draw();

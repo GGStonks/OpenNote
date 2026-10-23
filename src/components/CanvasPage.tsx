@@ -1021,7 +1021,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
-  usePinchInk(containerRef, scrollRoot ?? null, shownStrokes, PAGE_W, smoothAt(zoom), !printMode);
+  usePinchInk(containerRef, scrollRoot ?? null, shownStrokes, PAGE_W, !printMode);
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn sharp over the view (SharpInk) where page canvases hit their budget. */

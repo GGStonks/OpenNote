@@ -556,7 +556,7 @@ export function drawStrokes(ctx: CanvasRenderingContext2D, strokes: Stroke[], op
  * fountain line is its capsules, a stroked line round-capped and round-joined pieces of its width
  * (dashes and dots as pieces of their own), a highlighter 5.5 x its width.
  */
-export function strokeGlGeometry(s: Stroke, smooth = false): { caps: number[]; area: XY[] | null; arrow: [XY, XY, XY] | null } {
+export function strokeGlGeometry(s: Stroke): { caps: number[]; area: XY[] | null; arrow: [XY, XY, XY] | null } {
   const style = styleOf(s);
   const points = s.points;
   const closed = !!style.closed && points.length > 2;
@@ -574,7 +574,7 @@ export function strokeGlGeometry(s: Stroke, smooth = false): { caps: number[]; a
     stroked(line);
     if (fillable) area = line;
   } else if (!style.isShape) {
-    const g = smooth ? strokeGeometrySmooth(s) : strokeGeometry(s);
+    const g = strokeGeometry(s);
     if (g.widths && !highlighter) chainCaps(caps, g.pts, g.widths.map((w) => w / 2));
     else stroked(g.pts);
     if (fillable) area = g.pts;

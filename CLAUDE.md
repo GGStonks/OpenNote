@@ -99,6 +99,10 @@ show the iPad's compositing cost).
   (tablet-class): `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/radeon_icd.json BENCH_GPU=1
   BENCH_GPU_ARGS="--use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE --disable-vulkan-surface"`.
   `--only glwarm`: how soon after opening the GPU ink is ready (a pinch before that uses the bitmaps).
+  `--only glwrite`: pinches right after writing must be drawn by the GPU (new strokes are appended to
+  its buffer, not rebuilt). Each pinch's crash-log entry says who drew it (`gl`: gpu / preparing /
+  no-webgl / shell). `BENCH_NO_GL=1` (localStorage `opennote_gl` = 'off') compares with the bitmaps;
+  `--cpu 8` emulates a weak Android tablet.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)

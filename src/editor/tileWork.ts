@@ -17,6 +17,10 @@ export const tileWork = {
   /** Told every time the fingers lift (unlike `resume`, whose work is done once). */
   ended: new Set<() => void>(),
   painting: new Set<object>(),
+  /** Who drew the ink of the last pinch (usePinchInk): 'gpu', 'preparing' (bitmaps: its geometry was not ready), 'no-webgl', 'shell', 'off'. */
+  gl: '' as string,
+  /** How long the GPU ink took to start (ms). */
+  glStartMs: 0,
 };
 
 export function setTilesPaused(paused: boolean) {

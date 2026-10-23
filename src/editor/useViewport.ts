@@ -347,6 +347,8 @@ export function useViewport({ contentWidth, fingersNavigate, gestures, onFingerT
           max: Math.round(gaps[gaps.length - 1] ?? 0),
           slow: gaps.filter((g) => g > frameRate.frameMs * 1.5).length,
           hz: Math.round(frameRate.hz),
+          gl: tileWork.gl,
+          ...(tileWork.gl === 'gpu' ? { glStartMs: tileWork.glStartMs } : {}),
           redrawMs: Math.round(performance.now() - lifted),
           z0: Math.round(z0 * 100) / 100,
           z: Math.round(z * 100) / 100,
