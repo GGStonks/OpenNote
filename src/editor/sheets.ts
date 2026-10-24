@@ -3,6 +3,7 @@ import { ImageBlock, LatexBlock, NoteDocument, NotePage, PAGE_HEIGHT, PageSheet,
 import { markMoved } from '../ink/strokeRenderer';
 import { PageSetup, SetupPatch, pageSetup } from './pageSetup';
 import { restamp } from './zorder';
+import { PACKED_STRIDE, packedPoints } from '../storage/packedPoints';
 
 /**
  * A note is one continuous vertical surface (doc.pages[0]): ink and blocks go anywhere on it and
@@ -57,10 +58,18 @@ function strokeY(s: Stroke) {
   let r = yRanges.get(s);
   if (!r) {
     let minY = Infinity, maxY = -Infinity;
-    for (const p of s.points) {
-      if (p.y < minY) minY = p.y;
-      if (p.y > maxY) maxY = p.y;
-    }
+    const packed = packedPoints.get(s);
+    if (packed) {
+      // Loaded and not unpacked yet: read from the packed array (packedPoints.ts).
+      for (let o = 1; o < packed.length; o += PACKED_STRIDE) {
+        if (packed[o] < minY) minY = packed[o];
+        if (packed[o] > maxY) maxY = packed[o];
+      }
+    } else
+      for (const p of s.points) {
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
     r = { minY, maxY };
     yRanges.set(s, r);
   }

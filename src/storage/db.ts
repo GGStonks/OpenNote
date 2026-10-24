@@ -1,4 +1,5 @@
 import { letterSheetsFor, surfaceFromPages } from '../editor/sheets';
+import { packedPoints } from './packedPoints';
 import { AudioRecording, Folder, NoteDocument, NotePage, Point, SCHEMA_VERSION, Stroke, Subject, Tag, newId } from '../types';
 
 /**
@@ -10,13 +11,15 @@ import { AudioRecording, Folder, NoteDocument, NotePage, Point, SCHEMA_VERSION, 
  */
 
 const DB_NAME = 'OpenNote_Database';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NOTES = 'notes';
 /** Before v1.13: flat subjects. Read once to turn them into folders, then emptied. */
 const STORE_SUBJECTS = 'subjects';
 const STORE_FOLDERS = 'folders';
 const STORE_TAGS = 'tags';
 const STORE_AUDIO = 'audio';
+/** Library thumbnails: each note's first-page ink as images (thumbCache.ts), by `noteId|layer`. */
+const STORE_THUMBS = 'thumbs';
 
 export function createBlankPage(pageNumber: number): NotePage {
   return { id: newId('page'), pageNumber, strokes: [], latexBlocks: [], textBlocks: [], imageBlocks: [] };
@@ -131,9 +134,7 @@ function packStroke(s: Stroke): StoredStroke {
   return out;
 }
 
-function unpackStroke(s: StoredStroke | Stroke): Stroke {
-  if (!('pts' in s) || !(s.pts instanceof Float64Array)) return s as Stroke;
-  const { pts, ...rest } = s;
+function decodePoints(pts: Float64Array): Point[] {
   const points: Point[] = [];
   for (let o = 0; o + PT <= pts.length; o += PT) {
     const p: Point = { x: pts[o], y: pts[o + 1], pressure: pts[o + 2] };
@@ -142,8 +143,36 @@ function unpackStroke(s: StoredStroke | Stroke): Stroke {
     if (!Number.isNaN(pts[o + 5])) p.az = pts[o + 5];
     points.push(p);
   }
-  const out: Stroke = { ...rest, points };
+  return points;
+}
+
+/**
+ * The stroke with its points made from the packed array the first time they are read. Unpacking
+ * every point of every note when the library opened (an object per point, millions in a large
+ * library) held the home screen up for seconds; now a note is unpacked when it is opened, and the
+ * library only touches what its thumbnails show. Ranges are read from the packed array
+ * (packedPoints.ts).
+ */
+function unpackStroke(s: StoredStroke | Stroke): Stroke {
+  if (!('pts' in s) || !(s.pts instanceof Float64Array)) return s as Stroke;
+  const { pts, ...rest } = s;
+  const out = rest as Stroke;
+  const settle = (self: Stroke, points: Point[]) => {
+    Object.defineProperty(self, 'points', { value: points, writable: true, enumerable: true, configurable: true });
+    return points;
+  };
+  Object.defineProperty(out, 'points', {
+    enumerable: true,
+    configurable: true,
+    get(this: Stroke) {
+      return settle(this, decodePoints(pts));
+    },
+    set(this: Stroke, v: Point[]) {
+      settle(this, v);
+    },
+  });
   packedStrokes.set(out, s as StoredStroke);
+  packedPoints.set(out, pts);
   return out;
 }
 
@@ -193,6 +222,10 @@ function openDb(): Promise<IDBDatabase> {
         const s = db.createObjectStore(STORE_AUDIO, { keyPath: 'id' });
         s.createIndex('noteId', 'noteId');
       }
+      if (!db.objectStoreNames.contains(STORE_THUMBS)) {
+        const s = db.createObjectStore(STORE_THUMBS, { keyPath: 'id' });
+        s.createIndex('noteId', 'noteId');
+      }
     };
   });
   dbPromise.catch(() => (dbPromise = null));
@@ -230,15 +263,35 @@ export async function requestPersistentStorage(): Promise<void> {
   }
 }
 
+/**
+ * Every stored note, read one at a time with a cursor: getAll() made the browser copy the whole
+ * library out of the database in one task (a long freeze of the home screen with large notes);
+ * a cursor delivers each note in a task of its own.
+ */
+function readAllNotes(db: IDBDatabase): Promise<NoteDocument[]> {
+  return new Promise((resolve, reject) => {
+    const out: NoteDocument[] = [];
+    const cursorReq = db.transaction(STORE_NOTES, 'readonly').objectStore(STORE_NOTES).openCursor();
+    cursorReq.onerror = () => reject(cursorReq.error);
+    cursorReq.onsuccess = () => {
+      const c = cursorReq.result;
+      if (!c) return resolve(out);
+      // Unpacked as it arrives, in the same short task.
+      out.push(migrateNote(unpackNote(c.value as NoteDocument)));
+      c.continue();
+    };
+  });
+}
+
 export async function getAllNotes(): Promise<NoteDocument[]> {
   const db = await openDb();
-  const notes = (await req(db.transaction(STORE_NOTES, 'readonly').objectStore(STORE_NOTES).getAll())) as NoteDocument[];
+  const notes = await readAllNotes(db);
   if (!notes.length) {
     const w = welcomeNote();
     await saveNote(w, false);
     return [w];
   }
-  return notes.map((n) => migrateNote(unpackNote(n))).sort((a, b) => b.updatedAt - a.updatedAt);
+  return notes.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 export async function saveNote(note: NoteDocument, touch = true): Promise<NoteDocument> {
@@ -252,11 +305,36 @@ export async function saveNote(note: NoteDocument, touch = true): Promise<NoteDo
 
 export async function deleteNote(id: string): Promise<void> {
   const db = await openDb();
-  const tx = db.transaction([STORE_NOTES, STORE_AUDIO], 'readwrite', STRICT);
+  const tx = db.transaction([STORE_NOTES, STORE_AUDIO, STORE_THUMBS], 'readwrite', STRICT);
   tx.objectStore(STORE_NOTES).delete(id);
-  const audio = tx.objectStore(STORE_AUDIO);
-  const keys = await req(audio.index('noteId').getAllKeys(id));
-  keys.forEach((k) => audio.delete(k));
+  for (const store of [STORE_AUDIO, STORE_THUMBS]) {
+    const os = tx.objectStore(store);
+    const keys = await req(os.index('noteId').getAllKeys(id));
+    keys.forEach((k) => os.delete(k));
+  }
+  await txDone(tx);
+}
+
+/** A library thumbnail layer (thumbCache.ts): the ink of one layer of a note's first page, as an image. */
+export interface StoredThumb {
+  /** `noteId|layerKey|size`. */
+  id: string;
+  noteId: string;
+  /** The note's updatedAt when it was drawn: another means it is out of date. */
+  updatedAt: number;
+  url: string;
+}
+
+export async function getAllThumbs(): Promise<StoredThumb[]> {
+  const db = await openDb();
+  return (await req(db.transaction(STORE_THUMBS, 'readonly').objectStore(STORE_THUMBS).getAll())) as StoredThumb[];
+}
+
+/** Stores a thumbnail layer, replacing the note's out-of-date ones for that layer. */
+export async function putThumb(t: StoredThumb): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_THUMBS, 'readwrite');
+  tx.objectStore(STORE_THUMBS).put(t);
   await txDone(tx);
 }
 

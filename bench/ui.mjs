@@ -81,7 +81,9 @@ function seedNote() {
   // --latex: a converted formula on the first page, made halfway through the writing (the ink is
   // then two layers, under and over the formula, as after a LaTeX conversion).
   const latexBlocks = process.argv.includes('--latex')
-    ? [{ id: 'latex_bench', x: 120, y: 300, width: 300, height: 60, latexCode: '\\int_0^1 x^2\\,dx = \\frac{1}{3}', createdAt: 1700000000000 + Math.floor(strokes.length / 2) }]
+    ? [process.env.BENCH_LATEX_BIG
+        ? { id: 'latex_bench', x: 60, y: 200, width: 640, height: 400, scale: 2.2, latexCode: 'Sia $f(x) = \\int_0^x e^{-t^2}\\,dt$ la funzione degli errori. Allora per ogni $x > 0$ vale la stima seguente, che si dimostra integrando per parti due volte e confrontando i termini:\n\n$$\\sum_{n=0}^{\\infty} \\frac{(-1)^n x^{2n+1}}{n!\\,(2n+1)} = f(x)$$\n\nIn particolare la serie converge uniformemente sui compatti e la funzione è analitica ovunque.', createdAt: 1700000000000 + Math.floor(strokes.length / 2) }
+        : { id: 'latex_bench', x: 120, y: 300, width: 300, height: 60, latexCode: '\\int_0^1 x^2\\,dx = \\frac{1}{3}', createdAt: 1700000000000 + Math.floor(strokes.length / 2) }]
     : [];
   return {
     id: 'doc_bench', title: 'Bench note', createdAt: now, updatedAt: now, paperStyle: 'ruled', paperColor: 'white', schemaVersion: 3,
@@ -421,6 +423,111 @@ if (ONLY.has('glwrite')) {
   const log = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-3));
   console.log(`glwrite  pieces ${p0} -> ${await pieces()}; pinches: ${(log ?? []).map((c) => `${c.gl}${c.glStartMs !== undefined ? ' ' + c.glStartMs + ' ms' : ''}`).join(', ')}`);
 }
+// --only latexshift (with --latex): the LaTeX block's content, in page units, at zooms from the
+// fit width up to 500% (zoom buttons). It must not move or change size with the zoom.
+if (ONLY.has('latexshift')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const measure = () => page.evaluate(() => {
+    const c = document.querySelector('.on-page');
+    const k = document.querySelector('.on-math .katex') ?? document.querySelector('.on-math');
+    const box = document.querySelector('.on-math')?.closest('.absolute[style*="left"]');
+    if (!c || !k) return null;
+    const cr = c.getBoundingClientRect(), kr = k.getBoundingClientRect();
+    const zoom = Number(document.body.innerText.match(/(\d+)%/)?.[1] ?? 0) / 100;
+    const s = cr.width / c.offsetWidth;
+    const f = (v) => Math.round(v * 100) / 100;
+    const parts = [...document.querySelectorAll('.on-math p, .on-math .katex-display, .on-math .katex-html')].slice(0, 6).map((e) => f((e.getBoundingClientRect().top - cr.top) / s));
+    return { zoom, x: f((kr.left - cr.left) / s), y: f((kr.top - cr.top) / s), w: f(kr.width / s), h: f(kr.height / s), box: box ? f(box.getBoundingClientRect().width / s) : null, parts };
+  });
+  const rows = [await measure()];
+  for (let i = 0; i < 12; i++) {
+    const b = page.locator('[title^="Zoom in"]').first();
+    if (!(await b.isEnabled().catch(() => false))) break;
+    await b.click();
+    await sleep(500);
+    rows.push(await measure());
+  }
+  if (arg('shots')) {
+    const r = await page.evaluate(() => { const b = document.querySelector('.on-math .katex')?.getBoundingClientRect(); return b ? { x: b.left, y: b.top } : null; });
+    if (r) await page.screenshot({ path: join(arg('shots'), 'latex-500.png'), clip: { x: Math.max(0, r.x - 20), y: Math.max(0, r.y - 20), width: 600, height: 300 } });
+  }
+  for (const r of rows) console.log(`latexshift ${r ? `zoom ${r.zoom}  x ${r.x}  y ${r.y}  w ${r.w}  h ${r.h}  (block w ${r.box})  tops ${r.parts.join(' ')}` : 'no LaTeX'}`);
+}
+// --only library: the home screen with 24 notes like the bench note: how long the main thread is
+// blocked while the library shows (long tasks over 50 ms in the first 6 s, at the CPU slowdown).
+if (ONLY.has('library')) {
+  await page.evaluate(async (note) => {
+    const db = await new Promise((res, rej) => {
+      const r = indexedDB.open('OpenNote_Database');
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    await new Promise((res, rej) => {
+      const tx = db.transaction('notes', 'readwrite');
+      // As the app stores them (db.ts packNote): each stroke's points in one Float64Array.
+      const pack = (st) => {
+        const { points, ...rest } = st;
+        const pts = new Float64Array(points.length * 6);
+        points.forEach((q, i) => pts.set([q.x, q.y, q.pressure, q.t ?? NaN, q.alt ?? NaN, q.az ?? NaN], i * 6));
+        return { ...rest, pts };
+      };
+      const packed = { ...note, pages: note.pages.map((pg) => ({ ...pg, strokes: pg.strokes.map(pack) })) };
+      for (let i = 0; i < 24; i++) tx.objectStore('notes').put({ ...packed, id: `doc_lib_${i}`, title: `Library note ${i}`, updatedAt: note.updatedAt - i * 1000 });
+      tx.oncomplete = res;
+      tx.onerror = () => rej(tx.error);
+    });
+    db.close();
+  }, seedNote());
+  for (const pass of ['first', 'again']) {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await page.addInitScript(() => {
+      window.__long = [];
+      new PerformanceObserver((l) => l.getEntries().forEach((e) => window.__long.push(e.duration))).observe({ entryTypes: ['longtask'] });
+    });
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU });
+    const t0 = Date.now();
+    const run = async () => {
+      await page.reload();
+      await sleep(6000);
+    };
+    const drawAll = async () => {
+      // Every card's thumbnail drawn and stored before the second opening.
+      // (Only the cards near the screen are drawn: until no new one appears for 3 s.)
+      let n = -1, still = 0;
+      while (still < 6) {
+        await sleep(500);
+        const m = await page.evaluate(() => document.querySelectorAll('img').length);
+        still = m === n ? still + 1 : 0;
+        n = m;
+      }
+    };
+    if (pass === 'first') await profiled('library', run);
+    else await run();
+    const long = await page.evaluate(() => window.__long ?? []);
+    const imgs = await page.evaluate(() => document.querySelectorAll('img').length);
+    if (pass === 'first') await drawAll();
+    if (arg('shots')) {
+      await sleep(2000);
+      await page.screenshot({ path: join(arg('shots'), `library-${pass}.png`) });
+    }
+    if (process.env.BENCH_DEBUG) console.log('library  geom', JSON.stringify(await page.evaluate(() => {
+      const im = document.querySelector('img'); if (!im) return null;
+      const r = im.getBoundingClientRect(); const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 3);
+      const cs = getComputedStyle(im);
+      return { r: [r.left, r.top, r.width, r.height].map(Math.round), vis: cs.visibility, op: cs.opacity, disp: cs.display, top: top?.tagName + '.' + (top?.className?.toString?.() ?? ''), chain: (() => { const a = []; let e = im; for (let i = 0; i < 6 && e; i++) { a.push(e.tagName + ' ' + (e.getAttribute('class') ?? '') + ' ' + (e.getAttribute('style') ?? '').slice(0, 80)); e = e.parentElement; } return a; })() };
+    })));
+    if (process.env.BENCH_DEBUG) console.log('library  imgs', JSON.stringify(await page.evaluate(async () => Promise.all([...document.querySelectorAll('img')].slice(0, 2).map(async (im) => {
+      await im.decode().catch(() => null);
+      const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+      const x = c.getContext('2d'); x.drawImage(im, 0, 0);
+      const d = x.getImageData(0, 0, c.width, c.height).data; let ink = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 128) ink++;
+      return { w: im.naturalWidth, h: im.naturalHeight, ink, style: im.getAttribute('style'), len: im.src.length, parent: im.parentElement?.getAttribute('style') };
+    })))));
+    console.log(`library  ${pass}: long tasks ${long.length}, total ${Math.round(long.reduce((a, b) => a + b, 0))} ms, longest ${Math.round(Math.max(0, ...long))} ms in ${((Date.now() - t0) / 1000).toFixed(1)} s (${imgs} images)`);
+  }
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));
@@ -635,6 +742,49 @@ if (ONLY.has('canvasmem')) {
     console.log(`canvasmem ${await report()}`);
   }
 }
+// --only resize8: lassoes handwriting, drags the right side handle, then the top-left corner: the
+// side must change only the width, the corner both, with the opposite corner staying put.
+if (ONLY.has('resize8')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.locator('button[title^="Lasso"]').click();
+  await sleep(300);
+  const loop = Array.from({ length: 60 }, (_, i) => {
+    const a = (i / 59) * Math.PI * 2;
+    return [300 + Math.cos(a) * 120, 470 + Math.sin(a) * 45];
+  });
+  await mouse('mousePressed', loop[0][0], loop[0][1]);
+  for (const [x, y] of loop.slice(1)) {
+    await mouse('mouseMoved', x, y);
+    await sleep(8);
+  }
+  await mouse('mouseReleased', loop[59][0], loop[59][1]);
+  await sleep(800);
+  const boxOf = () => page.locator('.border-dashed.border-blue-500').first().boundingBox();
+  const drag = async (handle, ddx, ddy) => {
+    const h = await page.locator(`[data-resize="${handle}"]`).boundingBox();
+    if (!h) return false;
+    const hx = h.x + h.width / 2, hy = h.y + h.height / 2;
+    await mouse('mousePressed', hx, hy);
+    for (let i = 1; i <= 20; i++) {
+      await mouse('mouseMoved', hx + (ddx * i) / 20, hy + (ddy * i) / 20);
+      await sleep(10);
+    }
+    await mouse('mouseReleased', hx + ddx, hy + ddy);
+    await sleep(900);
+    return true;
+  };
+  const r = (b) => (b ? `x ${b.x.toFixed(0)} y ${b.y.toFixed(0)} w ${b.width.toFixed(0)} h ${b.height.toFixed(0)}` : 'none');
+  const b0 = await boxOf();
+  const ok1 = await drag('1,0', 80, 40);
+  const b1 = await boxOf();
+  const ok2 = await drag('-1,-1', -40, -30);
+  const b2 = await boxOf();
+  console.log(`resize8  start ${r(b0)}`);
+  console.log(`resize8  right side +80 (and 40 down): ${ok1 ? r(b1) : 'no handle'}`);
+  console.log(`resize8  top-left corner -40,-30: ${ok2 ? r(b2) : 'no handle'}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'resize8.png'), clip: { x: 0, y: 300, width: 820, height: 420 } });
+}
 // Not in the default run: --only selshots --shots <dir> lassoes some handwriting, enlarges the
 // selection with its corner handle, then zooms in: the selected ink must stay as sharp as the rest.
 if (ONLY.has('selshots') && arg('shots')) {
@@ -653,7 +803,7 @@ if (ONLY.has('selshots') && arg('shots')) {
   }
   await mouse('mouseReleased', loop[59][0], loop[59][1]);
   await sleep(800);
-  const h = await page.locator('.cursor-nwse-resize').boundingBox();
+  const h = await page.locator('[data-resize="1,1"]').boundingBox();
   if (!h) console.log('selshots (no resize handle)');
   else {
     const hx = h.x + h.width / 2, hy = h.y + h.height / 2;
@@ -738,7 +888,7 @@ if (ONLY.has('dragshots') && arg('shots')) {
   }
   await mouse('mouseReleased', loop[59][0], loop[59][1]);
   await sleep(800);
-  const h = await page.locator('.cursor-nwse-resize').boundingBox();
+  const h = await page.locator('[data-resize="1,1"]').boundingBox();
   if (h) {
     const hx = h.x + h.width / 2, hy = h.y + h.height / 2;
     await mouse('mousePressed', hx, hy);

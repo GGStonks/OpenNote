@@ -115,6 +115,17 @@ export const LatexBlockView = React.memo<LatexBlockViewProps>(
   sameData
 );
 
+/**
+ * Formulas and text are laid out at this many times their page size, at every zoom, and scaled to
+ * the zoom inside the block's layer. Laid out at each zoom's own size, they moved as the zoom
+ * changed: the browser rounds a font's ascent and descent to whole pixels at the size it lays text
+ * out at, and every line holding taller maths gained or lost a little, adding up line after line (a
+ * long block was off by several screen pixels at 500%). One layout, one set of roundings. The scale
+ * inside the layer is drawn from the vectors (only a layer of its own is drawn as a bitmap), so it
+ * stays sharp; the layer itself is still the block's size on screen.
+ */
+const MATH_LAYOUT = 5;
+
 const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interactive, selected, zoom, onSelect, onEdit, onDelete, onSilentUpdate, measure = true }) => {
   const rendered = useMemo(() => renderLatexContent(block.latexCode), [block.latexCode]);
   const textual = rendered.html.includes('<p>') || rendered.html.includes('on-h');
@@ -125,13 +136,13 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   const z = layoutZoom(zoom, block.width, block.height);
 
   // Keep the stored box equal to the rendered size (used by lasso hit-testing and export). The
-  // content is laid out at screen size (ScreenScaled): page size = measured / zoom.
+  // content is laid out at MATH_LAYOUT x its page size: page size = measured / MATH_LAYOUT.
   useLayoutEffect(() => {
     const el = contentRef.current;
     // Hidden copies (print layout portal) measure 0x0 and must not overwrite the stored size.
     if (!el || !measure || el.offsetParent === null) return;
-    const w = Math.ceil(textual ? block.width : el.scrollWidth / z);
-    const h = Math.ceil(el.scrollHeight / z);
+    const w = Math.ceil(textual ? block.width : el.scrollWidth / MATH_LAYOUT);
+    const h = Math.ceil(el.scrollHeight / MATH_LAYOUT);
     if (Math.abs(w - block.width) <= 2 && Math.abs(h - block.height) <= 2) return;
     const key = `${block.latexCode}|${scale}|${textual ? block.width : ''}`;
     const last = written.current;
@@ -151,11 +162,16 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
       }}
     >
       {selected && <ActionPill zoom={zoom} onEdit={onEdit} onCopy={() => navigator.clipboard?.writeText(block.latexCode)} onDelete={onDelete} />}
-      <ScreenScaled zoom={z} width={textual ? block.width : undefined}>
+      <ScreenScaled zoom={z} width={block.width} height={block.height}>
         <div
           ref={contentRef}
           className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
-          style={{ fontSize: BASE_MATH_PX * scale * z }}
+          style={{
+            fontSize: BASE_MATH_PX * scale * MATH_LAYOUT,
+            width: textual ? block.width * MATH_LAYOUT : undefined,
+            transform: `scale(${z / MATH_LAYOUT})`,
+            transformOrigin: '0 0',
+          }}
           dangerouslySetInnerHTML={{ __html: rendered.html }}
         />
       </ScreenScaled>

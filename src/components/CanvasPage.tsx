@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Maximize2, RotateCw } from 'lucide-react';
+import { RotateCw } from 'lucide-react';
 import {
   EraserMode, FillType, LatexBlock, LineStyle, NotePage, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
@@ -167,6 +167,12 @@ export function paperGrid(style: PaperStyle): number | null {
  * a larger one is drawn without the GPU, and a 4 GB iPad runs short of GPU memory sooner.
  */
 const MAX_CANVAS_PIXELS = 14_500_000;
+
+/** The selection's resize handles: corners, then the middle of each side (which sides each moves). */
+const RESIZE_HANDLES: { x: -1 | 0 | 1; y: -1 | 0 | 1; cursor: string }[] = [
+  { x: -1, y: -1, cursor: 'nwse-resize' }, { x: 1, y: -1, cursor: 'nesw-resize' }, { x: 1, y: 1, cursor: 'nwse-resize' }, { x: -1, y: 1, cursor: 'nesw-resize' },
+  { x: 0, y: -1, cursor: 'ns-resize' }, { x: 1, y: 0, cursor: 'ew-resize' }, { x: 0, y: 1, cursor: 'ns-resize' }, { x: -1, y: 0, cursor: 'ew-resize' },
+];
 /**
  * The page canvases' zoom is the zoom that fits the page's width on this screen (100% with an
  * iPad upright, about 150% sideways; at most this), whatever the user zooms to; above it committed
@@ -1996,17 +2002,20 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // the editor, which made moving anything lag.
   // Rotation: the rotate handle turns the selection about its centre; the angle is shown, and
   // snaps to every 15° (0° included) within ROTATE_SNAP. Items remember their total rotation.
+  // Resizing: eight handles, on the corners (both directions) and the sides (one), the opposite
+  // side staying where it is; `side` says which sides the handle moves (-1 left / top, 1 right /
+  // bottom, 0 neither).
   const transform = useRef<{
-    mode: 'move' | 'scale' | 'rotate'; startX: number; startY: number; sel: Selection; pointerId: number; dx: number; dy: number; f: number;
-    rot: number; startAngle: number; base: number | null;
+    mode: 'move' | 'scale' | 'rotate'; startX: number; startY: number; sel: Selection; pointerId: number; dx: number; dy: number; fx: number; fy: number;
+    rot: number; startAngle: number; base: number | null; side: { x: -1 | 0 | 1; y: -1 | 0 | 1 };
   } | null>(null);
-  const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; f: number; rot: number; base: number | null } | null>(null);
+  const [drag, setDrag] = useState<{ sel: Selection; dx: number; dy: number; fx: number; fy: number; rot: number; base: number | null } | null>(null);
   const dragFrame = useRef<number | null>(null);
   const floatCanvasRef = useRef<HTMLCanvasElement>(null);
   const glowCanvasRef = useRef<HTMLCanvasElement>(null);
   const [liveBounds, setLiveBounds] = useState<Selection['bounds'] | null>(null);
   const shownBounds = drag
-    ? { x: drag.sel.bounds.x + drag.dx, y: drag.sel.bounds.y + drag.dy, width: drag.sel.bounds.width * drag.f, height: drag.sel.bounds.height * drag.f }
+    ? { x: drag.sel.bounds.x + drag.dx, y: drag.sel.bounds.y + drag.dy, width: drag.sel.bounds.width * drag.fx, height: drag.sel.bounds.height * drag.fy }
     : liveBounds ?? selection?.bounds ?? null;
   /** The rotation the selected items share (null: they differ). */
   const selRotation = useMemo(() => (selection ? selectionRotation(page, selection) : null), [page, selection]);
@@ -2017,7 +2026,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     return (Math.atan2(p.y - c.y, p.x - c.x) * 180) / Math.PI;
   };
 
-  const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale' | 'rotate') => {
+  const startTransform = (e: React.PointerEvent, mode: 'move' | 'scale' | 'rotate', side: { x: -1 | 0 | 1; y: -1 | 0 | 1 } = { x: 1, y: 1 }) => {
     if (!selection) return;
     // Another finger is already down: the fingers scroll the page (useViewport), nothing is dragged.
     if (e.pointerType === 'touch' && gestures.touches > 1) return;
@@ -2026,12 +2035,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     const base = selRotation;
     transform.current = {
-      mode, startX: e.clientX, startY: e.clientY, sel: selection, pointerId: e.pointerId, dx: 0, dy: 0, f: 1,
-      rot: 0, startAngle: mode === 'rotate' ? angleTo(e, centreOf(selection.bounds)) : 0, base,
+      mode, startX: e.clientX, startY: e.clientY, sel: selection, pointerId: e.pointerId, dx: 0, dy: 0, fx: 1, fy: 1,
+      rot: 0, startAngle: mode === 'rotate' ? angleTo(e, centreOf(selection.bounds)) : 0, base, side,
     };
     gestures.dragging = true;
     crashLog.event('drag-start', { mode, strokes: selection.strokeIds.length, latex: selection.latexIds.length, zoom });
-    setDrag({ sel: selection, dx: 0, dy: 0, f: 1, rot: 0, base });
+    setDrag({ sel: selection, dx: 0, dy: 0, fx: 1, fy: 1, rot: 0, base });
     if (selection.strokeIds.length) setHiddenIds(new Set(selection.strokeIds));
   };
 
@@ -2048,7 +2057,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_W - b.x - b.width), dx));
       t.dy = Math.max(Math.min(0, -b.y), Math.min(Math.max(0, PAGE_H - b.y - b.height), dy));
     } else if (t.mode === 'scale') {
-      t.f = Math.max(0.2, Math.min(5, Math.max((b.width + dx) / b.width, (b.height + dy) / b.height)));
+      // The grabbed sides follow the pointer, the opposite ones stay.
+      const scaleOf = (side: -1 | 0 | 1, size: number, d: number) => (side ? Math.max(0.2, Math.min(5, (size + side * d) / Math.max(1e-6, size))) : 1);
+      t.fx = scaleOf(t.side.x, b.width, dx);
+      t.fy = scaleOf(t.side.y, b.height, dy);
+      t.dx = t.side.x < 0 ? b.width * (1 - t.fx) : 0;
+      t.dy = t.side.y < 0 ? b.height * (1 - t.fy) : 0;
     } else {
       let rot = normDeg(angleTo(e, centreOf(b)) - t.startAngle);
       // Snap the resulting orientation (or, for items turned differently, the turn) to 15° steps.
@@ -2062,7 +2076,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       dragFrame.current = requestAnimationFrame(() => {
         dragFrame.current = null;
         const cur = transform.current;
-        if (cur) setDrag({ sel: cur.sel, dx: cur.dx, dy: cur.dy, f: cur.f, rot: cur.rot, base: cur.base });
+        if (cur) setDrag({ sel: cur.sel, dx: cur.dx, dy: cur.dy, fx: cur.fx, fy: cur.fy, rot: cur.rot, base: cur.base });
       });
     }
   };
@@ -2072,16 +2086,17 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (!t || e.pointerId !== t.pointerId) return;
     transform.current = null;
     gestures.dragging = false;
-    crashLog.event('drag-end', { mode: t.mode, f: Math.round(t.f * 100) / 100, cancelled });
+    crashLog.event('drag-end', { mode: t.mode, fx: Math.round(t.fx * 100) / 100, fy: Math.round(t.fy * 100) / 100, cancelled });
     if (dragFrame.current !== null) cancelAnimationFrame(dragFrame.current);
     dragFrame.current = null;
-    const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.f - 1) > 1e-4 || Math.abs(t.rot) > 1e-3;
+    const moved = Math.abs(t.dx) > 0.01 || Math.abs(t.dy) > 0.01 || Math.abs(t.fx - 1) > 1e-4 || Math.abs(t.fy - 1) > 1e-4 || Math.abs(t.rot) > 1e-3;
     if (moved && !cancelled) {
-      const next = transformSelection(pageRef.current, t.sel, t.dx, t.dy, t.f, t.rot);
-      editor.commitPage(page.id, (p) => transformSelection(p, t.sel, t.dx, t.dy, t.f, t.rot));
-      const b = t.rot ? computeBounds(next, t.sel) : null;
+      const next = transformSelection(pageRef.current, t.sel, t.dx, t.dy, t.fx, t.rot, t.fy);
+      editor.commitPage(page.id, (p) => transformSelection(p, t.sel, t.dx, t.dy, t.fx, t.rot, t.fy));
+      // Rotated or stretched unevenly (text wraps again, formulas keep their shape): measured anew.
+      const b = t.rot || Math.abs(t.fx - t.fy) > 1e-4 ? computeBounds(next, t.sel) : null;
       const o = t.sel.bounds;
-      setSelection({ ...t.sel, bounds: b ?? { x: o.x + t.dx, y: o.y + t.dy, width: o.width * t.f, height: o.height * t.f } });
+      setSelection({ ...t.sel, bounds: b ?? { x: o.x + t.dx, y: o.y + t.dy, width: o.width * t.fx, height: o.height * t.fy } });
     }
     setDrag(null);
     setHiddenIds(null);
@@ -2131,47 +2146,39 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const layerSel = drag?.sel ?? null;
   const glowSel = !drag && selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null;
   /**
-   * glowOnly: the idle glow (any resolution will do). Otherwise the dragged ink, at the screen's
-   * resolution for this zoom and `k`, the scale the drag has reached (the canvas is CSS-scaled by
+   * The dragged ink and its glow, at the screen's resolution for this zoom and `k`, the scale the drag has reached (the canvas is CSS-scaled by
    * it): a bitmap at the page canvases' resolution, stretched while resizing, looked blurry until
    * the drag ended.
    */
-  const paintSelection = (c: HTMLCanvasElement | null, sel: Selection, glowOnly: boolean, k = 1) => {
+  const paintSelection = (c: HTMLCanvasElement | null, sel: Selection, k = 1) => {
     if (!c) return;
     const b = sel.bounds;
     const w = b.width + FLOAT_PAD * 2, h = b.height + FLOAT_PAD * 2;
-    const screen = zoom * Math.min(window.devicePixelRatio || 1, 3) * k;
-    const r = Math.min(glowOnly ? ratio : screen, Math.sqrt(MAX_CANVAS_PIXELS / (glowOnly ? 4 : 2) / Math.max(1, w * h)));
+    const r = Math.min(zoom * Math.min(window.devicePixelRatio || 1, 3) * k, Math.sqrt(MAX_CANVAS_PIXELS / 2 / Math.max(1, w * h)));
     c.width = Math.max(1, Math.round(w * r));
     c.height = Math.max(1, Math.round(h * r));
     const ctx = c.getContext('2d');
     if (!ctx) return;
-    // Glow only: just the shadow, the strokes drawn outside the canvas (`away` to the left, their
-    // shadow cast back by as much). A copy of the strokes in the glow's colour showed its hard,
-    // lower-resolution edge around the page's sharp ink when zoomed in; a blur stretches smoothly.
-    const away = glowOnly ? w + FLOAT_PAD : 0;
-    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD + away) * r, -(b.y - FLOAT_PAD) * r);
+    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
     const ids = new Set(sel.strokeIds);
-    // Idle: highlighters stay on the page only (drawing them twice would darken them).
-    const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id) && (!glowOnly || s.tool !== 'highlighter'));
+    const strokes = pageRef.current.strokes.filter((s) => ids.has(s.id));
     ctx.save();
     ctx.shadowColor = 'rgba(37, 99, 235, 0.9)';
     ctx.shadowBlur = 7 * r;
-    ctx.shadowOffsetX = away * r;
-    drawStrokes(ctx, strokes, glowOnly ? { color: 'rgba(37, 99, 235, 1)' } : {});
+    drawStrokes(ctx, strokes);
     ctx.restore();
-    ctx.setTransform(r, 0, 0, r, -(b.x - FLOAT_PAD) * r, -(b.y - FLOAT_PAD) * r);
-    if (!glowOnly) drawStrokes(ctx, strokes);
+    drawStrokes(ctx, strokes);
   };
   // Resizing: drawn again from the vectors each time the scale has moved by 8%, so it stays sharp.
-  const dragScale = drag && drag.f !== 1 ? Math.pow(1.08, Math.round(Math.log(drag.f) / Math.log(1.08))) : 1;
+  const dragMax = drag ? Math.max(drag.fx, drag.fy) : 1;
+  const dragScale = dragMax !== 1 ? Math.pow(1.08, Math.round(Math.log(dragMax) / Math.log(1.08))) : 1;
   useLayoutEffect(() => {
-    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, false, dragScale);
+    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, dragScale);
   }, [layerSel, ratio, zoom, dragScale, page.strokes]);
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
-    () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.f, drag.rot) : page),
+    () => (drag && drag.sel.latexIds.length + drag.sel.textIds.length + drag.sel.imageIds.length ? transformSelection({ ...page, strokes: [] }, drag.sel, drag.dx, drag.dy, drag.fx, drag.rot, drag.fy) : page),
     [drag, page]
   );
   /** The content in stacking order (editor/zorder.ts); unchanged ink layers keep their arrays. */
@@ -2183,9 +2190,84 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const ids = new Set(glowSel.strokeIds);
     return layers.find((l) => l.kind === 'ink' && l.strokes.some((st) => ids.has(st.id)))?.key ?? null;
   }, [glowSel, layers]);
+  /**
+   * The idle glow, at the screen's resolution over the part of the selection on screen (and a
+   * margin): drawn at the page canvases' resolution, the shadow took the coarse outline of the
+   * strokes at that resolution, a blocky blue edge around the sharp ink when zoomed in. Drawn again
+   * after a zoom and once scrolling rests away from what it covers.
+   */
+  const glowArea = useRef<SurfRect | null>(null);
+  const paintGlow = (sel: Selection) => {
+    const c = glowCanvasRef.current, cont = containerRef.current;
+    if (!c || !cont) return;
+    const b = sel.bounds;
+    let x0 = b.x - FLOAT_PAD, y0 = b.y - FLOAT_PAD, x1 = b.x + b.width + FLOAT_PAD, y1 = b.y + b.height + FLOAT_PAD;
+    const cr = cont.getBoundingClientRect(), s = cr.width / PAGE_W;
+    if (s > 0) {
+      const rr = scrollRoot?.getBoundingClientRect() ?? { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
+      const vw = (rr.right - rr.left) / s, vh = (rr.bottom - rr.top) / s;
+      const vx = (rr.left - cr.left) / s, vy = (rr.top - cr.top) / s;
+      x0 = Math.max(x0, vx - vw * 0.25);
+      y0 = Math.max(y0, vy - vh * 0.25);
+      x1 = Math.min(x1, vx + vw * 1.25);
+      y1 = Math.min(y1, vy + vh * 1.25);
+    }
+    if (x1 <= x0 || y1 <= y0) {
+      c.width = c.height = 1;
+      c.style.visibility = 'hidden';
+      glowArea.current = null;
+      return;
+    }
+    const w = x1 - x0, h = y1 - y0;
+    const r = Math.min(zoom * Math.min(window.devicePixelRatio || 1, 3), Math.sqrt(MAX_CANVAS_PIXELS / 4 / (w * h)));
+    Object.assign(c.style, { left: `${x0}px`, top: `${y0}px`, width: `${w}px`, height: `${h}px`, visibility: '' });
+    c.width = Math.max(1, Math.round(w * r));
+    c.height = Math.max(1, Math.round(h * r));
+    const ctx = c.getContext('2d');
+    if (!ctx) return;
+    // Just the shadow: the strokes drawn `away` to the left, past the whole selection, their shadow
+    // cast back by as much (a copy of the strokes in the glow's colour showed its hard edge).
+    const away = b.width + w + FLOAT_PAD * 4;
+    ctx.setTransform(r, 0, 0, r, -(x0 + away) * r, -y0 * r);
+    const ids = new Set(sel.strokeIds);
+    // Highlighters stay on the page only (drawing them twice would darken them).
+    const strokes = pageRef.current.strokes.filter((st) => ids.has(st.id) && st.tool !== 'highlighter');
+    ctx.shadowColor = 'rgba(37, 99, 235, 0.9)';
+    ctx.shadowBlur = 7 * r;
+    ctx.shadowOffsetX = away * r;
+    drawStrokes(ctx, strokes, { color: 'rgba(37, 99, 235, 1)' });
+    glowArea.current = { x0, y0, x1, y1 };
+  };
   useLayoutEffect(() => {
-    if (glowSel && glowLayerKey) paintSelection(glowCanvasRef.current, glowSel, true);
-  }, [glowSel, glowLayerKey, ratio, page.strokes]);
+    if (glowSel && glowLayerKey) paintGlow(glowSel);
+  }, [glowSel, glowLayerKey, zoom, page.strokes]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!glowSel || !glowLayerKey || !scrollRoot) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const rested = () => {
+      timer = null;
+      const cont = containerRef.current, a = glowArea.current;
+      if (!cont) return;
+      const cr = cont.getBoundingClientRect(), rr = scrollRoot.getBoundingClientRect(), s = cr.width / PAGE_W;
+      if (!(s > 0)) return;
+      const v = { x0: (rr.left - cr.left) / s, y0: (rr.top - cr.top) / s, x1: (rr.right - cr.left) / s, y1: (rr.bottom - cr.top) / s };
+      const b = glowSel.bounds;
+      // Drawn again only when the view shows part of the selection the glow does not cover.
+      const need = { x0: Math.max(v.x0, b.x - FLOAT_PAD), y0: Math.max(v.y0, b.y - FLOAT_PAD), x1: Math.min(v.x1, b.x + b.width + FLOAT_PAD), y1: Math.min(v.y1, b.y + b.height + FLOAT_PAD) };
+      if (need.x1 <= need.x0 || need.y1 <= need.y0) return;
+      if (a && a.x0 <= need.x0 && a.y0 <= need.y0 && a.x1 >= need.x1 && a.y1 >= need.y1) return;
+      paintGlow(glowSel);
+    };
+    const onScroll = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(rested, 120);
+    };
+    scrollRoot.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      if (timer) clearTimeout(timer);
+      scrollRoot.removeEventListener('scroll', onScroll);
+    };
+  }, [glowSel, glowLayerKey, scrollRoot]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ------------------------------------------------------------------ shape editing (handles)
   // Same idea for reshaping: the edited shape is drawn on the live layer while dragging and
@@ -2302,11 +2384,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             return (
               <React.Fragment key={l.key}>
                 {glowSel && l.key === glowLayerKey && (
-                  <canvas
-                    ref={glowCanvasRef}
-                    className="absolute pointer-events-none"
-                    style={{ left: glowSel.bounds.x - FLOAT_PAD, top: glowSel.bounds.y - FLOAT_PAD, width: glowSel.bounds.width + FLOAT_PAD * 2, height: glowSel.bounds.height + FLOAT_PAD * 2 }}
-                  />
+                  // Placed and sized by paintGlow (the part of the selection on screen).
+                  <canvas ref={glowCanvasRef} className="absolute pointer-events-none" />
                 )}
                 {layout.sheets.map((sh) => (
                   <InkTile
@@ -2398,7 +2477,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             width: layerSel.bounds.width + FLOAT_PAD * 2,
             height: layerSel.bounds.height + FLOAT_PAD * 2,
             transformOrigin: drag?.rot ? 'center' : `${FLOAT_PAD}px ${FLOAT_PAD}px`,
-            transform: drag ? (drag.rot ? `rotate(${drag.rot}deg)` : `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.f})`) : undefined,
+            transform: drag ? (drag.rot ? `rotate(${drag.rot}deg)` : `translate(${drag.dx}px, ${drag.dy}px) scale(${drag.fx}, ${drag.fy})`) : undefined,
             willChange: drag ? 'transform' : undefined,
           }}
         />
@@ -2500,17 +2579,26 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             </div>
             <div className="w-px h-3 bg-blue-500" />
           </div>
-          <div
-            data-no-pan
-            className="absolute -right-3 -bottom-3 w-7 h-7 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-md cursor-nwse-resize"
-            style={{ transform: `scale(${Math.max(1, 1 / zoom)})`, touchAction: 'none' }}
-            onPointerDown={(e) => startTransform(e, 'scale')}
-            onPointerMove={moveTransform}
-            onPointerUp={(e) => endTransform(e)}
-            onPointerCancel={(e) => endTransform(e, true)}
-          >
-            <Maximize2 className="w-3.5 h-3.5" />
-          </div>
+          {/* Resize: the corners change width and height, the sides one of them. */}
+          {!drag?.rot &&
+            RESIZE_HANDLES.map(({ x, y, cursor }) => (
+              <div
+                key={`${x},${y}`}
+                data-no-pan
+                data-resize={`${x},${y}`}
+                className="absolute flex items-center justify-center"
+                style={{
+                  left: `${(x + 1) * 50}%`, top: `${(y + 1) * 50}%`, width: 32, height: 32, marginLeft: -16, marginTop: -16,
+                  transform: `scale(${Math.max(1, 1 / zoom)})`, touchAction: 'none', cursor,
+                }}
+                onPointerDown={(e) => startTransform(e, 'scale', { x, y })}
+                onPointerMove={moveTransform}
+                onPointerUp={(e) => endTransform(e)}
+                onPointerCancel={(e) => endTransform(e, true)}
+              >
+                <span className="block w-3.5 h-3.5 bg-white border-2 border-blue-600 rounded-[3px] shadow-md" />
+              </div>
+            ))}
         </div>
       )}
 

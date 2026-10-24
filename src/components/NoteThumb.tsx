@@ -1,13 +1,14 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { zLayers } from '../editor/zorder';
 import { LatexBlock, NoteDocument, NotePage, PaperColor, PaperStyle, Stroke } from '../types';
-import { sheetView, surfaceLayout } from '../editor/sheets';
+import { sheetSlice, surfaceLayout } from '../editor/sheets';
 import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
 import { paperBackground } from './CanvasPage';
 import { rotationStyle } from './Blocks';
 import { textCss } from '../editor/textStyle';
+import { requestThumb } from '../services/thumbCache';
 
 /**
  * Page thumbnails (library cards: the first page; page manager: every page), drawn with the same content as the editor:
@@ -17,8 +18,21 @@ import { textCss } from '../editor/textStyle';
  * It is a scaled-down copy of the page in the DOM, not a raster: KaTeX and TikZ are HTML / SVG and
  * render exactly as on the page (fonts included), with no foreignObject rasterisation, which
  * cannot load fonts. Thumbnails are built only once they scroll near the screen; images are shown
- * once decoded, so a card never shows a half-loaded picture.
+ * once decoded, so a card never shows a half-loaded picture. Library cards show their ink from
+ * images drawn once and stored (thumbCache.ts): drawn from the strokes each time, a large library
+ * held the home screen up for seconds.
  */
+
+/**
+ * A library card's note: its ink comes from the stored thumbnail images. Its content is the
+ * surface's, not moved: `offset` brings the page's corner to (0, 0) (moving the strokes copied every
+ * point, also for a card whose image was stored).
+ */
+interface ThumbCache {
+  noteId: string;
+  updatedAt: number;
+  offset: { x: number; y: number };
+}
 
 const BASE_MATH_PX = 22;
 
@@ -64,6 +78,18 @@ const ThumbTikz: React.FC<{ block: LatexBlock; color: string; darkPaper: boolean
   );
 };
 
+/** A library card's ink layer: the stored image, drawn in the background when missing or out of date. */
+const CachedInk: React.FC<{ strokes: Stroke[]; width: number; height: number; cache: ThumbCache; layer: string }> = ({ strokes, width, height, cache, layer }) => {
+  const [url, setUrl] = useState<string | null>(null);
+  const { x, y } = cache.offset;
+  useEffect(
+    () => requestThumb(`${cache.noteId}|${layer}`, cache.noteId, cache.updatedAt, strokes, width, height, { x, y }, setUrl),
+    [cache.noteId, cache.updatedAt, layer, strokes, width, height, x, y]
+  );
+  // In the surface's frame, like the rest of the card's content (see ThumbCache).
+  return url ? <img src={url} alt="" draggable={false} className="absolute" style={{ left: -x, top: -y, width, height }} /> : null;
+};
+
 const ThumbInk: React.FC<{ strokes: Stroke[]; scale: number; width: number; height: number }> = ({ strokes, scale, width, height }) => {
   const ref = useRef<HTMLCanvasElement>(null);
   /** What the canvas shows: the same strokes at the same size are not painted again. */
@@ -86,14 +112,15 @@ const ThumbInk: React.FC<{ strokes: Stroke[]; scale: number; width: number; heig
   return <canvas ref={ref} className="absolute left-0 top-0" style={{ width, height }} />;
 };
 
-const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; width: number; height: number }> = ({ page, dark, scale, width, height }) => {
+const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; width: number; height: number; cache?: ThumbCache }> = ({ page, dark, scale, width, height, cache }) => {
   const ink = dark ? '#F3F4F6' : '#111827';
   const layers = useMemo(() => zLayers(page), [page]);
   return (
     <>
       {/* In stacking order (editor/zorder.ts), as on the page. */}
       {layers.map((l) => {
-        if (l.kind === 'ink') return <ThumbInk key={l.key} strokes={l.strokes} scale={scale} width={width} height={height} />;
+        if (l.kind === 'ink')
+          return cache ? <CachedInk key={l.key} strokes={l.strokes} width={width} height={height} cache={cache} layer={l.key} /> : <ThumbInk key={l.key} strokes={l.strokes} scale={scale} width={width} height={height} />;
         if (l.kind === 'image') {
           const im = l.block;
           return <ThumbImage key={l.key} src={im.dataUrl} style={{ left: im.x, top: im.y, width: im.width, height: im.height, ...rotationStyle(im.rotation) }} />;
@@ -122,8 +149,8 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
  * the scrolling list it is in).
  */
 export const PageThumb: React.FC<{
-  page: NotePage; width: number; height: number; paperStyle: PaperStyle; paperColor: PaperColor; scale: number; root?: Element | null;
-}> = React.memo(({ page, width, height, paperStyle, paperColor, scale, root }) => {
+  page: NotePage; width: number; height: number; paperStyle: PaperStyle; paperColor: PaperColor; scale: number; root?: Element | null; cache?: ThumbCache;
+}> = React.memo(({ page, width, height, paperStyle, paperColor, scale, root, cache }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
   useEffect(() => {
@@ -144,7 +171,12 @@ export const PageThumb: React.FC<{
         className="relative overflow-hidden pointer-events-none select-none"
         style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor, undefined, scale) }}
       >
-        {near && <ThumbContent page={page} dark={paperColor === 'dark'} scale={scale} width={width} height={height} />}
+        {near && (
+          // Sized to reach the page's far corner: images are capped to their container's width.
+          <div className="absolute" style={{ left: cache?.offset.x ?? 0, top: cache?.offset.y ?? 0, width: width - (cache?.offset.x ?? 0), height: height - (cache?.offset.y ?? 0) }}>
+            <ThumbContent page={page} dark={paperColor === 'dark'} scale={scale} width={width} height={height} cache={cache} />
+          </div>
+        )}
       </div>
     </div>
   );
@@ -154,7 +186,7 @@ export const PageThumb: React.FC<{
 export const NoteThumb: React.FC<{ note: NoteDocument }> = React.memo(({ note }) => {
   const wrapRef = useRef<HTMLDivElement>(null);
   const setup = useMemo(() => (note.pages[0] && note.sheets?.length ? surfaceLayout(note).sheets[0] : null), [note]);
-  const page = useMemo(() => (setup ? sheetView(note.pages[0], setup) : null), [note, setup]);
+  const page = useMemo(() => (setup ? sheetSlice(note.pages[0], setup) : null), [note, setup]);
   const [cardWidth, setCardWidth] = useState(160);
   useEffect(() => {
     const el = wrapRef.current;
@@ -166,7 +198,17 @@ export const NoteThumb: React.FC<{ note: NoteDocument }> = React.memo(({ note })
   const scale = setup ? cardWidth / setup.width : 0.2;
   return (
     <div ref={wrapRef} className="w-full overflow-hidden relative" style={{ height: Math.min(192, (setup?.height ?? 1056) * scale) }}>
-      {page && setup && <PageThumb page={page} width={setup.width} height={setup.height} paperStyle={setup.paperStyle} paperColor={setup.paperColor} scale={scale} />}
+      {page && setup && (
+        <PageThumb
+          page={page}
+          width={setup.width}
+          height={setup.height}
+          paperStyle={setup.paperStyle}
+          paperColor={setup.paperColor}
+          scale={scale}
+          cache={{ noteId: note.id, updatedAt: note.updatedAt, offset: { x: -setup.left, y: -setup.top } }}
+        />
+      )}
     </div>
   );
 });

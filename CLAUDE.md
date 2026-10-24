@@ -103,6 +103,15 @@ show the iPad's compositing cost).
   its buffer, not rebuilt). Each pinch's crash-log entry says who drew it (`gl`: gpu / preparing /
   no-webgl / shell). `BENCH_NO_GL=1` (localStorage `opennote_gl` = 'off') compares with the bitmaps;
   `--cpu 8` emulates a weak Android tablet.
+- LaTeX blocks are laid out once at `MATH_LAYOUT` (5x) their page size and scaled to the zoom inside
+  their layer (Blocks.tsx): laid out per zoom, font metric rounding moved long blocks as the zoom
+  changed. `--latex --only latexshift` (with `BENCH_LATEX_BIG=1` for a long text block) must show
+  the same numbers at every zoom.
+- Library: stored strokes keep their points packed until read (db.ts `unpackStroke`, ranges from
+  `storage/packedPoints.ts`), notes are read with a cursor (one per task), and card thumbnails show
+  their ink from stored images (`services/thumbCache.ts`, IndexedDB `thumbs`), drawn in the
+  background when missing or out of date. `--only library`: main-thread blocking on the home screen.
+- Selections resize with eight handles (corners: both directions, sides: one); `--only resize8`.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)

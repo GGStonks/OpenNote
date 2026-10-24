@@ -2,6 +2,19 @@ import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { Plus, Star, X } from 'lucide-react';
 
 /**
+ * The "any colour" button: a small colour sphere, every hue around it fading to white at the
+ * centre (where its + sits, dark on light), lit from the upper left, with a fine rim.
+ */
+const COLOUR_SPHERE: React.CSSProperties = {
+  background: [
+    'radial-gradient(circle at 34% 28%, rgba(255,255,255,0.7), rgba(255,255,255,0) 32%)',
+    'radial-gradient(closest-side, #fff 0%, rgba(255,255,255,0.92) 22%, rgba(255,255,255,0) 78%)',
+    `conic-gradient(${Array.from({ length: 13 }, (_, i) => `hsl(${(i * 30) % 360} 88% 56%)`).join(', ')})`,
+  ].join(', '),
+  boxShadow: 'inset 0 0 0 1px rgba(0,0,0,0.10), inset 0 -2px 4px rgba(0,0,0,0.18), 0 1px 3px rgba(0,0,0,0.22)',
+};
+
+/**
  * Colour picker of the pen, the Draw tool and the highlighter: preset swatches, the user's
  * favourite colours (shared by all tools, kept on the device), and a full-spectrum picker
  * (saturation / brightness square, hue strip, hex field) for any colour.
@@ -186,11 +199,15 @@ export const ColorPicker: React.FC<{ value: string; onChange: (hex: string) => v
         <div className="relative flex">
           <button
             onClick={() => setCustom((v) => !v)}
-            className={`${dot} rounded-full border-2 shadow-sm transition flex items-center justify-center ${custom ? 'border-blue-500 text-blue-600 bg-white dark:bg-ui-high' : 'border-black/10 dark:border-white/20'}`}
+            className={`${dot} rounded-full transition flex items-center justify-center ${custom ? 'border-2 border-blue-500 text-blue-600 bg-white dark:bg-ui-high' : ''}`}
             title="Any colour (spectrum, hex)"
-            style={{ background: custom ? undefined : 'conic-gradient(from 0deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)' }}
+            style={custom ? undefined : COLOUR_SPHERE}
           >
-            {custom ? <X className={size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} /> : <Plus className={`${size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} text-white drop-shadow`} />}
+            {custom ? (
+              <X className={size === 'lg' ? 'w-4 h-4' : 'w-3.5 h-3.5'} />
+            ) : (
+              <Plus className={`${size === 'lg' ? 'w-3.5 h-3.5' : 'w-3 h-3'} text-gray-700`} strokeWidth={3} />
+            )}
           </button>
         </div>
       </div>

@@ -187,35 +187,41 @@ export function singleBlockSelection(page: NotePage, kind: 'latex' | 'text' | 'i
 // Moving, scaling, rotating
 
 /**
- * Applies translate + uniform scale (about the selection's top-left corner), then a rotation of
- * `rot` degrees (clockwise) about the centre of the result, to the selected items. Every item
- * keeps the total of its rotations in `rotation` (0 = as it was made).
+ * Applies translate + scale (about the selection's top-left corner; `factor` across, `fy` down,
+ * the same unless given), then a rotation of `rot` degrees (clockwise) about the centre of the
+ * result, to the selected items. Every item keeps the total of its rotations in `rotation` (0 = as
+ * it was made). Stretched one way more than the other: ink stretches with it (its width by the
+ * mean), pictures stretch, a text box takes the new width (its text wraps again) and its font the
+ * height's scale, a LaTeX block its font the height's scale (a formula cannot stretch) and, as
+ * text, the new width.
  */
-export function transformSelection(page: NotePage, sel: Selection, dx: number, dy: number, factor: number, rot = 0): NotePage {
+export function transformSelection(page: NotePage, sel: Selection, dx: number, dy: number, factor: number, rot = 0, fy = factor): NotePage {
+  const fx = factor;
   const ox = sel.bounds.x, oy = sel.bounds.y;
-  const cx = ox + (sel.bounds.width * factor) / 2 + dx, cy = oy + (sel.bounds.height * factor) / 2 + dy;
+  const cx = ox + (sel.bounds.width * fx) / 2 + dx, cy = oy + (sel.bounds.height * fy) / 2 + dy;
   const r = (rot * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
   const T = (x: number, y: number): XY => {
-    const X = ox + (x - ox) * factor + dx, Y = oy + (y - oy) * factor + dy;
+    const X = ox + (x - ox) * fx + dx, Y = oy + (y - oy) * fy + dy;
     if (!rot) return { x: X, y: Y };
     const u = X - cx, v = Y - cy;
     return { x: cx + u * c - v * s, y: cy + u * s + v * c };
   };
   const turned = (deg?: number) => (rot ? { rotation: normDeg((deg ?? 0) + rot) } : {});
-  /** A box keeps its size (scaled) and turns about its own centre, which moves with the selection. */
-  const box = <B extends { x: number; y: number; rotation?: number }>(b: B, w: number, h: number) => {
+  /** A box takes its new size (w x h) and turns about its own centre, which moves with the selection. */
+  const box = <B extends { x: number; y: number; rotation?: number }>(b: B, w: number, h: number, nw: number, nh: number) => {
     const C = T(b.x + w / 2, b.y + h / 2);
-    return { x: C.x - (w * factor) / 2, y: C.y - (h * factor) / 2, ...turned(b.rotation) };
+    return { x: C.x - nw / 2, y: C.y - nh / 2, ...turned(b.rotation) };
   };
   const ids = new Set(sel.strokeIds);
-  const moveOnly = factor === 1 && !rot;
+  const moveOnly = fx === 1 && fy === 1 && !rot;
+  const inkScale = Math.sqrt(fx * fy);
   return {
     ...page,
     strokes: page.strokes.map((st) => {
       if (!ids.has(st.id)) return st;
       const out: Stroke = {
         ...st,
-        width: st.width * (factor === 1 ? 1 : Math.sqrt(factor)),
+        width: st.width * (inkScale === 1 ? 1 : Math.sqrt(inkScale)),
         points: st.points.map((p) => ({ ...p, ...T(p.x, p.y) })),
         ...turned(st.rotation),
       };
@@ -223,15 +229,13 @@ export function transformSelection(page: NotePage, sel: Selection, dx: number, d
       return moveOnly ? markMoved(out, st, dx, dy) : out;
     }),
     latexBlocks: page.latexBlocks.map((b) =>
-      sel.latexIds.includes(b.id)
-        ? { ...b, ...box(b, b.width, b.height), width: b.width * factor, height: b.height * factor, scale: (b.scale ?? 1) * factor }
-        : b
+      sel.latexIds.includes(b.id) ? { ...b, ...box(b, b.width, b.height, b.width * fx, b.height * fy), width: b.width * fx, height: b.height * fy, scale: (b.scale ?? 1) * fy } : b
     ),
     textBlocks: (page.textBlocks ?? []).map((t) =>
-      sel.textIds.includes(t.id) ? { ...t, ...box(t, t.width, textHeight(t)), width: t.width * factor, fontSize: t.fontSize * factor } : t
+      sel.textIds.includes(t.id) ? { ...t, ...box(t, t.width, textHeight(t), t.width * fx, textHeight(t) * fy), width: t.width * fx, fontSize: t.fontSize * fy } : t
     ),
     imageBlocks: (page.imageBlocks ?? []).map((im) =>
-      sel.imageIds.includes(im.id) ? { ...im, ...box(im, im.width, im.height), width: im.width * factor, height: im.height * factor } : im
+      sel.imageIds.includes(im.id) ? { ...im, ...box(im, im.width, im.height, im.width * fx, im.height * fy), width: im.width * fx, height: im.height * fy } : im
     ),
   };
 }
