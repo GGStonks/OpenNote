@@ -26,6 +26,10 @@ reaches the screen after the page's frame (clearing earlier made ink blink at 60
 `npm run bench:ui -- --native --only pen` checks every stroke is ended by id.
 Shapes being drawn (Draw tool, snapped strokes) are sent whole on every event (`d` messages,
 `src/ink/inkRecorder.ts`); `npm run bench:ui -- --native --only shapepen` measures the page's side.
+The Draw tool's free curve is densified like the pen, and when the pen lifts the shell is sent the
+finished curve (the spline) before it clears: shown with the page's for two frames, the live line
+doubled the curve where they differed. `--only curveshots --shots <dir> [--native [--late] | --web]`
+(fast curves with simulated shell Pencil samples, or web events only).
 Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 

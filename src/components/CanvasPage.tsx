@@ -1685,7 +1685,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       model: tool === 'pen' || tool === 'highlighter' ? new SmoothLiveStroke() : null,
       // Handwriting's and the lasso's: fast movements fill their wide gaps on a smooth curve (a
       // fast lasso was a polygon of straight pieces, a fast highlighter stroke jagged).
-      dense: tool === 'pen' || tool === 'highlighter' || tool === 'lasso' ? new SampleDensifier() : null,
+      dense: tool === 'pen' || tool === 'highlighter' || tool === 'lasso' || (tool === 'shape' && toolsRef.current.shapeMode === 'curve') ? new SampleDensifier() : null,
       ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -1797,7 +1797,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
       // Pen: the densifier decides about samples where the pen rests (some must reach the engine,
       // src/ink/densify.ts); other tools skip them.
-      const dense = d.dense && !d.snapped && (d.model || d.tool === 'lasso') ? d.dense : null;
+      const dense = d.dense && !d.snapped && (d.model || d.tool === 'lasso' || d.smart?.mode === 'curve') ? d.dense : null;
       const last = d.points[d.points.length - 1];
       if (!dense && Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
@@ -1818,12 +1818,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         d.force.push(lifting ? 0 : q.pressure);
         d.points.push(q);
         if (d.model && !d.snapped) d.model.add(q.x, q.y, q.t ?? 0, q.pressure);
+        // The Draw tool's free curve takes the filled-in points too (between fast samples its ink
+        // engine drew straight pieces, as the pen's did); its engine needs to know the pen is in
+        // the air (force-less) too.
+        if (d.smart && !d.snapped) snapTick = moveSmartPen(d.smart, lifting ? { ...q, pressure: 0 } : q) || snapTick;
       }
-      // The smart curve's ink engine needs to know the pen is in the air (force-less) too.
-      if (d.smart) {
-        if (!d.snapped) snapTick = moveSmartPen(d.smart, lifting ? { ...pt, pressure: 0 } : pt) || snapTick;
-      }
-      else if (d.tool === 'eraser') {
+      if (d.tool === 'eraser') {
         eraserPos.current = pt;
         eraseAt(pt.x, pt.y);
       }
@@ -1922,6 +1922,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
       d.smart = beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current);
+      d.dense = new SampleDensifier();
+      d.dense.push(pt);
       samples = samples.slice(1);
     }
     d.nativeSeen = true;
@@ -2007,6 +2009,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const made = smartPenStroke(d.smart, smartOptions(), newId('stroke'));
       if (made) {
         const stroke: Stroke = { ...made, createdAt: Date.now() };
+        // The shell shows its copy until the page's is on screen (two frames): the finished curve
+        // (simplified, a spline), not the line drawn live, or the two showed together for those
+        // frames, apart where they differ most (at the start: a doubled beginning).
+        if (d.ink) {
+          d.inkTf ??= inkTransform();
+          d.ink.drawing(record(d.inkTf, (ctx) => drawLiveStroke(ctx, stroke.points, styleOf(stroke))), d.inkTf);
+        }
         editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
         if (stroke.closed && d.smart.closing) haptic('success');
       }

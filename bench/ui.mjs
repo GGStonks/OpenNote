@@ -115,7 +115,7 @@ const LANDSCAPE = process.argv.includes('--landscape');
 const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, height: 820 } : { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
-if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
@@ -972,6 +972,75 @@ if (ONLY.has('zorder')) {
   await touch('touchEnd', []);
   await sleep(1500);
   console.log(`zorder   line under the circle: at rest ${rest}, pinching ${pinching} (${gpu ? 'GPU' : 'bitmaps'}), after ${await sample()}`);
+}
+// --only curveshots --shots <dir> [--web]: fast free curves with the Draw tool, as the iPad app
+// delivers them: the shell's 240 Hz Pencil samples (window.__opennotePencil) and the web view's
+// pointer events, a frame apart and read a little differently; --web: pointer events only (one per
+// frame, as Android). Screenshots while the pen is down and after.
+if (ONLY.has('curveshots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const web = process.argv.includes('--web');
+  await page.locator('button[title^="Smart pen"]').first().click();
+  await sleep(300);
+  await page.keyboard.press('Escape');
+  await sleep(300);
+  // Fast round curves: most of an ellipse 300 x 110 px in 0.3 s (--wave: a sine with sharp peaks).
+  const wave = process.argv.includes('--wave');
+  const curve = (t, k) => (wave ? [200 + 300 * t, 560 + k * 120 + 70 * Math.sin(t * 9)] : [360 + 150 * Math.cos(6.283 * (0.85 * t + 0.6)), 570 + k * 135 + 55 * Math.sin(6.283 * (0.85 * t + 0.6))]);
+  for (let k = 0; k < 3; k++) {
+    const T = wave ? 250 : 300, t0 = await page.evaluate(() => performance.now());
+    const at = (ms) => curve(Math.min(1, ms / T), k);
+    const sample = (ms) => { const [x, y] = at(ms); return [x, y, 0.5, (t0 + ms) / 1000, 1.2, 0.5]; };
+    // --late: the pointerdown first, the shell's first samples a frame and a half later (with the
+    // web events in between), as on a device the two race.
+    const late = process.argv.includes('--late');
+    if (!web && !late) await page.evaluate(([d, now]) => window.__opennotePencil(0, now, d, []), [sample(0), t0 / 1000]);
+    const [x0, y0] = at(0);
+    await mouse('mousePressed', x0 + 0.8, y0 - 0.6, 0.5);
+    if (!web && late) {
+      for (const ms of [8, 16]) { await sleep(8); const [x, y] = at(ms); await mouse('mouseMoved', x + 0.8, y - 0.6, 0.5); }
+      const batch = [];
+      for (let m = 0; m <= 16; m += 4) batch.push(...sample(m));
+      await page.evaluate(([d, now]) => { window.__opennotePencil(0, now, d.slice(0, 6), []); window.__opennotePencil(1, now, d.slice(6), []); }, [batch, (t0 + 24) / 1000]);
+    }
+    let last = late && !web ? 16 : 0;
+    for (let ms = last + 16; ms <= T; ms += 16) {
+      await sleep(16);
+      if (!web) {
+        const batch = [];
+        for (let m = last + 4; m <= ms; m += 4) batch.push(...sample(m));
+        await page.evaluate(([d, now]) => window.__opennotePencil(1, now, d, []), [batch, (t0 + ms) / 1000]);
+      }
+      last = ms;
+      const [x, y] = at(ms);
+      await mouse('mouseMoved', x + 0.8, y - 0.6, 0.5);
+      if (k === 0 && ms === 160) await page.screenshot({ path: join(arg('shots'), `curve-live${web ? '-web' : ''}.png`), clip: { x: 150, y: 470, width: 420, height: 200 } });
+    }
+    if (!web) await page.evaluate(([d, now]) => window.__opennotePencil(2, now, d, []), [sample(T), (t0 + T + 4) / 1000]);
+    const [x1, y1] = at(T);
+    await mouse('mouseReleased', x1 + 0.8, y1 - 0.6, 0);
+    await sleep(400);
+  }
+  await page.screenshot({ path: join(arg('shots'), `curve-after${web ? '-web' : ''}.png`), clip: { x: 150, y: 470, width: 420, height: 440 } });
+  console.log(`curveshots ${web ? 'web events' : 'native samples'}: shots written`);
+  // The shapes the shell was sent (--native): the first points of each drawing of a stroke, and
+  // whether any drawing's line steps back on itself near its start.
+  const ds = await page.evaluate(() => window.__inkDs ?? []);
+  if (ds.length) {
+    const firstPts = (m) => { const t = m.split(','); const out = []; for (let i = 5; i < t.length && out.length < 6; i++) if (t[i] === 'M' || t[i] === 'L') out.push([+t[i + 1], +t[i + 2]]); return out; };
+    let backs = 0, moves = 0;
+    for (const m of ds) {
+      const t = m.split(',');
+      moves = Math.max(moves, t.filter((x) => x === 'M').length);
+      const pts = firstPts(m);
+      for (let i = 2; i < pts.length; i++) { const a = [pts[i - 1][0] - pts[i - 2][0], pts[i - 1][1] - pts[i - 2][1]], b = [pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]]; if (a[0] * b[0] + a[1] * b[1] < 0) { backs++; console.log(`curveshots   steps back (drawing ${ds.indexOf(m)}): ${JSON.stringify(pts.map((p) => p.map((v) => Math.round(v * 10) / 10)))}`); break; } }
+    }
+    console.log(`curveshots ${ds.length} drawings sent; most subpaths in one: ${moves}; drawings stepping back near their start: ${backs}`);
+    // Each stroke's last drawing: the finished curve (a spline: C commands), as the page shows it.
+    console.log(`curveshots drawings as splines (finished curves): ${ds.filter((m) => m.split(',').includes('C')).length}`);
+    for (const m of [ds[0], ds[1], ds[2], ds[3]]) if (m) console.log(`curveshots   ${JSON.stringify(firstPts(m).map((p) => p.map((v) => Math.round(v * 10) / 10)))}`);
+  }
 }
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
