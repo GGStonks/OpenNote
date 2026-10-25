@@ -1,7 +1,7 @@
 import { splitIntoPages } from '../editor/sheets';
 import { zLayers } from '../editor/zorder';
 import React, { useState } from 'react';
-import { X, FileText, FileCode, Printer, Download, Save } from 'lucide-react';
+import { X, FileText, FileCode, Printer, Download, Save, Check } from 'lucide-react';
 import { NoteDocument } from '../types';
 import { strokeToSvg } from '../ink/strokeRenderer';
 import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
@@ -9,7 +9,7 @@ import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { PAPER_COLORS } from './CanvasPage';
 import { textHeight } from '../editor/selection';
-import { canMakePdf, shareFile } from '../platform';
+import { canMakePdf, exportFile } from '../platform';
 import { textCssString } from '../editor/textStyle';
 import type { TextBlock } from '../types';
 
@@ -164,13 +164,17 @@ function buildSvg(doc: NoteDocument): string {
 export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onPrint, onError }) => {
   const [includeInk, setIncludeInk] = useState(true);
   const [busy, setBusy] = useState(false);
+  /** Where the last export went (shown until the dialog closes). */
+  const [saved, setSaved] = useState<string | null>(null);
   if (!isOpen) return null;
 
   const run = async (name: string, content: string | Blob, type: string) => {
     setBusy(true);
+    setSaved(null);
     try {
-      await shareFile(name, content instanceof Blob ? content : new Blob([content], { type }));
-      onClose();
+      const where = await exportFile(name, content instanceof Blob ? content : new Blob([content], { type }));
+      if (where) setSaved(where);
+      else onClose();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!/cancel/i.test(msg)) onError(`Export failed: ${msg}`);
@@ -192,14 +196,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[env(safe-area-inset-bottom)] max-h-[calc(100dvh-16px)] flex flex-col">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Export “{doc.title}”</h3>
           <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-full">
             <X className="w-5 h-5" />
           </button>
         </div>
-        <div className="p-5 space-y-2.5 max-h-[75vh] overflow-y-auto">
+        <div className="p-5 space-y-2.5 flex-1 min-h-0 overflow-y-auto">
+          {saved && (
+            <div className="flex items-start gap-2 text-sm rounded-2xl bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200 px-3 py-2.5">
+              <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> {saved}
+            </div>
+          )}
           <Row
             icon={<FileText className="w-5 h-5" />}
             tint="bg-red-100 text-red-600 dark:bg-red-900/40"
@@ -211,11 +220,20 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
             <Row icon={<Printer className="w-5 h-5" />} tint="bg-gray-100 text-gray-600 dark:bg-gray-800" title="Print…" sub="System print dialog (one paper size for all pages)" onClick={onPrint} />
           )}
           <Row icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onClick={() => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml')} />
-          <Row icon={<FileCode className="w-5 h-5" />} tint="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40" title="LaTeX (.tex)" sub="Compilable document: math, text, TikZ" onClick={() => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex')} />
-          <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 px-2">
-            <input type="checkbox" checked={includeInk} onChange={(e) => setIncludeInk(e.target.checked)} />
-            Include remaining handwriting in the .tex as TikZ drawings
-          </label>
+          {/* The .tex option belongs to the LaTeX export: inside its box. */}
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition">
+            <button disabled={busy} onClick={() => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex')} className="w-full flex items-center p-3 pb-2 text-left disabled:opacity-50">
+              <div className="p-2.5 rounded-xl mr-3 bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40"><FileCode className="w-5 h-5" /></div>
+              <div>
+                <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">LaTeX (.tex)</div>
+                <div className="text-xs text-gray-500">Compilable document: math, text, TikZ</div>
+              </div>
+            </button>
+            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 px-3 pb-3 pl-[4.25rem]">
+              <input type="checkbox" checked={includeInk} onChange={(e) => setIncludeInk(e.target.checked)} />
+              Include remaining handwriting as TikZ drawings
+            </label>
+          </div>
           <Row icon={<FileText className="w-5 h-5" />} tint="bg-blue-100 text-blue-600 dark:bg-blue-900/40" title="Markdown (.md)" sub="Obsidian / GitHub compatible ($$ math, latex code blocks)" onClick={() => run(`${b}.md`, buildMarkdown(doc), 'text/markdown')} />
           <Row icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onClick={() => run(`${b}.opennote`, JSON.stringify(doc), 'application/json')} />
         </div>

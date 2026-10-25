@@ -37,7 +37,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.3.15";
+static NSString *const kVersion = @"2.4.0";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -890,12 +890,14 @@ static const double kInkHoldSeconds = 0.06;
 
 #pragma mark - View controller
 
-@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate>
+@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) ONInkView *inkView;
 @property (nonatomic, strong) ONPinchOverlay *pinchOverlay;
+/** The page's "saveFile" waiting for the folder picker (exports, src/platform.ts exportFile). */
+@property (nonatomic, copy) void (^saveReply)(id, NSString *);
 /** In-flight bridge HTTP requests by the page's request id (main thread only), for httpCancel. */
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionTask *> *httpTasks;
 @end
@@ -1017,6 +1019,8 @@ static const double kInkHoldSeconds = 0.06;
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"share"]) {
         [self handleShare:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"saveFile"]) {
+        [self handleSaveFile:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"updateDownload"]) {
         [self handleUpdateDownload:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"updateShare"]) {
@@ -1181,6 +1185,49 @@ static NSString *ONUpdatesDir(void) {
         reply(completed ? @{@"ok": @YES} : @{@"error": @"cancelled"}, nil);
     };
     [self presentViewController:avc animated:YES completion:nil];
+}
+
+// Exports: Files' folder picker, so the user chooses (and knows) where the file goes; the reply says
+// the file's name and folder for the page's confirmation.
+- (void)handleSaveFile:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    NSString *name = [msg[@"filename"] lastPathComponent] ?: @"export";
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:msg[@"base64"] ?: @"" options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (!data) {
+        reply(@{@"error": @"Invalid file data"}, nil);
+        return;
+    }
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"exports"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *fileURL = [NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]];
+    NSError *err = nil;
+    if (![data writeToURL:fileURL options:NSDataWritingAtomic error:&err]) {
+        reply(@{@"error": err.localizedDescription ?: @"Write failed"}, nil);
+        return;
+    }
+    if (self.saveReply) self.saveReply(@{@"cancelled": @YES}, nil);
+    self.saveReply = reply;
+    UIDocumentPickerViewController *picker = [[UIDocumentPickerViewController alloc] initForExportingURLs:@[ fileURL ] asCopy:YES];
+    picker.delegate = self;
+    picker.modalPresentationStyle = UIModalPresentationFormSheet;
+    [self presentViewController:picker animated:YES completion:nil];
+}
+
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    void (^reply)(id, NSString *) = self.saveReply;
+    self.saveReply = nil;
+    if (!reply) return;
+    NSURL *u = urls.firstObject;
+    if (!u) {
+        reply(@{@"cancelled": @YES}, nil);
+        return;
+    }
+    reply(@{@"name": u.lastPathComponent ?: @"", @"folder": u.URLByDeletingLastPathComponent.lastPathComponent ?: @""}, nil);
+}
+
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {
+    void (^reply)(id, NSString *) = self.saveReply;
+    self.saveReply = nil;
+    if (reply) reply(@{@"cancelled": @YES}, nil);
 }
 
 - (void)handlePrint:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {

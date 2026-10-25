@@ -133,6 +133,8 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
   /** The size last written: measuring that same size again writes nothing (no feedback loop). */
   const written = useRef<{ w: number; h: number; key: string } | null>(null);
   const scale = block.scale ?? 1;
+  /** Stretched sideways by the resize handles: the formula is drawn this much wider than tall. */
+  const sx = block.stretchX ?? 1;
   const z = layoutZoom(zoom, block.width, block.height);
 
   // Keep the stored box equal to the rendered size (used by lasso hit-testing and export). The
@@ -141,10 +143,10 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
     const el = contentRef.current;
     // Hidden copies (print layout portal) measure 0x0 and must not overwrite the stored size.
     if (!el || !measure || el.offsetParent === null) return;
-    const w = Math.ceil(textual ? block.width : el.scrollWidth / MATH_LAYOUT);
+    const w = Math.ceil(textual ? block.width : (el.scrollWidth / MATH_LAYOUT) * sx);
     const h = Math.ceil(el.scrollHeight / MATH_LAYOUT);
     if (Math.abs(w - block.width) <= 2 && Math.abs(h - block.height) <= 2) return;
-    const key = `${block.latexCode}|${scale}|${textual ? block.width : ''}`;
+    const key = `${block.latexCode}|${scale}|${sx}|${textual ? block.width : ''}`;
     const last = written.current;
     if (last && last.key === key && Math.abs(last.w - w) <= 2 && Math.abs(last.h - h) <= 2) return;
     written.current = { w, h, key };
@@ -168,8 +170,8 @@ const MathBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, interac
           className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
           style={{
             fontSize: BASE_MATH_PX * scale * MATH_LAYOUT,
-            width: textual ? block.width * MATH_LAYOUT : undefined,
-            transform: `scale(${z / MATH_LAYOUT})`,
+            width: textual ? (block.width * MATH_LAYOUT) / sx : undefined,
+            transform: `scale(${(z / MATH_LAYOUT) * sx}, ${z / MATH_LAYOUT})`,
             transformOrigin: '0 0',
           }}
           dangerouslySetInnerHTML={{ __html: rendered.html }}
@@ -229,6 +231,14 @@ const TikzBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, darkPap
   }, [block.latexCode, cachedOk]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const svg = cachedOk ? block.tikzSvg! : preview!.svg;
+  // Stretched by the resize handles: the drawing fills its box (it otherwise keeps its proportions).
+  const tikzRef = useRef<HTMLDivElement>(null);
+  const stretched = (block.stretchX ?? 1) !== 1;
+  useLayoutEffect(() => {
+    const el = tikzRef.current?.querySelector('svg');
+    if (!el) return;
+    if (stretched) el.setAttribute('preserveAspectRatio', 'none');
+  }, [svg, stretched]);
 
   // Size the preview box to the preview's aspect until the TeX render arrives.
   useLayoutEffect(() => {
@@ -253,6 +263,7 @@ const TikzBlockView: React.FC<LatexBlockViewProps> = ({ block, inkColor, darkPap
       {selected && <ActionPill zoom={zoom} onEdit={onEdit} onCopy={() => navigator.clipboard?.writeText(block.latexCode)} onDelete={onDelete} />}
       <ScreenScaled zoom={layoutZoom(zoom, block.width, block.height)} width={block.width} height={block.height}>
         <div
+          ref={tikzRef}
           className={`on-tikz w-full h-full ${cachedOk && darkPaper ? 'on-tikz-dark' : ''}`}
           dangerouslySetInnerHTML={{ __html: svg }}
         />
@@ -281,12 +292,27 @@ interface TextBlockViewProps {
   onCommit: (text: string) => void;
   onDelete: () => void;
   onSilentUpdate: (patch: Partial<TextBlock>) => void;
-  /** Resize handle dragged: 'start' and 'end' bracket one undo step, 'move' previews the size. */
-  onResize?: (patch: { width?: number; height?: number }, phase: 'start' | 'move' | 'end') => void;
+  /** Resize handle dragged: 'start' and 'end' bracket one undo step, 'move' previews the box. */
+  onResize?: (patch: Partial<Pick<TextBlock, 'x' | 'y' | 'width' | 'height' | 'fontSize'>>, phase: 'start' | 'move' | 'end') => void;
 }
 
 /** Narrowest a text box can be resized to (page px). */
 const TEXT_MIN_WIDTH = 40;
+
+/**
+ * Resize handles (selections and text boxes): corners, then the middle of each side, with the sides
+ * each moves (-1 left / top, 1 right / bottom, 0 neither). A small square on screen, in a larger
+ * touch area, the same size at any zoom.
+ */
+export const RESIZE_HANDLES: { x: -1 | 0 | 1; y: -1 | 0 | 1; cursor: string }[] = [
+  { x: -1, y: -1, cursor: 'nwse-resize' }, { x: 1, y: -1, cursor: 'nesw-resize' }, { x: 1, y: 1, cursor: 'nwse-resize' }, { x: -1, y: 1, cursor: 'nesw-resize' },
+  { x: 0, y: -1, cursor: 'ns-resize' }, { x: 1, y: 0, cursor: 'ew-resize' }, { x: 0, y: 1, cursor: 'ns-resize' }, { x: -1, y: 0, cursor: 'ew-resize' },
+];
+export const HANDLE_DOT = 'block w-2.5 h-2.5 bg-white border-[1.5px] border-blue-600 rounded-[2px] shadow';
+/** A handle's touch area (24 px on screen) centred on its point of the box. */
+export function handleBox(x: -1 | 0 | 1, y: -1 | 0 | 1, zoom: number): React.CSSProperties {
+  return { left: `${(x + 1) * 50}%`, top: `${(y + 1) * 50}%`, width: 24, height: 24, marginLeft: -12, marginTop: -12, transform: `scale(${1 / Math.max(0.05, zoom)})`, touchAction: 'none' };
+}
 
 export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete, onResize }) {
   const [draft, setDraft] = useState(block.text);
@@ -315,11 +341,13 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
   const resizeRef = useRef(onResize);
   resizeRef.current = onResize;
   /**
-   * A resize handle: the right edge sets the width, the bottom edge the (minimum) height, the
-   * corner both. The pointer is captured and the page's own handlers never see it; preventDefault
-   * keeps the keyboard focus in the text being edited.
+   * The eight handles, as a selection's: a side sets the width (left / right) or the (minimum)
+   * height (top / bottom), the text keeping its size and wrapping again; a corner scales box and
+   * text together, keeping their proportions; the opposite side stays where it is. The pointer is
+   * captured and the page's own handlers never see it; preventDefault keeps the keyboard focus in
+   * the text being edited.
    */
-  const startResize = (e: React.PointerEvent, axes: 'x' | 'y' | 'xy') => {
+  const startResize = (e: React.PointerEvent, sx: -1 | 0 | 1, sy: -1 | 0 | 1) => {
     e.preventDefault();
     e.stopPropagation();
     const handle = e.currentTarget as HTMLElement;
@@ -328,15 +356,23 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     } catch {
       /* ignore */
     }
-    const x0 = e.clientX, y0 = e.clientY, w0 = block.width;
+    const x0 = e.clientX, y0 = e.clientY, w0 = block.width, fs0 = block.fontSize;
     const h0 = (boxRef.current?.offsetHeight ?? block.fontSize * 1.35) as number;
-    const minH = block.fontSize * 1.35;
+    const bx = block.x, by = block.y;
     resizeRef.current?.({}, 'start');
     const move = (ev: PointerEvent) => {
       if (ev.pointerId !== e.pointerId) return;
-      const patch: { width?: number; height?: number } = {};
-      if (axes !== 'y') patch.width = Math.max(TEXT_MIN_WIDTH, Math.round(w0 + (ev.clientX - x0) / zoom));
-      if (axes !== 'x') patch.height = Math.max(minH, Math.round(h0 + (ev.clientY - y0) / zoom));
+      const dx = (ev.clientX - x0) / zoom, dy = (ev.clientY - y0) / zoom;
+      const patch: Partial<Pick<TextBlock, 'x' | 'y' | 'width' | 'height' | 'fontSize'>> = {};
+      if (sx && sy) {
+        const f = Math.max(TEXT_MIN_WIDTH / w0, 0.2, Math.min(5, Math.max((w0 + sx * dx) / w0, (h0 + sy * dy) / h0)));
+        patch.width = Math.round(w0 * f);
+        patch.height = Math.round(h0 * f);
+        patch.fontSize = Math.round(fs0 * f * 10) / 10;
+      } else if (sx) patch.width = Math.max(TEXT_MIN_WIDTH, Math.round(w0 + sx * dx));
+      else patch.height = Math.max(fs0 * 1.35, Math.round(h0 + sy * dy));
+      if (sx < 0) patch.x = bx + w0 - (patch.width ?? w0);
+      if (sy < 0) patch.y = by + h0 - (patch.height ?? h0);
       resizeRef.current?.(patch, 'move');
     };
     const up = (ev: PointerEvent) => {
@@ -362,19 +398,22 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     left: block.x, top: block.y, width: block.width, minHeight: block.height, fontSize: block.fontSize, color, lineHeight: TEXT_LINE_HEIGHT,
     ...textCss(block), ...rotationStyle(block.rotation),
   };
-  // Handles keep their size on screen whatever the zoom.
-  const hs = 1 / Math.max(0.3, zoom);
-  const handle = (cls: string, css: React.CSSProperties, axes: 'x' | 'y' | 'xy', title: string) =>
-    onResize ? (
-      <div
-        className={`absolute bg-white border-2 border-blue-500 rounded-full shadow ${cls}`}
-        style={{ width: 14 * hs, height: 14 * hs, touchAction: 'none', ...css }}
-        title={title}
-        data-no-pan
-        data-no-pan-strict
-        onPointerDown={(e) => startResize(e, axes)}
-      />
-    ) : null;
+  // The handles keep their size on screen whatever the zoom.
+  const handles = onResize
+    ? RESIZE_HANDLES.map(({ x, y, cursor }) => (
+        <div
+          key={`${x},${y}`}
+          className="absolute flex items-center justify-center"
+          style={{ ...handleBox(x, y, zoom), cursor }}
+          data-no-pan
+          data-no-pan-strict
+          data-text-resize={`${x},${y}`}
+          onPointerDown={(e) => startResize(e, x, y)}
+        >
+          <span className={HANDLE_DOT} />
+        </div>
+      ))
+    : null;
 
   if (editing) {
     return (
@@ -395,9 +434,7 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
           style={{ font: 'inherit', color: 'inherit', lineHeight: 'inherit', textDecoration: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}
           placeholder="Type…"
         />
-        {handle('cursor-ew-resize', { right: -8 * hs, top: '50%', marginTop: -7 * hs }, 'x', 'Drag to change the width')}
-        {handle('cursor-ns-resize', { bottom: -8 * hs, left: '50%', marginLeft: -7 * hs }, 'y', 'Drag to change the height')}
-        {handle('cursor-nwse-resize', { right: -8 * hs, bottom: -8 * hs }, 'xy', 'Drag to resize')}
+        {handles}
       </div>
     );
   }

@@ -71,6 +71,8 @@ export interface Stroke {
    * (editor/zorder.ts). Missing on strokes made before v2.0.1: the time in the id is used.
    */
   createdAt?: number;
+  /** Highlighters: how opaque the ink is (0-1; missing: 0.35, as before 2.4.0). */
+  highlightAlpha?: number;
   /** Dashed / dotted lines: where the pattern starts (a piece left by the precision eraser continues its stroke's pattern). */
   dashOffset?: number;
   /** Only the fill of a closed shape, without its outline (what the precision eraser leaves of a filled shape). */
@@ -90,6 +92,8 @@ export interface LatexBlock {
   width: number;
   height: number;
   scale?: number;
+  /** Stretched sideways (resize handles): width / height relative to the formula's own (missing: 1). */
+  stretchX?: number;
   latexCode: string;
   /** Deprecated (v1.0): rendering is always derived from latexCode. */
   renderedHtml?: string;

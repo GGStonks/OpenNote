@@ -108,3 +108,8 @@
 .on-gl-ink [data-ink-layer] {
   visibility: hidden !important;
 }
+
+/* Popovers scroll when taller than the screen without a scrollbar taking their width (which wrapped
+   the colours and added sideways scrolling). */
+.no-scrollbar { scrollbar-width: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

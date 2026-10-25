@@ -528,6 +528,122 @@ if (ONLY.has('library')) {
     console.log(`library  ${pass}: long tasks ${long.length}, total ${Math.round(long.reduce((a, b) => a + b, 0))} ms, longest ${Math.round(Math.max(0, ...long))} ms in ${((Date.now() - t0) / 1000).toFixed(1)} s (${imgs} images)`);
   }
 }
+// --only longpinch --shots <dir> (best with --latex): one pinch from the fit width to 500%, the
+// fingers still down at the end: the screenshot then must be sharp (the pinch commits its zoom on
+// the way, crash log 'rebases'), and match the one after the fingers lift.
+if (ONLY.has('longpinch') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await sleep(1500);
+  await fingers([[390, 600], [430, 600]], [[60, 600], [760, 600]], 1500, false);
+  await sleep(400);
+  await page.screenshot({ path: join(arg('shots'), 'longpinch-down.png') });
+  if (process.env.BENCH_DEBUG) console.log('longpinch state', JSON.stringify(await page.evaluate(() => {
+    const c = document.querySelector('.on-page');
+    const gl = [...document.querySelectorAll('canvas')].find((x) => x.style.zIndex === '1');
+    const inks = [...document.querySelectorAll('[data-ink-layer]')].map((e) => getComputedStyle(e).visibility);
+    return { cls: c?.className, gl: gl ? { d: gl.style.display, w: gl.width, h: gl.height } : null, inks: inks.slice(0, 4), zoom: document.body.innerText.match(/(\d+)%/)?.[1] };
+  })));
+  await touch('touchEnd', []);
+  await sleep(1500);
+  await page.screenshot({ path: join(arg('shots'), 'longpinch-after.png') });
+  const log = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'pinch').slice(-1)[0]);
+  console.log(`longpinch zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%  ${JSON.stringify(log)}`);
+}
+// --only uishots --shots <dir>: the draw tool's options with the custom colour open (no sideways
+// scrolling), the highlighter's, a new text box (handles, format bar, typeface list), the export
+// dialog, and the library's cards.
+if (ONLY.has('uishots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const shot = (name) => page.screenshot({ path: join(arg('shots'), `ui-${name}.png`) });
+  const draw = page.locator('button[title^="Smart pen"]').first();
+  await draw.click();
+  await sleep(200);
+  await draw.click();
+  await sleep(300);
+  await page.locator('button[title^="Any colour"]').first().click();
+  await sleep(300);
+  const pop = await page.evaluate(() => { const p = [...document.querySelectorAll('div')].find((d) => d.className.includes('no-scrollbar') && d.className.includes('w-80')); return p ? { sw: p.scrollWidth, cw: p.clientWidth } : null; });
+  console.log(`uishots draw popover scrollWidth ${pop?.sw} clientWidth ${pop?.cw}`);
+  await shot('draw');
+  const hl = page.locator('button[title="Highlighter"]').first();
+  await hl.click();
+  await sleep(200);
+  await hl.click();
+  await sleep(300);
+  await shot('highlighter');
+  await page.locator('button[title="Text"]').first().click();
+  await sleep(200);
+  await mouse('mousePressed', 300, 700);
+  await mouse('mouseReleased', 300, 700, 0);
+  await sleep(400);
+  await page.keyboard.type('Hello text box');
+  await sleep(300);
+  await shot('textbox');
+  const handles = await page.evaluate(() => [...document.querySelectorAll('[data-text-resize]')].map((h) => { const r = h.getBoundingClientRect(); return `${h.getAttribute('data-text-resize')}:${Math.round(r.width)}`; }).join(' '));
+  console.log(`uishots text box handles ${handles}`);
+  await page.locator('button[title="Typeface"]').first().dispatchEvent('pointerdown');
+  await sleep(300);
+  await shot('fonts');
+  await page.keyboard.press('Escape');
+  await page.locator('button[title="Export"]').first().click();
+  await sleep(400);
+  await shot('export');
+}
+// --only boxes (with --latex): the text tool reopens an existing text box (no new one), and a LaTeX
+// block's side handle stretches it one way only.
+if (ONLY.has('boxes')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const count = () => page.evaluate(() => document.querySelectorAll('textarea').length + document.querySelectorAll('.whitespace-pre-wrap.break-words').length);
+  await page.locator('button[title="Text"]').first().click();
+  await sleep(200);
+  await mouse('mousePressed', 300, 760);
+  await mouse('mouseReleased', 300, 760, 0);
+  await sleep(300);
+  await page.keyboard.type('First box');
+  await mouse('mousePressed', 600, 1000);
+  await mouse('mouseReleased', 600, 1000, 0);
+  await sleep(400);
+  const before = await count();
+  await mouse('mousePressed', 310, 765);
+  await mouse('mouseReleased', 310, 765, 0);
+  await sleep(400);
+  const editing = await page.evaluate(() => document.querySelector('textarea')?.value ?? null);
+  console.log(`boxes    text boxes ${before} -> ${await count()}, editing: ${JSON.stringify(editing)}, format bar ${await page.locator('[data-text-format]').count()}`);
+  // LaTeX: select it with the lasso (tap), drag the right side handle.
+  await page.locator('button[title^="Lasso"]').click();
+  await sleep(200);
+  const m = await page.locator('.on-math').first().boundingBox();
+  if (m) {
+    // A lasso around the formula (a tap would pick the ink lying over it).
+    const cx = m.x + m.width / 2, cy = m.y + m.height / 2, rx = m.width / 2 + 30, ry = m.height / 2 + 30;
+    const loop = Array.from({ length: 50 }, (_, i) => [cx + Math.cos((i / 49) * Math.PI * 2) * rx, cy + Math.sin((i / 49) * Math.PI * 2) * ry]);
+    await mouse('mousePressed', loop[0][0], loop[0][1]);
+    for (const [x, y] of loop.slice(1)) {
+      await mouse('mouseMoved', x, y);
+      await sleep(8);
+    }
+    await mouse('mouseReleased', loop[49][0], loop[49][1], 0);
+    await sleep(500);
+    console.log('boxes    after tap: selection', JSON.stringify(await page.locator('.border-dashed.border-blue-500').first().boundingBox().catch(() => null)));
+    const h = await page.locator('[data-resize="1,0"]').boundingBox();
+    if (h) {
+      const tr0 = await page.evaluate(() => getComputedStyle(document.querySelector('.on-math')).transform);
+      await mouse('mousePressed', h.x + h.width / 2, h.y + h.height / 2);
+      for (let i = 1; i <= 20; i++) {
+        await mouse('mouseMoved', h.x + h.width / 2 + i * 6, h.y + h.height / 2);
+        await sleep(10);
+      }
+      await mouse('mouseReleased', h.x + h.width / 2 + 120, h.y + h.height / 2, 0);
+      await sleep(800);
+      const tr1 = await page.evaluate(() => getComputedStyle(document.querySelector('.on-math')).transform);
+      console.log('boxes    selection box', JSON.stringify(await page.locator('.border-dashed.border-blue-500').first().boundingBox()), 'math box', JSON.stringify(await page.locator('.on-math').first().boundingBox()), 'handle was', JSON.stringify(h));
+      console.log(`boxes    LaTeX transform ${tr0} -> ${tr1}`);
+    } else console.log('boxes    no side handle on the LaTeX selection');
+  }
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));

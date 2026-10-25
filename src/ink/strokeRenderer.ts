@@ -31,6 +31,8 @@ export interface InkStyle {
   dashOffset?: number;
   /** Fill only, no outline (Stroke.fillOnly). */
   fillOnly?: boolean;
+  /** Highlighters: how opaque (Stroke.highlightAlpha; missing: 0.35). */
+  highlightAlpha?: number;
 }
 
 interface Built {
@@ -383,7 +385,7 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
   if (style.fillOnly) return;
   ctx.save();
   if (style.tool === 'highlighter') {
-    ctx.globalAlpha = 0.35;
+    ctx.globalAlpha = style.highlightAlpha ?? 0.35;
     ctx.strokeStyle = style.color;
     ctx.lineWidth = style.width * 5.5;
     ctx.lineCap = 'round';
@@ -437,6 +439,7 @@ export function styleOf(s: Stroke): InkStyle {
     modeled: s.modeled,
     dashOffset: s.dashOffset,
     fillOnly: s.fillOnly,
+    highlightAlpha: s.highlightAlpha,
   };
 }
 
@@ -589,9 +592,10 @@ export function strokeGlGeometry(s: Stroke): { caps: number[]; area: XY[] | null
 
 /**
  * How far (surface px) a merged piece may stray from the points it replaces, in place and width:
- * half a screen pixel at the highest zoom (5 x, 2 x pixel ratio).
+ * a sixth of a screen pixel at the highest zoom (5 x, 2 x pixel ratio): coarser, curves showed
+ * their straight pieces at 500%.
  */
-const GL_TOLERANCE = 0.05;
+const GL_TOLERANCE = 0.015;
 
 /**
  * The pieces from point to point, with the points that a straight piece passes within
@@ -747,7 +751,7 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
     if (ink.pts.length === 1) d = capsuleSvg(ink.pts[0], w[0] / 2, ink.pts[0], w[0] / 2, f2);
     out += `<path d="${d}" fill="${s.color}" fill-opacity="${opacity}" fill-rule="nonzero"/>`;
   } else if (style.tool === 'highlighter') {
-    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="0.35" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"/>`;
+    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${s.highlightAlpha ?? 0.35}" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"/>`;
   } else {
     const ls = style.lineStyle ?? 'solid';
     const dash =

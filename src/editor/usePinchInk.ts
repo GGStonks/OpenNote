@@ -1,6 +1,6 @@
-import { RefObject, useEffect, useRef } from 'react';
+import { RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Stroke } from '../types';
-import { GlInk, prepareGlGeometry } from '../ink/glInk';
+import { GlInk, RGBA, prepareGlGeometry } from '../ink/glInk';
 import { drawStrokes } from '../ink/strokeRenderer';
 import { tileWork } from './tileWork';
 import { frameRate } from '../services/frameRate';
@@ -171,3 +171,92 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
 
 // For the UI benchmark (bench/ui.mjs --only glcompare): both renderers on the same strokes.
 (window as unknown as { __opennoteGlInk?: unknown }).__opennoteGlInk = { GlInk, drawStrokes, shared: () => shared };
+
+let dragShared: GlInk | null | undefined;
+function dragGlInk(): GlInk | null {
+  if (dragShared?.lost) {
+    dragShared.canvas.remove();
+    dragShared = undefined;
+  }
+  if (dragShared === undefined) {
+    try {
+      dragShared = localStorage.getItem('opennote_gl') === 'off' ? null : GlInk.create();
+    } catch {
+      dragShared = null;
+    }
+  }
+  return dragShared;
+}
+
+/** A selection being dragged: moved by (dx, dy), scaled (fx, fy) about its corner, turned `rot` degrees about its centre. */
+export interface DragView {
+  bounds: { x: number; y: number; width: number; height: number };
+  dx: number;
+  dy: number;
+  fx: number;
+  fy: number;
+  rot: number;
+}
+
+/** The glow of a selection (the canvas one's colour; 7 page px, as its shadow). */
+const SELECTION_GLOW: { radius: number; rgba: RGBA } = { radius: 7, rgba: [37 / 255, 99 / 255, 235 / 255, 0.9] };
+
+/**
+ * The ink of a selection being moved, stretched or turned, drawn by the GPU from its vectors on
+ * every frame, with its glow: a canvas holding it as a bitmap was capped in size, and a large
+ * selection zoomed in looked coarse while it moved. Its own GPU canvas over the scroll view; hidden
+ * two frames after the drag ends (the page has drawn the dropped ink by then). Returns whether it
+ * draws (the canvas copy is then not made).
+ */
+export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, pageWidth: number, drag: DragView | null, strokes: Stroke[]): boolean {
+  const [active, setActive] = useState(false);
+  const live = !!drag && strokes.length > 0;
+  useLayoutEffect(() => {
+    const parent = scrollRoot?.parentElement;
+    if (!live || !scrollRoot || !parent) return;
+    const g = dragGlInk();
+    if (!g) return;
+    Object.assign(g.canvas.style, {
+      position: 'absolute', left: `${scrollRoot.offsetLeft}px`, top: `${scrollRoot.offsetTop}px`,
+      width: `${scrollRoot.clientWidth}px`, height: `${scrollRoot.clientHeight}px`, pointerEvents: 'none', zIndex: '1', display: '',
+    });
+    if (g.canvas.parentElement !== parent) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
+    g.setStrokes(strokes);
+    setActive(true);
+    return () => {
+      setActive(false);
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (dragShared && !dragShared.lost) {
+            dragShared.canvas.style.display = 'none';
+            dragShared.resize(1, 1);
+          }
+        })
+      );
+    };
+  }, [live, scrollRoot, strokes]);
+  useLayoutEffect(() => {
+    const g = dragShared, c = container.current;
+    if (!active || !drag || !g || !c || !scrollRoot) return;
+    const er = scrollRoot.getBoundingClientRect(), r = c.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    g.resize(er.width * dpr, er.height * dpr);
+    const k = (r.width / pageWidth) * dpr;
+    const { bounds: b, dx, dy, fx, fy } = drag;
+    const t = (drag.rot * Math.PI) / 180, cos = Math.cos(t), sin = Math.sin(t);
+    // As transformSelection: scaled about the corner and moved, then turned about the result's centre.
+    const ux = b.x - b.x * fx + dx, uy = b.y - b.y * fy + dy;
+    const cx = b.x + (b.width * fx) / 2 + dx, cy = b.y + (b.height * fy) / 2 + dy;
+    const px = cos * (ux - cx) - sin * (uy - cy) + cx, py = sin * (ux - cx) + cos * (uy - cy) + cy;
+    g.draw(
+      {
+        scale: k * Math.sqrt(Math.abs(fx * fy)),
+        ox: k * px + (r.left - er.left) * dpr,
+        oy: k * py + (r.top - er.top) * dpr,
+        m: [k * cos * fx, k * sin * fx, -k * sin * fy, k * cos * fy],
+      },
+      SELECTION_GLOW
+    );
+  }, [drag, active, pageWidth, scrollRoot, container]);
+  return active;
+}

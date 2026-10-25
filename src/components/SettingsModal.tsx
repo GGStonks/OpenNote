@@ -8,7 +8,7 @@ import { frameProbe } from '../services/frameProbe';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
-import { PageRate, platformKind, setPageRate, shareFile } from '../platform';
+import { ExportMode, PageRate, exportMode, platformKind, setExportMode, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 
 interface SettingsModalProps {
@@ -31,6 +31,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [crash, setCrash] = useState(crashLog.lastCrash);
   const probe = isOpen ? frameProbe.last : null;
   const [pageRate, setPageRateState] = useState<PageRate>(window.OpenNoteNative?.pageRate ?? 'auto');
+  const [exportChoice, setExportChoice] = useState<ExportMode>(exportMode);
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -93,7 +94,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[env(safe-area-inset-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="p-2 bg-blue-50 dark:bg-blue-900/40 text-blue-600 rounded-xl">
@@ -213,6 +214,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
                 <Upload className="w-4 h-4" /> Import .opennote
               </button>
               <input ref={importRef} type="file" accept=".opennote,.json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }} />
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm text-gray-800 dark:text-gray-200">Exports and backups</div>
+                <p className="text-[11px] text-gray-400">
+                  {exportChoice === 'save' ? 'Each file asks where to save it (a folder you choose), and says where it went.' : 'Each file opens the share sheet (Save to Files, AirDrop, other apps).'}
+                </p>
+              </div>
+              <select
+                value={exportChoice}
+                onChange={(e) => {
+                  const v = e.target.value as ExportMode;
+                  setExportChoice(v);
+                  setExportMode(v);
+                }}
+                className="text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-ui-raised px-2 py-1"
+              >
+                <option value="save">Ask where to save</option>
+                <option value="share">Share sheet</option>
+              </select>
             </div>
           </section>
 

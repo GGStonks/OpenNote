@@ -5,7 +5,7 @@ import { Plus, Star, X } from 'lucide-react';
  * The "any colour" button: a small colour sphere, every hue around it fading to white at the
  * centre (where its + sits, dark on light), lit from the upper left, with a fine rim.
  */
-const COLOUR_SPHERE: React.CSSProperties = {
+export const COLOUR_SPHERE: React.CSSProperties = {
   background: [
     'radial-gradient(circle at 34% 28%, rgba(255,255,255,0.7), rgba(255,255,255,0) 32%)',
     'radial-gradient(closest-side, #fff 0%, rgba(255,255,255,0.92) 22%, rgba(255,255,255,0) 78%)',
@@ -100,7 +100,8 @@ function useDrag(onPos: (u: number, v: number) => void) {
   return { ref, handlers };
 }
 
-const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void }> = ({ value, onChange }) => {
+/** Saturation / brightness square and hue strip; `pointerOnly` leaves out the hex box (it would take the focus). */
+export const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void; pointerOnly?: boolean }> = ({ value, onChange, pointerOnly }) => {
   const [hsv, setHsv] = useState(() => hexToHsv(value));
   const [hex, setHex] = useState(value.toUpperCase());
   // Follow outside changes (a swatch tapped) without losing the hue of greys.
@@ -138,32 +139,34 @@ const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void }> = (
       >
         <span className="absolute top-1/2 w-4 h-4 -ml-2 -mt-2 rounded-full border-2 border-white shadow ring-1 ring-black/30 pointer-events-none" style={{ left: `${(hsv[0] / 360) * 100}%`, backgroundColor: `hsl(${hsv[0]} 100% 50%)` }} />
       </div>
-      <div className="flex items-center gap-2 mt-2">
-        <span className="w-8 h-8 rounded-lg border border-black/10 flex-shrink-0" style={{ backgroundColor: value }} />
-        <input
-          value={hex}
-          onChange={(e) => {
-            setHex(e.target.value);
-            const n = normalizeHex(e.target.value);
-            if (n) onChange(n);
-          }}
-          onBlur={() => setHex(value.toUpperCase())}
-          spellCheck={false}
-          className="flex-1 min-w-0 font-mono text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-ui-panel text-gray-900 dark:text-gray-100 select-text"
-          aria-label="Hex colour"
-        />
-        <button
-          onClick={() => {
-            const c = value.toUpperCase();
-            setFavorites([c, ...favorites.filter((f) => f !== c)]);
-          }}
-          disabled={favorites.includes(value.toUpperCase())}
-          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-100 text-amber-800 disabled:opacity-40"
-          title="Add to favourites"
-        >
-          <Star className="w-3.5 h-3.5" /> Save
-        </button>
-      </div>
+      {!pointerOnly && (
+        <div className="flex items-center gap-2 mt-2">
+          <span className="w-8 h-8 rounded-lg border border-black/10 flex-shrink-0" style={{ backgroundColor: value }} />
+          <input
+            value={hex}
+            onChange={(e) => {
+              setHex(e.target.value);
+              const n = normalizeHex(e.target.value);
+              if (n) onChange(n);
+            }}
+            onBlur={() => setHex(value.toUpperCase())}
+            spellCheck={false}
+            className="flex-1 min-w-0 font-mono text-sm px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-600 bg-white dark:bg-ui-panel text-gray-900 dark:text-gray-100 select-text"
+            aria-label="Hex colour"
+          />
+          <button
+            onClick={() => {
+              const c = value.toUpperCase();
+              setFavorites([c, ...favorites.filter((f) => f !== c)]);
+            }}
+            disabled={favorites.includes(value.toUpperCase())}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-amber-100 text-amber-800 disabled:opacity-40"
+            title="Add to favourites"
+          >
+            <Star className="w-3.5 h-3.5" /> Save
+          </button>
+        </div>
+      )}
     </div>
   );
 };
@@ -194,7 +197,7 @@ export const ColorPicker: React.FC<{ value: string; onChange: (hex: string) => v
   );
   return (
     <div>
-      <div className="flex flex-wrap gap-2 items-center">
+      <div className={`flex flex-wrap items-center ${size === 'lg' ? 'gap-2' : 'gap-1'}`}>
         {presets.map((c) => swatch(c))}
         <div className="relative flex">
           <button

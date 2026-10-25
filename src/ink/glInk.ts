@@ -25,9 +25,18 @@ export interface GlTransform {
   /** Canvas px of the surface's origin. */
   ox: number;
   oy: number;
+  /**
+   * The linear part instead of `scale` (a, b, c, d as a canvas transform: x' = a x + c y + ox,
+   * y' = b x + d y + oy): a selection being moved, stretched or turned. `scale` is then the mean
+   * scale (edges are antialiased at it).
+   */
+  m?: [number, number, number, number];
 }
 
-type RGBA = [number, number, number, number];
+/** The transform's linear part. */
+const linear = (tf: GlTransform): [number, number, number, number] => tf.m ?? [tf.scale, 0, 0, tf.scale];
+
+export type RGBA = [number, number, number, number];
 interface Box {
   x0: number;
   y0: number;
@@ -48,7 +57,10 @@ layout(location = 0) in vec2 corner;
 layout(location = 1) in vec3 a;
 layout(location = 2) in vec3 b;
 layout(location = 3) in vec4 col;
-uniform vec3 u_tf;
+uniform mat2 u_m;
+uniform vec2 u_t;
+uniform float u_px;
+uniform float u_glowPad;
 uniform vec2 u_size;
 out vec2 v_p;
 flat out vec3 v_a;
@@ -56,7 +68,7 @@ flat out vec3 v_b;
 flat out vec4 v_col;
 void main() {
   // A quad along the piece, just around it (an axis-aligned box drew up to twice the pixels).
-  float R = max(a.z, b.z) + 1.5 / u_tf.x;
+  float R = max(a.z, b.z) + (1.5 + u_glowPad) / u_px;
   vec2 ab = b.xy - a.xy;
   float L = length(ab);
   vec2 u = L > 1e-6 ? ab / L : vec2(1.0, 0.0);
@@ -64,7 +76,7 @@ void main() {
   v_a = a;
   v_b = b;
   v_col = col;
-  vec2 d = v_p * u_tf.x + u_tf.yz;
+  vec2 d = u_m * v_p + u_t;
   gl_Position = vec4(d.x / u_size.x * 2.0 - 1.0, 1.0 - d.y / u_size.y * 2.0, 0.0, 1.0);
 }`;
 
@@ -74,8 +86,9 @@ in vec2 v_p;
 flat in vec3 v_a;
 flat in vec3 v_b;
 flat in vec4 v_col;
-uniform vec3 u_tf;
+uniform float u_px;
 uniform int u_cov;
+uniform float u_glow;
 out vec4 o;
 float cro(vec2 x, vec2 y) { return x.x * y.y - x.y * y.x; }
 // Distance to the outline of two circles and the lines tangent to both (negative inside).
@@ -97,17 +110,22 @@ float sdPiece(vec2 p, vec2 pa, vec2 pb, float ra, float rb) {
 }
 void main() {
   float d = sdPiece(v_p, v_a.xy, v_b.xy, v_a.z, v_b.z);
-  float cov = clamp(0.5 - d * u_tf.x, 0.0, 1.0);
-  if (cov <= 0.0) discard;
+  // A glow (selection): the shadow a canvas casts with shadowBlur u_glow (a Gaussian of sigma
+  // u_glow / 2) for a line of this piece's width: the blur of a strip 2r wide, the difference of
+  // its two edges' (logistic approximation of the normal distribution). A thin line's is faint.
+  float sg = u_glow * 0.5, rr = v_a.z + v_b.z;
+  float cov = u_glow > 0.0 ? 1.0 / (1.0 + exp(1.702 * d / sg)) - 1.0 / (1.0 + exp(1.702 * (d + rr) / sg)) : clamp(0.5 - d * u_px, 0.0, 1.0);
+  if (cov <= 0.004) discard;
   o = u_cov == 1 ? vec4(cov, 0.0, 0.0, cov) : vec4(v_col.rgb * v_col.a * cov, v_col.a * cov);
 }`;
 
 const VS_FLAT = `#version 300 es
 layout(location = 0) in vec2 pos;
-uniform vec3 u_tf;
+uniform mat2 u_m;
+uniform vec2 u_t;
 uniform vec2 u_size;
 void main() {
-  vec2 d = pos * u_tf.x + u_tf.yz;
+  vec2 d = u_m * pos + u_t;
   gl_Position = vec4(d.x / u_size.x * 2.0 - 1.0, 1.0 - d.y / u_size.y * 2.0, 0.0, 1.0);
 }`;
 
@@ -257,7 +275,7 @@ class Builder {
     const { caps: c } = geometry(s);
     if (!c.length) return;
     const { first, count } = this.pushCaps(c, [0, 0, 0, 1]);
-    this.ops.push({ k: 'see', first, count, rgba: rgba(s.color, 0.35), box: boxOfCaps(c, 0, c.length) });
+    this.ops.push({ k: 'see', first, count, rgba: rgba(s.color, s.highlightAlpha ?? 0.35), box: boxOfCaps(c, 0, c.length) });
     this.run = null;
   }
 
@@ -500,18 +518,28 @@ export class GlInk {
   }
 
   /** The box in canvas px (y up, for the scissor), clipped to the canvas; null when off it. */
-  private scissor(b: Box, tf: GlTransform): [number, number, number, number] | null {
+  private scissor(b: Box, tf: GlTransform, pad = 0): [number, number, number, number] | null {
     const w = this.canvas.width, h = this.canvas.height;
-    const x0 = Math.max(0, Math.floor(b.x0 * tf.scale + tf.ox) - 2), x1 = Math.min(w, Math.ceil(b.x1 * tf.scale + tf.ox) + 2);
-    const y0 = Math.max(0, Math.floor(b.y0 * tf.scale + tf.oy) - 2), y1 = Math.min(h, Math.ceil(b.y1 * tf.scale + tf.oy) + 2);
+    const [a, bb, c, d] = linear(tf);
+    const xs: number[] = [], ys: number[] = [];
+    for (const [x, y] of [[b.x0 - pad, b.y0 - pad], [b.x1 + pad, b.y0 - pad], [b.x0 - pad, b.y1 + pad], [b.x1 + pad, b.y1 + pad]]) {
+      xs.push(a * x + c * y + tf.ox);
+      ys.push(bb * x + d * y + tf.oy);
+    }
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 2), x1 = Math.min(w, Math.ceil(Math.max(...xs)) + 2);
+    const y0 = Math.max(0, Math.floor(Math.min(...ys)) - 2), y1 = Math.min(h, Math.ceil(Math.max(...ys)) + 2);
     if (x1 <= x0 || y1 <= y0) return null;
     return [x0, h - y1, x1 - x0, y1 - y0];
   }
 
-  private uniforms(prog: WebGLProgram, tf: GlTransform) {
+  private uniforms(prog: WebGLProgram, tf: GlTransform, glow = 0) {
     const gl = this.gl;
     gl.useProgram(prog);
-    gl.uniform3f(gl.getUniformLocation(prog, 'u_tf'), tf.scale, tf.ox, tf.oy);
+    gl.uniformMatrix2fv(gl.getUniformLocation(prog, 'u_m'), false, linear(tf));
+    gl.uniform2f(gl.getUniformLocation(prog, 'u_t'), tf.ox, tf.oy);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_px'), tf.scale);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_glow'), glow);
+    gl.uniform1f(gl.getUniformLocation(prog, 'u_glowPad'), glow * 2 * tf.scale);
     gl.uniform2f(gl.getUniformLocation(prog, 'u_size'), this.canvas.width, this.canvas.height);
   }
 
@@ -537,7 +565,40 @@ export class GlInk {
     this.ops = ops;
   }
 
-  draw(tf: GlTransform) {
+  /**
+   * Pieces [first, first + count) as one shape: their coverage (the most at each pixel) into the
+   * coverage texture, then laid on in `rgba` (over `box`, or the whole canvas). `glow` (page px): a
+   * soft falloff around them instead of an antialiased edge.
+   */
+  private layOn(first: number, count: number, rgba: RGBA, box: Box | null, tf: GlTransform, glow = 0) {
+    const gl = this.gl;
+    const sc = box ? this.scissor(box, tf, glow * 2) : [0, 0, this.canvas.width, this.canvas.height] as [number, number, number, number];
+    if (!sc || !count || !this.coverage()) return;
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(...sc);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.blendEquation(gl.MAX);
+    this.uniforms(this.caps, tf, glow);
+    gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 1);
+    gl.bindVertexArray(this.capVao);
+    this.pointCaps(first);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.blendEquation(gl.FUNC_ADD);
+    gl.useProgram(this.compose);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex);
+    gl.uniform1i(gl.getUniformLocation(this.compose, 'u_tex'), 0);
+    const [r, g, b, a] = rgba;
+    gl.uniform4f(gl.getUniformLocation(this.compose, 'u_col'), r * a, g * a, b * a, a);
+    gl.bindVertexArray(this.fullVao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.disable(gl.SCISSOR_TEST);
+  }
+
+  /** Draws the strokes; `glow`: a selection's glow (page px, colour) under them. */
+  draw(tf: GlTransform, glow?: { radius: number; rgba: RGBA }) {
     const gl = this.gl;
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.disable(gl.SCISSOR_TEST);
@@ -549,33 +610,10 @@ export class GlInk {
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    if (glow) this.layOn(0, this.pieces, glow.rgba, null, tf, glow.radius);
     for (const op of this.ops) {
       if (op.k === 'see') {
-        const sc = this.scissor(op.box, tf);
-        if (!sc || !this.coverage()) continue;
-        gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(...sc);
-        // Coverage: the most of the stroke's pieces at each pixel.
-        gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo);
-        gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.blendEquation(gl.MAX);
-        this.uniforms(this.caps, tf);
-        gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 1);
-        gl.bindVertexArray(this.capVao);
-        this.pointCaps(op.first);
-        gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, op.count);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-        gl.blendEquation(gl.FUNC_ADD);
-        // Laid on in its colour.
-        gl.useProgram(this.compose);
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, this.tex);
-        gl.uniform1i(gl.getUniformLocation(this.compose, 'u_tex'), 0);
-        const [r, g, b, a] = op.rgba;
-        gl.uniform4f(gl.getUniformLocation(this.compose, 'u_col'), r * a, g * a, b * a, a);
-        gl.bindVertexArray(this.fullVao);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        gl.disable(gl.SCISSOR_TEST);
+        this.layOn(op.first, op.count, op.rgba, op.box, tf);
       } else if (op.k === 'fill') {
         const sc = this.scissor(op.box, tf);
         if (!sc) continue;

@@ -191,9 +191,9 @@ export function singleBlockSelection(page: NotePage, kind: 'latex' | 'text' | 'i
  * the same unless given), then a rotation of `rot` degrees (clockwise) about the centre of the
  * result, to the selected items. Every item keeps the total of its rotations in `rotation` (0 = as
  * it was made). Stretched one way more than the other: ink stretches with it (its width by the
- * mean), pictures stretch, a text box takes the new width (its text wraps again) and its font the
- * height's scale, a LaTeX block its font the height's scale (a formula cannot stretch) and, as
- * text, the new width.
+ * mean), pictures stretch, a LaTeX block stretches (its font takes the height's scale, `stretchX`
+ * the rest), a text box takes the new width and height, its text wrapping again (its font scales
+ * only when both scales are the same: a corner).
  */
 export function transformSelection(page: NotePage, sel: Selection, dx: number, dy: number, factor: number, rot = 0, fy = factor): NotePage {
   const fx = factor;
@@ -229,10 +229,19 @@ export function transformSelection(page: NotePage, sel: Selection, dx: number, d
       return moveOnly ? markMoved(out, st, dx, dy) : out;
     }),
     latexBlocks: page.latexBlocks.map((b) =>
-      sel.latexIds.includes(b.id) ? { ...b, ...box(b, b.width, b.height, b.width * fx, b.height * fy), width: b.width * fx, height: b.height * fy, scale: (b.scale ?? 1) * fy } : b
+      sel.latexIds.includes(b.id)
+        ? {
+            ...b, ...box(b, b.width, b.height, b.width * fx, b.height * fy), width: b.width * fx, height: b.height * fy, scale: (b.scale ?? 1) * fy,
+            ...(fx !== fy ? { stretchX: (b.stretchX ?? 1) * (fx / fy) } : {}),
+          }
+        : b
     ),
     textBlocks: (page.textBlocks ?? []).map((t) =>
-      sel.textIds.includes(t.id) ? { ...t, ...box(t, t.width, textHeight(t), t.width * fx, textHeight(t) * fy), width: t.width * fx, fontSize: t.fontSize * fy } : t
+      sel.textIds.includes(t.id)
+        ? fx === fy
+          ? { ...t, ...box(t, t.width, textHeight(t), t.width * fx, textHeight(t) * fy), width: t.width * fx, fontSize: t.fontSize * fx, ...(t.height ? { height: t.height * fx } : {}) }
+          : { ...t, ...box(t, t.width, textHeight(t), t.width * fx, textHeight(t) * fy), width: t.width * fx, height: textHeight(t) * fy }
+        : t
     ),
     imageBlocks: (page.imageBlocks ?? []).map((im) =>
       sel.imageIds.includes(im.id) ? { ...im, ...box(im, im.width, im.height, im.width * fx, im.height * fy), width: im.width * fx, height: im.height * fy } : im

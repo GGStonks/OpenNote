@@ -1,9 +1,9 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Clock, Settings as SettingsIcon,
+  FileText, Plus, Search, MoreVertical, Trash2, Edit2, BookOpen, Settings as SettingsIcon,
   Grid as GridIcon, List as ListIcon, Copy, FolderInput, Upload, Folder as FolderIcon, FolderPlus,
-  ChevronRight, ChevronDown, Tag as TagIcon, SlidersHorizontal, Check, X, Hash,
+  ChevronRight, ChevronDown, Tag as TagIcon, SlidersHorizontal, Check, X, Hash, PencilLine, CalendarPlus,
 } from 'lucide-react';
 import { Folder, NoteDocument, Tag } from '../types';
 import { NoteThumb } from './NoteThumb';
@@ -51,6 +51,40 @@ type MoveTarget = { kind: 'note'; id: string } | { kind: 'folder'; id: string };
 const MENU = 'absolute bg-white dark:bg-ui-raised border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl py-1 z-50 text-sm';
 const MENU_ITEM = 'w-full px-3 py-2 flex items-center gap-2 text-left hover:bg-gray-100 dark:hover:bg-ui-high text-gray-700 dark:text-gray-200';
 
+/** A date and time in full (day, month, year, hours, minutes), compact enough for the narrowest cards. */
+const fullDate = (ms: number) => new Date(ms).toLocaleString([], { year: '2-digit', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+const pagesLabel = (n: number) => `${n} page${n === 1 ? '' : 's'}`;
+
+/** A note's last edit and creation (date and time, each with its icon) and its number of pages. */
+const NoteDates: React.FC<{ note: NoteDocument; className?: string; inline?: boolean }> = ({ note, className = '', inline }) => {
+  const edited = (
+    <span className="flex items-center gap-1 min-w-0" title="Last edited">
+      <PencilLine className="w-3 h-3 flex-shrink-0" /> <span className="truncate">{fullDate(note.updatedAt)}</span>
+    </span>
+  );
+  const created = (
+    <span className="flex items-center gap-1 min-w-0" title="Created">
+      <CalendarPlus className="w-3 h-3 flex-shrink-0" /> <span className="truncate">{fullDate(note.createdAt)}</span>
+    </span>
+  );
+  const pages = <span>{pagesLabel(pageCountOf(note))}</span>;
+  if (inline)
+    return (
+      <>
+        {edited}
+        {created}
+        {pages}
+      </>
+    );
+  return (
+    <div className={`text-[11px] text-gray-400 space-y-0.5 whitespace-nowrap min-w-0 ${className}`}>
+      {edited}
+      {created}
+      {pages}
+    </div>
+  );
+};
+
 /**
  * A menu shown next to the button that opened it, above everything (a portal on the page) and
  * always wholly on screen: below the button when it fits there, otherwise above, then clamped to
@@ -84,7 +118,7 @@ const AnchoredMenu: React.FC<{ anchor: HTMLElement | null; width: number; onClos
     <div
       ref={ref}
       className={MENU.replace('absolute', 'fixed').replace('z-50', 'z-[1000]')}
-      style={{ width, left: pos?.left ?? -9999, top: pos?.top ?? 0, maxHeight: 'calc(100vh - 16px)', overflowY: 'auto' }}
+      style={{ width, left: pos?.left ?? -9999, top: pos?.top ?? 0, maxHeight: 'calc(100dvh - 16px)', overflowY: 'auto' }}
       onClick={(e) => e.stopPropagation()}
     >
       {children}
@@ -423,7 +457,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
           {...dropProps(null)}
           className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-sm font-semibold mt-3 ${current === null ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-300 hover:bg-gray-200/60 dark:hover:bg-white/5'} ${dropFolder === 'root' ? 'ring-2 ring-blue-500' : ''}`}
         >
-          <span className="flex items-center gap-2.5"><BookOpen className="w-4 h-4" /> All Notes</span>
+          <span className="flex items-center gap-2.5"><BookOpen className="w-4 h-4" /> All notes</span>
           <span className="text-xs opacity-80">{notes.length}</span>
         </button>
       </div>
@@ -587,21 +621,19 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                       </span>
                     )}
                   </div>
-                  <div className="p-2.5 sm:p-3 flex items-start justify-between">
-                    <div className="flex-1 min-w-0 mr-1">
-                      {titleOrRename(note)}
-                      <div className="text-[11px] text-gray-400 mt-0.5 flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {new Date(prefs.sort.startsWith('created') ? note.createdAt : note.updatedAt).toLocaleDateString()} · {pageCountOf(note)}p
-                      </div>
-                      {nt.length > 0 && (
-                        <div className="flex flex-wrap gap-1 mt-1.5">
-                          {nt.slice(0, 3).map((t) => <TagChip key={t.id} tag={t} small />)}
-                          {nt.length > 3 && <span className="text-[10px] text-gray-400">+{nt.length - 3}</span>}
-                        </div>
-                      )}
+                  <div className="p-2.5 sm:p-3">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1 min-w-0 mr-1">{titleOrRename(note)}</div>
+                      {menuButton(note)}
                     </div>
-                    {menuButton(note)}
+                    {/* The full width of the card: the dates and times are not cut off. */}
+                    <NoteDates note={note} />
+                    {nt.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {nt.slice(0, 3).map((t) => <TagChip key={t.id} tag={t} small />)}
+                        {nt.length > 3 && <span className="text-[10px] text-gray-400">+{nt.length - 3}</span>}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -619,7 +651,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                     <div className="min-w-0 flex-1">
                       {titleOrRename(note)}
                       <div className="text-[11px] text-gray-400 flex items-center gap-1.5 flex-wrap">
-                        <span>{new Date(prefs.sort.startsWith('created') ? note.createdAt : note.updatedAt).toLocaleString()} · {pageCountOf(note)} page{pageCountOf(note) === 1 ? '' : 's'}</span>
+                        <NoteDates note={note} inline />
                         {folder && <span className="flex items-center gap-1"><FolderIcon className="w-3 h-3" style={{ color: folder.color }} />{folder.name}</span>}
                         {nt.map((t) => <TagChip key={t.id} tag={t} small />)}
                       </div>
@@ -644,7 +676,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   };
 
   const filterMenu = (
-    <div className={`${MENU} right-0 top-11 w-[19rem] max-w-[calc(100vw-1.5rem)] py-2 max-h-[70vh] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
+    <div className={`${MENU} right-0 top-11 w-[19rem] max-w-[calc(100vw-1.5rem)] py-2 max-h-[calc(100dvh-7rem)] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
       <div className="px-3 pb-1 text-[11px] font-bold text-gray-400 uppercase tracking-wider">Sort by</div>
       {['Last modified', 'Created', 'Title'].map((group) => (
         <div key={group} className="px-3 py-1 flex items-center gap-2">
@@ -784,7 +816,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
   // --- Layout -------------------------------------------------------------------------------------
 
-  const viewTitle = current ? path[path.length - 1]?.name ?? 'Folder' : 'All Notes';
+  const viewTitle = current ? path[path.length - 1]?.name ?? 'Folder' : 'All notes';
   const sidebarShown = !collapsed;
 
   return (
@@ -876,7 +908,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* "+": tap for a new note, hold (or right-click) to import files. */}
       <div className="absolute z-40 right-5 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
-          <div className={`${MENU} static w-56 mb-1`}>
+          <div className={`${MENU} static w-56 mb-1 max-h-[calc(100dvh-6rem-env(safe-area-inset-bottom))] overflow-y-auto`}>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); importRef.current?.click(); }}>
               <Upload className="w-4 h-4" />
               <span className="flex-1">
@@ -927,7 +959,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 /** A small modal sheet (bottom sheet on phones). */
 const Sheet: React.FC<{ title: string; onClose: () => void; children: React.ReactNode }> = ({ title, onClose, children }) => (
   <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4" onClick={(e) => { e.stopPropagation(); onClose(); }}>
-    <div className="bg-white dark:bg-ui-panel w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 max-h-[80vh] flex flex-col pb-[env(safe-area-inset-bottom)]" onClick={(e) => e.stopPropagation()}>
+    <div className="bg-white dark:bg-ui-panel w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 max-h-[calc(100dvh-16px)] flex flex-col pb-[env(safe-area-inset-bottom)]" onClick={(e) => e.stopPropagation()}>
       <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2">
         <h3 className="font-bold text-sm truncate">{title}</h3>
         <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600 rounded-full"><X className="w-5 h-5" /></button>

@@ -12,7 +12,6 @@ import { ColorPicker } from './ColorPicker';
 
 const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
-const PEN_WIDTHS = [1.2, 2, 3, 4.5, 7];
 
 export const FILL_OPTIONS: { id: FillType; label: string }[] = [
   { id: 'none', label: 'None' },
@@ -117,7 +116,7 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
 
 const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
   <div
-    className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto ${
+    className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto overflow-x-hidden no-scrollbar ${
       align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
     }`}
   >
@@ -128,6 +127,45 @@ const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.R
 const Label: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 mt-1.5">{children}</div>
 );
+
+/**
+ * A tool's width (or opacity) as a slider and a box, both from 1 to 100; editing one moves the
+ * other. The level maps onto the tool's own range [min, max], along a log scale for widths (fine
+ * steps where widths are thin) or straight for opacity.
+ */
+const LevelControl: React.FC<{ value: number; min: number; max: number; log?: boolean; onChange: (v: number) => void; label: string }> = ({ value, min, max, log = true, onChange, label }) => {
+  const toLevel = (v: number) => Math.round(1 + 99 * (log ? Math.log(Math.max(min, Math.min(max, v)) / min) / Math.log(max / min) : (Math.max(min, Math.min(max, v)) - min) / (max - min)));
+  const fromLevel = (l: number) => (log ? min * Math.pow(max / min, (l - 1) / 99) : min + ((l - 1) / 99) * (max - min));
+  const level = toLevel(value);
+  const [draft, setDraft] = useState(String(level));
+  useEffect(() => setDraft(String(level)), [level]);
+  const set = (l: number) => onChange(fromLevel(Math.max(1, Math.min(100, Math.round(l)))));
+  return (
+    <div className="flex items-center gap-3 mb-2">
+      <input type="range" min={1} max={100} step={1} value={level} onChange={(e) => set(+e.target.value)} className="flex-1 accent-blue-600" aria-label={label} />
+      <input
+        type="number"
+        inputMode="numeric"
+        min={1}
+        max={100}
+        value={draft}
+        aria-label={`${label} (1-100)`}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          const n = Number(e.target.value);
+          if (e.target.value !== '' && Number.isFinite(n) && n >= 1 && n <= 100) set(n);
+        }}
+        onBlur={() => setDraft(String(level))}
+        className="w-16 text-center text-sm rounded-xl border border-gray-200 dark:border-gray-600 bg-white dark:bg-ui-high py-1.5 tabular-nums"
+      />
+    </div>
+  );
+};
+
+/** The tools' width ranges (page px) behind the 1-100 levels. */
+const PEN_WIDTH_RANGE = { min: 0.5, max: 24 };
+const HIGHLIGHTER_WIDTH_RANGE = { min: 1, max: 20 };
+const ERASER_SIZE_RANGE = { min: 2, max: 100 };
 
 export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const { tools, setTools } = p;
@@ -160,13 +198,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               ))}
             </div>
             <Label>Width</Label>
-            <div className="flex justify-between mb-2">
-              {PEN_WIDTHS.map((w) => (
-                <button key={w} onClick={() => setTools({ penWidth: w })} className={`w-11 h-11 rounded-full flex items-center justify-center border-2 transition ${tools.penWidth === w ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/10'}`}>
-                  <span className="rounded-full bg-gray-900 dark:bg-gray-100" style={{ width: w * 2.2, height: w * 2.2 }} />
-                </button>
-              ))}
-            </div>
+            <LevelControl label="Pen width" value={tools.penWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ penWidth: v })} />
             <Label>Colour</Label>
             <ColorPicker value={tools.penColor} onChange={(c) => setTools({ penColor: c })} presets={PEN_COLORS} />
             <label className="flex items-center justify-between gap-3 py-1 mt-3 text-sm text-gray-700 dark:text-gray-300">
@@ -209,14 +241,8 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               ))}
             </div>
             <Label>Width</Label>
-            <div className="flex justify-between mb-2">
-              {PEN_WIDTHS.map((w) => (
-                <button key={w} onClick={() => setTools({ penWidth: w })} className={`w-11 h-11 rounded-full flex items-center justify-center border-2 transition ${tools.penWidth === w ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-transparent hover:bg-gray-100 dark:hover:bg-white/10'}`}>
-                  <span className="rounded-full bg-gray-900 dark:bg-gray-100" style={{ width: w * 2.2, height: w * 2.2 }} />
-                </button>
-              ))}
-            </div>
-            <Label>Colour (independent of the pen)</Label>
+            <LevelControl label="Draw width" value={tools.shapeWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ shapeWidth: v })} />
+            <Label>Colour</Label>
             <div className="mb-2">
               <ColorPicker value={tools.shapeColor} onChange={(c) => setTools({ shapeColor: c })} presets={PEN_COLORS} size="sm" />
             </div>
@@ -253,7 +279,9 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               <ColorPicker value={tools.highlighterColor} onChange={(c) => setTools({ highlighterColor: c })} presets={HIGHLIGHTER_COLORS} />
             </div>
             <Label>Width</Label>
-            <input type="range" min={2} max={8} step={0.5} value={tools.highlighterWidth} onChange={(e) => setTools({ highlighterWidth: +e.target.value })} className="w-full" />
+            <LevelControl label="Highlighter width" value={tools.highlighterWidth} {...HIGHLIGHTER_WIDTH_RANGE} onChange={(v) => setTools({ highlighterWidth: v })} />
+            <Label>Opacity</Label>
+            <LevelControl label="Highlighter opacity" value={tools.highlighterOpacity} min={0.01} max={1} log={false} onChange={(v) => setTools({ highlighterOpacity: v })} />
           </Popover>
         )}
       </div>
@@ -273,7 +301,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               ))}
             </div>
             <Label>Size</Label>
-            <input type="range" min={4} max={40} value={tools.eraserSize} onChange={(e) => setTools({ eraserSize: +e.target.value })} className="w-full" />
+            <LevelControl label="Eraser size" value={tools.eraserSize} {...ERASER_SIZE_RANGE} onChange={(v) => setTools({ eraserSize: v })} />
           </Popover>
         )}
       </div>

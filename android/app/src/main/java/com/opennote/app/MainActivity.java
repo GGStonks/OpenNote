@@ -3,10 +3,13 @@ package com.opennote.app;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.MotionEvent;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 
 import androidx.core.view.WindowCompat;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
@@ -18,8 +21,26 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(OpenNotePrintPlugin.class);
         registerPlugin(OpenNoteInkPlugin.class);
         registerPlugin(OpenNoteUpdatePlugin.class);
+        registerPlugin(OpenNoteSavePlugin.class);
         super.onCreate(savedInstanceState);
         enterImmersive();
+        keepClearOfSystemBars();
+    }
+
+    /**
+     * Where the system bars or a display cutout do cover the screen (devices where the bars do not
+     * stay hidden, or while they are shown), the app's content is inset by them: drawn under the
+     * navigation bar, the bottom of the app (the "+" menu, dialogs) was out of sight. With the bars
+     * hidden the insets are zero and the app keeps the whole screen. Touch and stylus positions are
+     * taken relative to the WebView's place in the window, so they follow.
+     */
+    private void keepClearOfSystemBars() {
+        View content = findViewById(android.R.id.content);
+        ViewCompat.setOnApplyWindowInsetsListener(content, (v, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
+            return WindowInsetsCompat.CONSUMED;
+        });
     }
 
     /** Native live ink: the stylus's newest position reaches the ink overlay before the WebView. */

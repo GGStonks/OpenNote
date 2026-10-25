@@ -32,7 +32,7 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { canMakePdf, haptic, pdfOfPrintLayout, printDocument, shareFile } from '../platform';
+import { canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
 import { joinPdfPages } from '../services/pdfExport';
 
 /** Margin around the surface (content px). */
@@ -105,9 +105,11 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
     penColor: '#111827',
     shapeColor: '#111827',
     penWidth: 2,
+    shapeWidth: 2,
     penStyle: settings.penStyle,
     highlighterColor: '#FDE047',
     highlighterWidth: 4,
+    highlighterOpacity: 0.35,
     eraserMode: settings.eraserMode,
     eraserSize: 14,
     stylusOnly: settings.stylusOnly,
@@ -125,6 +127,8 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
       const saved = JSON.parse(raw);
       // Before v1.11 the Draw tool used the pen's colour: it starts from that colour.
       if (!saved.shapeColor && saved.penColor) saved.shapeColor = saved.penColor;
+      // Before v2.4.0 the Draw tool used the pen's width: it starts from that width.
+      if (saved.shapeWidth === undefined && saved.penWidth) saved.shapeWidth = saved.penWidth;
       return { ...base, ...saved, stylusOnly: settings.stylusOnly, holdToSnap: settings.holdToSnap, penStyle: settings.penStyle, eraserMode: settings.eraserMode };
     }
   } catch {
@@ -213,6 +217,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget,
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
+  // A stable callback: an inline one is called with null and then the element again on every
+  // render, which made the scroll view briefly null for everything that uses it (the GPU ink of a
+  // pinch was switched off by any render during the pinch).
+  const scrollRefCallback = useCallback((el: HTMLDivElement | null) => {
+    scrollRef.current = el;
+    setScrollEl(el);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [selection, setSelectionState] = useState<Selection | null>(null);
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
@@ -818,7 +829,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       setPrintMode(false);
       setPrintOnly(null);
       setBusy(null);
-      await shareFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
+      const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
+      if (where) showToast(where);
     } catch (err) {
       setBusy(null);
       setPrintMode(false);
@@ -919,10 +931,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             </div>
           )}
           <div
-            ref={(el) => {
-              scrollRef.current = el;
-              if (el !== scrollEl) setScrollEl(el);
-            }}
+            ref={scrollRefCallback}
             onScroll={onScroll}
             className="absolute inset-0 overflow-auto bg-ui-desk dark:bg-ui-desk"
             style={{ touchAction: 'pan-x pan-y', overscrollBehavior: 'contain' }}

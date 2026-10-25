@@ -266,6 +266,78 @@ export async function shareFile(filename: string, blob: Blob): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
 
+/** Exports: 'save' asks where to save each file (the system's save dialog), 'share' opens the share sheet. */
+export type ExportMode = 'save' | 'share';
+const EXPORT_MODE_KEY = 'opennote_export_mode';
+
+export function exportMode(): ExportMode {
+  try {
+    return localStorage.getItem(EXPORT_MODE_KEY) === 'share' ? 'share' : 'save';
+  } catch {
+    return 'save';
+  }
+}
+
+export function setExportMode(mode: ExportMode) {
+  try {
+    localStorage.setItem(EXPORT_MODE_KEY, mode);
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+interface SavePlugin {
+  save(o: { filename: string; mimeType: string; base64: string }): Promise<{ cancelled?: boolean; name?: string; folder?: string }>;
+}
+let savePlugin: SavePlugin | null = null;
+
+/**
+ * Exports a file where the user chooses: the system's save dialog for each file (iOS: Files' folder
+ * picker; Android: the system's "save to" picker; browsers: their save dialog or the downloads), so
+ * it is clear where it went. Returns where it was saved, for a confirmation, or null when the user
+ * cancelled. Settings > Export can choose the share sheet instead (shareFile).
+ */
+export async function exportFile(filename: string, blob: Blob): Promise<string | null> {
+  const safeName = filename.replace(/[\\/:*?"<>|]+/g, '_');
+  if (exportMode() === 'share') {
+    await shareFile(safeName, blob);
+    return null;
+  }
+  const kind = platformKind();
+  const mimeType = blob.type || 'application/octet-stream';
+  if (kind === 'ios') {
+    const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'saveFile', filename: safeName, mimeType, base64: await blobToBase64(blob) });
+    if (res?.error) throw new Error(String(res.error));
+    if (res?.cancelled) return null;
+    return `Saved “${res?.name ?? safeName}” in ${res?.folder ? `“${res.folder}”` : 'the folder you chose'}.`;
+  }
+  if (kind === 'capacitor') {
+    if (!savePlugin) {
+      const { registerPlugin } = await import('@capacitor/core');
+      savePlugin = registerPlugin<SavePlugin>('OpenNoteSave');
+    }
+    const res = await savePlugin.save({ filename: safeName, mimeType, base64: await blobToBase64(blob) });
+    if (res?.cancelled) return null;
+    return `Saved “${res?.name ?? safeName}”${res?.folder ? ` in “${res.folder}”` : ' in the folder you chose'}.`;
+  }
+  // Browsers: their save dialog where there is one, else the downloads.
+  const picker = (window as unknown as { showSaveFilePicker?: (o: { suggestedName: string }) => Promise<{ name: string; createWritable(): Promise<{ write(b: Blob): Promise<void>; close(): Promise<void> }> }> }).showSaveFilePicker;
+  if (picker) {
+    try {
+      const handle = await picker({ suggestedName: safeName });
+      const w = await handle.createWritable();
+      await w.write(blob);
+      await w.close();
+      return `Saved “${handle.name}”.`;
+    } catch (err) {
+      if ((err as Error)?.name === 'AbortError') return null;
+      throw err;
+    }
+  }
+  await shareFile(safeName, blob);
+  return `Saved “${safeName}” in the browser's downloads.`;
+}
+
 /**
  * iOS shell: the page's frame rate from the next start. 'auto': the display's (WebKit's "near 60 fps"
  * cap lifted) where it is faster than 60 Hz and that worked; '60': the cap; 'max': always lifted.

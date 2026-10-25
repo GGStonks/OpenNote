@@ -26,12 +26,12 @@ import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles }
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
 import {
-  Selection, computeBounds, normDeg, resetRotation, selectInLasso, selectionRotation, singleBlockSelection, transformSelection,
+  Selection, computeBounds, normDeg, resetRotation, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
 } from '../editor/selection';
-import { ImageBlockView, LatexBlockView, TextBlockView } from './Blocks';
+import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox } from './Blocks';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
-import { usePinchInk } from '../editor/usePinchInk';
+import { useDragInk, usePinchInk } from '../editor/usePinchInk';
 import { frameRate } from '../services/frameRate';
 
 export interface ToolSettings {
@@ -40,9 +40,13 @@ export interface ToolSettings {
   /** Colour of the Draw tool (smart pen), independent of the pen's. */
   shapeColor: string;
   penWidth: number;
+  /** Width of the Draw tool (smart pen), independent of the pen's. */
+  shapeWidth: number;
   penStyle: PenStyle;
   highlighterColor: string;
   highlighterWidth: number;
+  /** How opaque highlighter ink is (0-1). */
+  highlighterOpacity: number;
   eraserMode: EraserMode;
   eraserSize: number;
   stylusOnly: boolean;
@@ -168,11 +172,6 @@ export function paperGrid(style: PaperStyle): number | null {
  */
 const MAX_CANVAS_PIXELS = 14_500_000;
 
-/** The selection's resize handles: corners, then the middle of each side (which sides each moves). */
-const RESIZE_HANDLES: { x: -1 | 0 | 1; y: -1 | 0 | 1; cursor: string }[] = [
-  { x: -1, y: -1, cursor: 'nwse-resize' }, { x: 1, y: -1, cursor: 'nesw-resize' }, { x: 1, y: 1, cursor: 'nwse-resize' }, { x: -1, y: 1, cursor: 'nesw-resize' },
-  { x: 0, y: -1, cursor: 'ns-resize' }, { x: 1, y: 0, cursor: 'ew-resize' }, { x: 0, y: 1, cursor: 'ns-resize' }, { x: -1, y: 0, cursor: 'ew-resize' },
-];
 /**
  * The page canvases' zoom is the zoom that fits the page's width on this screen (100% with an
  * iPad upright, about 150% sideways; at most this), whatever the user zooms to; above it committed
@@ -1274,14 +1273,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const liveStyle = (tool: ToolType): InkStyle => {
     const t = toolsRef.current;
     return tool === 'highlighter'
-      ? { tool: 'highlighter', color: t.highlighterColor, width: t.highlighterWidth, penStyle: 'ballpoint' }
+      ? { tool: 'highlighter', color: t.highlighterColor, width: t.highlighterWidth, penStyle: 'ballpoint', highlightAlpha: t.highlighterOpacity }
       : { tool: 'pen', color: t.penColor, width: t.penWidth, penStyle: t.penStyle };
   };
 
   const smartOptions = (): SmartPenOptions => {
     const t = toolsRef.current;
     return {
-      mode: t.shapeMode, color: t.shapeColor, width: t.penWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap,
+      mode: t.shapeMode, color: t.shapeColor, width: t.shapeWidth, fill: t.shapeFill, arrow: t.shapeArrow, lineStyle: t.shapeLineStyle, snap: t.shapeSnap,
       grid: t.shapeGridSnap ? paperGrid(paperStyleRef.current) : null,
     };
   };
@@ -1335,8 +1334,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ctx.beginPath();
       ctx.moveTo(d.points[0].x, d.points[0].y);
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const p of d.points) {
-        ctx.lineTo(p.x, p.y);
+      // A smooth curve through the midpoints (the points themselves as control points).
+      const pts = d.points;
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      }
+      ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+      for (const p of pts) {
         minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
       }
       ctx.closePath();
@@ -1538,11 +1543,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (selectedBlockId) setSelectedBlockId(null);
 
     if (tool === 'text') {
+      const pt = toPoint(e, performance.now());
+      // A text box under the pen is edited (its text and its bar), not covered by a new one: the
+      // drawing layer lies over the boxes, so they never saw the tap.
+      const hit = [...(pageRef.current.textBlocks ?? [])].reverse().find((t) => pt.x >= t.x - 6 && pt.x <= t.x + t.width + 6 && pt.y >= t.y - 6 && pt.y <= t.y + textHeight(t) + 6);
+      if (hit) {
+        if (hit.id !== editingTextId) setEditingTextId(hit.id);
+        return;
+      }
       if (editingTextId) {
         setEditingTextId(null);
         return;
       }
-      const pt = toPoint(e, performance.now());
       if (e.pointerType === 'touch') {
         pendingText.current = { pointerId: e.pointerId, pt };
         return;
@@ -1581,7 +1593,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       pressure: pt.pressure,
       force: [pt.pressure],
       model: tool === 'pen' ? new SmoothLiveStroke() : null,
-      dense: tool === 'pen' ? new SampleDensifier() : null,
+      // The pen's and the lasso's: fast movements fill their wide gaps on a smooth curve (a fast
+      // lasso was a polygon of straight pieces).
+      dense: tool === 'pen' || tool === 'lasso' ? new SampleDensifier() : null,
       ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -1693,7 +1707,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
       // Pen: the densifier decides about samples where the pen rests (some must reach the engine,
       // src/ink/densify.ts); other tools skip them.
-      const dense = d.model && d.dense && !d.snapped ? d.dense : null;
+      const dense = d.dense && !d.snapped && (d.model || d.tool === 'lasso') ? d.dense : null;
       const last = d.points[d.points.length - 1];
       if (!dense && Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
@@ -1928,6 +1942,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         // same way live and when the stroke is drawn later.
         points: d.snapped ? d.snapped.points : d.points,
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
+        ...(d.tool === 'highlighter' ? { highlightAlpha: style.highlightAlpha } : {}),
       };
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
     } else if (d.tool === 'eraser') {
@@ -2057,10 +2072,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       t.dx = Math.max(Math.min(0, -b.x), Math.min(Math.max(0, PAGE_W - b.x - b.width), dx));
       t.dy = Math.max(Math.min(0, -b.y), Math.min(Math.max(0, PAGE_H - b.y - b.height), dy));
     } else if (t.mode === 'scale') {
-      // The grabbed sides follow the pointer, the opposite ones stay.
+      // The grabbed sides follow the pointer, the opposite ones stay; a corner keeps the proportions.
       const scaleOf = (side: -1 | 0 | 1, size: number, d: number) => (side ? Math.max(0.2, Math.min(5, (size + side * d) / Math.max(1e-6, size))) : 1);
       t.fx = scaleOf(t.side.x, b.width, dx);
       t.fy = scaleOf(t.side.y, b.height, dy);
+      if (t.side.x && t.side.y) t.fx = t.fy = Math.max(t.fx, t.fy);
       t.dx = t.side.x < 0 ? b.width * (1 - t.fx) : 0;
       t.dy = t.side.y < 0 ? b.height * (1 - t.fy) : 0;
     } else {
@@ -2170,11 +2186,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawStrokes(ctx, strokes);
   };
   // Resizing: drawn again from the vectors each time the scale has moved by 8%, so it stays sharp.
+  // The dragged ink drawn by the GPU (sharp at any size); the canvas copy only without it.
+  const dragStrokes = useMemo(() => {
+    if (!layerSel?.strokeIds.length) return [];
+    const ids = new Set(layerSel.strokeIds);
+    return pageRef.current.strokes.filter((st) => ids.has(st.id));
+  }, [layerSel]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dragView = useMemo(() => (drag ? { bounds: drag.sel.bounds, dx: drag.dx, dy: drag.dy, fx: drag.fx, fy: drag.fy, rot: drag.rot } : null), [drag]);
+  const dragOnGpu = useDragInk(containerRef, scrollRoot ?? null, PAGE_W, dragView, dragStrokes);
   const dragMax = drag ? Math.max(drag.fx, drag.fy) : 1;
   const dragScale = dragMax !== 1 ? Math.pow(1.08, Math.round(Math.log(dragMax) / Math.log(1.08))) : 1;
   useLayoutEffect(() => {
-    if (layerSel) paintSelection(floatCanvasRef.current, layerSel, dragScale);
-  }, [layerSel, ratio, zoom, dragScale, page.strokes]);
+    if (layerSel && !dragOnGpu) paintSelection(floatCanvasRef.current, layerSel, dragScale);
+  }, [layerSel, ratio, zoom, dragScale, page.strokes, dragOnGpu]);
 
   // Blocks of the selection follow the drag without touching the document.
   const blockPage = useMemo(
@@ -2467,7 +2491,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           />
         );
       })}
-      {layerSel && layerSel.strokeIds.length > 0 && (
+      {layerSel && layerSel.strokeIds.length > 0 && !dragOnGpu && (
         <canvas
           ref={floatCanvasRef}
           className="absolute pointer-events-none z-[5]"
@@ -2587,16 +2611,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                 data-no-pan
                 data-resize={`${x},${y}`}
                 className="absolute flex items-center justify-center"
-                style={{
-                  left: `${(x + 1) * 50}%`, top: `${(y + 1) * 50}%`, width: 32, height: 32, marginLeft: -16, marginTop: -16,
-                  transform: `scale(${Math.max(1, 1 / zoom)})`, touchAction: 'none', cursor,
-                }}
+                style={{ ...handleBox(x, y, zoom), cursor }}
                 onPointerDown={(e) => startTransform(e, 'scale', { x, y })}
                 onPointerMove={moveTransform}
                 onPointerUp={(e) => endTransform(e)}
                 onPointerCancel={(e) => endTransform(e, true)}
               >
-                <span className="block w-3.5 h-3.5 bg-white border-2 border-blue-600 rounded-[3px] shadow-md" />
+                <span className={HANDLE_DOT} />
               </div>
             ))}
         </div>

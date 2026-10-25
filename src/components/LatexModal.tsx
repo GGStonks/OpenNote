@@ -40,7 +40,7 @@ const TikzLivePreview: React.FC<{ code: string }> = ({ code }) => {
 
   return (
     <div className="space-y-2">
-      <div className="on-tikz on-tikz-preview text-gray-900 dark:text-gray-100 flex items-center justify-center min-h-[160px] max-h-[46vh] overflow-auto" dangerouslySetInnerHTML={{ __html: tex.svg ?? preview.svg }} />
+      <div className="on-tikz on-tikz-preview text-gray-900 dark:text-gray-100 flex items-center justify-center min-h-[160px] max-h-[40dvh] overflow-auto" dangerouslySetInnerHTML={{ __html: tex.svg ?? preview.svg }} />
       <div className="text-[11px] flex items-center gap-1.5 text-gray-500">
         {tex.busy ? (
           <>
@@ -94,7 +94,7 @@ export const LatexModal: React.FC<LatexModalProps> = ({ state, onClose, onInsert
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-ui-panel w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[92vh] flex flex-col pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[env(safe-area-inset-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
             <div className={`p-2 rounded-xl ${isTikz ? 'bg-green-50 text-green-600 dark:bg-green-900/40' : 'bg-blue-50 text-blue-600 dark:bg-blue-900/40'}`}>

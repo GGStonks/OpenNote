@@ -111,7 +111,18 @@ show the iPad's compositing cost).
   `storage/packedPoints.ts`), notes are read with a cursor (one per task), and card thumbnails show
   their ink from stored images (`services/thumbCache.ts`, IndexedDB `thumbs`), drawn in the
   background when missing or out of date. `--only library`: main-thread blocking on the home screen.
-- Selections resize with eight handles (corners: both directions, sides: one); `--only resize8`.
+- Selections and text boxes resize with eight handles (`RESIZE_HANDLES` in Blocks.tsx): corners keep
+  the aspect ratio, sides stretch one way (ink and pictures stretch, LaTeX stretches via
+  `stretchX`, a text box rewraps; its font scales only at a corner). `--only resize8`, `--only boxes`.
+- A long pinch commits its zoom on the way (`REBASE_RATIO` in useViewport.ts, a synchronous commit):
+  everything is redrawn sharp while the fingers are down; `--latex --only longpinch --shots <dir>`.
+  Never re-run the gesture effect mid-pinch (its clean-up ends the pinch): callbacks it reads go
+  through refs, and the editor's scroll ref callback is stable.
+- A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
+- After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
+  rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
+- Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
+  Android `OpenNoteSavePlugin`), with a confirmation of where; Settings can choose the share sheet.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)

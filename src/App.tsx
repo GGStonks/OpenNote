@@ -10,7 +10,7 @@ import {
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
-import { shareFile } from './platform';
+import { exportFile } from './platform';
 import { applyTheme } from './theme';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
@@ -108,7 +108,7 @@ export const App: React.FC = () => {
   };
 
   const createNote = async () => {
-    const note = blankNote(`Note ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
+    const note = blankNote('Untitled note');
     upsertLocal(await saveNote(note, false));
     setOpenNoteId(note.id);
   };
@@ -243,7 +243,8 @@ export const App: React.FC = () => {
   const backup = async () => {
     try {
       const data = await exportLibrary();
-      await shareFile(`OpenNote-backup-${new Date().toISOString().slice(0, 10)}.opennote`, new Blob([JSON.stringify(data)], { type: 'application/json' }));
+      const where = await exportFile(`OpenNote-backup-${new Date().toISOString().slice(0, 10)}.opennote`, new Blob([JSON.stringify(data)], { type: 'application/json' }));
+      if (where) window.alert(`Backup: ${where}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (!/cancel/i.test(msg)) window.alert(`Backup failed: ${msg}`);
