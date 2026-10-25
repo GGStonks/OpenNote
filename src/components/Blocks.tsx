@@ -309,9 +309,12 @@ export const RESIZE_HANDLES: { x: -1 | 0 | 1; y: -1 | 0 | 1; cursor: string }[] 
   { x: 0, y: -1, cursor: 'ns-resize' }, { x: 1, y: 0, cursor: 'ew-resize' }, { x: 0, y: 1, cursor: 'ns-resize' }, { x: -1, y: 0, cursor: 'ew-resize' },
 ];
 export const HANDLE_DOT = 'block w-2.5 h-2.5 bg-white border-[1.5px] border-blue-600 rounded-[2px] shadow';
-/** A handle's touch area (24 px on screen) centred on its point of the box. */
-export function handleBox(x: -1 | 0 | 1, y: -1 | 0 | 1, zoom: number): React.CSSProperties {
-  return { left: `${(x + 1) * 50}%`, top: `${(y + 1) * 50}%`, width: 24, height: 24, marginLeft: -12, marginTop: -12, transform: `scale(${1 / Math.max(0.05, zoom)})`, touchAction: 'none' };
+/**
+ * A handle's touch area (24 px on screen) centred on its point of the box's frame: `out` page px
+ * outside the edge of the element it is in (the middle of a border or outline drawn there).
+ */
+export function handleBox(x: -1 | 0 | 1, y: -1 | 0 | 1, zoom: number, out = 0): React.CSSProperties {
+  return { left: `calc(${(x + 1) * 50}% + ${x * out}px)`, top: `calc(${(y + 1) * 50}% + ${y * out}px)`, width: 24, height: 24, marginLeft: -12, marginTop: -12, transform: `scale(${1 / Math.max(0.05, zoom)})`, touchAction: 'none' };
 }
 
 export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete, onResize }) {
@@ -404,7 +407,7 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
         <div
           key={`${x},${y}`}
           className="absolute flex items-center justify-center"
-          style={{ ...handleBox(x, y, zoom), cursor }}
+          style={{ ...handleBox(x, y, zoom, 1), cursor }}
           data-no-pan
           data-no-pan-strict
           data-text-resize={`${x},${y}`}

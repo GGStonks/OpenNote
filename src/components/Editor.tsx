@@ -23,6 +23,7 @@ import { crashLog } from '../services/crashLog';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
 import { restamp } from '../editor/zorder';
 import { DEFAULT_INKS, InkColorInfo, colorHint, enforceColors, inkColors } from '../services/inkColors';
+import { colorByInk } from '../services/colorByInk';
 import { renderLatexContent } from '../services/latexRender';
 import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRecognition';
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
@@ -75,6 +76,8 @@ type ConvTarget =
       kind: 'insert'; pageId: string; bounds: Rect; strokeIds: string[]; textIds: string[]; latexIds?: string[]; mode: ConversionMode; image: string; hint?: string;
       /** Ink colours of the handwriting (math / notes): kept in the LaTeX (inkColors.ts). */
       colors?: InkColorInfo;
+      /** The handwriting itself: a formula's symbols take the colour of their ink (colorByInk.ts). */
+      ink?: Stroke[];
     }
   | { kind: 'edit'; pageId: string; blockId: string }
   | { kind: 'new'; pageId: string; at: { x: number; y: number } };
@@ -583,7 +586,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         if (token !== busyToken.current) return;
         setTarget(t);
         setModal({
-          latex: t.colors && t.mode !== 'tikz' ? enforceColors(res.latex, t.colors) : res.latex,
+          latex: t.colors && t.mode !== 'tikz' ? ((t.ink && colorByInk(res.latex, t.ink, t.colors)) ?? enforceColors(res.latex, t.colors)) : res.latex,
           isTikz: t.mode === 'tikz',
           origin: 'vlm',
           subtitle: `${res.model} · ${(res.elapsedMs / 1000).toFixed(1)} s — review and edit before inserting`,
@@ -621,7 +624,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         : colors
           ? colorHint(colors, mode === 'text' ? 'text' : 'math') || undefined
           : undefined;
-    void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint, colors });
+    void runConversion({ kind: 'insert', pageId: selection.pageId, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode, image, hint, colors, ink });
   };
 
   const convertPage = () => {
@@ -630,7 +633,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     if (!b) return showToast('This page has no handwriting to transcribe');
     const colors = inkColors(ink, b);
     const image = renderInkImage(ink, b, [], colors.colors.length > 1 ? new Map(colors.colors.map((c) => [c.hex, c.imageColor])) : undefined);
-    void runConversion({ kind: 'insert', pageId: surface.id, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'text', image, hint: colorHint(colors, 'text') || undefined, colors });
+    void runConversion({ kind: 'insert', pageId: surface.id, bounds: b, strokeIds: ink.map((s) => s.id), textIds: [], mode: 'text', image, hint: colorHint(colors, 'text') || undefined, colors, ink });
   };
 
   const onModalInsert = (code: string, isTikz: boolean, replaceInk: boolean) => {

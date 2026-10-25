@@ -125,6 +125,15 @@ show the iPad's compositing cost).
   `patternColor` (note or page) colours the pattern; both use ColorPicker in PaperPicker. `--only papershots --shots <dir>`.
 - Angles are shown counterclockwise in [0°, 360°): selection rotation (`shownDeg`, stored rotations stay
   clockwise) and the straight line's direction (smartPenMeasure).
+- A formula's colours come from the ink, not the model (`src/services/colorByInk.ts`): the model's colour
+  markup is dropped, the formula laid out by KaTeX glyph by glyph, aligned with the ink symbols in reading
+  order (rank-aware DTW), and each symbol takes its ink's colour (bars and radicals: their containers').
+  Falls back to the model's colours (`enforceColors`) for notes with text or if anything fails.
+  `--only inkcolors` (handwriting simulated from the layout with drifted spacing).
+- The selection frame is an SVG rectangle of constant screen width with the handles on its edge (a CSS
+  border scaled with the zoom was thick and pixel-snapped in page space, the handles off its middle).
+- `--only tapshots [--steps 0,4,7]`: a held selection (GPU ink) against the page's ink at several zooms;
+  each GPU drag / pinch logs `gl-geometry` (canvas, buffer, scale) to the crash report.
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).

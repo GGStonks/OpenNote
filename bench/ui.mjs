@@ -627,7 +627,7 @@ if (ONLY.has('boxes')) {
     }
     await mouse('mouseReleased', loop[49][0], loop[49][1], 0);
     await sleep(500);
-    console.log('boxes    after tap: selection', JSON.stringify(await page.locator('.border-dashed.border-blue-500').first().boundingBox().catch(() => null)));
+    console.log('boxes    after tap: selection', JSON.stringify(await page.locator('[data-selection-box]').first().boundingBox().catch(() => null)));
     const h = await page.locator('[data-resize="1,0"]').boundingBox();
     if (h) {
       const tr0 = await page.evaluate(() => getComputedStyle(document.querySelector('.on-math')).transform);
@@ -639,7 +639,7 @@ if (ONLY.has('boxes')) {
       await mouse('mouseReleased', h.x + h.width / 2 + 120, h.y + h.height / 2, 0);
       await sleep(800);
       const tr1 = await page.evaluate(() => getComputedStyle(document.querySelector('.on-math')).transform);
-      console.log('boxes    selection box', JSON.stringify(await page.locator('.border-dashed.border-blue-500').first().boundingBox()), 'math box', JSON.stringify(await page.locator('.on-math').first().boundingBox()), 'handle was', JSON.stringify(h));
+      console.log('boxes    selection box', JSON.stringify(await page.locator('[data-selection-box]').first().boundingBox()), 'math box', JSON.stringify(await page.locator('.on-math').first().boundingBox()), 'handle was', JSON.stringify(h));
       console.log(`boxes    LaTeX transform ${tr0} -> ${tr1}`);
     } else console.log('boxes    no side handle on the LaTeX selection');
   }
@@ -708,6 +708,152 @@ if (ONLY.has('papershots') && arg('shots')) {
   const bg = await page.evaluate(() => { const p = [...document.querySelectorAll('.on-page > div')].find((e) => e.className.includes('shadow-')); return p && getComputedStyle(p).backgroundColor; });
   console.log(`papershots paper colour on the page: ${bg}`);
   await page.screenshot({ path: join(arg('shots'), 'paper-page.png') });
+}
+// --only inkcolors: a formula's colours from the ink (colorByInk.ts). Handwriting is made from the
+// typeset formula with its symbols moved and resized at random (as handwriting is spaced unlike
+// type), each in its own colour; the model's reply has every colour wrong. Every symbol must come
+// back in its ink's colour.
+if (ONLY.has('inkcolors')) {
+  await reopen();
+  await page.waitForFunction(() => window.__opennoteColorByInk);
+  const out = await page.evaluate(() => {
+    const { colorByInk, inkColors, katex } = window.__opennoteColorByInk;
+    const Wh = '#F3F4F6', R = '#DC2626', G = '#16A34A', T = '#0D9488', O = '#F59E0B', P = '#9333EA', DG = '#14532D', B = '#2563EB';
+    const tag = (k, t) => `{\\htmlClass{t t-${k}}{${t}}}`;
+    // truth: the formula with each symbol tagged (k: index into cols); parts: container ink
+    // (selector, colour, shape); reply: the model's answer (wrong colours, sometimes a symbol off);
+    // want: the colours of the reply's glyphs in order, and of its parts.
+    const cases = [
+      {
+        name: 'report example', sameAsTruth: true,
+        truth: [['\\int', Wh], ['3', Wh], ['y', Wh], ['2', Wh, '^'], ['d', Wh], ['y', Wh], ['-', R], ['7', G], ['i', T], ['l', O], ['o', O], ['g', O], ['(', T], ['8', P], ['z', P], ['3', P, '^'], [')', DG]].map(([t, c, sup], k) => [`${sup ? '^' : ''}${tag(k, t)}`, c]),
+        reply: '\\textcolor{#14532D}{\\int 3}\\textcolor{#F3F4F6}{y}^{\\textcolor{#14532D}{2}}\\textcolor{#14532D}{dy}\\textcolor{#F3F4F6}{-}\\textcolor{#DC2626}{7}\\textcolor{#16A34A}{i}\\textcolor{#F59E0B}{\\log}\\textcolor{#F3F4F6}{(}\\textcolor{#9333EA}{8}\\textcolor{#14532D}{z}^{\\textcolor{#9333EA}{3}}\\textcolor{#F3F4F6}{)}',
+        want: [Wh, Wh, Wh, Wh, Wh, Wh, R, G, T, O, O, O, T, P, P, P, DG],
+      },
+      {
+        name: 'fraction', sameAsTruth: true,
+        truth: [[`\\frac{${tag(0, 'a')}${tag(1, '+')}${tag(2, 'b')}}{${tag(3, 'c')}}`], [tag(4, '=')], [tag(5, 'x')], [`^${tag(6, '2')}`]],
+        cols: [R, Wh, G, B, Wh, O, T],
+        parts: [['.frac-line', P, 'bar']],
+        reply: '\\textcolor{#9333EA}{\\frac{a+b}{c}}=x^{2}',
+        want: [R, Wh, G, B, Wh, O, T],
+        wantParts: [['.frac-line', P]],
+      },
+      {
+        name: 'root, three-stroke H', sameAsTruth: true,
+        truth: [[`\\sqrt{${tag(0, 'x')}}`], [tag(1, '+')], [tag(2, 'H')]],
+        cols: [G, Wh, B],
+        parts: [['.sqrt', R, 'radical']],
+        multi: { 2: 'H' },
+        reply: '\\sqrt{x}+\\textcolor{#DC2626}{H}',
+        want: [G, Wh, B],
+        wantParts: [['.sqrt .hide-tail', R]],
+      },
+      {
+        name: 'model dropped a symbol',
+        truth: [['a', R], ['+', Wh], ['b', G], ['=', Wh], ['c', B], ['d', B]].map(([t, c], k) => [tag(k, t), c]),
+        reply: 'a+b=c',
+        want: [R, Wh, G, Wh, B],
+      },
+      {
+        name: 'model added a symbol',
+        truth: [['x', R], ['=', Wh], ['5', G]].map(([t, c], k) => [tag(k, t), c]),
+        reply: 'x=5y',
+        want: [R, Wh, G, G],
+      },
+    ];
+    const host = document.createElement('div');
+    Object.assign(host.style, { position: 'fixed', left: '0', top: '0', fontSize: '40px', whiteSpace: 'nowrap', background: '#1C1C1F', color: Wh });
+    document.body.appendChild(host);
+    const hex = (c) => '#' + c.match(/\d+/g).slice(0, 3).map((v) => (+v).toString(16).padStart(2, '0')).join('').toUpperCase();
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+    const report = [];
+    for (const cs of cases) {
+      const colOf = (k) => cs.cols ? cs.cols[k] : cs.truth[k][1];
+      katex.render(cs.truth.map((t) => t[0]).join(''), host, { displayMode: true, trust: true, strict: 'ignore', output: 'html' });
+      const nSyms = host.querySelectorAll('.t').length;
+      const boxes = Array.from({ length: nSyms }, (_, k) => host.querySelector(`.t-${k}`).getBoundingClientRect());
+      const partBoxes = (cs.parts ?? []).map(([sel, c, shape]) => [host.querySelector(sel).getBoundingClientRect(), c, shape]);
+      const all = [...boxes, ...partBoxes.map((p) => p[0])];
+      const x0 = Math.min(...all.map((b) => b.left)), Wd = Math.max(...all.map((b) => b.right)) - x0;
+      let perfect = 0, wrongSyms = 0;
+      const fails = [];
+      for (let trial = 0; trial < 30; trial++) {
+        const amp = 0.02 + (trial / 30) * 0.08, ph = rnd() * 6.28;
+        const warp = (x) => x + amp * Wd * Math.sin(((x - x0) / Wd) * 6.28 * 1.3 + ph);
+        const strokes = [];
+        const line = (pts, c) => strokes.push({ id: 's' + strokes.length, tool: 'pen', color: c, width: 2, opacity: 1, points: pts.map(([x, y]) => ({ x, y, pressure: 0.5 })) });
+        boxes.forEach((b, k) => {
+          const sc = 0.75 + rnd() * 0.5, dy = (rnd() - 0.5) * 6;
+          const bx0 = warp(b.left), bx1 = warp(b.right), w = (bx1 - bx0) * sc, h = b.height * 0.6 * sc;
+          const cx = (bx0 + bx1) / 2, cy = (b.top + b.bottom) / 2 + dy;
+          if (cs.multi?.[k] === 'H') {
+            line([[cx - w / 2, cy - h / 2], [cx - w / 2, cy + h / 2]], colOf(k));
+            line([[cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2]], colOf(k));
+            line([[cx - w / 2, cy], [cx + w / 2, cy]], colOf(k));
+            return;
+          }
+          line(Array.from({ length: 12 }, (_, i) => [cx - w / 2 + (w * i) / 11, cy - h / 2 + (i % 2 ? h * 0.8 : h * 0.2)]), colOf(k));
+          if (cs.truth[k]?.[0]?.includes('{i}')) line([[cx, cy - h * 0.9], [cx + 1, cy - h * 0.9]], colOf(k));
+        });
+        for (const [b, c, shape] of partBoxes) {
+          const l = warp(b.left), r = warp(b.right), my = (b.top + b.bottom) / 2;
+          if (shape === 'bar') line([[l, my], [r, my]], c);
+          else line([[l, my], [l + (r - l) * 0.04, b.bottom], [l + (r - l) * 0.1, b.top + 2], [r, b.top + 2]], c);
+        }
+        const xs = strokes.flatMap((s) => s.points.map((p) => p.x)), ys = strokes.flatMap((s) => s.points.map((p) => p.y));
+        const bx = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+        const info = inkColors(strokes.sort(() => rnd() - 0.5), bx);
+        const got = colorByInk(cs.reply, strokes, info);
+        if (!got) { fails.push('null'); wrongSyms += cs.want.length; continue; }
+        host.style.color = info.base;
+        katex.render(got, host, { displayMode: true, strict: 'ignore', output: 'html' });
+        const glyphs = readGlyphs();
+        let want = cs.want;
+        if (cs.sameAsTruth) {
+          const saved = host.innerHTML;
+          katex.render(cs.truth.map((t) => t[0]).join('').replace(/\\htmlClass\{t t-(\d+)\}/g, (_m, k) => `\\textcolor{${colOf(+k)}}`), host, { displayMode: true, strict: 'ignore', output: 'html' });
+          want = readGlyphs();
+          host.innerHTML = saved;
+        }
+        let bad = glyphs.filter((c, i) => c !== want[i]).length + Math.abs(glyphs.length - want.length);
+        const partsGot = (cs.wantParts ?? []).map(([sel, c]) => { const el = host.querySelector(sel); const g = el ? hex(getComputedStyle(el).color) : 'none'; if (g !== c) bad++; return g; });
+        if (!bad) perfect++;
+        else { wrongSyms += bad; if (fails.length < 2) fails.push(`amp ${amp.toFixed(2)}: ${glyphs.join(' ')} want ${want.join(' ')} | parts ${partsGot.join(' ')} | ${got}`); }
+      }
+      report.push({ name: cs.name, perfect, trials: 30, wrongSyms, fails });
+    }
+    host.remove();
+    return report;
+    /** The rendered glyphs' colours in reading order (columns left to right, top to bottom in each). */
+    function readGlyphs() {
+        const gl = [];
+        const tw = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+        const rg = document.createRange();
+        while (tw.nextNode()) {
+          const t = tw.currentNode;
+          for (let i = 0; i < t.length; i++) {
+            if (!t.data[i].trim()) continue;
+            rg.setStart(t, i); rg.setEnd(t, i + 1);
+            const r = rg.getBoundingClientRect();
+            if (r.width > 0.5) gl.push({ r, c: hex(getComputedStyle(t.parentElement).color) });
+          }
+        }
+        gl.sort((a, b) => a.r.left - b.r.left);
+        const cols = [];
+        for (const g of gl) {
+          const col = cols[cols.length - 1];
+          if (col && Math.min(col.x1, g.r.right) - Math.max(col.x0, g.r.left) > 0.5 * Math.min(g.r.width, col.x1 - col.x0)) { col.items.push(g); col.x0 = Math.min(col.x0, g.r.left); col.x1 = Math.max(col.x1, g.r.right); }
+          else cols.push({ x0: g.r.left, x1: g.r.right, items: [g] });
+        }
+        return cols.flatMap((c) => c.items.sort((a, b) => a.r.top - b.r.top).map((g) => g.c));
+    }
+  });
+  for (const r of out) {
+    console.log(`inkcolors ${r.name.padEnd(24)} ${r.perfect}/${r.trials} fully right, ${r.wrongSyms} wrong`);
+    for (const f of r.fails) console.log(`inkcolors     ${f}`);
+  }
 }
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
@@ -941,7 +1087,7 @@ if (ONLY.has('resize8')) {
   }
   await mouse('mouseReleased', loop[59][0], loop[59][1]);
   await sleep(800);
-  const boxOf = () => page.locator('.border-dashed.border-blue-500').first().boundingBox();
+  const boxOf = () => page.locator('[data-selection-box]').first().boundingBox();
   const drag = async (handle, ddx, ddy) => {
     const h = await page.locator(`[data-resize="${handle}"]`).boundingBox();
     if (!h) return false;
@@ -1084,6 +1230,53 @@ if (ONLY.has('dragshots') && arg('shots')) {
     await page.screenshot({ path: join(arg('shots'), 'drag-up.png'), clip: { x: 160, y: 480, width: 500, height: 300 } });
   }
   console.log(`dragshots zoom ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%${h ? '' : ' (no handle)'}`);
+}
+// --only tapshots [--shots <dir>]: a selection held down (drawn by the GPU while held) and after it
+// is let go (the page's ink), at 100% and zoomed in: the ink must not change size or place.
+if (ONLY.has('tapshots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  /** Bounding box of the dark ink (not the glow) in a screenshot of `clip`. */
+  const inkBox = async (clip) => {
+    const b64 = (await page.screenshot({ clip })).toString('base64');
+    return page.evaluate(async (src) => {
+      const im = new Image(); im.src = 'data:image/png;base64,' + src; await im.decode();
+      const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+      const x = c.getContext('2d'); x.drawImage(im, 0, 0);
+      const d = x.getImageData(0, 0, c.width, c.height).data;
+      // Ink coverage (darkness of the red channel: the glow is blue, the ink near black), its total and centre.
+      let sum = 0, sx = 0, sy = 0;
+      for (let i = 0; i < d.length; i += 4) { const v = Math.max(0, 200 - d[i]) / 200; if (v > 0.05) { const px = (i / 4) % c.width, py = Math.floor(i / 4 / c.width); sum += v; sx += v * px; sy += v * py; } }
+      return { ink: Math.round(sum), cx: +(sx / sum).toFixed(2), cy: +(sy / sum).toFixed(2) };
+    }, b64);
+  };
+  for (const steps of (arg("steps") ?? "0,4").split(",").map(Number)) {
+    for (let i = 0; i < steps; i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
+    await sleep(1500);
+    await page.locator('button[title^="Lasso"]').click();
+    await sleep(300);
+    const loop = Array.from({ length: 60 }, (_, i) => { const a = (i / 59) * Math.PI * 2; return [330 + Math.cos(a) * 150, 600 + Math.sin(a) * 60]; });
+    await mouse('mousePressed', loop[0][0], loop[0][1]);
+    for (const [x, y] of loop.slice(1)) { await mouse('mouseMoved', x, y); await sleep(8); }
+    await mouse('mouseReleased', loop[59][0], loop[59][1]);
+    await sleep(800);
+    const clip = { x: 120, y: 480, width: 420, height: 240 };
+    const rest = await inkBox(clip);
+    await mouse('mousePressed', 330, 600);
+    await sleep(600);
+    const held = await inkBox(clip);
+    if (arg('shots')) await page.screenshot({ path: join(arg('shots'), `tap-held-${steps}.png`), clip });
+    await mouse('mouseReleased', 330, 600);
+    await sleep(800);
+    const after = await inkBox(clip);
+    if (arg('shots')) await page.screenshot({ path: join(arg('shots'), `tap-after-${steps}.png`), clip });
+    const zoom = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    console.log(`tapshots ${zoom}%  selected ${JSON.stringify(rest)}  held ${JSON.stringify(held)}  after ${JSON.stringify(after)}`);
+    const geo = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'gl-geometry').slice(-1));
+    console.log(`tapshots   crash log: ${JSON.stringify(geo)}`);
+    await page.keyboard.press('Escape');
+    await sleep(300);
+  }
 }
 // Not in the default run: --only liveshots --shots <dir> writes a stroke zoomed in and saves it
 // while the pen is down (the live ink) and after it lifts (the finished ink): they must look the same.

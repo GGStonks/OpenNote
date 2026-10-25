@@ -225,6 +225,11 @@ function smoothAt(zoom: number): boolean {
   // Android every stroke shifted a little at lift.
   return zoom >= SMOOTH_ZOOM;
 }
+/** The selection box's frame (screen px): line width, corner radius, dash and gap. */
+const SEL_BORDER = 2;
+const SEL_RADIUS = 5;
+const SEL_DASH = [6, 4];
+
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
 
@@ -2577,9 +2582,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       {shownBounds && selection && !printMode && (
         <div
           data-no-pan
-          className="absolute z-20 border-2 border-dashed border-blue-500 bg-blue-500/5 rounded-lg cursor-move"
+          data-selection-box
+          className="absolute z-20 bg-blue-500/5 cursor-move"
           style={{
-            left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none',
+            left: shownBounds.x, top: shownBounds.y, width: shownBounds.width, height: shownBounds.height, touchAction: 'none', borderRadius: SEL_RADIUS / zoom,
             transform: drag?.rot ? `rotate(${drag.rot}deg)` : undefined,
           }}
           onPointerDown={(e) => startTransform(e, 'move')}
@@ -2587,6 +2593,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           onPointerUp={(e) => endTransform(e)}
           onPointerCancel={(e) => endTransform(e, true)}
         >
+          {/*
+            The frame, centred on the box's edge, the same on screen at any zoom, as the handles. A
+            CSS border scaled with the page was ~10 px thick zoomed in, and its edges snapped to the
+            page's pixel grid (enlarged by the zoom): the handles sat off its middle. Vector lines
+            are not snapped, and the handles go on the same edge.
+          */}
+          <svg className="absolute inset-0 w-full h-full overflow-visible pointer-events-none" aria-hidden>
+            <rect
+              x="0" y="0" width="100%" height="100%" rx={SEL_RADIUS / zoom} fill="none" stroke="#3B82F6"
+              strokeWidth={SEL_BORDER / zoom} strokeDasharray={`${SEL_DASH[0] / zoom} ${SEL_DASH[1] / zoom}`}
+            />
+          </svg>
           {/* Rotate handle, and the rotation from the original orientation (with a reset to 0°). */}
           <div
             className={`absolute left-1/2 flex items-center pointer-events-none ${shownBounds.y < 80 ? 'top-full flex-col-reverse' : 'bottom-full flex-col'}`}

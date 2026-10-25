@@ -90,6 +90,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     let on = false;
     let loop: number | null = null;
 
+    let logged = false;
     const draw = () => {
       const g = shared, c = container.current;
       if (!g || !c) return;
@@ -97,6 +98,10 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
       const dpr = Math.min(window.devicePixelRatio || 1, 3);
       g.resize(er.width * dpr, er.height * dpr);
       g.draw({ scale: (r.width / latest.current.pageWidth) * dpr, ox: (r.left - er.left) * dpr, oy: (r.top - er.top) * dpr });
+      if (!logged) {
+        logged = true;
+        logGeometry('pinch', g, er, r, latest.current.pageWidth, dpr);
+      }
     };
     const stop = () => {
       on = false;
@@ -133,6 +138,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
       });
       if (g.canvas.parentElement !== parent || g.canvas.previousSibling !== scrollRoot) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
       g.setStrokes(list);
+      logged = false;
       draw();
       c.classList.add('on-gl-ink');
       on = true;
@@ -167,6 +173,20 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
       if (on) stop();
     };
   }, [scrollRoot, container]);
+}
+
+/**
+ * Where the GPU ink really lands, for the crash report (once per drag or pinch): its canvas on
+ * screen and in pixels, its drawing buffer, and the scale it draws at (the page's ink was
+ * reported drawn smaller by the GPU on a device, which the benchmark does not show).
+ */
+function logGeometry(via: 'drag' | 'pinch', g: GlInk, er: DOMRect, r: DOMRect, pageWidth: number, dpr: number) {
+  const cr = g.canvas.getBoundingClientRect(), b = g.bufferSize;
+  const n = (v: number) => Math.round(v * 100) / 100;
+  crashLog.event('gl-geometry', {
+    via, dpr: n(window.devicePixelRatio), used: n(dpr), view: [n(er.width), n(er.height)], canvasCss: [n(cr.width), n(cr.height)], canvasAt: [n(cr.left - er.left), n(cr.top - er.top)],
+    canvasPx: [g.canvas.width, g.canvas.height], buffer: [b.w, b.h], zoom: n(r.width / pageWidth), page: [n(r.width), n(r.height)], vv: n(window.visualViewport?.scale ?? 1),
+  });
 }
 
 // For the UI benchmark (bench/ui.mjs --only glcompare): both renderers on the same strokes.
@@ -210,6 +230,7 @@ const SELECTION_GLOW: { radius: number; rgba: RGBA } = { radius: 7, rgba: [37 / 
  */
 export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, pageWidth: number, drag: DragView | null, strokes: Stroke[]): boolean {
   const [active, setActive] = useState(false);
+  const logged = useRef(false);
   const live = !!drag && strokes.length > 0;
   useLayoutEffect(() => {
     const parent = scrollRoot?.parentElement;
@@ -222,6 +243,7 @@ export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot:
     });
     if (g.canvas.parentElement !== parent) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
     g.setStrokes(strokes);
+    logged.current = false;
     setActive(true);
     return () => {
       setActive(false);
@@ -257,6 +279,10 @@ export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot:
       },
       SELECTION_GLOW
     );
+    if (!logged.current) {
+      logged.current = true;
+      logGeometry('drag', g, er, r, pageWidth, dpr);
+    }
   }, [drag, active, pageWidth, scrollRoot, container]);
   return active;
 }

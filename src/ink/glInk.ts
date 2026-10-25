@@ -390,6 +390,11 @@ export class GlInk {
   /** The browser took the GPU context away (the app in the background, GPU memory): make a new one. */
   lost = false;
 
+  /** The drawing buffer's size (px): smaller than the canvas where the browser could not allocate it. */
+  get bufferSize(): { w: number; h: number } {
+    return { w: this.gl.drawingBufferWidth, h: this.gl.drawingBufferHeight };
+  }
+
   /** null where WebGL 2 is not available. */
   static create(): GlInk | null {
     const canvas = document.createElement('canvas');
