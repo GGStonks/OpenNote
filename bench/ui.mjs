@@ -1250,6 +1250,10 @@ if (ONLY.has('tapshots')) {
       return { ink: Math.round(sum), cx: +(sx / sum).toFixed(2), cy: +(sy / sum).toFixed(2) };
     }, b64);
   };
+  // BENCH_GUTTER=1: the scroll view loses 8 px on the right and at the bottom, as with Android's
+  // classic scrollbars (styled ::-webkit-scrollbar): its clientWidth / clientHeight are then smaller
+  // than its box.
+  if (process.env.BENCH_GUTTER) await page.evaluate(() => { const sc = [...document.querySelectorAll('div')].find((d) => d.className.includes('overflow-auto') && d.className.includes('inset-0')); Object.assign(sc.style, { borderRight: '8px solid #ddd', borderBottom: '8px solid #ddd' }); });
   for (const steps of (arg("steps") ?? "0,4").split(",").map(Number)) {
     for (let i = 0; i < steps; i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
     await sleep(1500);

@@ -94,13 +94,16 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     const draw = () => {
       const g = shared, c = container.current;
       if (!g || !c) return;
-      const er = scrollRoot.getBoundingClientRect(), r = c.getBoundingClientRect();
+      // Sized and placed from the canvas's own box: the scroll view's box is larger by its
+      // scrollbars where they take room (Android, styled scrollbars), and the ink drawn for it was
+      // squeezed into the canvas, a little smaller than the page's.
+      const er = g.canvas.getBoundingClientRect(), r = c.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 3);
       g.resize(er.width * dpr, er.height * dpr);
       g.draw({ scale: (r.width / latest.current.pageWidth) * dpr, ox: (r.left - er.left) * dpr, oy: (r.top - er.top) * dpr });
       if (!logged) {
         logged = true;
-        logGeometry('pinch', g, er, r, latest.current.pageWidth, dpr);
+        logGeometry('pinch', g, scrollRoot.getBoundingClientRect(), r, latest.current.pageWidth, dpr);
       }
     };
     const stop = () => {
@@ -260,7 +263,8 @@ export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot:
   useLayoutEffect(() => {
     const g = dragShared, c = container.current;
     if (!active || !drag || !g || !c || !scrollRoot) return;
-    const er = scrollRoot.getBoundingClientRect(), r = c.getBoundingClientRect();
+    // From the canvas's own box (see usePinchInk's draw).
+    const er = g.canvas.getBoundingClientRect(), r = c.getBoundingClientRect();
     const dpr = Math.min(window.devicePixelRatio || 1, 3);
     g.resize(er.width * dpr, er.height * dpr);
     const k = (r.width / pageWidth) * dpr;
@@ -281,7 +285,7 @@ export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot:
     );
     if (!logged.current) {
       logged.current = true;
-      logGeometry('drag', g, er, r, pageWidth, dpr);
+      logGeometry('drag', g, scrollRoot.getBoundingClientRect(), r, pageWidth, dpr);
     }
   }, [drag, active, pageWidth, scrollRoot, container]);
   return active;

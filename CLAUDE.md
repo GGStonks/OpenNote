@@ -134,6 +134,11 @@ show the iPad's compositing cost).
   border scaled with the zoom was thick and pixel-snapped in page space, the handles off its middle).
 - `--only tapshots [--steps 0,4,7]`: a held selection (GPU ink) against the page's ink at several zooms;
   each GPU drag / pinch logs `gl-geometry` (canvas, buffer, scale) to the crash report.
+- Android's web view gives the scroll view real 8 px scrollbars (the styled `::-webkit-scrollbar` in
+  index.css), headless Chromium overlay ones: there the scroll view's box is 8 px larger than its
+  clientWidth / clientHeight. Anything drawn over it is sized and placed from its own box (the GPU
+  canvases drew for the scroll view's box into a canvas of its client size: ink 0.6% smaller while
+  dragged or pinched). `BENCH_GUTTER=1` (tapshots) reproduces the scrollbars.
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
