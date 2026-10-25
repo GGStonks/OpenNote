@@ -16,7 +16,9 @@ import { strokeGlGeometry } from './strokeRenderer';
  * colour in a row go together (a note in one ink is one pass); a see-through stroke (highlighter,
  * opacity) goes alone, as the canvas draws it (overlapping strokes darken, a stroke does not). Fills
  * (even-odd) go through the stencil: solid, hatched, or holes that clear what is under them.
- * Order as drawStrokes: highlighters, fills, ink.
+ * Order as the page draws its layers (editor/zorder.ts): layer by layer, bottom first, and in each
+ * as drawStrokes: highlighters, fills, ink (merged into one drawStrokes order, a fill made after
+ * ink of an earlier layer went under it while zooming, and over it again after).
  */
 
 export interface GlTransform {
@@ -329,18 +331,29 @@ class Builder {
     }
   }
 
-  /** All of `strokes`, in drawStrokes' order: highlighters, fills, ink. */
-  static of(strokes: Stroke[]): Builder {
+  /** The ink layers bottom first, each in drawStrokes' order: highlighters, fills, ink. */
+  static of(layers: readonly Stroke[][]): Builder {
     const b = new Builder();
-    for (const s of strokes) if (s.tool === 'highlighter' && s.points.length) b.highlighter(s);
-    for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) b.fill(s);
-    for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) b.ink(s);
+    for (const strokes of layers) {
+      for (const s of strokes) if (s.tool === 'highlighter' && s.points.length) b.highlighter(s);
+      for (const s of strokes) if (s.tool !== 'highlighter' && s.fill && s.fill !== 'none' && s.points.length) b.fill(s);
+      for (const s of strokes) if (s.tool !== 'highlighter' && s.points.length) b.ink(s);
+    }
     return b;
   }
 }
 
-/** Whether `next` is `prev` with strokes added at its end that only add ink (no highlighter, no fill). */
-function appendsInk(prev: Stroke[], next: Stroke[]): boolean {
+/**
+ * Whether `next` is `prev` with strokes added at the end of its top layer that only add ink (no
+ * highlighter, no fill): appended to what is built.
+ */
+function appendsInk(prev: readonly Stroke[][], next: readonly Stroke[][]): boolean {
+  if (!prev.length || prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length - 1; i++) if (prev[i] !== next[i]) return false;
+  return appendsTo(prev[prev.length - 1], next[next.length - 1]);
+}
+
+function appendsTo(prev: Stroke[], next: Stroke[]): boolean {
   if (next.length <= prev.length) return false;
   for (let i = 0; i < prev.length; i++) if (prev[i] !== next[i]) return false;
   for (let i = prev.length; i < next.length; i++) {
@@ -386,7 +399,8 @@ export class GlInk {
   private fbo: WebGLFramebuffer | null = null;
   private tex: WebGLTexture | null = null;
   private texSize = { w: 0, h: 0 };
-  private built: Stroke[] | null = null;
+  /** The ink layers built (bottom first). */
+  private built: Stroke[][] | null = null;
   /** The browser took the GPU context away (the app in the background, GPU memory): make a new one. */
   lost = false;
 
@@ -450,16 +464,18 @@ export class GlInk {
    * Prepares `strokes` for drawing. Strokes added at the end (writing) are added to what is there,
    * sending the GPU only the new part; any other change builds it all again.
    */
-  setStrokes(strokes: Stroke[]) {
-    if (this.built === strokes) return;
+  setStrokes(layers: readonly Stroke[][]) {
+    const built = this.built;
+    if (built && built.length === layers.length && built.every((l, i) => l === layers[i])) return;
     let b = this.builder;
-    if (b && this.built && appendsInk(this.built, strokes)) {
-      for (let i = this.built.length; i < strokes.length; i++) if (strokes[i].points.length) b.ink(strokes[i]);
+    if (b && built && appendsInk(built, layers)) {
+      const prev = built[built.length - 1], top = layers[layers.length - 1];
+      for (let i = prev.length; i < top.length; i++) if (top[i].points.length) b.ink(top[i]);
     } else {
-      b = this.builder = Builder.of(strokes);
+      b = this.builder = Builder.of(layers);
       this.sent = { pieces: 0, verts: 0, capsRoom: 0, flatRoom: 0 };
     }
-    this.built = strokes;
+    this.built = layers.slice();
     const gl = this.gl, sent = this.sent;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.capBuf);
     if (b.caps.length > sent.capsRoom) {

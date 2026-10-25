@@ -384,7 +384,8 @@ const SHARP_MARGIN_DELAY_MS = 300;
 
 /** A part of the surface (surface px). */
 type SurfRect = { x0: number; y0: number; x1: number; y1: number };
-type SharpTile = { i: number; j: number; canvas: HTMLCanvasElement; painted: Stroke[] | null };
+/** rect: the surface the tile covers (surface px). */
+type SharpTile = { i: number; j: number; rect: SurfRect; canvas: HTMLCanvasElement; painted: Stroke[] | null };
 
 /**
  * Committed ink of one layer where the page is zoomed in past what the page canvases hold sharp
@@ -437,6 +438,39 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       const el = container.querySelector<HTMLElement>(`[data-ink-key="${layerKey}:${sh.id}"]`);
       if (el) el.style.visibility = hide ? 'hidden' : '';
     }
+    clipPages();
+  };
+
+  /** Page canvases with a part cut out (see clipPages). */
+  const clipped = useRef(new Set<HTMLElement>());
+  /**
+   * While the page canvases show under the tiles (zooming out past them, scrolling onto tiles not
+   * painted yet, a new zoom), they show only where no tile does: the squares of the visible tiles
+   * are cut out of them. Under the tiles as well, translucent ink (highlighters, fills) was drawn
+   * twice there: darker until the tiles alone were left, a flash at the end of a zoom.
+   */
+  const clipPages = () => {
+    const container = containerRef.current;
+    if (!container) return;
+    const shown: SurfRect[] = [];
+    if (!tilesHidden.current && holderRef.current?.style.visibility !== 'hidden')
+      for (const map of [tiles.current, retiring.current])
+        if (map) for (const t of map.values()) if (t.canvas.width > 0 && t.canvas.style.visibility !== 'hidden') shown.push(t.rect);
+    const now = new Set<HTMLElement>();
+    const { width: W } = latest.current;
+    const n = (v: number) => Math.round(v * 100) / 100;
+    for (const sh of latest.current.sheets) {
+      const mine = shown.filter((b) => b.y1 > sh.top && b.y0 < sh.top + sh.height);
+      if (!mine.length) continue;
+      const el = container.querySelector<HTMLElement>(`[data-ink-key="${layerKey}:${sh.id}"]`);
+      if (!el) continue;
+      // The page, less each tile (even-odd: tiles never overlap one another), in the canvas's own px.
+      const d = [`M-8 -8H${n(W + 8)}V${n(sh.height + 8)}H-8Z`, ...mine.map((b) => `M${n(b.x0)} ${n(b.y0 - sh.top)}H${n(b.x1)}V${n(b.y1 - sh.top)}H${n(b.x0)}Z`)].join('');
+      el.style.clipPath = `path(evenodd, '${d}')`;
+      now.add(el);
+    }
+    for (const el of clipped.current) if (!now.has(el)) el.style.clipPath = '';
+    clipped.current = now;
   };
 
   /** The visible part of the surface, the scale for it and the page's corner on screen (device px); null when off the page. */
@@ -640,7 +674,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
             transformOrigin: '0 0', transform: `matrix(${1 / r}, 0, 0, ${1 / r}, ${rect.x0}, ${rect.y0})`, visibility: 'hidden',
           });
           holder.appendChild(canvas);
-          tile = { i, j, canvas, painted: null };
+          tile = { i, j, rect, canvas, painted: null };
           tiles.current.set(key, tile);
         }
         paintTile(tile, list);
@@ -654,6 +688,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       }
       const cur = viewNow();
       if (cur && Math.abs(cur.r - r) <= 1e-3 * r) hidePages(!tileWork.paused && covered(cur.visible));
+      clipPages();
       if (todo.length) frame.current = requestAnimationFrame(step);
     };
     step();
@@ -671,6 +706,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
       hidePages(false);
       // WebKit's canvas memory is tight: give the pixels back now.
       dropAll();
+      clipPages();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -755,6 +791,7 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
         tile.painted = strokes;
       }
     }
+    clipPages();
     // Tiles still being painted for the old strokes, or ink where there was none (no tile yet):
     // the tiles the view still needs.
     if (frame.current !== null || marginTimer.current !== null || added.length || area) paintNeeded();
@@ -1060,7 +1097,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
-  usePinchInk(containerRef, scrollRoot ?? null, shownStrokes, PAGE_W, !printMode);
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
   /** High zoom: the committed ink is drawn sharp over the view (SharpInk) where page canvases hit their budget. */
@@ -1333,6 +1369,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     let next: DirtyRect | null = null;
     const d = drawing.current;
+    liveLook(canvas, d && d.tool === 'highlighter' && d.model && !d.snapped ? d : null);
     const k = 1 / Math.max(0.3, zoomRef.current);
     const edit = handleDrag.current;
     if (edit) {
@@ -1349,8 +1386,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (m) next = unionRect(next, drawMeasure(ctx, m.text, m.at, k, sizeRef.current.w));
     } else if (d && d.model && !d.snapped) {
       if (d.rec) d.recFrames.push(Math.round((performance.now() - d.start) * 10) / 10);
-      const style = liveStyle('pen');
-      if (!d.ink) d.model.paint(ctx, { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure });
+      const hl = d.tool === 'highlighter';
+      const style = liveStyle(hl ? 'highlighter' : 'pen');
+      // The highlighter opaque: the canvas takes its transparency (liveLook).
+      if (!d.ink) d.model.paint(ctx, { color: style.color, width: hl ? style.width * 5.5 : strokeWidth({ ...style, isShape: false }), variable: !hl && isVariableWidth(style) && d.realPressure });
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = d.ink ? null : paintSnapped(ctx, d);
@@ -1400,6 +1439,20 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     dirty.current = next;
   };
+  /**
+   * A highlighter stroke being drawn is painted opaque and the live canvas made see-through (CSS
+   * opacity): painted see-through, every place it was painted twice was darker (round spots where
+   * its pieces met, on some devices). On light paper it also multiplies, so it lies under the ink
+   * as the finished stroke does (over it, ink showed tinted until the pen lifted). Kept until the
+   * canvas is cleared of it.
+   */
+  function liveLook(canvas: HTMLCanvasElement, d: NonNullable<typeof drawing.current> | null) {
+    const opacity = d ? String(liveStyle('highlighter').highlightAlpha ?? 0.35) : '';
+    const blend = d && !darkAt(d.points[0].y) ? 'multiply' : '';
+    if (canvas.style.opacity !== opacity) canvas.style.opacity = opacity;
+    if (canvas.style.mixBlendMode !== blend) canvas.style.mixBlendMode = blend;
+  }
+
   /** The Draw tool's shape in progress and its snap dot (the measure label is drawn by renderActive). */
   function paintSmart(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>, k: number): DirtyRect | null {
     let next: DirtyRect | null = null;
@@ -1626,10 +1679,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
       force: [pt.pressure],
-      model: tool === 'pen' ? new SmoothLiveStroke() : null,
-      // The pen's and the lasso's: fast movements fill their wide gaps on a smooth curve (a fast
-      // lasso was a polygon of straight pieces).
-      dense: tool === 'pen' || tool === 'lasso' ? new SampleDensifier() : null,
+      // Handwriting (pen, highlighter) is drawn live as the line it will be (SmoothLiveStroke): the
+      // highlighter's engine line as modelled, redrawn every frame, was straight between samples
+      // and changed when the pen lifted.
+      model: tool === 'pen' || tool === 'highlighter' ? new SmoothLiveStroke() : null,
+      // Handwriting's and the lasso's: fast movements fill their wide gaps on a smooth curve (a
+      // fast lasso was a polygon of straight pieces, a fast highlighter stroke jagged).
+      dense: tool === 'pen' || tool === 'highlighter' || tool === 'lasso' ? new SampleDensifier() : null,
       ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
@@ -2242,6 +2298,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   /** The content in stacking order (editor/zorder.ts); unchanged ink layers keep their arrays. */
   const layersRef = useRef<ZLayer[] | undefined>(undefined);
   const layers = useMemo(() => (layersRef.current = zLayers({ ...blockPage, strokes: shownStrokes }, layersRef.current)), [blockPage, shownStrokes]);
+  /** The ink layers bottom first: the GPU draws a pinch's ink in the page's stacking order. */
+  const inkLayers = useMemo(() => layers.flatMap((l) => (l.kind === 'ink' ? [l.strokes] : [])), [layers]);
+  usePinchInk(containerRef, scrollRoot ?? null, inkLayers, PAGE_W, !printMode);
   /** The ink layer the idle selection glow goes under: the lowest one with selected strokes. */
   const glowLayerKey = useMemo(() => {
     if (!glowSel) return null;

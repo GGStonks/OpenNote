@@ -115,7 +115,7 @@ const LANDSCAPE = process.argv.includes('--landscape');
 const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, height: 820 } : { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
-if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
@@ -855,6 +855,124 @@ if (ONLY.has('inkcolors')) {
     for (const f of r.fails) console.log(`inkcolors     ${f}`);
   }
 }
+// --only hlshots --shots <dir>: a large highlighter stroke while the pen is down and after, zoomed
+// in (tiles), and its colour on every frame after a pinch lifts (a flash: drawn twice, or not at all).
+if (ONLY.has('hlshots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const shot = (name, clip) => page.screenshot({ path: join(arg('shots'), `hl-${name}.png`), ...(clip ? { clip } : {}) });
+  await page.locator('button[title="Highlighter"]').first().click();
+  await sleep(300);
+  await page.keyboard.press('Escape');
+  // --steps n: zoomed in first (the photo of the report was zoomed in).
+  for (let i = 0; i < Number(arg('steps', 0)); i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
+  await sleep(1200);
+  // --sparse: few samples far apart, as a fast finger gives.
+  const N = process.argv.includes('--sparse') ? 25 : 90;
+  const pts = Array.from({ length: N }, (_, i) => { const t = i / (N - 1); return [180 + 420 * t, 640 + 140 * Math.sin(t * 7) + 60 * t]; });
+  await mouse('mousePressed', pts[0][0], pts[0][1], 0.5);
+  for (const [x, y] of pts.slice(1)) { await mouse('mouseMoved', x, y, 0.5); await sleep(N === 90 ? 12 : 16); }
+  await sleep(200);
+  await shot('live', { x: 140, y: 480, width: 520, height: 360 });
+  await mouse('mouseReleased', pts[N - 1][0], pts[N - 1][1], 0);
+  await sleep(800);
+  await shot('after', { x: 140, y: 480, width: 520, height: 360 });
+  // The colour at a point on the stroke, sampled from a screenshot.
+    for (let i = 0; i < 6; i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
+  await sleep(1500);
+  await shot('zoomed');
+  // A pinch, then every frame after the fingers lift: the highlighter's colour at the screen's middle.
+  const colorAt = async () => {
+    const b64 = (await page.screenshot({ clip: { x: 0, y: 0, width: 820, height: 1180 } })).toString('base64');
+    return page.evaluate(async (src) => {
+      const im = new Image(); im.src = 'data:image/png;base64,' + src; await im.decode();
+      const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+      const x = c.getContext('2d'); x.drawImage(im, 0, 0);
+      const d = x.getImageData(0, 0, c.width, c.height).data;
+      // How much yellow ink there is (blue channel lowered by the highlighter), over the screen.
+      let sum = 0, n = 0;
+      for (let i = 0; i < d.length; i += 16) { const v = d[i] + d[i + 1] - 2 * d[i + 2]; if (v > 40) { sum += 255 - d[i + 2]; n++; } }
+      return { px: n, depth: n ? Math.round(sum / n) : 0 };
+    }, b64);
+  };
+  console.log(`hlshots  zoom before the pinch ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
+  const before = await colorAt();
+  // Every frame from the pinch on: what shows the ink (GPU canvas, page canvases, tiles).
+  await page.evaluate(() => {
+    window.__layers = [];
+    const tick = () => {
+      const page = document.querySelector('.on-page');
+      const glOn = !!page?.classList.contains('on-gl-ink');
+      const pages = [...document.querySelectorAll('[data-ink-key]')].filter((e) => e.style.visibility !== 'hidden' && !glOn).length;
+      const holders = [...document.querySelectorAll('[data-ink-layer]:not([data-ink-key])')];
+      const tiles = glOn ? 0 : holders.reduce((n, h) => n + (h.style.visibility === 'hidden' ? 0 : [...h.children].filter((c) => c.style.visibility !== 'hidden' && c.width > 0).length), 0);
+      const gl = [...document.querySelectorAll('canvas')].some((c) => c.style.zIndex === '1' && c.style.display !== 'none' && c.width > 1);
+      window.__layers.push(`${gl ? 'G' : '-'}${pages ? 'P' + pages : '--'}${tiles ? 'T' + tiles : '--'}`);
+      if (window.__layers.length < 400) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+  await fingers([[240, 600], [580, 600]], [[330, 600], [490, 600]], 400, false);
+  const during = await colorAt();
+  await shot('during');
+  await touch('touchEnd', []);
+  const after = [];
+  for (let i = 0; i < 12; i++) after.push(await colorAt());
+  await sleep(1000);
+  const settled = await colorAt();
+  console.log(`hlshots  zoom now ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%`);
+  console.log(`hlshots  yellow before ${JSON.stringify(before)} during ${JSON.stringify(during)} settled ${JSON.stringify(settled)}`);
+  console.log(`hlshots  after lifting, frame by frame: ${after.map((a) => a.depth).join(' ')}`);
+  // Runs of the same state: G GPU canvas, P page canvases (count), T tiles (count). Translucent ink
+  // doubles where P and T (or G and P / T) show together.
+  const runs = (await page.evaluate(() => window.__layers)).reduce((a, s) => (a.length && a[a.length - 1][0] === s ? (a[a.length - 1][1]++, a) : [...a, [s, 1]]), []);
+  console.log(`hlshots  frames: ${runs.map(([s, n]) => `${s}x${n}`).join(' ')}`);
+}
+// --only zorder: a black line, then a text box, then a red filled circle over the line (a layer
+// above it: the circle's fill tints the line). The line's colour inside the circle at rest and
+// while a pinch is drawn by the GPU must be the same.
+if (ONLY.has('zorder')) {
+  await page.evaluate(async (note) => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const P = (x, y) => ({ x, y, pressure: 0.5 });
+    const line = { id: 'z_line', tool: 'pen', color: '#111827', width: 6, opacity: 1, penStyle: 'ballpoint', isShape: true, shapeKind: 'line', points: [P(150, 300), P(550, 300)], createdAt: 1000 };
+    const circle = { id: 'z_circle', tool: 'pen', color: '#DC2626', width: 2, opacity: 1, penStyle: 'ballpoint', isShape: true, closed: true, shapeKind: 'ellipse', fill: 'solid',
+      points: Array.from({ length: 48 }, (_, i) => P(350 + 90 * Math.cos((i / 48) * 6.283), 300 + 90 * Math.sin((i / 48) * 6.283))), createdAt: 3000 };
+    const text = { id: 'z_text', x: 150, y: 600, width: 300, text: 'A text box', fontSize: 20, color: '#111827', createdAt: 2000 };
+    await new Promise((res, rej) => {
+      const tx = db.transaction('notes', 'readwrite');
+      tx.objectStore('notes').put({ ...note, id: 'doc_z', title: 'Z note', schemaVersion: 5, updatedAt: note.updatedAt + 9000,
+        pages: [{ ...note.pages[0], strokes: [line, circle], latexBlocks: [], textBlocks: [text], imageBlocks: [] }],
+        sheets: [{ id: 'sh_z' }] });
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+    db.close();
+  }, seedNote());
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await page.getByText('Z note').first().click();
+  await sleep(3000);
+  // The colour of the line at (320, 300) on the page (inside the circle), from a screenshot.
+  const sample = async () => {
+    const at = await page.evaluate(() => { const c = document.querySelector('.on-page').getBoundingClientRect(); const k = c.width / 816; return { x: c.left + 320 * k, y: c.top + 300 * k }; });
+    const b64 = (await page.screenshot({ clip: { x: Math.round(at.x) - 1, y: Math.round(at.y) - 1, width: 3, height: 3 } })).toString('base64');
+    return page.evaluate(async (src) => {
+      const im = new Image(); im.src = 'data:image/png;base64,' + src; await im.decode();
+      const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+      const x = c.getContext('2d'); x.drawImage(im, 0, 0);
+      const d = x.getImageData(Math.floor(im.width / 2), Math.floor(im.height / 2), 1, 1).data;
+      return `rgb(${d[0]},${d[1]},${d[2]})`;
+    }, b64);
+  };
+  const rest = await sample();
+  await fingers([[250, 900], [570, 900]], [[220, 900], [600, 900]], 300, false);
+  await sleep(100);
+  const pinching = await sample();
+  const gpu = await page.evaluate(() => !!document.querySelector('.on-page')?.classList.contains('on-gl-ink'));
+  await touch('touchEnd', []);
+  await sleep(1500);
+  console.log(`zorder   line under the circle: at rest ${rest}, pinching ${pinching} (${gpu ? 'GPU' : 'bitmaps'}), after ${await sample()}`);
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));
@@ -905,7 +1023,7 @@ if (ONLY.has('glcompare')) {
         const W = Math.round(200 * k), H = Math.round(80 * k);
         const c2 = document.createElement('canvas'); c2.width = W; c2.height = H;
         const ctx = c2.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawStrokes(ctx, strokes, {});
-        gl.setStrokes(strokes, false); gl.resize(W, H); gl.draw({ scale: k, ox: 0, oy: 0 });
+        gl.setStrokes([strokes]); gl.resize(W, H); gl.draw({ scale: k, ox: 0, oy: 0 });
         const c3 = document.createElement('canvas'); c3.width = W; c3.height = H;
         const x3 = c3.getContext('2d'); x3.drawImage(gl.canvas, 0, 0);
         const a = ctx.getImageData(0, 0, W, H).data, b = x3.getImageData(0, 0, W, H).data;
@@ -1408,6 +1526,45 @@ for (const s of recorded.slice(0, Number(arg('strokes', 40)))) {
 const pen = await stop();
 frameStats('pen', pen.frames);
 console.log(`pen      input lag p50 ${f1(pct(pen.lags, 0.5))} p95 ${f1(pct(pen.lags, 0.95))} max ${f1(Math.max(...pen.lags))} ms (event to next frame), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+}
+
+// --only shapepen [--native]: the recorded strokes drawn with the Draw tool (shapes: freehand
+// curves, larger than writing), as the pen scenario: frames and input lag. In the apps the shell
+// shows the shape the page sends on every event, so the page's work per event is what it shows.
+if (ONLY.has('shapepen')) {
+  await reopen();
+  const draw = page.locator('button[title^="Smart pen"]').first();
+  await draw.click();
+  await sleep(300);
+  await page.keyboard.press('Escape');
+  await sleep(200);
+  await start();
+  const t0 = Date.now();
+  let wrote = 0;
+  await traced('shapepen', () => profiled('shapepen', async () => {
+    for (const s of recorded.slice(0, Number(arg('strokes', 16)))) {
+      const xs = s.samples.map((p) => p[0]), ys = s.samples.map((p) => p[1]);
+      const minX = Math.min(...xs), minY = Math.min(...ys);
+      const ox = 140 + (wrote % 4) * 150, oy = 380 + Math.floor(wrote / 4) * 140;
+      const k = Math.min(4, 110 / Math.max(1, Math.max(...ys) - minY, Math.max(...xs) - minX));
+      const p0 = s.samples[0];
+      await mouse('mousePressed', ox + (p0[0] - minX) * k, oy + (p0[1] - minY) * k, p0[3] || 0.5);
+      const begin = Date.now();
+      for (const p of s.samples.slice(1)) {
+        const wait = begin + p[2] - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        await mouse('mouseMoved', ox + (p[0] - minX) * k, oy + (p[1] - minY) * k, p[3] || 0.5);
+      }
+      const pl = s.samples[s.samples.length - 1];
+      await mouse('mouseReleased', ox + (pl[0] - minX) * k, oy + (pl[1] - minY) * k, 0);
+      await new Promise((r) => setTimeout(r, 150));
+      wrote++;
+    }
+  }));
+  const r = await stop();
+  frameStats('shapepen', r.frames);
+  console.log(`shapepen shapes sent to the shell: ${await page.evaluate(() => `${window.__inkD ?? 0} (longest ${window.__inkDLen ?? 0} chars)`)}`);
+  console.log(`shapepen input lag p50 ${f1(pct(r.lags, 0.5))} p95 ${f1(pct(r.lags, 0.95))} max ${f1(Math.max(...r.lags))} ms (event to next frame), ${((Date.now() - t0) / 1000).toFixed(1)} s`);
 }
 
 // Scroll: wheel scrolling down through the note and back, twice (first view of the pages, then

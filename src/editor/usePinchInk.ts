@@ -1,4 +1,4 @@
-import { RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Stroke } from '../types';
 import { GlInk, RGBA, prepareGlGeometry } from '../ink/glInk';
 import { drawStrokes } from '../ink/strokeRenderer';
@@ -55,9 +55,11 @@ function glInk(): GlInk | null {
   return shared;
 }
 
-export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, strokes: Stroke[], pageWidth: number, enabled: boolean) {
-  const latest = useRef({ strokes, pageWidth, enabled });
-  latest.current = { strokes, pageWidth, enabled };
+/** `layers`: the ink layers bottom first (editor/zorder.ts), drawn in that order as the page does. */
+export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot: HTMLElement | null, layers: Stroke[][], pageWidth: number, enabled: boolean) {
+  const strokes = useMemo(() => layers.flat(), [layers]);
+  const latest = useRef({ strokes, layers, pageWidth, enabled });
+  latest.current = { strokes, layers, pageWidth, enabled };
   const mountedAt = useRef(performance.now());
 
   // Ahead of the next pinch.
@@ -73,7 +75,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
       const g = glInk();
       if (!g) return;
       const first = !warmed.has(g);
-      g.setStrokes(strokes);
+      g.setStrokes(layers);
       if (first) {
         warmed.add(g);
         g.warm();
@@ -83,7 +85,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [strokes, enabled]);
+  }, [strokes, layers, enabled]);
 
   useEffect(() => {
     if (!scrollRoot) return;
@@ -140,7 +142,7 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
         width: `${scrollRoot.clientWidth}px`, height: `${scrollRoot.clientHeight}px`, pointerEvents: 'none', zIndex: '1', display: '',
       });
       if (g.canvas.parentElement !== parent || g.canvas.previousSibling !== scrollRoot) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
-      g.setStrokes(list);
+      g.setStrokes(latest.current.layers);
       logged = false;
       draw();
       c.classList.add('on-gl-ink');
@@ -245,7 +247,7 @@ export function useDragInk(container: RefObject<HTMLElement | null>, scrollRoot:
       width: `${scrollRoot.clientWidth}px`, height: `${scrollRoot.clientHeight}px`, pointerEvents: 'none', zIndex: '1', display: '',
     });
     if (g.canvas.parentElement !== parent) parent.insertBefore(g.canvas, scrollRoot.nextSibling);
-    g.setStrokes(strokes);
+    g.setStrokes([strokes]);
     logged.current = false;
     setActive(true);
     return () => {

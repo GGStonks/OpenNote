@@ -24,6 +24,8 @@ In the apps, the stroke being written is also drawn natively above the web view 
 screen (also while the next is written) until its own `e,id`, plus ~60 ms, as the page's copy
 reaches the screen after the page's frame (clearing earlier made ink blink at 60 fps).
 `npm run bench:ui -- --native --only pen` checks every stroke is ended by id.
+Shapes being drawn (Draw tool, snapped strokes) are sent whole on every event (`d` messages,
+`src/ink/inkRecorder.ts`); `npm run bench:ui -- --native --only shapepen` measures the page's side.
 Both shells mirror the engine's capsule geometry (`addCapsule`);
 if the engine's look ever differed from them, the fix belongs in the shells, never in the engine.
 
@@ -139,6 +141,13 @@ show the iPad's compositing cost).
   clientWidth / clientHeight. Anything drawn over it is sized and placed from its own box (the GPU
   canvases drew for the scroll view's box into a canvas of its client size: ink 0.6% smaller while
   dragged or pinched). `BENCH_GUTTER=1` (tapshots) reproduces the scrollbars.
+- Translucent ink (highlighters, fills) shows anything drawn twice, which opaque ink hides. The page
+  canvases are clipped out from under visible sharp tiles (`clipPages` in SharpInk: the flash at the
+  end of a bitmap zoom); the live highlighter is a SmoothLiveStroke painted opaque on a see-through,
+  multiplying live canvas (`liveLook`: no leftovers, under the ink as when finished), densified like
+  the pen. The GPU draws a pinch's ink layer by layer (zorder.ts), as the page. `--only hlshots
+  --shots <dir> [--sparse]` (live / after / zoomed, and the layers shown each frame of a pinch;
+  `BENCH_NO_GL=1` for the bitmap pinch), `--only zorder` (a fill over earlier ink while pinching).
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
