@@ -1,4 +1,4 @@
-import { NoteDocument, PageOrientation, PageSheet, PageSize, PaperColor, PaperStyle } from '../types';
+import { NoteDocument, PageOrientation, PageSheet, PageSize, PaperColor, PaperColorName, PaperStyle } from '../types';
 
 /**
  * Paper of each page: a page's own pattern, colour, format and orientation (set in the page
@@ -24,7 +24,7 @@ export const PAPER_STYLE_OPTIONS: { id: PaperStyle; label: string }[] = [
   { id: 'dots', label: 'Dotted' },
 ];
 
-export const PAPER_COLOR_OPTIONS: { id: PaperColor; label: string }[] = [
+export const PAPER_COLOR_OPTIONS: { id: PaperColorName; label: string }[] = [
   { id: 'white', label: 'White' },
   { id: 'cream', label: 'Cream' },
   { id: 'yellow', label: 'Yellow' },
@@ -39,6 +39,8 @@ export const PAPER_COLOR_OPTIONS: { id: PaperColor; label: string }[] = [
 export interface PageSetup {
   paperStyle: PaperStyle;
   paperColor: PaperColor;
+  /** Pattern colour (#RRGGBB); null: the default for the paper. */
+  patternColor: string | null;
   size: PageSize;
   orientation: PageOrientation;
   /** Page size in px, orientation applied. */
@@ -46,9 +48,10 @@ export interface PageSetup {
   height: number;
 }
 
-export type SetupPatch = Partial<Pick<PageSetup, 'paperStyle' | 'paperColor' | 'size' | 'orientation'>>;
+/** patternColor null: back to the default pattern colour. */
+export type SetupPatch = Partial<Pick<PageSetup, 'paperStyle' | 'paperColor' | 'patternColor' | 'size' | 'orientation'>>;
 
-export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 'pageSize' | 'orientation'>, page: PageSheet): PageSetup {
+export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 'patternColor' | 'pageSize' | 'orientation'>, page: PageSheet): PageSetup {
   const size = page.size ?? doc.pageSize ?? 'letter';
   const orientation = page.orientation ?? doc.orientation ?? 'portrait';
   const s = PAGE_SIZES[size] ?? PAGE_SIZES.letter;
@@ -56,6 +59,7 @@ export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 
   return {
     paperStyle: page.paperStyle ?? doc.paperStyle,
     paperColor: page.paperColor ?? doc.paperColor,
+    patternColor: page.patternColor ?? doc.patternColor ?? null,
     size,
     orientation,
     width: landscape ? s.h : s.w,
@@ -65,5 +69,5 @@ export function pageSetup(doc: Pick<NoteDocument, 'paperStyle' | 'paperColor' | 
 
 /** True when the page has paper of its own (not the note's default). */
 export function hasOwnSetup(p: PageSheet): boolean {
-  return p.paperStyle !== undefined || p.paperColor !== undefined || p.size !== undefined || p.orientation !== undefined;
+  return p.paperStyle !== undefined || p.paperColor !== undefined || p.patternColor !== undefined || p.size !== undefined || p.orientation !== undefined;
 }

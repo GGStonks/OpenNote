@@ -873,7 +873,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onRedo={editor.redo}
         title={doc.title}
         setTitle={(title) => editor.commit((d) => ({ ...d, title }))}
-        paper={{ paperStyle: doc.paperStyle, paperColor: doc.paperColor, size: doc.pageSize ?? 'letter', orientation: doc.orientation ?? 'portrait' }}
+        paper={{ paperStyle: doc.paperStyle, paperColor: doc.paperColor, patternColor: doc.patternColor ?? null, size: doc.pageSize ?? 'letter', orientation: doc.orientation ?? 'portrait' }}
         setPaper={(patch: SetupPatch) => editor.commit((d) => setNotePaper(d, patch))}
         pagesOpen={pagesOpen}
         onTogglePages={() => setPagesOpen(!pagesOpen)}

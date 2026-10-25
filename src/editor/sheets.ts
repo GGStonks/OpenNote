@@ -298,7 +298,11 @@ export function setSheetsSetup(d: NoteDocument, ids: ReadonlySet<string>, patch:
     es.map((e) => {
       if (!ids.has(e.sheet.id)) return e;
       if (patch === 'reset') return { ...e, sheet: { id: e.sheet.id } };
-      return { ...e, sheet: { ...e.sheet, ...patch } };
+      const { patternColor, ...rest } = patch;
+      const sheet: PageSheet = { ...e.sheet, ...rest };
+      if (patternColor) sheet.patternColor = patternColor;
+      else if (patternColor === null) delete sheet.patternColor;
+      return { ...e, sheet };
     })
   );
 }
@@ -308,6 +312,7 @@ export function setNotePaper(d: NoteDocument, patch: SetupPatch): NoteDocument {
   return recut(d, (es) => es, {
     ...(patch.paperStyle ? { paperStyle: patch.paperStyle } : {}),
     ...(patch.paperColor ? { paperColor: patch.paperColor } : {}),
+    ...(patch.patternColor !== undefined ? { patternColor: patch.patternColor ?? undefined } : {}),
     ...(patch.size ? { pageSize: patch.size } : {}),
     ...(patch.orientation ? { orientation: patch.orientation } : {}),
   });
@@ -425,6 +430,7 @@ export function surfaceFromPages(d: Omit<NoteDocument, 'sheets'>, pages: (NotePa
     id: newId('sheet'),
     ...(p.paperStyle ? { paperStyle: p.paperStyle } : {}),
     ...(p.paperColor ? { paperColor: p.paperColor } : {}),
+    ...(p.patternColor ? { patternColor: p.patternColor } : {}),
     ...(p.size ? { size: p.size } : {}),
     ...(p.orientation ? { orientation: p.orientation } : {}),
   }));

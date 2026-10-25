@@ -462,11 +462,10 @@ export function smartPenMeasure(st: SmartPenState): { text: string; at: XY } | n
     case 'line': {
       const l = dist(s, e);
       if (l < 4) return null;
-      // Tilt from the horizontal, -90°..90° (positive: rising to the right, as on paper).
-      let deg = (-Math.atan2(e.y - s.y, e.x - s.x) * 180) / Math.PI;
-      if (deg > 90) deg -= 180;
-      else if (deg <= -90) deg += 180;
-      const r = Math.round(deg * 10) / 10;
+      // Direction from the start, counterclockwise in [0°, 360°): right 0°, up 90°, left 180°, down 270°.
+      const deg = (-Math.atan2(e.y - s.y, e.x - s.x) * 180) / Math.PI;
+      let r = Math.round((((deg % 360) + 360) % 360) * 10) / 10;
+      if (r >= 360) r = 0;
       return { text: `${r % 1 ? r.toFixed(1) : r.toFixed(0)}° · ${cm(l)} cm`, at: e };
     }
     case 'rectangle': {

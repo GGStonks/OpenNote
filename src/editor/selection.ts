@@ -29,6 +29,15 @@ export function normDeg(a: number): number {
   return Math.round(d * 100) / 100;
 }
 
+/**
+ * A rotation as shown to the user: counterclockwise positive, in [0, 360), rounded to 0.01°
+ * (stored rotations are clockwise, as on screen).
+ */
+export function shownDeg(a: number): number {
+  const d = Math.round(((((-a) % 360) + 360) % 360) * 100) / 100;
+  return d >= 360 ? 0 : d + 0;
+}
+
 /** Corners of a box of size w x h at (x, y), rotated by `deg` (clockwise) about its centre. */
 export function boxCorners(x: number, y: number, w: number, h: number, deg = 0): XY[] {
   const cx = x + w / 2, cy = y + h / 2;

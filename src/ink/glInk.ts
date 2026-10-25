@@ -224,6 +224,8 @@ class Builder {
   flat = new Float32Array(2 * 256);
   verts = BOX_VERTICES;
   ops: Op[] = [];
+  /** Each stroke's pieces, for its own glow (a selection's: drawn stroke by stroke, as a canvas casts shadows). */
+  strokes: { first: number; count: number; box: Box }[] = [];
   /** The ink run still open (the last op): opaque strokes of its colour that follow join it. */
   private run: Extract<Op, { k: 'see' }> | null = null;
 
@@ -275,7 +277,9 @@ class Builder {
     const { caps: c } = geometry(s);
     if (!c.length) return;
     const { first, count } = this.pushCaps(c, [0, 0, 0, 1]);
-    this.ops.push({ k: 'see', first, count, rgba: rgba(s.color, s.highlightAlpha ?? 0.35), box: boxOfCaps(c, 0, c.length) });
+    const box = boxOfCaps(c, 0, c.length);
+    this.ops.push({ k: 'see', first, count, rgba: rgba(s.color, s.highlightAlpha ?? 0.35), box });
+    this.strokes.push({ first, count, box });
     this.run = null;
   }
 
@@ -309,6 +313,7 @@ class Builder {
       const join = opaque && r && this.ops[this.ops.length - 1] === r && r.rgba[0] === col[0] && r.rgba[1] === col[1] && r.rgba[2] === col[2] && r.rgba[3] === col[3];
       const at = this.pushCaps(c, [0, 0, 0, 1]);
       const box = boxOfCaps(c, 0, c.length);
+      this.strokes.push({ first: at.first, count: at.count, box });
       if (join && r) {
         r.count += at.count;
         r.box = { x0: Math.min(r.box.x0, box.x0), y0: Math.min(r.box.y0, box.y0), x1: Math.max(r.box.x1, box.x1), y1: Math.max(r.box.y1, box.y1) };
@@ -610,7 +615,9 @@ export class GlInk {
     gl.enable(gl.BLEND);
     gl.blendEquation(gl.FUNC_ADD);
     gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-    if (glow) this.layOn(0, this.pieces, glow.rgba, null, tf, glow.radius);
+    // A selection's glow, stroke by stroke laid over one another (the strongest of all pieces at
+    // each pixel left a lighter crease between strokes close together).
+    if (glow) for (const st of this.builder?.strokes ?? []) this.layOn(st.first, st.count, glow.rgba, st.box, tf, glow.radius);
     for (const op of this.ops) {
       if (op.k === 'see') {
         this.layOn(op.first, op.count, op.rgba, op.box, tf);

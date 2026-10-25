@@ -7,7 +7,7 @@ import { strokeToSvg } from '../ink/strokeRenderer';
 import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
 import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
-import { PAPER_COLORS } from './CanvasPage';
+import { paperHex, paperIsDark } from './CanvasPage';
 import { textHeight } from '../editor/selection';
 import { canMakePdf, exportFile } from '../platform';
 import { textCssString } from '../editor/textStyle';
@@ -126,8 +126,8 @@ function buildSvg(doc: NoteDocument): string {
   pages.forEach(({ p, setup }, i) => {
     const dy = top;
     top += setup.height + gap;
-    const paper = PAPER_COLORS[setup.paperColor] ?? '#FFFFFF';
-    const ink = setup.paperColor === 'dark' ? '#F3F4F6' : '#111827';
+    const paper = paperHex(setup.paperColor);
+    const ink = paperIsDark(setup.paperColor) ? '#F3F4F6' : '#111827';
     out += `<g id="page-${i + 1}"${setup.width < W ? ` transform="translate(${(W - setup.width) / 2} 0)"` : ''}>\n<rect x="0" y="${dy}" width="${setup.width}" height="${setup.height}" fill="${paper}"/>\n`;
     // In stacking order (editor/zorder.ts), as on screen.
     for (const l of zLayers(p)) {

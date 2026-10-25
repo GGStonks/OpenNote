@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { RotateCw } from 'lucide-react';
 import {
-  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PaperColor, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
+  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PaperColor, PaperColorName, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
 } from '../types';
 import {
@@ -26,7 +26,7 @@ import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles }
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
 import {
-  Selection, computeBounds, normDeg, resetRotation, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
+  Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
 } from '../editor/selection';
 import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox } from './Blocks';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
@@ -81,7 +81,7 @@ interface CanvasPageProps {
   layout: SurfaceLayout;
 }
 
-export const PAPER_COLORS: Record<PaperColor, string> = {
+export const PAPER_COLORS: Record<PaperColorName, string> = {
   white: '#FFFFFF',
   cream: '#FBF7EE',
   yellow: '#FEF9C3',
@@ -92,6 +92,25 @@ export const PAPER_COLORS: Record<PaperColor, string> = {
   gray: '#EDEDED',
   dark: '#1C1C1F',
 };
+
+const rgbOf = (hex: string): [number, number, number] => {
+  const n = parseInt(hex.slice(1, 7), 16) || 0;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+};
+
+/** The paper's colour as #RRGGBB (named colours or any colour). */
+export function paperHex(c: PaperColor | undefined): string {
+  if (c && /^#[0-9a-f]{6}$/i.test(c)) return c;
+  return PAPER_COLORS[c as PaperColorName] ?? PAPER_COLORS.white;
+}
+
+/** Dark paper (light ink and lines on it): 'dark', or any colour of low luminance. */
+export function paperIsDark(c: PaperColor | undefined): boolean {
+  if (c === 'dark') return true;
+  if (!c || c[0] !== '#') return false;
+  const [r, g, b] = rgbOf(paperHex(c));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 110;
+}
 
 /**
  * Paper patterns as CSS backgrounds (no canvas memory, prints as vectors). `origin`: where the
@@ -104,15 +123,25 @@ export const PAPER_COLORS: Record<PaperColor, string> = {
  * stay at least about one screen pixel, and graph paper keeps only its major lines. At full size
  * the 1 px grid lines fell below a pixel in the thumbnails and grid / graph pages looked blank.
  */
-export function paperBackground(style: PaperStyle, color: PaperColor, origin = { x: 0, y: 0 }, scale = 1, swatch = false): React.CSSProperties {
-  const dark = color === 'dark';
-  const base = PAPER_COLORS[color] ?? PAPER_COLORS.white;
+export function paperBackground(
+  style: PaperStyle,
+  color: PaperColor,
+  origin = { x: 0, y: 0 },
+  scale = 1,
+  swatch = false,
+  pattern: string | null = null
+): React.CSSProperties {
+  const dark = paperIsDark(color);
+  const base = paperHex(color);
   const small = scale < 0.6;
   // Line thickness in page px, so a line covers about 0.9 screen px at this scale.
   const lw = small ? Math.max(1, 0.9 / scale) : 1;
   const boost = (a: number) => (small ? Math.min(1, a * 1.5) : a);
-  const line = dark ? `rgba(255,255,255,${boost(0.13)})` : `rgba(59,130,246,${boost(0.22)})`;
-  const grid = dark ? `rgba(255,255,255,${boost(0.09)})` : `rgba(0,0,0,${boost(0.08)})`;
+  // A chosen pattern colour: that colour, a little see-through (as the default lines are).
+  const pc = pattern && /^#[0-9a-f]{6}$/i.test(pattern) ? rgbOf(pattern).join(',') : null;
+  const ink = (a: number, light: string, onDark: string) => (pc ? `rgba(${pc},${boost(Math.min(1, a * 3))})` : dark ? `rgba(${onDark},${boost(a)})` : `rgba(${light},${boost(a)})`);
+  const line = pc ? ink(0.22, '', '') : dark ? `rgba(255,255,255,${boost(0.13)})` : `rgba(59,130,246,${boost(0.22)})`;
+  const grid = ink(dark ? 0.09 : 0.08, '0,0,0', '255,255,255');
   const margin = dark ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.4)';
   const css: React.CSSProperties = { backgroundColor: base };
   if ((style === 'ruled' || style === 'narrow') && swatch) {
@@ -142,8 +171,8 @@ export function paperBackground(style: PaperStyle, color: PaperColor, origin = {
   } else if (style === 'graph') {
     // Millimetre-style graph paper: fine lines every 12 px, stronger ones every 60 px (only those
     // when shrunk: the fine ones would fill the thumbnail).
-    const major = dark ? `rgba(255,255,255,${boost(0.16)})` : `rgba(0,0,0,${boost(0.13)})`;
-    const minor = dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
+    const major = ink(dark ? 0.16 : 0.13, '0,0,0', '255,255,255');
+    const minor = pc ? `rgba(${pc},0.15)` : dark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.05)';
     const layers = [
       `linear-gradient(to right, ${major} ${lw}px, transparent ${lw}px)`,
       `linear-gradient(to bottom, ${major} ${lw}px, transparent ${lw}px)`,
@@ -154,7 +183,7 @@ export function paperBackground(style: PaperStyle, color: PaperColor, origin = {
     css.backgroundPosition = `${-origin.x}px ${-origin.y}px`;
   } else if (style === 'dots') {
     const r = small ? Math.min(6, 1.3 / Math.max(scale, 0.25)) : 1.3;
-    css.backgroundImage = `radial-gradient(circle, ${dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} ${r}px, transparent ${r + 0.4}px)`;
+    css.backgroundImage = `radial-gradient(circle, ${pc ? `rgba(${pc},0.7)` : dark ? 'rgba(255,255,255,0.28)' : 'rgba(0,0,0,0.22)'} ${r}px, transparent ${r + 0.4}px)`;
     css.backgroundSize = '24px 24px';
     css.backgroundPosition = `${12 - origin.x}px ${12 - origin.y}px`;
   }
@@ -1013,7 +1042,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const activeCanvasRef = useRef<HTMLCanvasElement>(null);
   const visible = true;
   /** Blocks: the default ink follows the paper of the page they are on. */
-  const darkAt = (y: number) => sheetAt(y).paperColor === 'dark';
+  const darkAt = (y: number) => paperIsDark(sheetAt(y).paperColor);
   const inkAt = (y: number) => (darkAt(y) ? '#F3F4F6' : '#111827');
   const pageRef = useRef(page);
   pageRef.current = page;
@@ -1055,7 +1084,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const pageSmooth = useRef(smoothAt(inkZoom));
   if (!sharp) pageSmooth.current = smoothAt(inkZoom);
   /** Paper under a stroke ("hole" fills in SVG). */
-  const svgPaperOf = (st: Stroke) => PAPER_COLORS[sheetAt(strokeYRange(st).minY + 12).paperColor] ?? '#FFFFFF';
+  const svgPaperOf = (st: Stroke) => paperHex(sheetAt(strokeYRange(st).minY + 12).paperColor);
   /** SVG of each ink layer, made again only when the layer's strokes (or the pages) change. */
   const layerSvgs = useMemo(() => new WeakMap<Stroke[], string>(), [layout, printMode]);
   const layerSvg = (strokes: Stroke[]) => {
@@ -2392,7 +2421,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         <div
           key={sh.id}
           className={`absolute pointer-events-none ${printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]'}`}
-          style={{ left: sh.left, top: sh.top, width: sh.width, height: sh.height, ...paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }) }}
+          style={{ left: sh.left, top: sh.top, width: sh.width, height: sh.height, ...paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor) }}
         />
       ))}
       {/*
@@ -2570,13 +2599,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             <div className="flex items-center gap-1 my-1 pointer-events-auto" onPointerDown={(e) => e.stopPropagation()}>
               {drag && transform.current?.mode === 'rotate' ? (
                 <span className="px-2 py-0.5 rounded-full bg-gray-900/85 text-white text-[11px] font-semibold tabular-nums">
-                  {drag.base !== null ? `${normDeg(drag.base + drag.rot)}°` : `${drag.rot > 0 ? '+' : ''}${drag.rot}°`}
+                  {`${shownDeg((drag.base ?? 0) + drag.rot)}°`}
                 </span>
               ) : (
                 !drag && selRotation !== 0 && (
                   <>
                     <span className="px-2 py-0.5 rounded-full bg-gray-900/85 text-white text-[11px] font-semibold tabular-nums" title="Rotation from the original orientation">
-                      {selRotation === null ? 'mixed' : `${selRotation}°`}
+                      {selRotation === null ? 'mixed' : `${shownDeg(selRotation)}°`}
                     </span>
                     <button
                       className="px-2 py-0.5 rounded-full bg-blue-600 text-white text-[11px] font-semibold"
@@ -2651,7 +2680,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                 className="absolute pointer-events-none"
                 style={{
                   left: Math.min(sh.left, layout.sheets[sh.index - 1].left), width: Math.max(sh.width, layout.sheets[sh.index - 1].width), top: sh.top - 0.5, height: 1,
-                  background: sh.paperColor === 'dark' ? 'rgba(255,255,255,0.18)' : 'rgba(100,116,139,0.35)',
+                  background: paperIsDark(sh.paperColor) ? 'rgba(255,255,255,0.18)' : 'rgba(100,116,139,0.35)',
                 }}
               />
             )}

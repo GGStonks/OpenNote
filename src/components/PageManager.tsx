@@ -64,7 +64,7 @@ function useThrottled<T>(value: T, ms: number): T {
 const LiveThumb: React.FC<{ surface: NotePage; box: SheetBox; root: Element | null }> = ({ surface, box, root }) => {
   const page = useMemo(() => sheetView(surface, box), [surface, box]);
   const scale = Math.min(THUMB_W / box.width, THUMB_MAX_H / box.height);
-  return <PageThumb page={page} width={box.width} height={box.height} paperStyle={box.paperStyle} paperColor={box.paperColor} scale={scale} root={root} />;
+  return <PageThumb page={page} width={box.width} height={box.height} paperStyle={box.paperStyle} paperColor={box.paperColor} patternColor={box.patternColor} scale={scale} root={root} />;
 };
 
 const BAR_BTN = 'w-9 h-9 flex items-center justify-center rounded-xl transition active:scale-90 disabled:opacity-30 disabled:active:scale-100';
@@ -218,7 +218,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   const paperValue = useMemo<PaperValues>(() => {
     const sel = setups.filter((_, i) => selected.has(pages[i].id));
     const same = <K extends keyof PaperValues>(k: K) => (sel.length && sel.every((s) => s[k] === sel[0][k]) ? (sel[0][k] as PaperValues[K]) : null);
-    return { paperStyle: same('paperStyle'), paperColor: same('paperColor'), size: same('size'), orientation: same('orientation') };
+    return { paperStyle: same('paperStyle'), paperColor: same('paperColor'), patternColor: same('patternColor'), size: same('size'), orientation: same('orientation') };
   }, [setups, selected, pages]);
   const anyOwn = pages.some((pg) => selected.has(pg.id) && hasOwnSetup(pg));
 

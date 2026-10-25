@@ -644,6 +644,71 @@ if (ONLY.has('boxes')) {
     } else console.log('boxes    no side handle on the LaTeX selection');
   }
 }
+// --only fitwidth --shots <dir>: a note with a portrait page then a landscape one: "fit to width"
+// on each must fill the screen's width (the page's edges a few px from the screen's).
+if (ONLY.has('fitwidth')) {
+  await page.evaluate(async (note) => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    await new Promise((res, rej) => {
+      const tx = db.transaction('notes', 'readwrite');
+      tx.objectStore('notes').put({ ...note, id: 'doc_fit', title: 'Fit note', schemaVersion: 5, updatedAt: note.updatedAt + 5000,
+        pages: [{ ...note.pages[0], strokes: note.pages[0].strokes.slice(0, 40) }],
+        sheets: [{ id: 'sh_a', size: 'letter', orientation: 'portrait' }, { id: 'sh_b', size: 'letter', orientation: 'landscape' }, { id: 'sh_c', size: 'letter', orientation: 'portrait' }] });
+      tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+    });
+    db.close();
+  }, seedNote());
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await page.getByText('Fit note').first().click();
+  await sleep(2000);
+  const edges = () => page.evaluate(() => {
+    const sc = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 200 && getComputedStyle(d).overflow === 'auto');
+    if (!sc) return { error: 'no scroller', text: document.body.innerText.slice(0, 120) };
+    const er = sc.getBoundingClientRect();
+    const page0 = document.querySelector('.on-page');
+    if (!page0) return { error: 'no page', title: document.title, text: document.body.innerText.slice(0, 80) };
+    const papers = [...page0.children].filter((e) => e.className.includes('shadow-') && e.getBoundingClientRect().height > 200);
+    if (!papers.length) return { error: 'no paper', n: page0.children.length };
+    const mid = er.top + er.height / 3;
+    const p = papers.find((e) => { const r = e.getBoundingClientRect(); return r.top <= mid && r.bottom >= mid; }) ?? papers[0];
+    const r = p.getBoundingClientRect();
+    return { left: Math.round(r.left - er.left), right: Math.round(er.right - r.right), width: Math.round(r.width), zoom: document.body.innerText.match(/(\d+)%/)?.[1] };
+  });
+  console.log(`fitwidth page 1 (portrait) on open: ${JSON.stringify(await edges())}`);
+  // Scroll to the landscape page: fit to width follows it.
+  await page.evaluate(() => { const sc = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 200 && getComputedStyle(d).overflow === 'auto'); sc.scrollTop += 1150; });
+  await sleep(1500);
+  console.log(`fitwidth page 2 (landscape) after scrolling: ${JSON.stringify(await edges())}`);
+  // A pinch ending near the page's width snaps to it; a larger one keeps its zoom.
+  await fingers([[260, 900], [560, 900]], [[250, 900], [570, 900]], 200);
+  await sleep(1200);
+  console.log(`fitwidth after a 1.07x pinch (snaps): ${JSON.stringify(await edges())}`);
+  await fingers([[260, 900], [560, 900]], [[200, 900], [620, 900]], 300);
+  await sleep(1200);
+  console.log(`fitwidth after a 1.4x pinch (kept): ${JSON.stringify(await edges())}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'fitwidth.png') });
+}
+// --only papershots --shots <dir>: the paper menu with any colour for the paper (spectrum open) and
+// a pattern colour, then the page with them.
+if (ONLY.has('papershots') && arg('shots')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.locator('button[title="Paper"]').first().click();
+  await sleep(300);
+  await page.locator('button[title="#EF4444"]').first().click();
+  await page.locator('button[title^="Any colour"]').first().click();
+  await sleep(300);
+  const sq = await page.locator('.cursor-crosshair').first().boundingBox();
+  await page.mouse.click(sq.x + sq.width * 0.3, sq.y + sq.height * 0.12);
+  await sleep(600);
+  await page.screenshot({ path: join(arg('shots'), 'paper-menu.png') });
+  await page.locator('button[title="Paper"]').first().click();
+  await sleep(600);
+  const bg = await page.evaluate(() => { const p = [...document.querySelectorAll('.on-page > div')].find((e) => e.className.includes('shadow-')); return p && getComputedStyle(p).backgroundColor; });
+  console.log(`papershots paper colour on the page: ${bg}`);
+  await page.screenshot({ path: join(arg('shots'), 'paper-page.png') });
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));

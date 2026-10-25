@@ -82,19 +82,44 @@ public class OpenNoteSavePlugin extends Plugin {
         return fallback;
     }
 
-    /** The folder, from the document id where providers use "volume:path/to/file" (local storage). */
+    /**
+     * Where the file went, as the user would call it: the folder for local storage ("volume:path"
+     * ids, and the Downloads provider's "raw:/path" ones), "Downloads" for the Downloads provider's
+     * other ids (numbers), otherwise the provider's own name (Drive, a cloud app...).
+     */
     private String folderOf(Uri uri) {
+        String authority = uri.getAuthority();
         try {
             String id = DocumentsContract.getDocumentId(uri);
-            int colon = id.indexOf(':');
-            String path = colon >= 0 ? id.substring(colon + 1) : id;
-            int slash = path.lastIndexOf('/');
-            // (Ids without a path, such as the Downloads provider's numbers: the folder is not known.)
-            if (slash <= 0) return null;
-            String dir = path.substring(0, slash);
-            return dir.substring(dir.lastIndexOf('/') + 1);
-        } catch (Exception e) {
-            return null;
+            String path = null;
+            if (id.startsWith("raw:")) path = id.substring(4);
+            else if ("com.android.externalstorage.documents".equals(authority)) {
+                int colon = id.indexOf(':');
+                path = colon >= 0 ? id.substring(colon + 1) : id;
+                if (path.indexOf('/') < 0) return "Internal storage";
+            }
+            if (path != null) {
+                int slash = path.lastIndexOf('/');
+                if (slash > 0) {
+                    String dir = path.substring(0, slash);
+                    return dir.substring(dir.lastIndexOf('/') + 1);
+                }
+            }
+        } catch (Exception ignored) {
+            /* not a document id: below */
         }
+        if ("com.android.providers.downloads.documents".equals(authority)) return "Downloads";
+        try {
+            android.content.pm.PackageManager pm = getContext().getPackageManager();
+            android.content.pm.ProviderInfo info = authority != null ? pm.resolveContentProvider(authority, 0) : null;
+            if (info != null) {
+                CharSequence label = info.loadLabel(pm);
+                if (label == null || label.length() == 0) label = info.applicationInfo.loadLabel(pm);
+                if (label != null && label.length() > 0) return label.toString();
+            }
+        } catch (Exception ignored) {
+            /* unknown provider */
+        }
+        return null;
     }
 }

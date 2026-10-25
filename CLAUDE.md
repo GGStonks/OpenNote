@@ -118,6 +118,13 @@ show the iPad's compositing cost).
   everything is redrawn sharp while the fingers are down; `--latex --only longpinch --shots <dir>`.
   Never re-run the gesture effect mid-pinch (its clean-up ends the pinch): callbacks it reads go
   through refs, and the editor's scroll ref callback is stable.
+- Fit to width fits the page on screen (Editor's `curSheet`), `FIT_MARGIN` px from the edges, and refits as
+  pages of another width scroll in; a pinch ending within `FIT_SNAP` of that zoom snaps to it.
+  `--only fitwidth` (portrait and landscape pages, pinch snap).
+- Paper colour is a named colour or any `#RRGGBB` (`paperHex` / `paperIsDark` in CanvasPage.tsx), and
+  `patternColor` (note or page) colours the pattern; both use ColorPicker in PaperPicker. `--only papershots --shots <dir>`.
+- Angles are shown counterclockwise in [0°, 360°): selection rotation (`shownDeg`, stored rotations stay
+  clockwise) and the straight line's direction (smartPenMeasure).
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).

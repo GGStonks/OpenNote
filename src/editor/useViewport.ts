@@ -27,7 +27,9 @@ interface Options {
 export type FitMode = 'width' | 'page' | null;
 
 /** Screen px left between a page fitted to the width and each edge of the screen. */
-const FIT_MARGIN = 4;
+const FIT_MARGIN = 2;
+/** A pinch ending within this fraction of the page's fit-to-width zoom snaps to it (and follows the pages again). */
+const FIT_SNAP = 0.08;
 
 /** A content point (unscaled px, relative to the zoomed content) and where it goes on screen. */
 interface Anchor {
@@ -171,12 +173,13 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
    * the padding around the surface: wide margins, and too small for narrower pages in a note that
    * mixes sizes or orientations.
    */
+  const fitWidthZoom = (el: HTMLElement, t: { width: number }) => Math.max(0.05, (el.clientWidth - 2 * FIT_MARGIN) / Math.max(1, t.width));
   const fitWidth = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !el.clientWidth) return;
     setFitMode('width');
     const t = fitTargetRef.current?.() ?? { left: 0, width: contentWidthRef.current };
-    const z = Math.max(0.05, (el.clientWidth - 2 * FIT_MARGIN) / Math.max(1, t.width));
+    const z = fitWidthZoom(el, t);
     const a = anchorAt(0, 0);
     // The page's left edge goes FIT_MARGIN from the screen's.
     setView(z, a && { ...a, cx: t.left - FIT_MARGIN / z, sx: 0 });
@@ -429,8 +432,17 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       const z = p.z0 * p.k;
       // The content point first between the fingers goes where the fingers are now.
       const a = { cx: p.o.x / p.z0, cy: p.o.y / p.z0, sx: p.c.x, sy: p.c.y };
-      setFitMode(null);
-      setView(z, a);
+      const t = fitTargetRef.current?.();
+      const zf = t ? fitWidthZoom(el, t) : 0;
+      if (t && Math.abs(z / zf - 1) < FIT_SNAP) {
+        // Close to the page's width: fitted exactly, edge to edge, as the button does (the point
+        // between the fingers keeps its height).
+        setFitMode('width');
+        setView(zf, { ...a, cx: t.left - FIT_MARGIN / zf, sx: 0 });
+      } else {
+        setFitMode(null);
+        setView(z, a);
+      }
       logPinch(p.z0, z, p.native !== null);
       // The shell's snapshot stays until the new zoom is on screen (the second frame from now). It
       // is told where the point first between the fingers really is: the scroll range can keep

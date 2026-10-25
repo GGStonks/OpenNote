@@ -12,7 +12,9 @@ export type EraserMode = 'stroke' | 'partial';
 
 export type PaperStyle = 'blank' | 'ruled' | 'narrow' | 'grid' | 'graph' | 'dots';
 
-export type PaperColor = 'white' | 'cream' | 'yellow' | 'ochre' | 'blue' | 'green' | 'pink' | 'gray' | 'dark';
+export type PaperColorName = 'white' | 'cream' | 'yellow' | 'ochre' | 'blue' | 'green' | 'pink' | 'gray' | 'dark';
+/** A named paper colour, or any colour as #RRGGBB. */
+export type PaperColor = PaperColorName | `#${string}`;
 
 /** Sheet formats (see editor/pageSetup.ts for their sizes). */
 export type PageSize = 'letter' | 'legal' | 'a3' | 'a4' | 'a5' | 'b5';
@@ -160,6 +162,8 @@ export interface PageSheet {
   id: string;
   paperStyle?: PaperStyle;
   paperColor?: PaperColor;
+  /** Colour of the pattern's lines and dots, #RRGGBB (missing: the note's, else the default). */
+  patternColor?: string;
   size?: PageSize;
   orientation?: PageOrientation;
 }
@@ -186,6 +190,8 @@ export interface NoteDocument {
   /** Default paper of the pages (the template of new pages); pages may override it. */
   paperStyle: PaperStyle;
   paperColor: PaperColor;
+  /** Pattern colour, #RRGGBB (missing: the default for the paper). */
+  patternColor?: string;
   /** Default sheet format and orientation (missing: US Letter, portrait). */
   pageSize?: PageSize;
   orientation?: PageOrientation;

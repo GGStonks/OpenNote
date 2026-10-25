@@ -5,7 +5,7 @@ import { sheetSlice, surfaceLayout } from '../editor/sheets';
 import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
-import { paperBackground } from './CanvasPage';
+import { paperBackground, paperIsDark } from './CanvasPage';
 import { rotationStyle } from './Blocks';
 import { textCss } from '../editor/textStyle';
 import { requestThumb } from '../services/thumbCache';
@@ -149,8 +149,8 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
  * the scrolling list it is in).
  */
 export const PageThumb: React.FC<{
-  page: NotePage; width: number; height: number; paperStyle: PaperStyle; paperColor: PaperColor; scale: number; root?: Element | null; cache?: ThumbCache;
-}> = React.memo(({ page, width, height, paperStyle, paperColor, scale, root, cache }) => {
+  page: NotePage; width: number; height: number; paperStyle: PaperStyle; paperColor: PaperColor; patternColor?: string | null; scale: number; root?: Element | null; cache?: ThumbCache;
+}> = React.memo(({ page, width, height, paperStyle, paperColor, patternColor, scale, root, cache }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
   useEffect(() => {
@@ -169,12 +169,12 @@ export const PageThumb: React.FC<{
     <div ref={ref} className="relative overflow-hidden" style={{ width: width * scale, height: height * scale }}>
       <div
         className="relative overflow-hidden pointer-events-none select-none"
-        style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor, undefined, scale) }}
+        style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor, undefined, scale, false, patternColor) }}
       >
         {near && (
           // Sized to reach the page's far corner: images are capped to their container's width.
           <div className="absolute" style={{ left: cache?.offset.x ?? 0, top: cache?.offset.y ?? 0, width: width - (cache?.offset.x ?? 0), height: height - (cache?.offset.y ?? 0) }}>
-            <ThumbContent page={page} dark={paperColor === 'dark'} scale={scale} width={width} height={height} cache={cache} />
+            <ThumbContent page={page} dark={paperIsDark(paperColor)} scale={scale} width={width} height={height} cache={cache} />
           </div>
         )}
       </div>
@@ -205,6 +205,7 @@ export const NoteThumb: React.FC<{ note: NoteDocument }> = React.memo(({ note })
           height={setup.height}
           paperStyle={setup.paperStyle}
           paperColor={setup.paperColor}
+          patternColor={setup.patternColor}
           scale={scale}
           cache={{ noteId: note.id, updatedAt: note.updatedAt, offset: { x: -setup.left, y: -setup.top } }}
         />
