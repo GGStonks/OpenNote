@@ -1042,6 +1042,39 @@ if (ONLY.has('curveshots') && arg('shots')) {
     for (const m of [ds[0], ds[1], ds[2], ds[3]]) if (m) console.log(`curveshots   ${JSON.stringify(firstPts(m).map((p) => p.map((v) => Math.round(v * 10) / 10)))}`);
   }
 }
+// --only pdfsize [--hl]: the note's print layout (the one the Android PDF export renders, page by
+// page) printed by Chromium's own PDF renderer: the size of each page's PDF. --hl draws a few
+// highlighter strokes over the ink first.
+if (ONLY.has('pdfsize')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  if (process.argv.includes('--hl')) {
+    await page.locator('button[title="Highlighter"]').first().click();
+    await sleep(300);
+    await page.keyboard.press('Escape');
+    for (let k = 0; k < 4; k++) {
+      const pts = Array.from({ length: 60 }, (_, i) => { const t = i / 59; return [150 + 520 * t, 420 + k * 90 + 25 * Math.sin(t * 6)]; });
+      await mouse('mousePressed', pts[0][0], pts[0][1], 0.5);
+      for (const [x, y] of pts.slice(1)) { await mouse('mouseMoved', x, y, 0.5); await sleep(10); }
+      await mouse('mouseReleased', pts[59][0], pts[59][1], 0);
+      await sleep(300);
+    }
+    await sleep(1500);
+  }
+  await page.evaluate(() => { window.__printing = false; window.print = () => { window.__printing = true; }; });
+  await page.locator('button[title="Export"]').first().click();
+  await sleep(500);
+  // On the web the PDF row prints (the print layout, then window.print).
+  await page.getByText('PDF', { exact: true }).first().click();
+  await page.waitForFunction(() => window.__printing, null, { timeout: 5000 });
+  const t0 = Date.now();
+  const pdf = await page.pdf({ width: '816px', height: '1056px', printBackground: true, pageRanges: '1-3' });
+  const ms = Date.now() - t0;
+  // Images in it (a rasterised area shows as an image XObject).
+  const txt = pdf.toString('latin1');
+  const images = (txt.match(/\/Subtype\s*\/Image/g) ?? []).length;
+  console.log(`pdfsize  ${process.argv.includes('--hl') ? 'with highlighter' : 'ink only'}: 3 pages ${(pdf.length / 1024).toFixed(0)} KB, ${images} images, ${ms} ms`);
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));

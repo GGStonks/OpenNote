@@ -829,10 +829,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         pages.push(await pdfOfPrintLayout(doc.title, s.width, s.height));
       }
       const pdf = await joinPdfPages(pages, doc.title);
+      // The pages' own PDFs are not needed any more (memory for the save that follows).
+      const pageKB = pages.map((p) => Math.round(p.length / 1024));
+      pages.length = 0;
       setPrintMode(false);
       setPrintOnly(null);
       setBusy(null);
+      crashLog.event('export', { kind: 'pdf', pages: sheets.length, pageKB, kb: Math.round(pdf.length / 1024) });
       const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
+      crashLog.event('export-saved', { kind: 'pdf', saved: !!where });
       if (where) showToast(where);
     } catch (err) {
       setBusy(null);

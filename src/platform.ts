@@ -287,9 +287,13 @@ export function setExportMode(mode: ExportMode) {
 }
 
 interface SavePlugin {
-  save(o: { filename: string; mimeType: string; base64: string }): Promise<{ cancelled?: boolean; name?: string; folder?: string }>;
+  stage(o: { id: string; chunk: string; first: boolean }): Promise<void>;
+  save(o: { filename: string; mimeType: string; staged: string }): Promise<{ cancelled?: boolean; name?: string; folder?: string }>;
 }
 let savePlugin: SavePlugin | null = null;
+
+/** Bytes per staged chunk: a multiple of 3, so each chunk is base64 on its own (no padding inside). */
+const STAGE_CHUNK = 3 * 256 * 1024;
 
 /**
  * Exports a file where the user chooses: the system's save dialog for each file (iOS: Files' folder
@@ -316,7 +320,15 @@ export async function exportFile(filename: string, blob: Blob): Promise<string |
       const { registerPlugin } = await import('@capacitor/core');
       savePlugin = registerPlugin<SavePlugin>('OpenNoteSave');
     }
-    const res = await savePlugin.save({ filename: safeName, mimeType, base64: await blobToBase64(blob) });
+    // The file is handed over in chunks first and the picker gets only its id: with the file in the
+    // call that opens the picker, Android had to keep it in the app's saved state when the picker
+    // sent the app to the background, and a large export (megabytes) crashed the app, leaving the
+    // chosen file empty (OpenNoteSavePlugin).
+    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    for (let at = 0; at === 0 || at < blob.size; at += STAGE_CHUNK) {
+      await savePlugin.stage({ id, chunk: await blobToBase64(blob.slice(at, at + STAGE_CHUNK)), first: at === 0 });
+    }
+    const res = await savePlugin.save({ filename: safeName, mimeType, staged: id });
     if (res?.cancelled) return null;
     return `Saved “${res?.name ?? safeName}”${res?.folder ? ` in “${res.folder}”` : ' in the folder you chose'}.`;
   }

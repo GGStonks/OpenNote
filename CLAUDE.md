@@ -157,6 +157,10 @@ show the iPad's compositing cost).
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
 - Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
   Android `OpenNoteSavePlugin`), with a confirmation of where; Settings can choose the share sheet.
+  Android: never put file contents in a plugin call that starts an activity. Capacitor saves that
+  call's data in the activity's saved state when the app goes to the background (over ~1 MB:
+  TransactionTooLargeException, app killed, the chosen file left 0 B). The file is staged in chunks
+  first (`stage`), and `save` carries only its id. Exports log `export` / `export-saved` to the crash report.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
