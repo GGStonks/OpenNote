@@ -182,6 +182,12 @@ show the iPad's compositing cost).
   first (`stage`), and `save` carries only its id. Exports log `export` / `export-saved` to the crash report.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
+- Finished ink is drawn as vectors by default (`src/ink/vectorInk.ts`, Settings > Pencil & input >
+  Vector ink): each page's strokes are an SVG (`VectorInk` in CanvasPage, one memoized element per
+  stroke from `strokeSvgParts`, in drawStrokes' order), painted by WebKit at the screen's resolution
+  at every zoom, so no SharpInk. The bitmaps below (page canvases, SharpInk) are the fallback (setting
+  off, `BENCH_VECTOR=off`) and for layers with a "hole" fill. The user saw the bitmap ink go soft at
+  lift even when it was 1:1. `--only svgcompare` (SVG against the canvas, every kind of stroke).
 - Visible ink is never resampled: the page canvases are drawn at exactly the zoom fitting the width
   uses (`fitZoom` in CanvasPage = useViewport's `FIT_MARGIN` formula, `canvasRatio(..., exact)`), and
   SharpInk takes over as soon as the zoom is above it. Rounded to a quarter, an 816 px note view

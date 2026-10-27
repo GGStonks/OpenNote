@@ -6,8 +6,9 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry, strokeSvgParts,
 } from '../ink/strokeRenderer';
+import { vectorInkEnabled } from '../ink/vectorInk';
 import { SmoothLiveStroke, pixelAligned } from '../ink/smoothLiveStroke';
 import { crashLog } from '../services/crashLog';
 import { SampleDensifier } from '../ink/densify';
@@ -274,7 +275,12 @@ function logInkGrid(zoom: number) {
     const r = c.getBoundingClientRect();
     return { kind: kind(c), scale: Math.round(((r.width * dpr) / c.width) * 10000) / 10000, off: [frac(r.left), frac(r.top)] };
   });
-  crashLog.event('ink-grid', { zoom: Math.round(zoom * 10000) / 10000, dpr, shown: shown.length, canvases });
+  // Pages drawn as vectors (vectorInk.ts) on screen: not resampled by construction.
+  const vectors = [...document.querySelectorAll('[data-ink-layer] svg')].filter((v) => {
+    const r = v.getBoundingClientRect();
+    return r.bottom > 0 && r.top < window.innerHeight;
+  }).length;
+  crashLog.event('ink-grid', { zoom: Math.round(zoom * 10000) / 10000, dpr, shown: shown.length, canvases, vectors });
 }
 
 /** Committed ink as SVG markup (cached per stroke): high zoom and printing. `paperOf`: for "hole" fills. */
@@ -839,14 +845,40 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
 /** What a tile's canvas shows: its strokes, at what resolution, and whether as the smooth line. */
 type TileShown = { strokes: Stroke[]; ratio: number; smooth: boolean };
 
-const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; smooth: boolean; scrollRoot: HTMLElement | null; inkKey: string }) {
-  const { eager, top, width: W, height: H, strokes, ratio, smooth, scrollRoot, inkKey } = props;
+/** One stroke's fill or ink as SVG (strokeSvgParts): the same object, nothing re-rendered. */
+const StrokeSvg = React.memo(function StrokeSvg({ s, part }: { s: Stroke; part: 'fill' | 'ink' }) {
+  return <g dangerouslySetInnerHTML={{ __html: strokeSvgParts(s)[part] }} />;
+});
+
+/**
+ * A page's finished ink as vectors (vectorInk.ts), in drawStrokes' order: highlighters, then the
+ * fills, then the ink. WebKit draws it at the screen's resolution at every zoom (the content is
+ * scaled by a CSS transform, painted at its real scale): nothing is resampled. Each stroke is an
+ * element of its own, so a new stroke adds one and only its area is painted.
+ */
+const VectorInk = React.memo(
+  React.forwardRef<SVGSVGElement, { strokes: Stroke[]; top: number; width: number; height: number }>(function VectorInk({ strokes, top, width, height }, ref) {
+    const hl = strokes.filter((st) => st.tool === 'highlighter');
+    const ink = strokes.filter((st) => st.tool !== 'highlighter');
+    return (
+      <svg ref={ref} width={width} height={height} viewBox={`0 ${top} ${width} ${height}`} style={{ display: 'block' }}>
+        <g>{hl.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
+        <g>{ink.filter((st) => st.fill && st.fill !== 'none').map((st) => <StrokeSvg key={st.id} s={st} part="fill" />)}</g>
+        <g>{ink.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
+      </svg>
+    );
+  })
+);
+
+const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; smooth: boolean; scrollRoot: HTMLElement | null; inkKey: string; vector: boolean }) {
+  const { eager, top, width: W, height: H, strokes, ratio, smooth, scrollRoot, inkKey, vector } = props;
   const mine = useMemo(() => strokes.filter((s) => {
     const r = strokeYRange(s);
     return r.maxY >= top && r.minY <= top + H;
   }), [strokes, top, H]);
   const holderRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const svgRef = useRef<SVGSVGElement>(null);
   const [alive, setAlive] = useState(eager);
   const onScreen = useRef(eager);
   /** Within half a screen of the view: the canvas is displayed (see `shown` below). */
@@ -881,7 +913,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     c.style.transform = `translate(${n.x}px, ${n.y}px)`;
   };
   const applyShown = () => {
-    const c = canvasRef.current;
+    const c = canvasRef.current ?? svgRef.current;
     if (c) c.style.display = shown.current ? '' : 'none';
     if (shown.current) align();
   };
@@ -1051,7 +1083,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   }, [mine, ratio, smooth, alive, top, W, H]);
   return (
     <div ref={holderRef} data-ink-key={inkKey} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
-      {alive && mine.length > 0 && <canvas ref={canvasRef} style={{ width: W, height: H }} />}
+      {alive && mine.length > 0 && (vector ? <VectorInk ref={svgRef} strokes={mine} top={top} width={W} height={H} /> : <canvas ref={canvasRef} style={{ width: W, height: H }} />)}
     </div>
   );
 });
@@ -2428,6 +2460,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   /** The content in stacking order (editor/zorder.ts); unchanged ink layers keep their arrays. */
   const layersRef = useRef<ZLayer[] | undefined>(undefined);
   const layers = useMemo(() => (layersRef.current = zLayers({ ...blockPage, strokes: shownStrokes }, layersRef.current)), [blockPage, shownStrokes]);
+  // Ink layers drawn as vectors (vectorInk.ts): sharp at every zoom, so no SharpInk over them. A
+  // layer with a "hole" fill keeps its bitmaps (the canvas punches the hole through the ink below).
+  const vectorOn = useMemo(vectorInkEnabled, []);
+  const vectorLayers = useMemo(
+    () => new Set(vectorOn ? layers.filter((l) => l.kind === 'ink' && !l.strokes.some((st) => st.fill === 'hole')).map((l) => l.key) : []),
+    [layers, vectorOn]
+  );
   /** The ink layers bottom first: the GPU draws a pinch's ink in the page's stacking order. */
   const inkLayers = useMemo(() => layers.flatMap((l) => (l.kind === 'ink' ? [l.strokes] : [])), [layers]);
   usePinchInk(containerRef, scrollRoot ?? null, inkLayers, PAGE_W, !printMode);
@@ -2646,9 +2685,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     ratio={canvasRatio(pageZoom, PAGE_W * sh.height, true)}
                     smooth={pageSmooth.current}
                     scrollRoot={scrollRoot}
+                    vector={vectorLayers.has(l.key)}
                   />
                 ))}
-                {sharp && <SharpInk key={`s${l.key}`} layerKey={l.key} strokes={l.strokes} sheets={layout.sheets} width={PAGE_W} height={PAGE_H} zoom={zoom} scrollRoot={scrollRoot} />}
+                {sharp && !vectorLayers.has(l.key) && <SharpInk key={`s${l.key}`} layerKey={l.key} strokes={l.strokes} sheets={layout.sheets} width={PAGE_W} height={PAGE_H} zoom={zoom} scrollRoot={scrollRoot} />}
               </React.Fragment>
             );
           }

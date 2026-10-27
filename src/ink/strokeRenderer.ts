@@ -749,14 +749,35 @@ function svgFill(style: InkStyle, areaD: string, pts: XY[], paper: string): stri
 
 /** SVG for vector export. `paper` is the colour used for "hole" fills. */
 export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
+  const { fill, ink } = svgParts(s, dy, paper);
+  return fill + ink;
+}
+
+const svgPartsCache = new WeakMap<Stroke, { fill: string; ink: string }>();
+
+/**
+ * A stroke's SVG as its fill and its ink, cached: the page's vector ink (VectorInk in CanvasPage)
+ * draws all fills under all ink, as drawStrokes does. "Hole" fills come out in white here (the
+ * canvas punches them through): pages with one keep their canvas.
+ */
+export function strokeSvgParts(s: Stroke): { fill: string; ink: string } {
+  let p = svgPartsCache.get(s);
+  if (!p) {
+    p = svgParts(s, 0, '#FFFFFF');
+    svgPartsCache.set(s, p);
+  }
+  return p;
+}
+
+function svgParts(s: Stroke, dy: number, paper: string): { fill: string; ink: string } {
   const style = styleOf(s);
   const pts = s.points.map((p) => ({ ...p, y: p.y + dy }));
-  if (pts.length === 0) return '';
+  if (pts.length === 0) return { fill: '', ink: '' };
   const closed = !!s.closed && pts.length > 2;
   const opacity = s.opacity ?? 1;
 
   if (s.shapeKind === 'point') {
-    return `<circle cx="${f2(pts[0].x)}" cy="${f2(pts[0].y)}" r="${f2(Math.max(2.5, s.width * 1.7))}" fill="${s.color}" fill-opacity="${opacity}"/>`;
+    return { fill: '', ink: `<circle cx="${f2(pts[0].x)}" cy="${f2(pts[0].y)}" r="${f2(Math.max(2.5, s.width * 1.7))}" fill="${s.color}" fill-opacity="${opacity}"/>` };
   }
   let out = '';
   let lineD: string;
@@ -772,8 +793,8 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
   } else {
     lineD = areaD = svgCenterlineD(pts, false, closed);
   }
-  if (closed) out += svgFill(style, areaD, pts, paper);
-  if (s.fillOnly) return out;
+  const fill = closed ? svgFill(style, areaD, pts, paper) : '';
+  if (s.fillOnly) return { fill, ink: '' };
 
   if (ink?.widths && style.tool === 'pen') {
     let d = '';
@@ -795,7 +816,7 @@ export function strokeToSvg(s: Stroke, dy = 0, paper = '#FFFFFF'): string {
     const h = arrowHead(pts, style);
     if (h) out += `<path d="M${f2(h[0].x)} ${f2(h[0].y)} L${f2(h[1].x)} ${f2(h[1].y)} L${f2(h[2].x)} ${f2(h[2].y)} Z" fill="${s.color}"/>`;
   }
-  return out;
+  return { fill, ink: out };
 }
 
 // ---------------------------------------------------------------------------------------------

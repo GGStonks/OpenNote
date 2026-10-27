@@ -8,6 +8,7 @@ import { frameProbe } from '../services/frameProbe';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
+import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
 import { ExportMode, PageRate, exportMode, exportOffersBoth, platformKind, setExportMode, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 
@@ -32,6 +33,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const probe = isOpen ? frameProbe.last : null;
   const [pageRate, setPageRateState] = useState<PageRate>(window.OpenNoteNative?.pageRate ?? 'auto');
   const [exportChoice, setExportChoice] = useState<ExportMode>(exportMode);
+  const [vectorInk, setVectorInkState] = useState(vectorInkEnabled);
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -194,6 +196,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
             <Toggle checked={draft.holdToSnap} onChange={(v) => set({ holdToSnap: v })} title="Draw and hold to snap shapes" sub="Hold the pen still for a second at the end: lines, arrows, circles, ellipses, rectangles, triangles, polygons (keeping the pen's width)" />
             <Toggle checked={draft.pencilDoubleTapEraser} onChange={(v) => set({ pencilDoubleTapEraser: v })} title="Apple Pencil double-tap switches to eraser" />
             <Toggle checked={draft.fingerTapUndo} onChange={(v) => set({ fingerTapUndo: v })} title="Two-finger tap to undo" sub="Three-finger tap redoes" />
+            <Toggle
+              checked={vectorInk}
+              onChange={(v) => {
+                setVectorInkState(v);
+                setVectorInk(v);
+              }}
+              title="Vector ink"
+              sub="Finished ink drawn as vectors, sharp at every zoom (off: bitmaps). Applies when a note is opened."
+            />
           </section>
 
           {canUpdate() && (

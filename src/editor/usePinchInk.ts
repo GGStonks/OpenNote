@@ -1,7 +1,7 @@
 import { RefObject, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Stroke } from '../types';
 import { GlInk, RGBA, prepareGlGeometry } from '../ink/glInk';
-import { drawStrokes } from '../ink/strokeRenderer';
+import { drawStrokes, strokeSvgParts } from '../ink/strokeRenderer';
 import { tileWork } from './tileWork';
 import { frameRate } from '../services/frameRate';
 import { crashLog } from '../services/crashLog';
@@ -195,7 +195,7 @@ function logGeometry(via: 'drag' | 'pinch', g: GlInk, er: DOMRect, r: DOMRect, p
 }
 
 // For the UI benchmark (bench/ui.mjs --only glcompare): both renderers on the same strokes.
-(window as unknown as { __opennoteGlInk?: unknown }).__opennoteGlInk = { GlInk, drawStrokes, shared: () => shared };
+(window as unknown as { __opennoteGlInk?: unknown }).__opennoteGlInk = { GlInk, drawStrokes, strokeSvgParts, shared: () => shared };
 
 let dragShared: GlInk | null | undefined;
 function dragGlInk(): GlInk | null {

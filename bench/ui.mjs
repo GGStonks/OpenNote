@@ -120,6 +120,8 @@ if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
+// BENCH_VECTOR=off: the finished ink as bitmaps (page canvases, SharpInk) instead of vectors (vectorInk.ts).
+if (process.env.BENCH_VECTOR === 'off') await page.addInitScript(() => localStorage.setItem('opennote_vector_ink', 'off'));
 // BENCH_NO_GL=1: pinches without the GPU ink (the bitmaps), to compare.
 if (process.env.BENCH_NO_GL) await page.addInitScript(() => localStorage.setItem('opennote_gl', 'off'));
 const url = `http://localhost:${PORT}/`;
@@ -1091,12 +1093,14 @@ if (ONLY.has('glwarm')) {
 // Not in the default run: --only glcompare, every kind of stroke drawn by the GPU renderer of a
 // pinch (glInk.ts) and by the canvas, at three scales: how far apart they are (mean difference of
 // the composited pixels, 0-255, and the share of pixels off by more than 64).
-if (ONLY.has('glcompare')) {
+// --only svgcompare: the same strokes as vectors (strokeSvgParts, as VectorInk draws a page) against
+// the canvas ("hole" fills excepted: pages with one keep their canvas).
+for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
   await reopen();
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   await page.waitForFunction(() => window.__opennoteGlInk);
-  const out = await page.evaluate(() => {
-    const { GlInk, drawStrokes } = window.__opennoteGlInk;
+  const out = await page.evaluate(async (mode) => {
+    const { GlInk, drawStrokes, strokeSvgParts } = window.__opennoteGlInk;
     const pts = (f, n = 60) => Array.from({ length: n }, (_, i) => { const t = i / (n - 1); const [x, y, p] = f(t); return { x, y, pressure: p ?? 0.5, t: i * 8 }; });
     const wave = (y0, amp = 12) => (t) => [20 + t * 160, y0 + Math.sin(t * 9) * amp, 0.25 + 0.75 * Math.sin(t * 3.1) ** 2];
     let n = 0;
@@ -1117,8 +1121,9 @@ if (ONLY.has('glcompare')) {
       curve: [S({ isShape: true, shapeKind: 'curve', closed: true, fill: 'solid', color: '#7c3aed', points: [{ x: 30, y: 40, pressure: 0.5 }, { x: 100, y: 10, pressure: 0.5 }, { x: 170, y: 40, pressure: 0.5 }, { x: 100, y: 70, pressure: 0.5 }] })],
       point: [S({ isShape: true, shapeKind: 'point', width: 3, points: [{ x: 100, y: 40, pressure: 0.5 }] })],
     };
-    const gl = GlInk.create();
-    if (!gl) return { error: 'no webgl2' };
+    const gl = mode === 'glcompare' ? GlInk.create() : null;
+    if (mode === 'glcompare' && !gl) return { error: 'no webgl2' };
+    if (mode === 'svgcompare') delete cases.hole;
     const res = {};
     for (const [name, strokes] of Object.entries(cases)) {
       res[name] = [];
@@ -1126,9 +1131,20 @@ if (ONLY.has('glcompare')) {
         const W = Math.round(200 * k), H = Math.round(80 * k);
         const c2 = document.createElement('canvas'); c2.width = W; c2.height = H;
         const ctx = c2.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawStrokes(ctx, strokes, {});
-        gl.setStrokes([strokes]); gl.resize(W, H); gl.draw({ scale: k, ox: 0, oy: 0 });
         const c3 = document.createElement('canvas'); c3.width = W; c3.height = H;
-        const x3 = c3.getContext('2d'); x3.drawImage(gl.canvas, 0, 0);
+        const x3 = c3.getContext('2d');
+        if (gl) {
+          gl.setStrokes([strokes]); gl.resize(W, H); gl.draw({ scale: k, ox: 0, oy: 0 });
+          x3.drawImage(gl.canvas, 0, 0);
+        } else {
+          // VectorInk's order: highlighters, fills, ink.
+          const hl = strokes.filter((s) => s.tool === 'highlighter'), ink = strokes.filter((s) => s.tool !== 'highlighter');
+          const body = hl.map((s) => strokeSvgParts(s).ink).join('') + ink.map((s) => strokeSvgParts(s).fill).join('') + ink.map((s) => strokeSvgParts(s).ink).join('');
+          const img = new Image();
+          img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 200 80">${body}</svg>`);
+          await img.decode();
+          x3.drawImage(img, 0, 0);
+        }
         const a = ctx.getImageData(0, 0, W, H).data, b = x3.getImageData(0, 0, W, H).data;
         let sum = 0, big = 0, inked = 0;
         for (let i = 0; i < a.length; i += 4) {
@@ -1144,8 +1160,8 @@ if (ONLY.has('glcompare')) {
       }
     }
     return res;
-  });
-  for (const [k, v] of Object.entries(out)) console.log(`glcompare ${k.padEnd(12)} ${Array.isArray(v) ? v.join('   ') : v}`);
+  }, mode);
+  for (const [k, v] of Object.entries(out)) console.log(`${mode} ${k.padEnd(12)} ${Array.isArray(v) ? v.join('   ') : v}`);
 }
 // Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
 if (ONLY.has('probe')) {
