@@ -163,6 +163,15 @@ show the iPad's compositing cost).
   first (`stage`), and `save` carries only its id. Exports log `export` / `export-saved` to the crash report.
 - Zoomed in, memory must follow the screen, not the zoom: page canvases stay
   at the fit-width zoom and SharpInk's tiles (no canvas where there is no ink) draw the rest.
+- Visible ink is never resampled: the page canvases are drawn at exactly the zoom fitting the width
+  uses (`fitZoom` in CanvasPage = useViewport's `FIT_MARGIN` formula, `canvasRatio(..., exact)`), and
+  SharpInk takes over as soon as the zoom is above it. Rounded to a quarter, an 816 px note view
+  (iPad Pro 13" with a panel open) fit at 1.02 over canvases drawn for 1.00: every finished stroke
+  was stretched 2%, soft next to the shell's native live ink (crisp while writing, blurry at lift);
+  shrinking softens too. `--only liftshots [--native] [--width N] [--shots <dir>]`: the frames after
+  a lift (sharpness, movement) and each page canvas's scale and device-pixel offset (`1.0000x off 0,0`
+  is 1:1); the same goes to the crash report after a native stroke (`ink-grid`, every 10 s at most).
+  Still open: pages start a fraction of a device pixel off the grid at some zooms (`off` 0.16–0.31).
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release

@@ -27,7 +27,7 @@ interface Options {
 export type FitMode = 'width' | 'page' | null;
 
 /** Screen px left between a page fitted to the width and each edge of the screen. */
-const FIT_MARGIN = 2;
+export const FIT_MARGIN = 2;
 /** A pinch ending within this fraction of the page's fit-to-width zoom snaps to it (and follows the pages again). */
 const FIT_SNAP = 0.08;
 

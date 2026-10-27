@@ -20,7 +20,7 @@
  * Needs playwright-core (/home/ds/AI/camofox-browser/node_modules) and Playwright's Chromium.
  */
 import { spawn } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -112,7 +112,8 @@ const browser = await chromium.launch({ executablePath, headless: !HEADED, args:
 // --dpr: the screen's density (2 = iPad; Android tablets are often 2.6-3.5).
 // --landscape: an iPad held sideways (the page fits the width at about 140%).
 const LANDSCAPE = process.argv.includes('--landscape');
-const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: 1180, height: 820 } : { width: 820, height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
+// --width: the window's width in CSS px (a note view of another width lands on another fit zoom).
+const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: Number(arg('width', 1180)), height: 820 } : { width: Number(arg('width', 820)), height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
 if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
@@ -1529,6 +1530,93 @@ if (ONLY.has('liveshots') && arg('shots')) {
   await sleep(600);
   await page.screenshot({ path: join(arg('shots'), 'live-up.png'), clip: { x: 120, y: 520, width: 480, height: 260 } });
   console.log(`liveshots zoom ${z}%`);
+}
+// Not in the default run: --only liftshots [--native] [--shots <dir>] writes a stroke at fit width
+// and zoomed in, then captures the page in the frames after the pen lifts. Per frame: how soft the
+// ink's edges are (`soft`: share of ink pixels that are only partly covered; blur raises it) and
+// where it is (`dx,dy`: centroid shift from the last frame, in screen px). A finished stroke must
+// not start soft and sharpen, nor move.
+if (ONLY.has('liftshots')) {
+  const clip = { x: 120, y: 520, width: 480, height: 260 };
+  const measure = (png) => page.evaluate(async (b64) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const c = document.createElement('canvas');
+    c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d');
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    // Paper is the brightest common value; ink coverage = darkness relative to the darkest pixel.
+    let lo = 255, hi = 0;
+    for (let i = 0; i < d.length; i += 4) { const l = (d[i] + d[i + 1] + d[i + 2]) / 3; if (l < lo) lo = l; if (l > hi) hi = l; }
+    let ink = 0, soft = 0, sx = 0, sy = 0, w = 0;
+    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+      const cov = (hi - (d[i] + d[i + 1] + d[i + 2]) / 3) / Math.max(1, hi - lo);
+      if (cov < 0.08) continue;
+      ink++;
+      if (cov < 0.85) soft++;
+      sx += (p % c.width) * cov; sy += Math.floor(p / c.width) * cov; w += cov;
+    }
+    return { ink, soft: ink ? soft / ink : 0, cx: w ? sx / w : 0, cy: w ? sy / w : 0 };
+  }, png.toString('base64'));
+  for (const zoomSteps of [0, 6]) {
+    await reopen();
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    for (let i = 0; i < zoomSteps; i++) {
+      await page.keyboard.press('Control+Equal');
+      await sleep(150);
+    }
+    await sleep(1500);
+    const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    const pts = Array.from({ length: 70 }, (_, i) => {
+      const a = (i / 69) * Math.PI * 3.2;
+      return [300 + Math.cos(a) * 140 + i * 2, 640 + Math.sin(a) * 90];
+    });
+    await mouse('mousePressed', pts[0][0], pts[0][1]);
+    for (const [x, y] of pts.slice(1)) {
+      await mouse('mouseMoved', x, y, 0.4 + 0.3 * Math.sin(x / 40));
+      await sleep(8);
+    }
+    await sleep(300);
+    const downPng = await page.screenshot({ clip });
+    const down = await measure(downPng);
+    if (arg('shots')) writeFileSync(join(arg('shots'), `lift-${z}-pendown.png`), downPng);
+    await mouse('mouseReleased', pts[pts.length - 1][0], pts[pts.length - 1][1]);
+    const t0 = Date.now();
+    const rows = [];
+    let prev = null;
+    for (const at of [0, 16, 33, 66, 100, 150, 250, 400, 700, 1500]) {
+      const wait = at - (Date.now() - t0);
+      if (wait > 0) await sleep(wait);
+      const png = await page.screenshot({ clip });
+      const m = await measure(png);
+      const t = Date.now() - t0;
+      if (arg('shots')) writeFileSync(join(arg('shots'), `lift-${z}-${String(t).padStart(4, '0')}ms.png`), png);
+      rows.push(`${t}ms ink ${m.ink} soft ${m.soft.toFixed(3)}` + (prev ? ` d ${(m.cx - prev.cx).toFixed(2)},${(m.cy - prev.cy).toFixed(2)}` : ''));
+      prev = m;
+    }
+    const shift = await page.evaluate(() => [...document.querySelectorAll('div')].map((d) => d.style.translate).find((t) => t) || 'none');
+    // The page's ink canvases on screen: device px per backing px (1.000 = drawn 1:1, no resampling)
+    // and the fraction of a device px their corner is off the pixel grid (0 = not resampled either).
+    const grid = await page.evaluate(() => {
+      const dpr = window.devicePixelRatio;
+      return [...document.querySelectorAll('canvas')].filter((c) => {
+        const r = c.getBoundingClientRect();
+        return c.width > 0 && r.width > 200 && r.bottom > 0 && r.top < innerHeight && getComputedStyle(c).visibility !== 'hidden';
+      }).map((c) => {
+        const r = c.getBoundingClientRect();
+        const frac = (v) => { const f = Math.abs(v * dpr - Math.round(v * dpr)); return Math.round(f * 1000) / 1000; };
+        return `${(r.width * dpr / c.width).toFixed(4)}x off ${frac(r.left)},${frac(r.top)}`;
+      });
+    });
+    // --native: the page draws no live ink, so the pen-down frame lacks the new stroke (not comparable).
+    console.log(`liftshots zoom ${z}%  canvases on screen: ${grid.join(' | ') || 'none'}`);
+    console.log(`liftshots zoom ${z}%  content shift ${shift}  pen down: ink ${down.ink} soft ${down.soft.toFixed(3)}${process.argv.includes('--native') ? ' (native: without the new stroke)' : ''}`);
+    for (const r of rows) console.log(`liftshots   ${r}`);
+    const ig = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'ink-grid').slice(-1));
+    console.log(`liftshots   crash log: ${JSON.stringify(ig)}`);
+  }
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {

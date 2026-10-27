@@ -16,6 +16,7 @@ import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil'
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
 import { tileWork } from '../editor/tileWork';
+import { FIT_MARGIN } from '../editor/useViewport';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -235,13 +236,41 @@ const ROTATE_SNAP = 3;
 
 /**
  * Backing-store scale of a canvas covering `area` page px². Quantised in half-zoom steps so that
- * zooming does not reallocate and repaint the canvases for every small zoom change.
+ * zooming does not reallocate and repaint the canvases for every small zoom change; `exact` for a
+ * zoom that does not follow the gesture (the page canvases' fit-width zoom).
  */
-function canvasRatio(zoom: number, area: number): number {
+function canvasRatio(zoom: number, area: number, exact = false): number {
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
-  const z = Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2;
+  const z = exact ? Math.max(1, Math.min(zoom, 5)) : Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2) / 2;
   const maxByBudget = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, area));
   return Math.max(1, Math.min(dpr * z, maxByBudget));
+}
+
+let inkGridAt = 0;
+/**
+ * Crash report, after a stroke the shell drew natively is handed to the page (at most every 10 s):
+ * how the page's ink canvases on screen map to device pixels. `scale` 1 = drawn 1:1; `off`: how
+ * far (device px) their corner is from the pixel grid. Anything else is resampled, softer than the
+ * shell's native line was while writing.
+ */
+function logInkGrid(zoom: number) {
+  const now = Date.now();
+  if (now - inkGridAt < 10_000) return;
+  inkGridAt = now;
+  const dpr = window.devicePixelRatio || 1;
+  const frac = (v: number) => Math.round(Math.abs(v * dpr - Math.round(v * dpr)) * 1000) / 1000;
+  const shown = [...document.querySelectorAll<HTMLCanvasElement>('[data-ink-layer] canvas')].filter((c) => {
+    const r = c.getBoundingClientRect();
+    return c.width > 0 && r.bottom > 0 && r.top < window.innerHeight && getComputedStyle(c).visibility !== 'hidden';
+  });
+  // Page canvases first (sharp tiles, SharpInk's, are many and all alike).
+  const kind = (c: HTMLCanvasElement) => (c.closest('[data-ink-key]') ? 'page' : 'tile');
+  const ordered = [...shown.filter((c) => kind(c) === 'page'), ...shown.filter((c) => kind(c) === 'tile')];
+  const canvases = ordered.slice(0, 4).map((c) => {
+    const r = c.getBoundingClientRect();
+    return { kind: kind(c), scale: Math.round(((r.width * dpr) / c.width) * 10000) / 10000, off: [frac(r.left), frac(r.top)] };
+  });
+  crashLog.event('ink-grid', { zoom: Math.round(zoom * 10000) / 10000, dpr, shown: shown.length, canvases });
 }
 
 /** Committed ink as SVG markup (cached per stroke): high zoom and printing. `paperOf`: for "hole" fills. */
@@ -1104,7 +1133,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // by its pixel budget (MAX_CANVAS_PIXELS; from about 2x on an iPad, 1.4x on a 3x Android screen):
   // those canvases were drawn soft and then stretched. Printing draws SVG.
   const tileArea = Math.max(1, ...layout.sheets.map((sh) => PAGE_W * sh.height));
-  const fitZoom = () => Math.max(1, Math.min(PAGE_CANVAS_MAX_ZOOM, Math.round(((scrollRoot?.clientWidth || window.innerWidth) / PAGE_W) * 4) / 4));
+  // Exactly the zoom fitting the width uses (useViewport's fitWidthZoom), not a rounder one: the
+  // canvases are then 1:1 with the screen at fit width. Rounded to a quarter, a note view 816 px
+  // wide fit at 1.02 with canvases drawn for 1.00 and stretched 2%: every finished stroke came out
+  // soft next to the native live ink, crisp while writing and blurry at lift. Any resampling
+  // softens the ink (a canvas 3% too large and shrunk did too).
+  const fitZoom = () => Math.max(1, Math.min(PAGE_CANVAS_MAX_ZOOM, ((scrollRoot?.clientWidth || window.innerWidth) - 2 * FIT_MARGIN) / PAGE_W));
   const [pageZoom, setPageZoom] = useState(fitZoom);
   useEffect(() => {
     const onResize = () => setPageZoom(fitZoom());
@@ -1112,7 +1146,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [scrollRoot, PAGE_W]); // eslint-disable-line react-hooks/exhaustive-deps
-  const sharp = !printMode && (zoom > pageZoom * 1.02 || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
+  // Above the page canvases' zoom they would be stretched: the sharp ink takes over at once.
+  const sharp = !printMode && (zoom > pageZoom * 1.001 || canvasRatio(zoom, tileArea) + 1e-6 < (Math.min(window.devicePixelRatio || 1, 3) * Math.ceil(Math.max(1, Math.min(zoom, 5)) * 2)) / 2);
   // The page canvases' zoom: never above the fitting zoom (zooming further in never reallocates them).
   const inkZoom = Math.min(zoom, pageZoom);
   useEffect(() => {
@@ -1990,7 +2025,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // The finished stroke is painted with React's commit below; the shell's layer is cleared
       // once a frame showing it has been drawn, so the ink never blinks.
       if (cancelled) ink.cancel();
-      else requestAnimationFrame(() => requestAnimationFrame(() => ink.end()));
+      else requestAnimationFrame(() => requestAnimationFrame(() => { ink.end(); logInkGrid(zoomRef.current); }));
     }
 
     if (!cancelled && d.smart && d.snapped) {
@@ -2522,7 +2557,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     width={PAGE_W}
                     height={sh.height}
                     strokes={l.strokes}
-                    ratio={canvasRatio(inkZoom, PAGE_W * sh.height)}
+                    ratio={canvasRatio(pageZoom, PAGE_W * sh.height, true)}
                     smooth={pageSmooth.current}
                     scrollRoot={scrollRoot}
                   />
