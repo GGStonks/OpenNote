@@ -24,7 +24,7 @@ function safeInsets(): { top: number; right: number; bottom: number; left: numbe
     safeProbe = document.createElement('div');
     safeProbe.style.cssText =
       'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;' +
-      'padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
+      'padding:var(--sa-top) var(--sa-right) var(--sa-bottom) var(--sa-left)';
     document.body.appendChild(safeProbe);
   }
   const s = getComputedStyle(safeProbe);

@@ -77,7 +77,8 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     applyTheme(settings.theme);
-    void setLaunchTheme(settings.theme, (THEMES[settings.theme] ?? THEMES.light).ui.app).catch(() => undefined);
+    const t = THEMES[settings.theme] ?? THEMES.light;
+    void setLaunchTheme(settings.theme, t.ui.app, t.dark).catch((err) => crashLog.event('launch-theme-failed', { error: String(err?.message ?? err).slice(0, 200) }));
   }, [settings.theme]);
   useEffect(() => {
     crashLog.start();

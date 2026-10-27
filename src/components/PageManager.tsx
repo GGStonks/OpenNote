@@ -345,7 +345,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
         </div>
       )}
 
-      <div className="flex items-center justify-between px-1.5 py-1.5 border-t border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 pb-[calc(6px+env(safe-area-inset-bottom))]">
+      <div className="flex items-center justify-between px-1.5 py-1.5 border-t border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 pb-[calc(6px+var(--sa-bottom))]">
         <button disabled={!count} onClick={() => setPaperOpen(!paperOpen)} className={`${BAR_BTN} ${paperOpen ? 'bg-blue-600 text-white' : ''}`} title="Paper of the selected pages">
           <Palette className="w-5 h-5" />
         </button>

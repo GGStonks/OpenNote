@@ -1,6 +1,7 @@
 package com.opennote.app;
 
 import android.app.Activity;
+import android.app.UiModeManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Color;
@@ -28,6 +29,7 @@ public class OpenNoteLaunchPlugin extends Plugin {
     @PluginMethod
     public void setTheme(PluginCall call) {
         String id = call.getString("id", "light");
+        boolean dark = Boolean.TRUE.equals(call.getBoolean("dark", false));
         int color;
         try {
             color = Color.parseColor(call.getString("background", "#F2F2F7"));
@@ -40,7 +42,14 @@ public class OpenNoteLaunchPlugin extends Plugin {
         activity.runOnUiThread(() -> {
             activity.getWindow().setBackgroundDrawable(new ColorDrawable(color));
             getBridge().getWebView().setBackgroundColor(color);
-            if (Build.VERSION.SDK_INT >= 33) activity.getSplashScreen().setSplashScreenTheme(launchStyle(id));
+            if (Build.VERSION.SDK_INT >= 33) {
+                activity.getSplashScreen().setSplashScreenTheme(launchStyle(id));
+            } else if (Build.VERSION.SDK_INT >= 31) {
+                // Android 12 has no setSplashScreenTheme: its splash screen follows the app's own
+                // night mode (persisted by the system), so a dark theme starts on the dark colour.
+                UiModeManager modes = (UiModeManager) activity.getSystemService(Context.UI_MODE_SERVICE);
+                if (modes != null) modes.setApplicationNightMode(dark ? UiModeManager.MODE_NIGHT_YES : UiModeManager.MODE_NIGHT_NO);
+            }
         });
         call.resolve();
     }

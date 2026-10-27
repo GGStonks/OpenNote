@@ -35,6 +35,7 @@ import {
 import { PageManager } from './PageManager';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
 import { joinPdfPages } from '../services/pdfExport';
+import { useBack } from '../services/backStack';
 
 /** Margin around the surface (content px). */
 const PAD = 8;
@@ -871,6 +872,17 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const printed = printMode ? printedSheets(doc).filter((s) => !printOnly || s.id === printOnly) : [];
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
+  const goHome = async () => {
+    await editor.flush();
+    onBack();
+  };
+  // The device's back (backStack.ts): the note last, as the back button at the top left; before it
+  // a running conversion, the selection and the pages panel (dialogs and popovers register themselves).
+  useBack(true, () => void goHome());
+  useBack(pagesOpen, () => setPagesOpen(false));
+  useBack(!!selection, () => setSelectionState(null));
+  useBack(!!busy, cancelConversion);
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       <Toolbar
@@ -886,10 +898,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         setPaper={(patch: SetupPatch) => editor.commit((d) => setNotePaper(d, patch))}
         pagesOpen={pagesOpen}
         onTogglePages={() => setPagesOpen(!pagesOpen)}
-        onBack={async () => {
-          await editor.flush();
-          onBack();
-        }}
+        onBack={goHome}
         onConvertPage={convertPage}
         onExport={() => setExportOpen(true)}
         onSettings={onOpenSettings}
@@ -979,7 +988,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           {/* Page indicator and zoom */}
           <div
             className="absolute right-3 z-30 flex items-center gap-1.5"
-            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + env(safe-area-inset-bottom))` }}
+            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
             data-no-pan
           >
             <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
@@ -1007,7 +1016,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
       {/* Paste (lasso tool, something copied, nothing selected) */}
       {!selection && clipboard && tools.tool === 'lasso' && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
           <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
             <ClipboardPaste className="w-5 h-5" /> Paste
           </button>
@@ -1016,7 +1025,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + env(safe-area-inset-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
           <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
             {FILL_OPTIONS.map((f) => (
               <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
@@ -1028,7 +1037,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         </div>
       )}
       {selection && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + env(safe-area-inset-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
           <div className="flex items-center gap-1.5 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
             {selectionHasInk && (
               <>

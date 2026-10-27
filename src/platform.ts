@@ -360,13 +360,13 @@ export async function setPageRate(rate: PageRate): Promise<void> {
  * The UI theme's background for the shells' launch screens (shown before the page runs, from the
  * next start): an OLED Black app started on a light grey screen.
  */
-export async function setLaunchTheme(id: string, background: string): Promise<void> {
+export async function setLaunchTheme(id: string, background: string, dark: boolean): Promise<void> {
   const kind = platformKind();
   if (kind === 'ios') {
     await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setLaunchTheme', background });
   } else if (kind === 'capacitor') {
     const { registerPlugin } = await import('@capacitor/core');
-    await registerPlugin<{ setTheme(o: { id: string; background: string }): Promise<void> }>('OpenNoteLaunch').setTheme({ id, background });
+    await registerPlugin<{ setTheme(o: { id: string; background: string; dark: boolean }): Promise<void> }>('OpenNoteLaunch').setTheme({ id, background, dark });
   }
 }
 

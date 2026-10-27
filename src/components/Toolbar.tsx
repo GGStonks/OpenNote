@@ -10,6 +10,7 @@ import { PaperPicker, PaperValues } from './PaperPicker';
 import { ToolSettings } from './CanvasPage';
 import { ColorPicker } from './ColorPicker';
 import { OnScreen } from './onScreen';
+import { useBack } from '../services/backStack';
 
 const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
@@ -90,6 +91,7 @@ interface ToolbarProps {
 function usePopover() {
   const [open, setOpen] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  useBack(!!open, () => setOpen(null));
   useEffect(() => {
     if (!open) return;
     const close = (e: PointerEvent) => {
@@ -368,7 +370,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const iconBtn = 'p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition';
 
   return (
-    <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[env(safe-area-inset-top)]">
+    <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[var(--sa-top)]">
       <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 px-3 py-2">
         <div ref={leftRef} className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
           <button onClick={p.onBack} className="flex-none flex items-center text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">

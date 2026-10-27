@@ -5,6 +5,7 @@ import { COLOUR_SPHERE, Spectrum } from './ColorPicker';
 import type { TextBlock } from '../types';
 import { OnScreen } from './onScreen';
 import { TEXT_FONTS, fontStack, nextTextSize } from '../editor/textStyle';
+import { useBack } from '../services/backStack';
 
 /** Ink colours offered for text (the pen's palette). */
 const TEXT_COLORS = ['#111827', '#6B7280', '#1A73E8', '#D93025', '#188038', '#E37400', '#9B51E0', '#FFFFFF'];
@@ -53,6 +54,7 @@ export const TextFormatBar: React.FC<{ block: TextBlock; onChange: (patch: Parti
     `w-9 h-9 flex-shrink-0 flex items-center justify-center rounded-xl transition active:scale-90 ${on ? 'bg-blue-600 text-white' : 'hover:bg-white/10'}`;
   const family = block.fontFamily ?? 'sans';
   const [open, setOpen] = useState<{ what: 'font' | 'colour'; at: DOMRect } | null>(null);
+  useBack(!!open, () => setOpen(null));
   const toggleMenu = (what: 'font' | 'colour') => (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();

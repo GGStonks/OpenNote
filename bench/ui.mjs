@@ -1827,6 +1827,63 @@ if (ONLY.has('header')) {
   }
   console.log(`header ${bad ? `${bad} screens with overlapping or cut buttons` : 'no overlaps at any width'}`);
 }
+// --only back: the device's back (Android's button / gesture calls window.OpenNoteBack, as
+// MainActivity does): each press closes what was opened last, then leaves the note; at home with
+// nothing open it answers false (the shell then sends the app to the background). It used to close
+// the app from anywhere.
+if (ONLY.has('back')) {
+  const pctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true });
+  const pp = await pctx.newPage();
+  pp.on('pageerror', (e) => console.error('page error:', e.message));
+  await pp.goto(url);
+  await sleep(1500);
+  const back = () => pp.evaluate(() => window.OpenNoteBack());
+  const shown = () => pp.evaluate(() => ({
+    popups: [...document.querySelectorAll('[data-on-screen]')].filter((e) => e.getClientRects().length).length,
+    dialogs: [...document.querySelectorAll('.fixed.inset-0')].filter((e) => e.getClientRects().length).length,
+    editor: !!document.querySelector('header button[title="Insert & pages"]'),
+    depth: window.OpenNoteBackDepth(),
+  }));
+  const steps = [];
+  const step = async (label, expect) => {
+    const r = await back();
+    await sleep(400);
+    const s = await shown();
+    const ok = expect(r, s);
+    steps.push(`${label}: ${ok ? 'ok' : `WRONG (back ${r}, ${JSON.stringify(s)})`}`);
+    return ok;
+  };
+  let ok = true;
+  // Home: the + menu, then nothing.
+  await pp.locator('button[aria-label="New note"]').dispatchEvent('contextmenu');
+  await sleep(400);
+  ok = (await step('+ menu', (r, s) => r && !s.popups)) && ok;
+  ok = (await step('home', (r, s) => !r && !s.editor)) && ok;
+  // A note: a popover, the export dialog, the pages panel, then the note itself.
+  await pp.getByText('Welcome to', { exact: false }).first().click();
+  await sleep(2000);
+  // Only the note may be registered (a hidden dialog that registered took a back press).
+  const depth = (await shown()).depth;
+  steps.push(`note open, depth ${depth}: ${depth === 1 ? 'ok' : 'WRONG'}`);
+  ok = depth === 1 && ok;
+  await pp.locator('button[title="Insert & pages"]').first().click();
+  await sleep(300);
+  ok = (await step('… menu', (r, s) => r && !s.popups && s.editor)) && ok;
+  const exp = pp.locator('button[title="Export"]');
+  if (await exp.count()) await exp.first().click();
+  else { await pp.locator('button[title="Insert & pages"]').first().click(); await sleep(200); await pp.locator('header button', { hasText: 'Export' }).first().click(); }
+  await sleep(400);
+  ok = (await step('export dialog', (r, s) => r && !s.dialogs && s.editor)) && ok;
+  await pp.locator('button[title="Pages"]').first().click();
+  await sleep(400);
+  ok = (await step('pages panel', (r, s) => r && s.editor)) && ok;
+  ok = (await step('note', (r, s) => r && !s.editor)) && ok;
+  await sleep(800);
+  ok = (await step('home again', (r, s) => !r && s.depth === 0)) && ok;
+  console.log(`back   ${steps.join(' | ')}`);
+  console.log(`back   ${ok ? 'every press went back one step' : 'WRONG'}`);
+  await pctx.close();
+}
 // --only penhold: the pen's hold-to-snap. A line pressed firmly and held still 0.6 s must stay
 // handwriting (resting the pen at the end of a stroke straightened fraction bars); held 1.2 s it
 // snaps, at the handwriting's own width (Stroke.width x 1.4 = its median drawn width).

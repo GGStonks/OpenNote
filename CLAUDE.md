@@ -179,10 +179,27 @@ show the iPad's compositing cost).
   overlapping or cut buttons (on a 360 px phone undo and redo slid under record and paper).
 - Launch screens follow the UI theme: the app sends it at start and on change (`setLaunchTheme`,
   platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
-  the `Launch.<Theme>` styles from Android 13, window and WebView colour in MainActivity) and to the
-  iOS shell (`OpenNoteLaunchColor`, window and web view colour). The mark (`launch_icon.xml`, from
+  the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView
+  colour in MainActivity) and to the iOS shell (`OpenNoteLaunchColor`, window and web view colour).
+  A failed call logs `launch-theme-failed` to the crash report. The mark (`launch_icon.xml`, from
   public/favicon.svg) is centred at its own size on every screen shape: the old full-screen
   splash.png was stretched on 20:9 phones.
+- The safe area is `--sa-top/right/bottom/left` (index.css), never `env(safe-area-inset-*)`: iOS
+  fills them from env(), the Android shell sets them from its insets (cutout, bars that stay shown;
+  MainActivity `keepClearOfSystemBars`), as Android's WebView gives no env() values. The app draws on
+  the whole screen; bars pad their controls by these and `#root` keeps the sides free. Capacitor's
+  SystemBars must keep `insetsHandling: 'disable'` (capacitor.config.ts): on WebViews without
+  safe-area support it padded the window by the cutout and bars, and repainted it with the static
+  theme's colour (grey bands on 20:9 phones, a light start before an OLED app); MainActivity
+  re-applies the theme's colour after it. An emulator (`~/.android/avd/on20x9`, Pixel 7, API 35,
+  headless) shows the launch and insets; driving the WebView: `adb forward` its
+  `webview_devtools_remote_<pid>` and raw CDP (Playwright cannot attach). Headless qemu crashes on
+  any display change (rotation, cutout overlays).
+- The device's back (Android button or gesture) goes back one step: whatever can be closed
+  registers with `useBack(active, close)` (src/services/backStack.ts) while shown, MainActivity
+  asks `window.OpenNoteBack()`, which closes the newest (menus, popovers, dialogs, sheets, the pages
+  panel, the selection, then the note as its back button), and moves the app to the background
+  only when nothing was open. New closable UI must call useBack. `--only back`.
 - Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
   Android `OpenNoteSavePlugin`), with a confirmation of where, or with `mode` 'share' the share
   sheet. In the apps (`exportOffersBoth`: iOS and Android) every export offers both, "Save to…" and

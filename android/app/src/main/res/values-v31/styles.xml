@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+: the splash screen's own attributes set directly (not only through the
+         splash screen library's ?attr), for the theme the app last used (OpenNoteLaunchPlugin). -->
+    <style name="Launch.Light" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_light</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_light</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="android:windowBackground">@drawable/launch_screen_light</item>
+    </style>
+    <style name="Launch.Dark" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_dark</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_dark</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="android:windowBackground">@drawable/launch_screen_dark</item>
+    </style>
+    <style name="Launch.Sepia" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_sepia</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_sepia</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="android:windowBackground">@drawable/launch_screen_sepia</item>
+    </style>
+    <style name="Launch.Midnight" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_midnight</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_midnight</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="android:windowBackground">@drawable/launch_screen_midnight</item>
+    </style>
+    <style name="Launch.Oled" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_oled</item>
+        <item name="android:windowSplashScreenBackground">@color/launch_oled</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="android:windowBackground">@drawable/launch_screen_oled</item>
+    </style>
+</resources>

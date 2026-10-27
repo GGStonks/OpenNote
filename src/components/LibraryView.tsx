@@ -14,6 +14,7 @@ import {
   FOLDER_COLORS, LibraryPrefs, SORT_OPTIONS, TAG_COLORS, TagMode, childFolders, folderAndDescendants, folderPath,
   loadLibraryPrefs, matchesSearch, noteFolder, passesTagFilter, saveLibraryPrefs, sortFolders, sortNotes, tagFilterActive,
 } from '../library';
+import { useBack } from '../services/backStack';
 
 /** Pages of a note (not counting the blank page the note always ends with). */
 const pageCountOf = (n: NoteDocument) => (n.sheets?.length ? printedSheets(n).length : 1);
@@ -229,6 +230,9 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     setFilterOpen(false);
     setFabMenu(false);
   };
+  // The device's back (backStack.ts): the sidebar slid over a phone's screen, then any open menu.
+  useBack(narrow && !prefs.sidebarCollapsed, () => setPrefs({ sidebarCollapsed: true }));
+  useBack(!!(menuNoteId || menuFolderId || menuTagId || filterOpen || fabMenu), closeMenus);
 
   const selectFolder = (id: string | null) => {
     p.onSelectFolder(id);
@@ -450,7 +454,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   const sidebar = (
     <aside className="w-72 h-full bg-ui-side border-r border-gray-300/70 dark:border-gray-800 flex flex-col" onClick={closeMenus}>
       {/* Room for the brand row (logo · name · version), which sits above the sidebar. */}
-      <div className="flex-shrink-0 h-14 mt-[env(safe-area-inset-top)]" />
+      <div className="flex-shrink-0 h-14 mt-[var(--sa-top)]" />
       <div className="px-3 flex-shrink-0">
         <div className="relative">
           <Search className="w-4 h-4 text-gray-400 absolute left-3 top-2.5" />
@@ -827,7 +831,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     <div className="relative h-full flex bg-ui-app text-gray-900 dark:text-gray-100 select-none overflow-hidden" onClick={closeMenus}>
       {/* Brand row: the logo toggles the sidebar and stays visible when the sidebar is closed. */}
       {/* The logo is centred in a header-high square (3.5rem) at the left edge, open or closed. */}
-      <div className={`absolute left-0 top-0 z-50 flex items-center pt-[env(safe-area-inset-top)] h-[calc(3.5rem+env(safe-area-inset-top))] ${sidebarShown ? 'w-72' : ''}`}>
+      <div className={`absolute left-0 top-0 z-50 flex items-center pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${sidebarShown ? 'w-72' : ''}`}>
         <div className="w-14 h-14 flex-shrink-0 flex items-center justify-center">
           <button
             onClick={(e) => { e.stopPropagation(); setPrefs({ sidebarCollapsed: !collapsed }); }}
@@ -859,7 +863,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       )}
 
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white dark:bg-ui-panel">
-        <header className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-3 sm:pr-6 flex-shrink-0 pt-[env(safe-area-inset-top)] h-[calc(3.5rem+env(safe-area-inset-top))] ${!sidebarShown || narrow ? 'pl-[3.75rem]' : 'pl-4 sm:pl-6'}`}>
+        <header className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-3 sm:pr-6 flex-shrink-0 pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${!sidebarShown || narrow ? 'pl-[3.75rem]' : 'pl-4 sm:pl-6'}`}>
           <div className="flex items-center gap-2 min-w-0">
             {path.length > 1 && (
               <div className="hidden sm:flex items-center gap-1 text-sm text-gray-400 min-w-0">
@@ -902,7 +906,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* Settings: fixed in the bottom-left corner, also when the sidebar is closed. */}
       <button
         onClick={(e) => { e.stopPropagation(); p.onOpenSettings(); }}
-        className={`absolute z-50 left-3 bottom-[calc(0.75rem+env(safe-area-inset-bottom))] flex items-center gap-2 h-11 rounded-2xl text-sm font-semibold text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-ui-raised/90 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-md active:scale-95 transition ${sidebarShown ? 'px-3.5' : 'w-11 justify-center'}`}
+        className={`absolute z-50 left-3 bottom-[calc(0.75rem+var(--sa-bottom))] flex items-center gap-2 h-11 rounded-2xl text-sm font-semibold text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-ui-raised/90 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-md active:scale-95 transition ${sidebarShown ? 'px-3.5' : 'w-11 justify-center'}`}
         title="Settings"
       >
         <SettingsIcon className="w-5 h-5" />
@@ -911,11 +915,11 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
       {/* "+": tap for a new note, hold (or right-click) to import files or make a folder (a tap
           already makes a note: the menu has no "New note"). */}
-      <div className="absolute z-40 right-5 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
+      <div className="absolute z-40 right-5 bottom-[calc(1.25rem+var(--sa-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
           // Above the + button (it was given `static` too: `absolute` won, with no offsets, so the
           // menu hung from the button's top edge, mostly below the screen's bottom on a phone).
-          <OnScreen className={`${MENU} bottom-full right-0 mb-2 w-56 max-h-[calc(100dvh-6rem-env(safe-area-inset-bottom))] overflow-y-auto`}>
+          <OnScreen className={`${MENU} bottom-full right-0 mb-2 w-56 max-h-[calc(100dvh-6rem-var(--sa-bottom))] overflow-y-auto`}>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); importRef.current?.click(); }}>
               <Upload className="w-4 h-4" />
               <span className="flex-1">
@@ -961,14 +965,17 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 };
 
 /** A small modal sheet (bottom sheet on phones). */
-const Sheet: React.FC<{ title: string; onClose: () => void; children: React.ReactNode }> = ({ title, onClose, children }) => (
-  <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4" onClick={(e) => { e.stopPropagation(); onClose(); }}>
-    <div className="bg-white dark:bg-ui-panel w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 max-h-[calc(100dvh-16px)] flex flex-col pb-[env(safe-area-inset-bottom)]" onClick={(e) => e.stopPropagation()}>
-      <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2">
-        <h3 className="font-bold text-sm truncate">{title}</h3>
-        <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600 rounded-full"><X className="w-5 h-5" /></button>
+const Sheet: React.FC<{ title: string; onClose: () => void; children: React.ReactNode }> = ({ title, onClose, children }) => {
+  useBack(true, onClose);
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-4" onClick={(e) => { e.stopPropagation(); onClose(); }}>
+      <div className="bg-white dark:bg-ui-panel w-full sm:max-w-sm rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 max-h-[calc(100dvh-16px)] flex flex-col pb-[var(--sa-bottom)]" onClick={(e) => e.stopPropagation()}>
+        <div className="px-4 py-3 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between gap-2">
+          <h3 className="font-bold text-sm truncate">{title}</h3>
+          <button onClick={onClose} className="p-1 text-gray-400 hover:text-gray-600 rounded-full"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="p-2 overflow-y-auto">{children}</div>
       </div>
-      <div className="p-2 overflow-y-auto">{children}</div>
     </div>
-  </div>
-);
+  );
+};

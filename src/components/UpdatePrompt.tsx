@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Download, Loader2, X, AlertCircle } from 'lucide-react';
 import { AppRelease, UpdateProgress, canUpdate, cleanupUpdates, downloadUpdate, findUpdate, installUpdate } from '../services/updater';
 import { platformKind } from '../platform';
+import { useBack } from '../services/backStack';
 
 type Phase =
   | { kind: 'idle' }
@@ -61,6 +62,8 @@ export const UpdatePrompt: React.FC<{ enabled: boolean }> = ({ enabled }) => {
     }
   };
 
+  // Back dismisses the offer as a tap beside it does; a download under way is left alone.
+  useBack(phase.kind !== 'idle' && phase.kind !== 'downloading', () => setPhase({ kind: 'idle' }));
   if (phase.kind === 'idle') return null;
   const ios = platformKind() === 'ios';
 
@@ -98,7 +101,7 @@ export const UpdatePrompt: React.FC<{ enabled: boolean }> = ({ enabled }) => {
 
   // Downloading / ready / failed: a small card in a corner; the app stays usable.
   return (
-    <div className="fixed z-[900] right-3 bottom-3 w-72 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-ui-raised rounded-2xl shadow-2xl ring-1 ring-black/5 dark:ring-white/10 p-3 text-sm" style={{ marginBottom: 'env(safe-area-inset-bottom)' }}>
+    <div className="fixed z-[900] right-3 bottom-3 w-72 max-w-[calc(100vw-1.5rem)] bg-white dark:bg-ui-raised rounded-2xl shadow-2xl ring-1 ring-black/5 dark:ring-white/10 p-3 text-sm" style={{ marginBottom: 'var(--sa-bottom)' }}>
       <div className="flex items-start gap-2">
         {phase.kind === 'error' ? <AlertCircle className="w-4 h-4 mt-0.5 text-red-500 flex-shrink-0" /> : phase.kind === 'downloading' ? <Loader2 className="w-4 h-4 mt-0.5 animate-spin text-blue-600 flex-shrink-0" /> : <Download className="w-4 h-4 mt-0.5 text-blue-600 flex-shrink-0" />}
         <div className="flex-1 min-w-0">

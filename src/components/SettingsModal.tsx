@@ -11,6 +11,7 @@ import { autoDeviceName } from '../services/serverAuth';
 import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
 import { ExportMode, PageRate, exportOffersBoth, platformKind, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
+import { useBack } from '../services/backStack';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -45,6 +46,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
     }
   }, [isOpen, settings]);
 
+  useBack(isOpen, close);
   if (!isOpen) return null;
   // The theme is previewed as soon as it is picked; closing without saving puts the saved one back.
   const onClose = () => {
@@ -95,7 +97,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
-      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[var(--sa-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <div className="p-2 bg-blue-50 dark:bg-blue-900/40 text-blue-600 rounded-xl">

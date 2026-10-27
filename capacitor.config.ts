@@ -16,7 +16,10 @@ const config: CapacitorConfig = {
     // Native HTTP is called explicitly (src/platform.ts); fetch/XHR are not patched globally.
     CapacitorHttp: { enabled: false },
     // Immersive fullscreen (MainActivity hides the bars too, and again whenever the app regains focus).
-    SystemBars: { hidden: true, initialViewportFitValueHint: 'cover' },
+    // Insets: MainActivity gives them to the page (--sa-* in index.css). Capacitor's own handling
+    // padded the whole app by the cutout and the bars on WebViews without safe-area support,
+    // leaving bands of the window's colour around it (20:9 phones).
+    SystemBars: { hidden: true, initialViewportFitValueHint: 'cover', insetsHandling: 'disable' },
   },
 };
 

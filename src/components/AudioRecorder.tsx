@@ -3,6 +3,7 @@ import { Mic, Square, Play, Pause, Trash2, ListMusic } from 'lucide-react';
 import { AudioRecording, newId } from '../types';
 import { OnScreen } from './onScreen';
 import { deleteRecording, getRecordingBlob, listRecordings, saveRecording } from '../storage/db';
+import { useBack } from '../services/backStack';
 
 /**
  * Per-note audio recording (Notability's signature feature, simplified: recordings are stored with
@@ -25,6 +26,7 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
   const [elapsed, setElapsed] = useState(0);
   const [list, setList] = useState<AudioRecording[]>([]);
   const [open, setOpen] = useState(false);
+  useBack(open, () => setOpen(false));
   const [playing, setPlaying] = useState<string | null>(null);
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<Blob[]>([]);
