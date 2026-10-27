@@ -37,7 +37,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.4.7";
+static NSString *const kVersion = @"2.4.8";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -53,6 +53,7 @@ static NSString *const kPage120Key = @"OpenNotePage120Hz";
 @property (nonatomic, readonly) BOOL active;
 - (void)handleMessage:(NSString *)msg;
 - (void)leadTo:(CGPoint)p;
+- (void)dropLead;
 - (void)touchEnded;
 @end
 
@@ -120,11 +121,16 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         // Native live ink: the line reaches the pen's newest position now, not after the page. Not
         // to samples without force: the Pencil leaving the glass, which the ink engine leaves out of
         // the ink (the line ends where it lifted); drawing the lead to them made the ink overshoot
-        // past its end until the page took the stroke over.
+        // past its end until the page took the stroke over. Nor to an older sample once one without
+        // force came: the line runs on past it, and the lead back to it showed as a chord. The page
+        // keeps the same lead (src/ink/nativePencil.ts): its finished stroke ends there.
         ONInkView *ink = self.inkView;
         UITouch *newest = samples.lastObject;
         CGFloat maxForce = newest.maximumPossibleForce > 0 ? newest.maximumPossibleForce : 1;
-        if (ink.active && phase == 1 && newest.force / maxForce > 0.02) [ink leadTo:[newest preciseLocationInView:view]];
+        if (ink.active && phase == 1) {
+            if (newest.force / maxForce > 0.02) [ink leadTo:[newest preciseLocationInView:view]];
+            else [ink dropLead];
+        }
         if (phase >= 2) {
             _pencil = nil;
             [ink touchEnded];
@@ -479,6 +485,8 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     CGColorRef _color;
     BOOL _hasRaw;
     CGPoint _raw;
+    /** The pen lifted from the stroke shown: the next touch's samples are not its lead. */
+    BOOL _lifted;
     NSUInteger _generation;
     ONSceneView *_scene;
     /** The page's id of the stroke shown ("b"'s last field; 0: none or a drawing). */
@@ -588,7 +596,11 @@ static const double kInkHoldSeconds = 0.06;
         [_tail removeFromSuperlayer];
         [held addSublayer:_tail];
     }
-    [_lead removeFromSuperlayer];
+    // The lead too: the pen lifted where it reaches (the page's stroke ends there, "l").
+    if (_lead) {
+        [_lead removeFromSuperlayer];
+        if (_hasRaw) [held addSublayer:_lead];
+    }
     [_chunks removeAllObjects];
     _tail = _lead = nil;
     [self.layer insertSublayer:held below:_clip];
@@ -646,6 +658,7 @@ static const double kInkHoldSeconds = 0.06;
 }
 
 - (void)leadTo:(CGPoint)p {
+    if (_lifted) return;
     _raw = p;
     _hasRaw = YES;
     [CATransaction begin];
@@ -654,13 +667,29 @@ static const double kInkHoldSeconds = 0.06;
     [CATransaction commit];
 }
 
-- (void)touchEnded {
-    // The pen lifted: no lead past the line's end (the line itself ends where the ink engine ends it).
+- (void)dropLead {
+    if (_lifted || !_hasRaw) return;
     _hasRaw = NO;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     _lead.path = NULL;
     [CATransaction commit];
+}
+
+/** The line's last piece (from the last settled point through the provisional tail). */
+- (void)drawTail {
+    NSUInteger nt = _tailPts.length / sizeof(ONInkPt), ns = self.settledCount;
+    if (!_tail) _tail = [self newShape];
+    NSMutableData *seq = [NSMutableData dataWithCapacity:(nt + 1) * sizeof(ONInkPt)];
+    if (ns) [seq appendBytes:self.settled + ns - 1 length:sizeof(ONInkPt)];
+    [seq appendData:_tailPts];
+    [self setShape:_tail points:(const ONInkPt *)seq.bytes count:seq.length / sizeof(ONInkPt)];
+}
+
+- (void)touchEnded {
+    // The pen lifted: the lead stays until the page says where its stroke ends ("l"); dropping it
+    // here pulled the ink's end back at every lift (zoomed in, by several px).
+    _lifted = YES;
     // Safety net: the page normally clears the layer ("e"); if it never does, do not leave ink.
     NSUInteger gen = _generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -686,6 +715,7 @@ static const double kInkHoldSeconds = 0.06;
         [self clear];
         _generation++;
         _currentId = sid;
+        _lifted = NO;
         if (_color) CGColorRelease(_color);
         _color = CGColorRetain([UIColor colorWithRed:f[1].doubleValue / 255 green:f[2].doubleValue / 255 blue:f[3].doubleValue / 255 alpha:f[4].doubleValue].CGColor);
         _variable = f[5].intValue != 0;
@@ -720,13 +750,20 @@ static const double kInkHoldSeconds = 0.06;
             [self setShape:_chunks.lastObject points:self.settled + _chunkStart count:ns - _chunkStart];
         }
         // The tail continues from the last settled point.
-        NSUInteger nt = _tailPts.length / sizeof(ONInkPt);
-        if (!_tail) _tail = [self newShape];
-        NSMutableData *seq = [NSMutableData dataWithCapacity:(nt + 1) * sizeof(ONInkPt)];
-        if (ns) [seq appendBytes:self.settled + ns - 1 length:sizeof(ONInkPt)];
-        [seq appendData:_tailPts];
-        [self setShape:_tail points:(const ONInkPt *)seq.bytes count:seq.length / sizeof(ONInkPt)];
+        [self drawTail];
         [self drawLead];
+    } else if ([kind isEqualToString:@"l"] && _active && f.count >= 2 && f[1].integerValue == _currentId) {
+        // The pen lifted and the page's stroke is finished: it runs on to x, y at its end's radius
+        // (Stroke.penEnd, where the lead reached), which becomes part of the line; "l,id" alone: it
+        // ends where the line ends.
+        ONInkPt end;
+        if (f.count >= 4 && [self lineEnd:&end]) {
+            ONInkPt q = { f[2].doubleValue, f[3].doubleValue, end.r };
+            [_tailPts appendBytes:&q length:sizeof q];
+            [self drawTail];
+        }
+        _hasRaw = NO;
+        _lead.path = NULL;
     } else if ([kind isEqualToString:@"d"] && f.count >= 5) {
         // A whole drawing: replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
         BOOL wasScene = _active && !_chunks.count && !_tail;

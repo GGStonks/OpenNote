@@ -120,6 +120,8 @@ public class OpenNoteInkPlugin extends Plugin {
         private boolean active;
         private boolean hasRaw;
         private float rawX, rawY;
+        /** The stylus lifted from the stroke shown: the next touch's positions are not its lead. */
+        private boolean lifted;
         private int generation;
         private final int[] wvLoc = new int[2];
         private final int[] myLoc = new int[2];
@@ -206,6 +208,7 @@ public class OpenNoteInkPlugin extends Plugin {
                     clear();
                     generation++;
                     currentId = sid;
+                    lifted = false;
                     color = Color.argb(Math.round(Float.parseFloat(f[4]) * 255), Math.round(Float.parseFloat(f[1])), Math.round(Float.parseFloat(f[2])), Math.round(Float.parseFloat(f[3])));
                     variable = !"0".equals(f[5]);
                     clip.set(Float.parseFloat(f[6]), Float.parseFloat(f[7]), Float.parseFloat(f[6]) + Float.parseFloat(f[8]), Float.parseFloat(f[7]) + Float.parseFloat(f[9]));
@@ -252,6 +255,15 @@ public class OpenNoteInkPlugin extends Plugin {
                     tailWidth = tail.length > 0 ? tail[tail.length - 1] * 2 : 0;
                     break;
                 }
+                case "l": {
+                    // The stylus lifted and the page's stroke is finished: it runs on to x, y at its
+                    // end's radius (Stroke.penEnd, where the lead reached), which becomes part of the
+                    // line; "l,id" alone: it ends where the line ends.
+                    if (!active || f.length < 2 || Integer.parseInt(f[1]) != currentId) return;
+                    if (f.length >= 4) appendToTail(Float.parseFloat(f[2]), Float.parseFloat(f[3]));
+                    hasRaw = false;
+                    break;
+                }
                 case "d": {
                     if (f.length < 5) return;
                     // Replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
@@ -286,9 +298,38 @@ public class OpenNoteInkPlugin extends Plugin {
             invalidate();
         }
 
+        /** The line's end: the tail's last point, else the last settled point (null: none). */
+        private float[] lineEnd() {
+            int n = tail.length / 3;
+            if (n > 0) return new float[] { tail[(n - 1) * 3], tail[(n - 1) * 3 + 1], tail[(n - 1) * 3 + 2] };
+            if (settledCount > 0) return new float[] { settled[(settledCount - 1) * 3], settled[(settledCount - 1) * 3 + 1], settled[(settledCount - 1) * 3 + 2] };
+            return null;
+        }
+
+        /** Continues the line straight to x, y at its end's radius. */
+        private void appendToTail(float x, float y) {
+            float[] end = lineEnd();
+            if (end == null) return;
+            float[] grown;
+            if (tail.length == 0) {
+                grown = new float[] { end[0], end[1], end[2], x, y, end[2] };
+            } else {
+                grown = new float[tail.length + 3];
+                System.arraycopy(tail, 0, grown, 0, tail.length);
+                grown[tail.length] = x;
+                grown[tail.length + 1] = y;
+                grown[tail.length + 2] = end[2];
+            }
+            tail = grown;
+            tailPath = build(tail, 0, tail.length / 3);
+            tailWidth = end[2] * 2;
+        }
+
         /** Keeps the shown stroke on screen (as Retired) until its "e,id", while the next is written. */
         private void retire() {
             if (!active || scene != null || currentId == 0 || (chunks.isEmpty() && tail.length == 0)) return;
+            // The lead too: the stylus lifted where it reaches (the page's stroke ends there, "l").
+            if (hasRaw) appendToTail(rawX, rawY);
             Retired r = new Retired(currentId, new ArrayList<>(chunks), new ArrayList<>(chunkWidths), tailPath, tailWidth, color, variable, new RectF(clip));
             retired.add(r);
             // Safety net, as touchEnded's.
@@ -316,6 +357,7 @@ public class OpenNoteInkPlugin extends Plugin {
 
         /** The stylus's newest raw position (window px), straight from the touch event. */
         void leadTo(float windowX, float windowY) {
+            if (lifted) return;
             webView.getLocationInWindow(wvLoc);
             rawX = windowX - wvLoc[0];
             rawY = windowY - wvLoc[1];
@@ -323,11 +365,18 @@ public class OpenNoteInkPlugin extends Plugin {
             invalidate();
         }
 
-        /** Safety net: the page normally clears the ink ("e"); if it never does, do not leave it. */
-        void touchEnded() {
-            // The stylus lifted: no lead past the line's end (the line ends where the ink engine ends it).
+        /** A move without pressure: the line runs on past the lead's sample, a lead back to it showed as a chord. */
+        void dropLead() {
+            if (lifted || !hasRaw) return;
             hasRaw = false;
             invalidate();
+        }
+
+        /** Safety net: the page normally clears the ink ("e"); if it never does, do not leave it. */
+        void touchEnded() {
+            // The stylus lifted: the lead stays until the page says where its stroke ends ("l");
+            // dropping it here pulled the ink's end back at every lift.
+            lifted = true;
             int gen = generation;
             postDelayed(() -> {
                 if (generation == gen && active) {
@@ -595,11 +644,16 @@ public class OpenNoteInkPlugin extends Plugin {
         int i = ev.getActionIndex();
         if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_STYLUS) return;
         switch (ev.getActionMasked()) {
-            case MotionEvent.ACTION_MOVE:
+            case MotionEvent.ACTION_MOVE: {
                 // Not to samples without pressure (the stylus leaving the glass): the ink engine leaves
-                // them out of the ink, and a lead to them made the ink overshoot past its end.
-                if (ev.getPressure(i) > 0.02f) view.leadTo(ev.getX(i), ev.getY(i));
+                // them out of the ink, and a lead to them made the ink overshoot past its end. The
+                // stylus's own pointer, whose samples the page gets (its lead is the same: nativePencil.ts).
+                int p = stylusId >= 0 ? ev.findPointerIndex(stylusId) : -1;
+                if (p < 0) break;
+                if (ev.getPressure(p) > 0.02f) view.leadTo(ev.getX(p), ev.getY(p));
+                else view.dropLead();
                 break;
+            }
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
                 view.touchEnded();

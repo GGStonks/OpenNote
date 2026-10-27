@@ -24,6 +24,14 @@ In the apps, the stroke being written is also drawn natively above the web view 
 screen (also while the next is written) until its own `e,id`, plus ~60 ms, as the page's copy
 reaches the screen after the page's frame (clearing earlier made ink blink at 60 fps).
 `npm run bench:ui -- --native --only pen` checks every stroke is ended by id.
+While the pen is down the shells also draw a lead, from the modelled line's end to the stylus's
+newest sample while it presses (> 2% force; dropped on a move without force). The engine's
+finished line ends short of it (median 1.4, p90 6 page px on real recordings, `npm run
+bench:leadend`), so dropping the lead at lift pulled the ink's end back, several screen px zoomed
+in. Now the shells keep it until the page's `l,id[,x,y]`: the page tracks the same lead
+(`nativePencil.lead`) and the finished stroke runs straight on to it (`Stroke.penEnd`: its last
+point is that sample, not modelled; `penEnd()` / `strokeGeometry` in strokeRenderer.ts, after the
+smoothing). `--native --only leadend` checks the message and the stored stroke.
 Shapes being drawn (Draw tool, snapped strokes) are sent whole on every event (`d` messages,
 `src/ink/inkRecorder.ts`); `npm run bench:ui -- --native --only shapepen` measures the page's side.
 The Draw tool's free curve is densified like the pen, and when the pen lifts the shell is sent the
@@ -171,7 +179,14 @@ show the iPad's compositing cost).
   shrinking softens too. `--only liftshots [--native] [--width N] [--shots <dir>]`: the frames after
   a lift (sharpness, movement) and each page canvas's scale and device-pixel offset (`1.0000x off 0,0`
   is 1:1); the same goes to the crash report after a native stroke (`ink-grid`, every 10 s at most).
-  Still open: pages start a fraction of a device pixel off the grid at some zooms (`off` 0.16–0.31).
+  `--zsteps a,b` picks the zooms, `--scroll N` other pages. Page tops sit at zoom x page height, a
+  fraction of a device px (2.4.7 at 126%, the iPad Pro's full width: 0.16-0.39 px off, every finished
+  stroke resampled): each page canvas nudges itself onto whole device px (`align` in InkTile, under
+  half a px, again after each zoom: useViewport's `CONTENT_PLACED` event), as SharpInk's tiles do
+  with their origin.
+  Zoomed in over empty paper there are no tiles and the page canvases are hidden: SharpInk must
+  still paint a new stroke there (it once returned early without tiles: the stroke stayed invisible
+  after the shell's line cleared; `--native --blank --only liftshots`).
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release

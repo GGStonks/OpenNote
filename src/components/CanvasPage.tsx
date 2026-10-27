@@ -16,7 +16,7 @@ import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil'
 import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
 import { tileWork } from '../editor/tileWork';
-import { FIT_MARGIN } from '../editor/useViewport';
+import { CONTENT_PLACED, FIT_MARGIN } from '../editor/useViewport';
 import { detectShape } from '../services/shapeRecognition';
 import { PageOps } from '../state/useNoteEditor';
 import {
@@ -793,7 +793,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
   useLayoutEffect(() => {
     const before = prevStrokes.current;
     prevStrokes.current = strokes;
-    if (before === strokes || !tiles.current.size) return;
+    // Also without a single tile (zoomed in over empty paper: none were needed): the page canvases are
+    // hidden then, so returning here left a stroke written there invisible once the shell's native
+    // line cleared, until something else repainted.
+    if (before === strokes) return;
     const r = scale.current;
     const n = before.length;
     const appended = strokes.length > n && before.every((st, i) => strokes[i] === st) && strokes.slice(n).every((st) => st.tool !== 'highlighter' && (!st.fill || st.fill === 'none'));
@@ -844,10 +847,59 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   const onScreen = useRef(eager);
   /** Within half a screen of the view: the canvas is displayed (see `shown` below). */
   const shown = useRef(true);
+  /** The canvas's nudge onto whole screen pixels (page px, see `align`). */
+  const nudge = useRef({ x: 0, y: 0, el: null as HTMLCanvasElement | null });
+  /**
+   * Puts the canvas's corner on a whole screen pixel. The page tops are at zoom x page height, a
+   * fraction of a device px at most zooms (at 126%, the iPad Pro's full width, 0.16-0.39 px): the
+   * compositor then resampled the whole canvas, and every finished stroke went soft beside the
+   * shell's crisp live line. The nudge is under half a device px (SharpInk's tiles do the same
+   * with their origin). Scrolling moves by whole device px, so only a new zoom or layout needs it.
+   */
+  const align = () => {
+    const c = canvasRef.current;
+    if (!c || !shown.current || !c.isConnected) return;
+    const r = c.getBoundingClientRect();
+    const s = r.width / W;
+    if (!(s > 0)) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const off = (v: number) => (Math.round(v * dpr) - v * dpr) / (dpr * s);
+    const dx = off(r.left), dy = off(r.top);
+    if (Math.abs(dx) * s * dpr < 0.002 && Math.abs(dy) * s * dpr < 0.002) return;
+    const n = nudge.current;
+    if (n.el !== c) Object.assign(n, { x: 0, y: 0, el: c });
+    n.x += dx;
+    n.y += dy;
+    // Back within half a device px (the content may have moved by more since the last nudge).
+    const half = 0.5 / (dpr * s);
+    if (Math.abs(n.x) > half) n.x -= Math.round(n.x / (2 * half)) * 2 * half;
+    if (Math.abs(n.y) > half) n.y -= Math.round(n.y / (2 * half)) * 2 * half;
+    c.style.transform = `translate(${n.x}px, ${n.y}px)`;
+  };
   const applyShown = () => {
     const c = canvasRef.current;
     if (c) c.style.display = shown.current ? '' : 'none';
+    if (shown.current) align();
   };
+  // Again after the zoom places the content (a sub-pixel translate, useViewport) and on resizing.
+  useEffect(() => {
+    let raf: number | null = null;
+    const later = () => {
+      if (raf !== null) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = null;
+        align();
+      });
+    };
+    window.addEventListener(CONTENT_PLACED, later);
+    window.addEventListener('resize', later);
+    later();
+    return () => {
+      if (raf !== null) cancelAnimationFrame(raf);
+      window.removeEventListener(CONTENT_PLACED, later);
+      window.removeEventListener('resize', later);
+    };
+  }, [ratio, alive, top, W, H]);
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
@@ -1369,6 +1421,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     inkTf: InkTransform | null;
     /** The pen lifted before the shell's last samples arrived: finish when they do. */
     finishPending: { cancelled: boolean; pointerType: string; timer: ReturnType<typeof setTimeout> } | null;
+    /** Where the shell's native ink reaches past the modelled line (nativePencil.lead), page px. */
+    lead: Point | null;
   } | null>(null);
   const raf = useRef<number | null>(null);
   const eraserPos = useRef<{ x: number; y: number } | null>(null);
@@ -1730,6 +1784,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       lastNativeAt: 0,
       webBuffer: [],
       finishPending: null,
+      lead: null,
       rec: tool === 'pen' && penRecorder.enabled ? [recSample(pt, e.pointerType === 'pen' ? e.pressure : 0.5, start)] : null,
       recFrames: [],
     };
@@ -1963,6 +2018,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     d.nativeSeen = true;
     if (ended) d.nativeEnded = true;
+    const lead = nativePencil.lead;
+    d.lead = lead ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null;
     ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
     if (ended && d.finishPending) {
       clearTimeout(d.finishPending.timer);
@@ -2063,6 +2120,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           frames: d.recFrames,
         });
       }
+      // The shell's live ink reached past the modelled line, to the Pencil (its lead): the stroke
+      // runs on to there, as it was seen, instead of pulling back when the pen lifts (zoomed in,
+      // the engine's end a page px or two short was several screen px). Only with the shell's
+      // samples to the end: its lead is where they put it.
+      const end = d.ink && d.nativeEnded && !d.snapped && d.tool === 'pen' ? d.lead : null;
+      if (d.ink && !d.snapped) d.ink.lift(end, d.inkTf ?? inkTransform());
       const stroke: Stroke = {
         id: newId('stroke'),
         createdAt: Date.now(),
@@ -2074,7 +2137,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         lineStyle: 'solid',
         // Pen strokes keep their lift-off samples: Nib leaves them out of the ink (nib.ts, 4b), the
         // same way live and when the stroke is drawn later.
-        points: d.snapped ? d.snapped.points : d.points,
+        points: d.snapped ? d.snapped.points : end ? [...d.points, end] : d.points,
+        ...(end ? { penEnd: true } : {}),
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
         ...(d.tool === 'highlighter' ? { highlightAlpha: style.highlightAlpha } : {}),
       };

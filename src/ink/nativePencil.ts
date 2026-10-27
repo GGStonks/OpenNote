@@ -28,6 +28,8 @@ export interface PencilSample {
 export type PencilListener = (samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void;
 
 const STRIDE = 6;
+/** The shells draw the lead to a sample with more force than this (OpenNoteShell.m, OpenNoteInkPlugin.java). */
+const LEAD_FORCE = 0.02;
 
 /** performance.now() minus the native clock, in ms: the smallest value seen (least IPC delay). */
 let offset = Infinity;
@@ -45,6 +47,12 @@ let queue: PencilSample[] = [];
 let touchActive = false;
 let touchEnded = false;
 let seen = false;
+/**
+ * Where the shell's live ink reaches now, past the modelled line (its lead): the newest sample of
+ * the touch's last move with force, as ONInkView / InkOverlay draw it; null once a move without
+ * force came (the shells drop the lead then).
+ */
+let lead: PencilSample | null = null;
 
 function decode(data: number[], offset: number): PencilSample[] {
   const out: PencilSample[] = [];
@@ -81,6 +89,11 @@ function receive(phase: number, nativeNow: number, data: number[], predicted: nu
   }
   const o = Number.isFinite(touchOffset) ? touchOffset : offset;
   const samples = decode(data, o);
+  if (phase === 0) lead = null;
+  else if (phase === 1 && samples.length) {
+    const newest = samples[samples.length - 1];
+    lead = newest.pressure > LEAD_FORCE ? newest : null;
+  }
   const ended = phase >= 2;
   if (ended) {
     touchActive = false;
@@ -107,6 +120,10 @@ export const nativePencil = {
   },
   get touching(): boolean {
     return touchActive;
+  },
+  /** Where the shell's live ink reaches past the modelled line for the current touch (see `lead`). */
+  get lead(): PencilSample | null {
+    return lead;
   },
   /** Starts delivering samples to `fn`; samples queued since the touch began come first. */
   attach(fn: PencilListener): PencilSample[] {

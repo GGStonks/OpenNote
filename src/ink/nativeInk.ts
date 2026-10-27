@@ -20,6 +20,10 @@
  *                                                 until its own e,id (the next stroke often
  *                                                 begins before the page has drawn the last)
  *   u,n,x,y,r,...                                 n new settled points, then the tail (x, y, radius)
+ *   l,id,x,y                                      the pen lifted: stroke id's line runs on to x, y
+ *                                                 at its end's radius (Stroke.penEnd: the lead,
+ *                                                 kept); "l,id" alone: no lead (the shells keep it
+ *                                                 from the lift until this message)
  *   d,clipX,clipY,clipW,clipH,<commands>         a whole drawing (Draw tool shapes, snapped shapes):
  *                                                 replaces what is shown (commands: inkRecorder.ts)
  *   e,id                                          the page shows stroke id: the shell removes its
@@ -133,6 +137,15 @@ export class NativeInk {
     this.sent = final.length;
     rest.forEach((q, i) => push(q, restW[i]));
     send!(out.join(','));
+  }
+
+  /**
+   * The pen lifted: the finished stroke runs on from the line's end to `end` (page px; its
+   * Stroke.penEnd), which the shell's lead reached, or ends where the line ends (null).
+   */
+  lift(end: { x: number; y: number } | null, tf: InkTransform): void {
+    if (this.done || this.scene || !this.model || !NativeInk.available) return;
+    send!(end ? `l,${this.id},${f(tf.ox + end.x * tf.k)},${f(tf.oy + end.y * tf.k)}` : `l,${this.id}`);
   }
 
   /** Shows a whole drawing (commands from inkRecorder's record), replacing the stroke or the last drawing. */

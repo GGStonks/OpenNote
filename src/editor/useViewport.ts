@@ -28,6 +28,8 @@ export type FitMode = 'width' | 'page' | null;
 
 /** Screen px left between a page fitted to the width and each edge of the screen. */
 export const FIT_MARGIN = 2;
+/** Window event after a zoom has placed the content (scroll and sub-pixel translate): ink canvases re-align to the pixel grid. */
+export const CONTENT_PLACED = 'opennote-content-placed';
 /** A pinch ending within this fraction of the page's fit-to-width zoom snaps to it (and follows the pages again). */
 const FIT_SNAP = 0.08;
 
@@ -147,6 +149,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     const sub = (d: number) => (Math.abs(d) < 1 ? Math.round(d * 100) / 100 : 0);
     const dx = sub(a.sx - (a.cx * z + o.x)), dy = sub(a.sy - (a.cy * z + o.y));
     if (dx || dy) outer.style.translate = `${dx}px ${dy}px`;
+    window.dispatchEvent(new Event(CONTENT_PLACED));
   };
 
   /**

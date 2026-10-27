@@ -112,6 +112,35 @@ export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoi
 type InkGeometry = ReturnType<typeof inkGeometry>;
 const geometryCache = new WeakMap<Stroke, InkGeometry>();
 
+/** The point a stroke's line continues to after the ink engine's end (Stroke.penEnd), or null. */
+export function penEnd(s: Stroke): Point | null {
+  return s.penEnd && !s.modeled && !s.isShape && s.points.length > 1 ? s.points[s.points.length - 1] : null;
+}
+
+/** The points the ink engine models: all but the pen end. */
+function enginePoints(s: Stroke): Point[] {
+  return penEnd(s) ? s.points.slice(0, -1) : s.points;
+}
+
+/**
+ * The line continued straight to the pen end at its last point's width: what the shells drew from
+ * the line's end to the Pencil (the lead) while the pen was down.
+ */
+function toPenEnd<G extends { pts: ModeledPoint[]; widths: number[] | null }>(g: G, end: Point | null): G {
+  const last = g.pts[g.pts.length - 1];
+  if (!end || !last || Math.hypot(end.x - last.x, end.y - last.y) < 0.05) return g;
+  return {
+    ...g,
+    pts: [...g.pts, { x: end.x, y: end.y, p: last.p, t: last.t }],
+    widths: g.widths ? [...g.widths, g.widths[g.widths.length - 1]] : null,
+  };
+}
+
+/** The modelled centre line of a stroke, to its pen end (TikZ). */
+export function strokeLine(s: Stroke): ModeledPoint[] {
+  return toPenEnd({ pts: modeledLine(enginePoints(s), s.modeled), widths: null }, penEnd(s)).pts;
+}
+
 /**
  * The line of a committed stroke as it is drawn everywhere (canvas, SVG, eraser), cached per
  * stroke (a moved copy reuses its original's, moved): the ink engine's line, smoothed except its
@@ -129,8 +158,10 @@ export function strokeGeometry(s: Stroke): InkGeometry {
     g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
   } else {
     const style = styleOf(s);
-    g = inkGeometry(s.points, style);
+    g = inkGeometry(enginePoints(s), style);
     if (!style.modeled && !s.isShape) g = settledSmooth(g);
+    // After the smoothing, which is then the very line drawn live (the pen end is not smoothed in).
+    g = toPenEnd(g, penEnd(s));
   }
   geometryCache.set(s, g);
   return g;
@@ -1020,6 +1051,7 @@ export function eraseStrokesPartial(
           fill: undefined,
           arrow: keepsEnd ? s.arrow : undefined,
           modeled,
+          penEnd: undefined,
         });
       }
       run = [];

@@ -116,7 +116,7 @@ const LANDSCAPE = process.argv.includes('--landscape');
 const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: Number(arg('width', 1180)), height: 820 } : { width: Number(arg('width', 820)), height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
-if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'l') (window.__inkLs ??= []).push(m); if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
@@ -1531,7 +1531,7 @@ if (ONLY.has('liveshots') && arg('shots')) {
   await page.screenshot({ path: join(arg('shots'), 'live-up.png'), clip: { x: 120, y: 520, width: 480, height: 260 } });
   console.log(`liveshots zoom ${z}%`);
 }
-// Not in the default run: --only liftshots [--native] [--shots <dir>] writes a stroke at fit width
+// Not in the default run: --only liftshots [--native] [--zsteps a,b] [--scroll N] [--shots <dir>] writes a stroke at fit width
 // and zoomed in, then captures the page in the frames after the pen lifts. Per frame: how soft the
 // ink's edges are (`soft`: share of ink pixels that are only partly covered; blur raises it) and
 // where it is (`dx,dy`: centroid shift from the last frame, in screen px). A finished stroke must
@@ -1560,19 +1560,56 @@ if (ONLY.has('liftshots')) {
     }
     return { ink, soft: ink ? soft / ink : 0, cx: w ? sx / w : 0, cy: w ? sy / w : 0 };
   }, png.toString('base64'));
-  for (const zoomSteps of [0, 6]) {
-    await reopen();
+  // --blank: a note of its own on blank paper with one small stroke in a corner, so the stroke is
+  // written where there is no ink yet (zoomed in: no sharp tile there until it is painted).
+  const openBlank = async () => {
+    const now = Date.now();
+    await page.evaluate(async (note) => {
+      const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+      await new Promise((res) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(note); tx.oncomplete = res; });
+      db.close();
+    }, { id: 'doc_lift', title: 'Lift note', createdAt: now, updatedAt: now + 2e6, paperStyle: 'blank', paperColor: 'white', schemaVersion: 3,
+         pages: [{ id: 'page_lift', pageNumber: 1, latexBlocks: [], textBlocks: [], imageBlocks: [],
+           strokes: [{ id: 'lift_0', tool: 'pen', color: '#111827', width: 1.6, opacity: 1, penStyle: 'fountain', createdAt: now,
+             points: [0, 1, 2, 3, 4, 5].map((i) => ({ x: 30 + i * 6, y: 30 + (i % 2) * 4, pressure: 0.5, t: i * 8 })) }] }] });
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await page.reload();
+    await page.getByText('Lift note').first().click();
+    await sleep(2500);
+    await instrument();
+  };
+  // --zsteps a,b: the zooms (Ctrl+= presses from fit width; default 0,6: 100% and about 380%).
+  for (const zoomSteps of arg('zsteps', '0,6').split(',').map(Number)) {
+    if (process.argv.includes('--blank')) await openBlank();
+    else await reopen();
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
     for (let i = 0; i < zoomSteps; i++) {
       await page.keyboard.press('Control+Equal');
       await sleep(150);
     }
     await sleep(1500);
+    // --scroll N: scrolled N px down first (other pages sit at other fractions of a device px).
+    if (arg('scroll')) {
+      await page.mouse.move(500, 700);
+      for (let left = +arg('scroll'); left > 0; left -= 400) { await page.mouse.wheel(0, Math.min(400, left)); await sleep(120); }
+      await sleep(1200);
+    }
     const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    // --at x,y: where the loop is centred (default over existing handwriting; on empty paper a
+    // zoomed-in page has no sharp tile there yet).
+    // --at empty: the first spot in view no sharp tile covers (no ink there yet).
+    const [ax, ay] = arg('at') === 'empty' ? await page.evaluate(() => {
+      const tiles = [...document.querySelectorAll('[data-ink-layer] canvas')].filter((c) => !c.closest('[data-ink-key]')).map((c) => c.getBoundingClientRect());
+      const free = (x, y) => !tiles.some((r) => r.right > x - 220 && r.left < x + 220 && r.bottom > y - 130 && r.top < y + 130);
+      for (let y = 300; y < innerHeight - 200; y += 40) for (let x = 260; x < innerWidth - 240; x += 40) if (free(x, y)) return [x, y];
+      return [360, 640];
+    }) : (arg('at') || '360,640').split(',').map(Number);
+    if (arg('at') === 'empty') console.log(`liftshots   empty spot at ${ax},${ay}`);
     const pts = Array.from({ length: 70 }, (_, i) => {
       const a = (i / 69) * Math.PI * 3.2;
-      return [300 + Math.cos(a) * 140 + i * 2, 640 + Math.sin(a) * 90];
+      return [ax - 60 + Math.cos(a) * 140 + i * 2, ay + Math.sin(a) * 90];
     });
+    clip.x = ax - 240; clip.y = ay - 120;
     await mouse('mousePressed', pts[0][0], pts[0][1]);
     for (const [x, y] of pts.slice(1)) {
       await mouse('mouseMoved', x, y, 0.4 + 0.3 * Math.sin(x / 40));
@@ -1614,8 +1651,61 @@ if (ONLY.has('liftshots')) {
     console.log(`liftshots zoom ${z}%  canvases on screen: ${grid.join(' | ') || 'none'}`);
     console.log(`liftshots zoom ${z}%  content shift ${shift}  pen down: ink ${down.ink} soft ${down.soft.toFixed(3)}${process.argv.includes('--native') ? ' (native: without the new stroke)' : ''}`);
     for (const r of rows) console.log(`liftshots   ${r}`);
+    if (process.argv.includes('--blank')) {
+      const st = await page.evaluate(() => ({
+        tiles: [...document.querySelectorAll('[data-ink-layer] canvas')].filter((c) => !c.closest('[data-ink-key]')).length,
+        pageCanvases: [...document.querySelectorAll('[data-ink-key] canvas')].map((c) => `${c.width}x${c.height} ${getComputedStyle(c).visibility} ${getComputedStyle(c.parentElement).visibility}`),
+      }));
+      console.log(`liftshots   blank: ${JSON.stringify(st)}`);
+      if (arg('shots')) await page.screenshot({ path: join(arg('shots'), `lift-${z}-fullview.png`) });
+    }
     const ig = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'ink-grid').slice(-1));
     console.log(`liftshots   crash log: ${JSON.stringify(ig)}`);
+  }
+}
+// --native --only leadend: pen strokes from the shell's samples (window.__opennotePencil), the last
+// move pressing (then the shell's lead reaches its newest sample) or not (no lead). When the pen
+// lifts, the shell must be told to keep its lead ("l,id,x,y" at that sample) or drop it ("l,id"), and
+// the stored stroke must end there (Stroke.penEnd), so the ink does not pull back at the lift.
+if (ONLY.has('leadend') && process.argv.includes('--native')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const unit = await page.evaluate(() => window.devicePixelRatio || 1); // the mock shell is Android's: device px
+  for (const [k, pressing] of [[0, true], [1, false], [2, true]]) {
+    await page.evaluate(() => { window.__inkLs = []; });
+    const T = 240, t0 = await page.evaluate(() => performance.now());
+    const at = (ms) => [260 + 300 * (ms / T), 560 + k * 110 + 40 * Math.sin(ms / 40)];
+    const sample = (ms, force) => { const [x, y] = at(ms); return [x, y, force, (t0 + ms) / 1000, 1.2, 0.5]; };
+    await page.evaluate(([d, now]) => window.__opennotePencil(0, now, d, []), [sample(0, 0.4), t0 / 1000]);
+    await mouse('mousePressed', ...at(0), 0.4);
+    let last = 0;
+    for (let ms = 16; ms <= T; ms += 16) {
+      await sleep(16);
+      const batch = [];
+      // The last move: pressing to its newest sample, or already off the glass (force 0.01).
+      for (let m = last + 4; m <= ms; m += 4) batch.push(...sample(m, ms === T && !pressing ? 0.01 : 0.4));
+      await page.evaluate(([d, now]) => window.__opennotePencil(1, now, d, []), [batch, (t0 + ms) / 1000]);
+      last = ms;
+      await mouse('mouseMoved', ...at(ms), 0.4);
+    }
+    const [lx, ly] = at(T);
+    await page.evaluate(([d, now]) => window.__opennotePencil(2, now, d, []), [[lx + 1.5, ly + 1, 0, (t0 + T + 4) / 1000, 1.2, 0.5], (t0 + T + 4) / 1000]);
+    await mouse('mouseReleased', lx + 1.5, ly + 1, 0);
+    await sleep(1200);
+    const ls = await page.evaluate(() => window.__inkLs);
+    const l = (ls[0] ?? '').split(',');
+    const told = l.length >= 4 ? Math.hypot(+l[2] / unit - lx, +l[3] / unit - ly).toFixed(2) + ' px from the lead' : l.length === 2 ? 'no lead' : 'nothing';
+    // The stored stroke (the newest): it runs on to the lead (penEnd) exactly when the shell keeps it.
+    const penEnd = await page.evaluate(async () => {
+      const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+      const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
+      db.close();
+      let best = null;
+      for (const n of notes) for (const pg of n.pages ?? []) for (const s of pg.strokes ?? []) if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
+      return !!best?.penEnd;
+    });
+    const ok = ls.length === 1 && penEnd === pressing && (l.length >= 4) === pressing;
+    console.log(`leadend stroke ${k + 1} (last move ${pressing ? 'pressing' : 'lifting'}): shell told ${ls.length} "l" (${told}), stored stroke penEnd ${penEnd}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.

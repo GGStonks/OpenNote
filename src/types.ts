@@ -66,6 +66,13 @@ export interface Stroke {
    * vary more than the pen's pressure range). Missing: raw pen samples.
    */
   modeled?: 'variable' | 'uniform' | 'proportional';
+  /**
+   * The last point is where the app shell's live ink reached when the pen lifted (its lead to the
+   * Pencil's last sample with force), not a pen sample for the ink engine: the line continues
+   * straight to it (strokeRenderer.ts `penEnd`), so the finished stroke ends where the ink was seen
+   * while writing instead of pulling back. Missing: ends where the engine ends it.
+   */
+  penEnd?: boolean;
   /** Degrees this item has been rotated from how it was made (0 = original orientation). */
   rotation?: number;
   /**

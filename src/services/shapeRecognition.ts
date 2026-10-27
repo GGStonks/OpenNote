@@ -1,6 +1,6 @@
 import { FillType, Point, Stroke, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
-import { arrowSize, modeledLine } from '../ink/strokeRenderer';
+import { arrowSize, strokeLine } from '../ink/strokeRenderer';
 import { latexForDocument } from './latexRender';
 
 /**
@@ -343,7 +343,7 @@ export function snapStroke(stroke: Stroke): Stroke {
   if (stroke.tool !== 'pen' || stroke.isShape) return stroke;
   const shape = detectShape(stroke.points);
   if (!shape) return stroke;
-  return { ...stroke, points: shape.points, isShape: true, closed: shape.closed, shapeKind: shape.kind, modeled: undefined };
+  return { ...stroke, points: shape.points, isShape: true, closed: shape.closed, shapeKind: shape.kind, modeled: undefined, penEnd: undefined };
 }
 
 // --- TikZ export of ink ------------------------------------------------------------------------
@@ -506,7 +506,7 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
         break;
       default: {
         // Handwriting: the modelled centre line the ink engine draws, as cubic Beziers within 0.08 mm.
-        const segs = fitBeziers(modeledLine(pts, s.modeled), 0.3, closed);
+        const segs = fitBeziers(strokeLine(s), 0.3, closed);
         lines.push(`  \\draw${o} ${segs.length ? curve(segs, closed) : `${c(pts[0])} -- ${c(pts[pts.length - 1])}`};`);
       }
     }
