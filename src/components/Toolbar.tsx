@@ -9,6 +9,7 @@ import { SetupPatch } from '../editor/pageSetup';
 import { PaperPicker, PaperValues } from './PaperPicker';
 import { ToolSettings } from './CanvasPage';
 import { ColorPicker } from './ColorPicker';
+import { OnScreen } from './onScreen';
 
 const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
@@ -114,14 +115,16 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
   </button>
 );
 
+// Kept on the screen (onScreen.tsx): a popover under a button near an edge of a phone's screen
+// went partly past it.
 const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
-  <div
+  <OnScreen
     className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto overflow-x-hidden no-scrollbar ${
       align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
     }`}
   >
     {children}
-  </div>
+  </OnScreen>
 );
 
 const Label: React.FC<{ children: React.ReactNode }> = ({ children }) => (

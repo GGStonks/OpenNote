@@ -163,8 +163,16 @@ show the iPad's compositing cost).
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
+- Menus, popovers and pop-ups are kept on the screen on every device (`src/components/onScreen.tsx`:
+  `OnScreen` / `useOnScreen`): after layout each is measured against the visible screen less the safe
+  area, shortened by its button (it scrolls) or else moved in, again on any resize. New floating
+  panels use it too. `--only popups` opens each one on phones (portrait, landscape, 320 px) and a
+  tablet: all must be wholly on screen and closable by their own button (the + menu once hung below
+  a phone's screen; the pen popover, moved up, covered its own button with the phone sideways).
 - Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
   Android `OpenNoteSavePlugin`), with a confirmation of where; Settings can choose the share sheet.
+  On Android (`exportOffersBoth`) the export menu has "Save to…" and "Share" on every format
+  (ExportModal's `Format`, passed to `exportFile` as `mode`); Settings' choice is then for backups only.
   Android: never put file contents in a plugin call that starts an activity. Capacitor saves that
   call's data in the activity's saved state when the app goes to the background (over ~1 MB:
   TransactionTooLargeException, app killed, the chosen file left 0 B). The file is staged in chunks

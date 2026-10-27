@@ -1,7 +1,7 @@
 import { splitIntoPages } from '../editor/sheets';
 import { zLayers } from '../editor/zorder';
 import React, { useState } from 'react';
-import { X, FileText, FileCode, Printer, Download, Save, Check } from 'lucide-react';
+import { X, FileText, FileCode, Printer, Download, Save, Check, FolderDown, Share2 } from 'lucide-react';
 import { NoteDocument } from '../types';
 import { strokeToSvg } from '../ink/strokeRenderer';
 import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
@@ -9,7 +9,7 @@ import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { paperHex, paperIsDark } from './CanvasPage';
 import { textHeight } from '../editor/selection';
-import { canMakePdf, exportFile } from '../platform';
+import { ExportMode, canMakePdf, exportFile, exportOffersBoth } from '../platform';
 import { textCssString } from '../editor/textStyle';
 import type { TextBlock } from '../types';
 
@@ -34,7 +34,7 @@ interface ExportModalProps {
   isOpen: boolean;
   onClose: () => void;
   document: NoteDocument;
-  onPdf: () => void;
+  onPdf: (mode?: ExportMode) => void;
   onPrint: () => void;
   onError: (msg: string) => void;
 }
@@ -168,11 +168,13 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
   const [saved, setSaved] = useState<string | null>(null);
   if (!isOpen) return null;
 
-  const run = async (name: string, content: string | Blob, type: string) => {
+  const both = exportOffersBoth();
+
+  const run = async (name: string, content: string | Blob, type: string, mode?: ExportMode) => {
     setBusy(true);
     setSaved(null);
     try {
-      const where = await exportFile(name, content instanceof Blob ? content : new Blob([content], { type }));
+      const where = await exportFile(name, content instanceof Blob ? content : new Blob([content], { type }), mode);
       if (where) setSaved(where);
       else onClose();
     } catch (err) {
@@ -184,15 +186,45 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
   };
 
   const b = baseName(doc);
-  const Row: React.FC<{ icon: React.ReactNode; title: string; sub: string; onClick: () => void; tint: string }> = ({ icon, title, sub, onClick, tint }) => (
-    <button disabled={busy} onClick={onClick} className="w-full flex items-center p-3 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition text-left disabled:opacity-50">
-      <div className={`p-2.5 rounded-xl mr-3 ${tint}`}>{icon}</div>
-      <div>
-        <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</div>
-        <div className="text-xs text-gray-500">{sub}</div>
+  /**
+   * One format. Android (exportOffersBoth): "Save to…" (a folder the user picks) and "Share"
+   * (Drive, Gmail, a chat…) side by side; elsewhere the whole card exports, as Settings chooses.
+   */
+  const Format: React.FC<{ icon: React.ReactNode; title: string; sub: string; tint: string; onExport: (mode?: ExportMode) => void; children?: React.ReactNode }> = ({ icon, title, sub, tint, onExport, children }) => {
+    const head = (
+      <>
+        <div className={`p-2.5 rounded-xl mr-3 flex-shrink-0 ${tint}`}>{icon}</div>
+        <div className="min-w-0">
+          <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</div>
+          <div className="text-xs text-gray-500">{sub}</div>
+        </div>
+      </>
+    );
+    const option = children && <div className="px-3 pb-3 pl-[4.25rem]">{children}</div>;
+    if (!both) {
+      return (
+        <div className="rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition">
+          <button disabled={busy} onClick={() => onExport()} className={`w-full flex items-center p-3 text-left disabled:opacity-50 ${children ? 'pb-2' : ''}`}>{head}</button>
+          {option}
+        </div>
+      );
+    }
+    const action = 'flex-1 flex items-center justify-center gap-2 h-10 rounded-xl text-sm font-semibold transition disabled:opacity-50';
+    return (
+      <div className="rounded-2xl border border-gray-200 dark:border-gray-700">
+        <div className="flex items-center p-3 pb-2">{head}</div>
+        {option}
+        <div className="flex gap-2 px-3 pb-3">
+          <button disabled={busy} onClick={() => onExport('save')} className={`${action} bg-gray-100 text-gray-800 active:bg-gray-200 dark:bg-ui-raised dark:text-gray-100`}>
+            <FolderDown className="w-4 h-4" /> Save to…
+          </button>
+          <button disabled={busy} onClick={() => onExport('share')} className={`${action} bg-blue-600 text-white active:bg-blue-700`}>
+            <Share2 className="w-4 h-4" /> Share
+          </button>
+        </div>
       </div>
-    </button>
-  );
+    );
+  };
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
@@ -209,33 +241,31 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
               <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> {saved}
             </div>
           )}
-          <Row
+          <Format
             icon={<FileText className="w-5 h-5" />}
             tint="bg-red-100 text-red-600 dark:bg-red-900/40"
             title="PDF"
             sub={canMakePdf() ? 'Vector PDF, every page at its own size and orientation' : 'Vector PDF through the system print dialog (Save as PDF / Save to Files)'}
-            onClick={onPdf}
+            onExport={onPdf}
           />
-          {canMakePdf() && (
-            <Row icon={<Printer className="w-5 h-5" />} tint="bg-gray-100 text-gray-600 dark:bg-gray-800" title="Print…" sub="System print dialog (one paper size for all pages)" onClick={onPrint} />
-          )}
-          <Row icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onClick={() => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml')} />
-          {/* The .tex option belongs to the LaTeX export: inside its box. */}
-          <div className="rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition">
-            <button disabled={busy} onClick={() => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex')} className="w-full flex items-center p-3 pb-2 text-left disabled:opacity-50">
-              <div className="p-2.5 rounded-xl mr-3 bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40"><FileCode className="w-5 h-5" /></div>
-              <div>
-                <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">LaTeX (.tex)</div>
-                <div className="text-xs text-gray-500">Compilable document: math, text, TikZ</div>
-              </div>
-            </button>
-            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400 px-3 pb-3 pl-[4.25rem]">
+          <Format icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onExport={(m) => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml', m)} />
+          <Format icon={<FileCode className="w-5 h-5" />} tint="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40" title="LaTeX (.tex)" sub="Compilable document: math, text, TikZ" onExport={(m) => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex', m)}>
+            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
               <input type="checkbox" checked={includeInk} onChange={(e) => setIncludeInk(e.target.checked)} />
               Include remaining handwriting as TikZ drawings
             </label>
-          </div>
-          <Row icon={<FileText className="w-5 h-5" />} tint="bg-blue-100 text-blue-600 dark:bg-blue-900/40" title="Markdown (.md)" sub="Obsidian / GitHub compatible ($$ math, latex code blocks)" onClick={() => run(`${b}.md`, buildMarkdown(doc), 'text/markdown')} />
-          <Row icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onClick={() => run(`${b}.opennote`, JSON.stringify(doc), 'application/json')} />
+          </Format>
+          <Format icon={<FileText className="w-5 h-5" />} tint="bg-blue-100 text-blue-600 dark:bg-blue-900/40" title="Markdown (.md)" sub="Obsidian / GitHub compatible ($$ math, latex code blocks)" onExport={(m) => run(`${b}.md`, buildMarkdown(doc), 'text/markdown', m)} />
+          <Format icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onExport={(m) => run(`${b}.opennote`, JSON.stringify(doc), 'application/json', m)} />
+          {canMakePdf() && (
+            <button disabled={busy} onClick={onPrint} className="w-full flex items-center p-3 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition text-left disabled:opacity-50">
+              <div className="p-2.5 rounded-xl mr-3 bg-gray-100 text-gray-600 dark:bg-gray-800"><Printer className="w-5 h-5" /></div>
+              <div>
+                <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">Print…</div>
+                <div className="text-xs text-gray-500">System print dialog (one paper size for all pages)</div>
+              </div>
+            </button>
+          )}
         </div>
       </div>
     </div>

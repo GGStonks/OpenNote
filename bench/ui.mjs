@@ -1708,6 +1708,59 @@ if (ONLY.has('leadend') && process.argv.includes('--native')) {
     console.log(`leadend stroke ${k + 1} (last move ${pressing ? 'pressing' : 'lifting'}): shell told ${ls.length} "l" (${told}), stored stroke penEnd ${penEnd}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }
+// --only popups: every menu and popover (the elements kept on the screen, `data-on-screen` in
+// onScreen.tsx), opened on phones (portrait, landscape, a small one) and a tablet: each must be
+// wholly on the screen. The + button's menu used to hang below the bottom of a phone's screen.
+if (ONLY.has('popups')) {
+  const screens = [['phone', 360, 780], ['phone-land', 780, 360], ['small', 320, 568], ['tablet', 820, 1180]];
+  let bad = 0;
+  for (const [name, width, height] of screens) {
+    const pctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: true });
+    const pp = await pctx.newPage();
+    pp.on('pageerror', (e) => console.error('page error:', e.message));
+    await pp.goto(url);
+    await sleep(1500);
+    const results = [];
+    /** Opens with `open` (skipped when it cannot), checks the popups shown, closes with `close`. */
+    const check = async (label, open, close) => {
+      try {
+        await open();
+      } catch {
+        results.push(`${label}: -`);
+        return;
+      }
+      await sleep(450);
+      const out = await pp.evaluate(() => [...document.querySelectorAll('[data-on-screen]')].filter((e) => e.getClientRects().length).map((e) => {
+        const r = e.getBoundingClientRect();
+        const off = Math.max(0, -r.left, -r.top, r.right - innerWidth, r.bottom - innerHeight);
+        return Math.round(off);
+      }));
+      const worst = out.length ? Math.max(...out) : null;
+      if (worst) bad++;
+      results.push(`${label}: ${worst === null ? 'none shown' : worst ? `${worst} px OFF SCREEN` : 'ok'}`);
+      await close();
+      await sleep(300);
+    };
+    // Home: reloaded after each (a tap to close a menu can land on a note card and open it).
+    const home = async () => { await pp.reload(); await sleep(1500); };
+    const tap = (loc) => async () => { await loc.click({ timeout: 2500 }); };
+    const twice = (loc) => async () => { await loc.click({ timeout: 2500 }); await sleep(200); await loc.click({ timeout: 2500 }); };
+    await check('+ menu', async () => { await pp.locator('button[aria-label="New note"]').dispatchEvent('contextmenu'); }, home);
+    await check('sort & filter', tap(pp.locator('button[title="Sort and filter"]').first()), home);
+    await check('note menu', tap(pp.locator('button:has(svg.lucide-more-vertical), button:has(svg.lucide-ellipsis-vertical)').last()), home);
+    await pp.getByText('Welcome to', { exact: false }).first().click();
+    await sleep(2000);
+    // Editor: each popover is closed by its own button again. The pen is the tool already: one tap.
+    const tools = [['pen', 'Pen (tap again', 1], ['smart pen', 'Smart pen', 2], ['highlighter', 'Highlighter', 2], ['eraser', 'Eraser', 2], ['paper', 'Paper', 1], ['insert & pages', 'Insert & pages', 1]];
+    for (const [label, title, taps] of tools) {
+      const btn = pp.locator(`button[title^="${title}"]`).first();
+      await check(label, taps === 2 ? twice(btn) : tap(btn), tap(btn));
+    }
+    console.log(`popups ${name.padEnd(10)} ${results.join(' | ')}`);
+    await pctx.close();
+  }
+  console.log(`popups ${bad ? `${bad} OFF SCREEN` : 'all on screen'}`);
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();

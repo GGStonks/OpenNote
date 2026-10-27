@@ -4,6 +4,7 @@ import { ImageBlock, LatexBlock, TextBlock } from '../types';
 import { TEXT_LINE_HEIGHT, textCss } from '../editor/textStyle';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview, renderTikzWithTeX } from '../services/tikzEngine';
+import { OnScreen } from './onScreen';
 
 const BASE_MATH_PX = 22;
 
@@ -74,7 +75,8 @@ interface ActionPillProps {
 }
 
 const ActionPill: React.FC<ActionPillProps> = ({ zoom, onEdit, onCopy, onDelete }) => (
-  <div
+  // Kept on the screen (onScreen.tsx): over a block at the top of the view it went under the top bar.
+  <OnScreen
     className="absolute left-1/2 bottom-full mb-2 flex items-center gap-1 bg-gray-900/90 text-white px-2 py-1 rounded-full shadow-xl z-40"
     style={{ transform: `translateX(-50%) scale(${1 / zoom})`, transformOrigin: 'bottom center' }}
     onPointerDown={(e) => e.stopPropagation()}
@@ -92,7 +94,7 @@ const ActionPill: React.FC<ActionPillProps> = ({ zoom, onEdit, onCopy, onDelete 
     <button className="p-1.5 hover:text-red-300" onClick={onDelete} title="Delete">
       <Trash2 className="w-4 h-4" />
     </button>
-  </div>
+  </OnScreen>
 );
 
 interface LatexBlockViewProps {

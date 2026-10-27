@@ -278,6 +278,15 @@ export function exportMode(): ExportMode {
   }
 }
 
+/**
+ * The export menu offers both for every file ("Save to…" and "Share"): the Android app, where
+ * sending a note to Drive, Gmail or a chat is as common as keeping it in a folder, and switching a
+ * setting for each was in the way. Elsewhere the setting chooses.
+ */
+export function exportOffersBoth(): boolean {
+  return platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android';
+}
+
 export function setExportMode(mode: ExportMode) {
   try {
     localStorage.setItem(EXPORT_MODE_KEY, mode);
@@ -299,11 +308,12 @@ const STAGE_CHUNK = 3 * 256 * 1024;
  * Exports a file where the user chooses: the system's save dialog for each file (iOS: Files' folder
  * picker; Android: the system's "save to" picker; browsers: their save dialog or the downloads), so
  * it is clear where it went. Returns where it was saved, for a confirmation, or null when the user
- * cancelled. Settings > Export can choose the share sheet instead (shareFile).
+ * cancelled. Settings > Export can choose the share sheet instead (shareFile); `mode` overrides it
+ * (the Android export menu asks for each file, exportOffersBoth).
  */
-export async function exportFile(filename: string, blob: Blob): Promise<string | null> {
+export async function exportFile(filename: string, blob: Blob, mode: ExportMode = exportMode()): Promise<string | null> {
   const safeName = filename.replace(/[\\/:*?"<>|]+/g, '_');
-  if (exportMode() === 'share') {
+  if (mode === 'share') {
     await shareFile(safeName, blob);
     return null;
   }

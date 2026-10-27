@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Folder, NoteDocument, Tag } from '../types';
 import { NoteThumb } from './NoteThumb';
+import { OnScreen, useOnScreen } from './onScreen';
 import { Logo } from './Logo';
 import { printedSheets } from '../editor/sheets';
 import {
@@ -105,6 +106,8 @@ const AnchoredMenu: React.FC<{ anchor: HTMLElement | null; width: number; onClos
     const left = Math.max(m, Math.min(a.right - width, window.innerWidth - m - width));
     setPos({ left, top });
   }, [anchor, width]);
+  // Also within the safe area (notch, home indicator) and when the screen changes size.
+  useOnScreen(ref, !!pos);
   useEffect(() => {
     const close = () => onClose();
     window.addEventListener('resize', close);
@@ -117,6 +120,7 @@ const AnchoredMenu: React.FC<{ anchor: HTMLElement | null; width: number; onClos
   return createPortal(
     <div
       ref={ref}
+      data-on-screen
       className={MENU.replace('absolute', 'fixed').replace('z-50', 'z-[1000]')}
       style={{ width, left: pos?.left ?? -9999, top: pos?.top ?? 0, maxHeight: 'calc(100dvh - 16px)', overflowY: 'auto' }}
       onClick={(e) => e.stopPropagation()}
@@ -367,7 +371,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   );
 
   const FolderMenu: React.FC<{ f: Folder }> = ({ f }) => (
-    <div className={`${MENU} right-1 top-8 w-48`} onClick={(e) => e.stopPropagation()}>
+    <OnScreen className={`${MENU} right-1 top-8 w-48`} onClick={(e) => e.stopPropagation()}>
       <button className={MENU_ITEM} onClick={() => startCreateFolder(f.id)}><FolderPlus className="w-4 h-4" /> New subfolder</button>
       <button className={MENU_ITEM} onClick={() => { setNameDraft(f.name); setRenamingFolderId(f.id); setMenuFolderId(null); }}><Edit2 className="w-4 h-4" /> Rename</button>
       <button className={MENU_ITEM} onClick={() => { setMoveTarget({ kind: 'folder', id: f.id }); setMenuFolderId(null); }}><FolderInput className="w-4 h-4" /> Move to…</button>
@@ -377,7 +381,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
         ))}
       </div>
       <button className={`${MENU_ITEM} !text-red-600`} onClick={() => confirmDeleteFolder(f)}><Trash2 className="w-4 h-4" /> Delete folder</button>
-    </div>
+    </OnScreen>
   );
 
   const renderFolder = (f: Folder, depth: number): React.ReactNode => {
@@ -506,7 +510,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                   <MoreVertical className="w-3.5 h-3.5" />
                 </button>
                 {menuTagId === t.id && (
-                  <div className={`${MENU} right-1 top-8 w-44`} onClick={(e) => e.stopPropagation()}>
+                  <OnScreen className={`${MENU} right-1 top-8 w-44`} onClick={(e) => e.stopPropagation()}>
                     <button className={MENU_ITEM} onClick={() => { setNameDraft(t.name); setRenamingTagId(t.id); setMenuTagId(null); }}><Edit2 className="w-4 h-4" /> Rename</button>
                     <div className="px-3 py-2 flex flex-wrap gap-1.5">
                       {TAG_COLORS.map((c) => (
@@ -514,7 +518,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                       ))}
                     </div>
                     <button className={`${MENU_ITEM} !text-red-600`} onClick={() => { setMenuTagId(null); if (window.confirm(`Delete tag “${t.name}”? It is removed from ${tagCounts.get(t.id) ?? 0} note(s).`)) p.onDeleteTag(t.id); }}><Trash2 className="w-4 h-4" /> Delete tag</button>
-                  </div>
+                  </OnScreen>
                 )}
               </div>
             );
@@ -676,7 +680,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   };
 
   const filterMenu = (
-    <div className={`${MENU} right-0 top-11 w-[19rem] max-w-[calc(100vw-1.5rem)] py-2 max-h-[calc(100dvh-7rem)] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
+    <OnScreen className={`${MENU} right-0 top-11 w-[19rem] max-w-[calc(100vw-1.5rem)] py-2 max-h-[calc(100dvh-7rem)] overflow-y-auto`} onClick={(e) => e.stopPropagation()}>
       <div className="px-3 pb-1 text-[11px] font-bold text-gray-400 uppercase tracking-wider">Sort by</div>
       {['Last modified', 'Created', 'Title'].map((group) => (
         <div key={group} className="px-3 py-1 flex items-center gap-2">
@@ -739,7 +743,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
           )}
         </div>
       )}
-    </div>
+    </OnScreen>
   );
 
   // --- Sheets: move & tags ------------------------------------------------------------------------
@@ -908,7 +912,9 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* "+": tap for a new note, hold (or right-click) to import files. */}
       <div className="absolute z-40 right-5 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
-          <div className={`${MENU} static w-56 mb-1 max-h-[calc(100dvh-6rem-env(safe-area-inset-bottom))] overflow-y-auto`}>
+          // Above the + button (it was given `static` too: `absolute` won, with no offsets, so the
+          // menu hung from the button's top edge, mostly below the screen's bottom on a phone).
+          <OnScreen className={`${MENU} bottom-full right-0 mb-2 w-56 max-h-[calc(100dvh-6rem-env(safe-area-inset-bottom))] overflow-y-auto`}>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); importRef.current?.click(); }}>
               <Upload className="w-4 h-4" />
               <span className="flex-1">
@@ -922,7 +928,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); p.onCreateNote(); }}>
               <Plus className="w-4 h-4" /> New note
             </button>
-          </div>
+          </OnScreen>
         )}
         <button
           onPointerDown={fabDown}

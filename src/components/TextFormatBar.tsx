@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { Bold, ChevronDown, Italic, Underline, Minus, Plus } from 'lucide-react';
 import { COLOUR_SPHERE, Spectrum } from './ColorPicker';
 import type { TextBlock } from '../types';
+import { OnScreen } from './onScreen';
 import { TEXT_FONTS, fontStack, nextTextSize } from '../editor/textStyle';
 
 /** Ink colours offered for text (the pen's palette). */
@@ -21,7 +22,7 @@ const TEXT_COLORS = ['#111827', '#6B7280', '#1A73E8', '#D93025', '#188038', '#E3
 const Floating: React.FC<{ anchor: DOMRect; width: number; children: React.ReactNode }> = ({ anchor, width, children }) => {
   const left = Math.max(8, Math.min(window.innerWidth - width - 8, anchor.left));
   return createPortal(
-    <div
+    <OnScreen
       data-no-pan
       className="fixed z-[200] bg-ui-bar/95 backdrop-blur-xl text-white rounded-2xl shadow-2xl ring-1 ring-white/10 p-1.5 max-h-[calc(100dvh-16px)] overflow-y-auto no-scrollbar"
       style={{ left, top: Math.min(anchor.bottom + 6, window.innerHeight - 60), width }}
@@ -32,7 +33,7 @@ const Floating: React.FC<{ anchor: DOMRect; width: number; children: React.React
       onMouseDown={(e) => e.preventDefault()}
     >
       {children}
-    </div>,
+    </OnScreen>,
     document.body
   );
 };

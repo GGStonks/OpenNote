@@ -33,7 +33,7 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
+import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
 import { joinPdfPages } from '../services/pdfExport';
 
 /** Margin around the surface (content px). */
@@ -808,7 +808,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
    * PDF: each page at its own size and orientation (Android: made by the app, page by page, see
    * services/pdfExport.ts); elsewhere through the print dialog.
    */
-  const exportPdf = async () => {
+  /** `mode`: saved or shared (the Android export menu asks for each file); missing: Settings' choice. */
+  const exportPdf = async (mode?: ExportMode) => {
     if (!canMakePdf()) return printNote();
     setExportOpen(false);
     await editor.flush();
@@ -836,8 +837,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       setPrintOnly(null);
       setBusy(null);
       crashLog.event('export', { kind: 'pdf', pages: sheets.length, pageKB, kb: Math.round(pdf.length / 1024) });
-      const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }));
-      crashLog.event('export-saved', { kind: 'pdf', saved: !!where });
+      const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), mode);
+      crashLog.event('export-saved', { kind: 'pdf', saved: !!where, mode: mode ?? 'setting' });
       if (where) showToast(where);
     } catch (err) {
       setBusy(null);
@@ -1016,7 +1017,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + env(safe-area-inset-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold">
+          <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
             {FILL_OPTIONS.map((f) => (
               <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
                 <span className="scale-125"><FillSwatch fill={f.id} color="#E5E7EB" /></span>

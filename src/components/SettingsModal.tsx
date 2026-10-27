@@ -8,7 +8,7 @@ import { frameProbe } from '../services/frameProbe';
 import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
-import { ExportMode, PageRate, exportMode, platformKind, setExportMode, setPageRate, shareFile } from '../platform';
+import { ExportMode, PageRate, exportMode, exportOffersBoth, platformKind, setExportMode, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 
 interface SettingsModalProps {
@@ -217,7 +217,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
             </div>
             <div className="mt-3 flex items-center justify-between gap-3">
               <div>
-                <div className="text-sm text-gray-800 dark:text-gray-200">Exports and backups</div>
+                {/* Android: the export menu has Save to… and Share for each file; this is for backups. */}
+                <div className="text-sm text-gray-800 dark:text-gray-200">{exportOffersBoth() ? 'Backups' : 'Exports and backups'}</div>
                 <p className="text-[11px] text-gray-400">
                   {exportChoice === 'save' ? 'Each file asks where to save it (a folder you choose), and says where it went.' : 'Each file opens the share sheet (Save to Files, AirDrop, other apps).'}
                 </p>

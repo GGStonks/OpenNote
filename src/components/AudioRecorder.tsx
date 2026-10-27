@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Mic, Square, Play, Pause, Trash2, ListMusic } from 'lucide-react';
 import { AudioRecording, newId } from '../types';
+import { OnScreen } from './onScreen';
 import { deleteRecording, getRecordingBlob, listRecordings, saveRecording } from '../storage/db';
 
 /**
@@ -126,7 +127,7 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
         </button>
       )}
       {open && (
-        <div className="absolute top-11 right-0 z-50 bg-white dark:bg-ui-raised rounded-2xl p-2 shadow-xl border border-gray-200 dark:border-gray-700 w-64">
+        <OnScreen className="absolute top-11 right-0 z-50 bg-white dark:bg-ui-raised rounded-2xl p-2 shadow-xl border border-gray-200 dark:border-gray-700 w-64 max-h-[calc(100dvh-5rem)] overflow-y-auto">
           {list.map((r) => (
             <div key={r.id} className="flex items-center gap-2 px-2 py-1.5 text-xs text-gray-700 dark:text-gray-200">
               <button onClick={() => play(r)} className="p-1.5 rounded-full bg-blue-50 dark:bg-blue-900/40 text-blue-600">
@@ -151,7 +152,7 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
               </button>
             </div>
           ))}
-        </div>
+        </OnScreen>
       )}
     </div>
   );
