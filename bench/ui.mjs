@@ -1761,6 +1761,32 @@ if (ONLY.has('popups')) {
   }
   console.log(`popups ${bad ? `${bad} OFF SCREEN` : 'all on screen'}`);
 }
+// --only penhold: the pen's hold-to-snap. A line pressed firmly and held still 0.6 s must stay
+// handwriting (resting the pen at the end of a stroke straightened fraction bars); held 1.2 s it
+// snaps, at the handwriting's own width (Stroke.width x 1.4 = its median drawn width).
+if (ONLY.has('penhold')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const penWidth = 2; // the default pen (Editor.tsx); pressed at 0.9 its ink is drawn 1.26x as wide
+  for (const [k, hold] of [[0, 600], [1, 1200]]) {
+    const y = 560 + k * 80;
+    await mouse('mousePressed', 250, y, 0.9);
+    for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 250 + i * 8, y + (i % 2) * 0.4, 0.9); await sleep(8); }
+    await sleep(hold);
+    await mouse('mouseReleased', 490, y, 0);
+    await sleep(900);
+    const st = await page.evaluate(async () => {
+      const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+      const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
+      db.close();
+      let best = null;
+      for (const n of notes) for (const pg of n.pages ?? []) for (const s of pg.strokes ?? []) if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
+      return best && { isShape: !!best.isShape, kind: best.shapeKind ?? null, width: best.width };
+    });
+    const ok = hold < 1000 ? !st?.isShape : st?.isShape && st.kind === 'line';
+    console.log(`penhold held ${hold} ms: ${st?.isShape ? `snapped (${st.kind}), width ${st.width.toFixed(2)} = ${(st.width / penWidth).toFixed(2)} x the pen's` : 'handwriting'}: ${ok ? 'ok' : 'WRONG'}`);
+  }
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();

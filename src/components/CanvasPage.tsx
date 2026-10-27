@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt,
+  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry,
 } from '../ink/strokeRenderer';
 import { SmoothLiveStroke, pixelAligned } from '../ink/smoothLiveStroke';
 import { crashLog } from '../services/crashLog';
@@ -230,6 +230,10 @@ function smoothAt(zoom: number): boolean {
 const SEL_BORDER = 2;
 const SEL_RADIUS = 5;
 const SEL_DASH = [6, 4];
+
+/** Hold-to-snap: how long the Draw tool / the pen must be held still at the end of a stroke (ms). */
+const SHAPE_HOLD_MS = 450;
+const PEN_HOLD_MS = 1000;
 
 /** A rotation within this many degrees of a multiple of 15° (0° included) snaps to it. */
 const ROTATE_SNAP = 3;
@@ -1390,7 +1394,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     points: Point[];
     predicted: Point[];
     start: number;
-    snapped: { points: Point[]; closed: boolean; kind: Stroke['shapeKind'] } | null;
+    /** `width`: a pen stroke's snapped shape keeps its handwriting's width (snapWidth). */
+    snapped: { points: Point[]; closed: boolean; kind: Stroke['shapeKind']; width?: number } | null;
     /** After a hold-snap the pen keeps sizing the shape until it lifts. */
     adjust: SnapAdjust | null;
     holdTimer: ReturnType<typeof setTimeout> | null;
@@ -1563,8 +1568,23 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   /** A pen or highlighter stroke snapped to a shape (hold to snap). */
   function paintSnapped(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>): DirtyRect | null {
     if (!d.snapped) return null;
-    return drawLiveStroke(ctx, d.snapped.points, { ...liveStyle(d.tool as 'pen' | 'highlighter'), isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
+    const style = liveStyle(d.tool as 'pen' | 'highlighter');
+    return drawLiveStroke(ctx, d.snapped.points, { ...style, width: d.snapped.width ?? style.width, isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind });
   }
+
+  /**
+   * The width (Stroke.width) of a pen stroke's snapped shape: the handwriting's own drawn width (its
+   * median along the line), so the line keeps the weight it was written with. At the pen's plain
+   * width a shape is drawn as with medium pressure: written with a firmer hand, a fraction bar
+   * snapped to a visibly thinner line.
+   */
+  const snapWidth = (points: Point[]): number => {
+    const style = liveStyle('pen');
+    const g = inkGeometry(points, style);
+    const ws = g.widths ? [...g.widths].sort((a, b) => a - b) : [];
+    const drawn = ws.length ? ws[ws.length >> 1] : g.width;
+    return (drawn / strokeWidth({ ...style, isShape: true })) * style.width;
+  };
 
   /** Settled live ink of a finished/cancelled stroke, cleared on the next frame. */
   const staleInk = useRef<DirtyRect | null>(null);
@@ -1650,6 +1670,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * Draw & hold: the pen held still at the end of a stroke turns it into the clean shape (circle,
    * polygon, line...), which the pen then sizes until it lifts. Pen and Draw tool (smart curve):
    * for the Draw tool the line as drawn is used, already closed when it came back to its start.
+   * The pen waits longer (PEN_HOLD_MS): resting it at the end of a stroke for half a second, as one
+   * does writing, snapped fraction bars into straight lines that jumped.
    */
   const armHoldToSnap = () => {
     const d = drawing.current;
@@ -1667,7 +1689,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       const shape = detectShape(source);
       if (shape) {
-        cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind };
+        cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind, ...(cur.smart ? {} : { width: snapWidth(cur.points) }) };
         const pen = cur.points[cur.points.length - 1];
         cur.adjust = { kind: shape.kind, base: shape.points, closed: shape.closed, pen0: { x: pen.x, y: pen.y } };
         retireInk(cur);
@@ -1675,7 +1697,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         haptic('snap');
         requestRender();
       }
-    }, 450);
+    }, smartCurve ? SHAPE_HOLD_MS : PEN_HOLD_MS);
   };
 
   const placeText = (pt: Point) => {
@@ -2131,7 +2153,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         createdAt: Date.now(),
         tool: d.tool,
         color: style.color,
-        width: style.width,
+        width: d.snapped?.width ?? style.width,
         opacity: 1,
         penStyle: style.penStyle,
         lineStyle: 'solid',

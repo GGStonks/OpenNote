@@ -191,7 +191,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
           <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
             <div className={label}>Pencil & input</div>
             <Toggle checked={draft.stylusOnly} onChange={(v) => set({ stylusOnly: v })} title="Only the pencil draws" sub="Palm rejection: fingers scroll and zoom instead of drawing" />
-            <Toggle checked={draft.holdToSnap} onChange={(v) => set({ holdToSnap: v })} title="Draw and hold to snap shapes" sub="Lines, arrows, circles, ellipses, rectangles, triangles, polygons" />
+            <Toggle checked={draft.holdToSnap} onChange={(v) => set({ holdToSnap: v })} title="Draw and hold to snap shapes" sub="Hold the pen still for a second at the end: lines, arrows, circles, ellipses, rectangles, triangles, polygons (keeping the pen's width)" />
             <Toggle checked={draft.pencilDoubleTapEraser} onChange={(v) => set({ pencilDoubleTapEraser: v })} title="Apple Pencil double-tap switches to eraser" />
             <Toggle checked={draft.fingerTapUndo} onChange={(v) => set({ fingerTapUndo: v })} title="Two-finger tap to undo" sub="Three-finger tap redoes" />
           </section>

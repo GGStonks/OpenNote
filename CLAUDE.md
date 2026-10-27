@@ -163,6 +163,9 @@ show the iPad's compositing cost).
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
+- Hold to snap: the pen must be held still `PEN_HOLD_MS` (1 s; the Draw tool `SHAPE_HOLD_MS`, 0.45 s)
+  and its snapped shape keeps the handwriting's median drawn width (`snapWidth`): resting the pen
+  half a second at the end of a fraction bar snapped it to a thinner line that jumped. `--only penhold`.
 - Menus, popovers and pop-ups are kept on the screen on every device (`src/components/onScreen.tsx`:
   `OnScreen` / `useOnScreen`): after layout each is measured against the visible screen less the safe
   area, shortened by its button (it scrolls) or else moved in, again on any resize. New floating
