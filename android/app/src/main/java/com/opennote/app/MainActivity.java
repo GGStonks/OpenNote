@@ -1,5 +1,8 @@
 package com.opennote.app;
 
+import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.MotionEvent;
@@ -22,7 +25,9 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(OpenNoteInkPlugin.class);
         registerPlugin(OpenNoteUpdatePlugin.class);
         registerPlugin(OpenNoteSavePlugin.class);
+        registerPlugin(OpenNoteLaunchPlugin.class);
         super.onCreate(savedInstanceState);
+        launchColors();
         enterImmersive();
         keepClearOfSystemBars();
     }
@@ -41,6 +46,19 @@ public class MainActivity extends BridgeActivity {
             v.setPadding(bars.left, bars.top, bars.right, bars.bottom);
             return WindowInsetsCompat.CONSUMED;
         });
+    }
+
+    /**
+     * Until the page has painted, the window and the WebView show the app's own theme (saved by
+     * OpenNoteLaunchPlugin): the WebView's default white, or the system's light or dark, flashed
+     * before an OLED Black or Sepia app.
+     */
+    private void launchColors() {
+        SharedPreferences saved = OpenNoteLaunchPlugin.saved(this);
+        if (saved == null) return;
+        int color = saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE);
+        getWindow().setBackgroundDrawable(new ColorDrawable(color));
+        getBridge().getWebView().setBackgroundColor(color);
     }
 
     /** Native live ink: the stylus's newest position reaches the ink overlay before the WebView. */

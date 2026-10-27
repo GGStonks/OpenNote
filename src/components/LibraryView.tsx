@@ -909,7 +909,8 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
         {sidebarShown && <span>Settings</span>}
       </button>
 
-      {/* "+": tap for a new note, hold (or right-click) to import files. */}
+      {/* "+": tap for a new note, hold (or right-click) to import files or make a folder (a tap
+          already makes a note: the menu has no "New note"). */}
       <div className="absolute z-40 right-5 bottom-[calc(1.25rem+env(safe-area-inset-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
           // Above the + button (it was given `static` too: `absolute` won, with no offsets, so the
@@ -924,9 +925,6 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             </button>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); startCreateFolder(current); if (collapsed) setPrefs({ sidebarCollapsed: false }); }}>
               <FolderPlus className="w-4 h-4" /> New folder{current ? ' here' : ''}
-            </button>
-            <button className={MENU_ITEM} onClick={() => { setFabMenu(false); p.onCreateNote(); }}>
-              <Plus className="w-4 h-4" /> New note
             </button>
           </OnScreen>
         )}

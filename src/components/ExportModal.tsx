@@ -187,8 +187,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
 
   const b = baseName(doc);
   /**
-   * One format. Android (exportOffersBoth): "Save to…" (a folder the user picks) and "Share"
-   * (Drive, Gmail, a chat…) side by side; elsewhere the whole card exports, as Settings chooses.
+   * One format. In the apps (exportOffersBoth): "Save to…" (a folder the user picks) and "Share"
+   * (Drive, Mail, a chat…) side by side; in a browser the whole card saves.
    */
   const Format: React.FC<{ icon: React.ReactNode; title: string; sub: string; tint: string; onExport: (mode?: ExportMode) => void; children?: React.ReactNode }> = ({ icon, title, sub, tint, onExport, children }) => {
     const head = (

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app's mark (public/favicon.svg) for the launch screens: 128 dp in a 288 dp canvas, the size
+     Android 12's splash screen gives an icon without background (it must fit a 192 dp circle). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="288dp"
+    android:height="288dp"
+    android:viewportWidth="288"
+    android:viewportHeight="288">
+    <group android:translateX="80" android:translateY="80" android:scaleX="2" android:scaleY="2">
+        <path android:pathData="M15,0H49A15,15 0,0 1,64 15V49A15,15 0,0 1,49 64H15A15,15 0,0 1,0 49V15A15,15 0,0 1,15 0Z">
+            <aapt:attr name="android:fillColor">
+                <gradient android:type="linear" android:startX="0" android:startY="0" android:endX="64" android:endY="64"
+                    android:startColor="#3B82F6" android:endColor="#6D28D9" />
+            </aapt:attr>
+        </path>
+        <path android:pathData="M41.3,27.4A15,15 0,1 1,34.1 21.9"
+            android:strokeColor="#FFFFFF" android:strokeWidth="6.5" android:strokeLineCap="round" android:strokeLineJoin="round" />
+        <path android:pathData="M42.6,26.4L49.2,24.7L44.3,19.8Z"
+            android:fillColor="#FFFFFF" android:strokeColor="#FFFFFF" android:strokeWidth="1.2" android:strokeLineJoin="round" />
+        <path android:pathData="M50.1,23.9L45.1,18.9L51.5,12.5L56.5,17.5Z"
+            android:fillColor="#FFFFFF" android:fillAlpha="0.85" android:strokeColor="#FFFFFF" android:strokeAlpha="0.85"
+            android:strokeWidth="1.6" android:strokeLineJoin="round" />
+    </group>
+</vector>

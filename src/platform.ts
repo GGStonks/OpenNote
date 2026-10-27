@@ -268,31 +268,15 @@ export async function shareFile(filename: string, blob: Blob): Promise<void> {
 
 /** Exports: 'save' asks where to save each file (the system's save dialog), 'share' opens the share sheet. */
 export type ExportMode = 'save' | 'share';
-const EXPORT_MODE_KEY = 'opennote_export_mode';
-
-export function exportMode(): ExportMode {
-  try {
-    return localStorage.getItem(EXPORT_MODE_KEY) === 'share' ? 'share' : 'save';
-  } catch {
-    return 'save';
-  }
-}
 
 /**
- * The export menu offers both for every file ("Save to…" and "Share"): the Android app, where
- * sending a note to Drive, Gmail or a chat is as common as keeping it in a folder, and switching a
- * setting for each was in the way. Elsewhere the setting chooses.
+ * The export menus offer both for every file ("Save to…" and "Share") in the apps (iOS and
+ * Android), where sending a note to Drive, Mail or a chat is as common as keeping it in a folder;
+ * a setting choosing one for all exports was in the way. Browsers save.
  */
 export function exportOffersBoth(): boolean {
-  return platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android';
-}
-
-export function setExportMode(mode: ExportMode) {
-  try {
-    localStorage.setItem(EXPORT_MODE_KEY, mode);
-  } catch {
-    /* storage unavailable */
-  }
+  const kind = platformKind();
+  return kind === 'ios' || (kind === 'capacitor' && Capacitor.getPlatform() === 'android');
 }
 
 interface SavePlugin {
@@ -308,10 +292,10 @@ const STAGE_CHUNK = 3 * 256 * 1024;
  * Exports a file where the user chooses: the system's save dialog for each file (iOS: Files' folder
  * picker; Android: the system's "save to" picker; browsers: their save dialog or the downloads), so
  * it is clear where it went. Returns where it was saved, for a confirmation, or null when the user
- * cancelled. Settings > Export can choose the share sheet instead (shareFile); `mode` overrides it
- * (the Android export menu asks for each file, exportOffersBoth).
+ * cancelled. `mode` 'share' opens the share sheet instead (shareFile; the apps' export menus ask
+ * for each file, exportOffersBoth).
  */
-export async function exportFile(filename: string, blob: Blob, mode: ExportMode = exportMode()): Promise<string | null> {
+export async function exportFile(filename: string, blob: Blob, mode: ExportMode = 'save'): Promise<string | null> {
   const safeName = filename.replace(/[\\/:*?"<>|]+/g, '_');
   if (mode === 'share') {
     await shareFile(safeName, blob);
@@ -370,6 +354,20 @@ export async function setPageRate(rate: PageRate): Promise<void> {
   if (platformKind() !== 'ios') return;
   await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setPageRate', rate });
   window.OpenNoteNative!.pageRate = rate;
+}
+
+/**
+ * The UI theme's background for the shells' launch screens (shown before the page runs, from the
+ * next start): an OLED Black app started on a light grey screen.
+ */
+export async function setLaunchTheme(id: string, background: string): Promise<void> {
+  const kind = platformKind();
+  if (kind === 'ios') {
+    await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setLaunchTheme', background });
+  } else if (kind === 'capacitor') {
+    const { registerPlugin } = await import('@capacitor/core');
+    await registerPlugin<{ setTheme(o: { id: string; background: string }): Promise<void> }>('OpenNoteLaunch').setTheme({ id, background });
+  }
 }
 
 /** iOS shell: the page measured under 50 fps with the cap lifted; 'auto' keeps it from the next start. */

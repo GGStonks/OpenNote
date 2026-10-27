@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { canUpdate } from '../services/updater';
-import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload } from 'lucide-react';
+import { X, Settings as SettingsIcon, Check, Loader2, Wifi, AlertCircle, Download, Upload, FolderDown, Share2 } from 'lucide-react';
 import { THEMES, THEME_IDS, applyTheme } from '../theme';
 import { penRecorder } from '../ink/penRecorder';
 import { crashLog } from '../services/crashLog';
@@ -9,7 +9,7 @@ import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
 import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
-import { ExportMode, PageRate, exportMode, exportOffersBoth, platformKind, setExportMode, setPageRate, shareFile } from '../platform';
+import { ExportMode, PageRate, exportOffersBoth, platformKind, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 
 interface SettingsModalProps {
@@ -18,7 +18,7 @@ interface SettingsModalProps {
   settings: AppSettings;
   onSave: (s: AppSettings) => void;
   /** Exports the whole library as one .opennote archive. */
-  onBackup: () => void;
+  onBackup: (mode?: ExportMode) => void;
   /** Imports a .opennote archive or note. */
   onImport: (file: File) => void;
 }
@@ -32,7 +32,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [crash, setCrash] = useState(crashLog.lastCrash);
   const probe = isOpen ? frameProbe.last : null;
   const [pageRate, setPageRateState] = useState<PageRate>(window.OpenNoteNative?.pageRate ?? 'auto');
-  const [exportChoice, setExportChoice] = useState<ExportMode>(exportMode);
   const [vectorInk, setVectorInkState] = useState(vectorInkEnabled);
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
@@ -218,34 +217,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
             <div className={label}>Library</div>
             <p className="text-[11px] text-gray-400 mb-2">A backup is one <code className="font-mono">.opennote</code> archive of every note, folder and tag. Importing adds its notes (notes with the same id are replaced).</p>
             <div className="flex flex-wrap gap-2">
-              <button onClick={onBackup} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
-                <Download className="w-4 h-4" /> Backup (export .opennote)
-              </button>
+              {/* In the apps, saved or shared as each export (exportOffersBoth). */}
+              {exportOffersBoth() ? (
+                <>
+                  <button onClick={() => onBackup('save')} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
+                    <FolderDown className="w-4 h-4" /> Save backup to…
+                  </button>
+                  <button onClick={() => onBackup('share')} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
+                    <Share2 className="w-4 h-4" /> Share backup
+                  </button>
+                </>
+              ) : (
+                <button onClick={() => onBackup()} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
+                  <Download className="w-4 h-4" /> Backup (export .opennote)
+                </button>
+              )}
               <button onClick={() => importRef.current?.click()} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
                 <Upload className="w-4 h-4" /> Import .opennote
               </button>
               <input ref={importRef} type="file" accept=".opennote,.json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }} />
-            </div>
-            <div className="mt-3 flex items-center justify-between gap-3">
-              <div>
-                {/* Android: the export menu has Save to… and Share for each file; this is for backups. */}
-                <div className="text-sm text-gray-800 dark:text-gray-200">{exportOffersBoth() ? 'Backups' : 'Exports and backups'}</div>
-                <p className="text-[11px] text-gray-400">
-                  {exportChoice === 'save' ? 'Each file asks where to save it (a folder you choose), and says where it went.' : 'Each file opens the share sheet (Save to Files, AirDrop, other apps).'}
-                </p>
-              </div>
-              <select
-                value={exportChoice}
-                onChange={(e) => {
-                  const v = e.target.value as ExportMode;
-                  setExportChoice(v);
-                  setExportMode(v);
-                }}
-                className="text-sm rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-ui-raised px-2 py-1"
-              >
-                <option value="save">Ask where to save</option>
-                <option value="share">Share sheet</option>
-              </select>
             </div>
           </section>
 

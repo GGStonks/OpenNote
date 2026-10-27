@@ -172,10 +172,21 @@ show the iPad's compositing cost).
   panels use it too. `--only popups` opens each one on phones (portrait, landscape, 320 px) and a
   tablet: all must be wholly on screen and closable by their own button (the + menu once hung below
   a phone's screen; the pen popover, moved up, covered its own button with the phone sideways).
+- The editor's top bar fits any width by construction: after layout, if the left group (title,
+  undo, redo) is covered, Paper, Export and Settings move into the "…" menu one at a time, then the
+  title may shrink away (`useHeaderFold` in Toolbar.tsx, again on every resize); the tool shelf's
+  buttons shrink down to 280 px screens. `--only header` checks 280-1920 px wide screens for
+  overlapping or cut buttons (on a 360 px phone undo and redo slid under record and paper).
+- Launch screens follow the UI theme: the app sends it at start and on change (`setLaunchTheme`,
+  platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
+  the `Launch.<Theme>` styles from Android 13, window and WebView colour in MainActivity) and to the
+  iOS shell (`OpenNoteLaunchColor`, window and web view colour). The mark (`launch_icon.xml`, from
+  public/favicon.svg) is centred at its own size on every screen shape: the old full-screen
+  splash.png was stretched on 20:9 phones.
 - Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
-  Android `OpenNoteSavePlugin`), with a confirmation of where; Settings can choose the share sheet.
-  On Android (`exportOffersBoth`) the export menu has "Save to…" and "Share" on every format
-  (ExportModal's `Format`, passed to `exportFile` as `mode`); Settings' choice is then for backups only.
+  Android `OpenNoteSavePlugin`), with a confirmation of where, or with `mode` 'share' the share
+  sheet. In the apps (`exportOffersBoth`: iOS and Android) every export offers both, "Save to…" and
+  "Share" (ExportModal's `Format`, Settings' backup buttons); there is no setting for it any more.
   Android: never put file contents in a plugin call that starts an activity. Capacitor saves that
   call's data in the activity's saved state when the app goes to the background (over ~1 MB:
   TransactionTooLargeException, app killed, the chosen file left 0 B). The file is staged in chunks

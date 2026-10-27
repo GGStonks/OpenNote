@@ -10,8 +10,8 @@ import {
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
-import { exportFile } from './platform';
-import { applyTheme } from './theme';
+import { ExportMode, exportFile, setLaunchTheme } from './platform';
+import { THEMES, applyTheme } from './theme';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
 import { crashLog } from './services/crashLog';
@@ -75,7 +75,10 @@ export const App: React.FC = () => {
     setSettingsState(s);
   }, []);
 
-  useEffect(() => applyTheme(settings.theme), [settings.theme]);
+  useEffect(() => {
+    applyTheme(settings.theme);
+    void setLaunchTheme(settings.theme, (THEMES[settings.theme] ?? THEMES.light).ui.app).catch(() => undefined);
+  }, [settings.theme]);
   useEffect(() => {
     crashLog.start();
     startFrameRate();
@@ -240,10 +243,10 @@ export const App: React.FC = () => {
     else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
   };
 
-  const backup = async () => {
+  const backup = async (mode?: ExportMode) => {
     try {
       const data = await exportLibrary();
-      const where = await exportFile(`OpenNote-backup-${new Date().toISOString().slice(0, 10)}.opennote`, new Blob([JSON.stringify(data)], { type: 'application/json' }));
+      const where = await exportFile(`OpenNote-backup-${new Date().toISOString().slice(0, 10)}.opennote`, new Blob([JSON.stringify(data)], { type: 'application/json' }), mode);
       if (where) window.alert(`Backup: ${where}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

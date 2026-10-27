@@ -1770,12 +1770,62 @@ if (ONLY.has('popups')) {
     const tools = [['pen', 'Pen (tap again', 1], ['smart pen', 'Smart pen', 2], ['highlighter', 'Highlighter', 2], ['eraser', 'Eraser', 2], ['paper', 'Paper', 1], ['insert & pages', 'Insert & pages', 1]];
     for (const [label, title, taps] of tools) {
       const btn = pp.locator(`button[title^="${title}"]`).first();
+      if (label === 'paper' && !(await btn.count())) {
+        // Folded into the "…" menu (narrow top bar): opened from there, closed by reopening the note.
+        const more = pp.locator('button[title="Insert & pages"]').first();
+        await check('paper (…)', async () => { await more.click({ timeout: 2500 }); await sleep(200); await pp.locator('header button', { hasText: 'Paper' }).first().click({ timeout: 2500 }); }, async () => {
+          await pp.reload();
+          await sleep(1500);
+          await pp.getByText('Welcome to', { exact: false }).first().click();
+          await sleep(2000);
+        });
+        continue;
+      }
       await check(label, taps === 2 ? twice(btn) : tap(btn), tap(btn));
     }
     console.log(`popups ${name.padEnd(10)} ${results.join(' | ')}`);
     await pctx.close();
   }
   console.log(`popups ${bad ? `${bad} OFF SCREEN` : 'all on screen'}`);
+}
+// --only header: the editor's top bar at many screen widths (phones to desktops): no two of its
+// buttons (or the title) may overlap, and all must be on the screen. On a 360 px phone undo and redo
+// slid under the record and paper buttons; buttons without room go into the "…" menu (Toolbar's
+// useHeaderFold).
+if (ONLY.has('header')) {
+  const widths = [[280, 640], [320, 568], [360, 780], [390, 844], [412, 915], [600, 960], [780, 360], [820, 1180], [1024, 768], [1180, 820], [1366, 1024], [1920, 1080]];
+  let bad = 0;
+  for (const [width, height] of widths) {
+    const pctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: true });
+    const pp = await pctx.newPage();
+    pp.on('pageerror', (e) => console.error('page error:', e.message));
+    await pp.goto(url);
+    await sleep(1500);
+    await pp.getByText('Welcome to', { exact: false }).first().click();
+    await sleep(1800);
+    const out = await pp.evaluate(() => {
+      const items = [...document.querySelectorAll('header button, header input:not([type=file])')].filter((e) => e.getClientRects().length);
+      const rects = items.map((e) => ({ name: e.getAttribute('title')?.split(' (')[0] || e.tagName.toLowerCase(), r: e.getBoundingClientRect() }));
+      const overlaps = [];
+      for (let i = 0; i < rects.length; i++) {
+        for (let j = i + 1; j < rects.length; j++) {
+          const a = rects[i].r, b = rects[j].r;
+          const w = Math.min(a.right, b.right) - Math.max(a.left, b.left), h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          // Nested elements (a button inside another's box) do not occur in the header.
+          if (w > 1 && h > 1) overlaps.push(`${rects[i].name}/${rects[j].name}`);
+        }
+      }
+      const off = rects.filter(({ r }) => r.left < -0.5 || r.right > innerWidth + 0.5 || r.top < -0.5).map(({ name }) => name);
+      const title = rects.find((x) => x.name === 'input');
+      const shown = ['Paper', 'Export', 'Settings'].filter((t) => rects.some((x) => x.name === t));
+      return { overlaps, off, title: title ? Math.round(title.r.width) : 0, shown, rows: new Set(rects.map(({ r }) => Math.round(r.top / 8))).size };
+    });
+    const ok = !out.overlaps.length && !out.off.length;
+    if (!ok) bad++;
+    console.log(`header ${String(width).padStart(4)}x${height}  title ${String(out.title).padStart(3)} px  in the bar: ${out.shown.join(', ') || '(all in the menu)'}  ${ok ? 'ok' : `OVERLAP ${out.overlaps.join(' ')} OFF ${out.off.join(' ')}`}`);
+    await pctx.close();
+  }
+  console.log(`header ${bad ? `${bad} screens with overlapping or cut buttons` : 'no overlaps at any width'}`);
 }
 // --only penhold: the pen's hold-to-snap. A line pressed firmly and held still 0.6 s must stay
 // handwriting (resting the pen at the end of a stroke straightened fraction bars); held 1.2 s it

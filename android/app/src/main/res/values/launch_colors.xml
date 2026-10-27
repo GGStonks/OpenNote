@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Each UI theme's background (src/theme.ts, `ui.app`), for the launch screens. -->
+    <color name="launch_light">#F2F2F7</color>
+    <color name="launch_dark">#121214</color>
+    <color name="launch_sepia">#EFE7D6</color>
+    <color name="launch_midnight">#0F172A</color>
+    <color name="launch_oled">#000000</color>
+    <color name="launch_background">@color/launch_light</color>
+</resources>

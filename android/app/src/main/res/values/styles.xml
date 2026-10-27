@@ -16,7 +16,39 @@
     </style>
 
 
+    <!-- Launch: the theme's background with the mark centred at its own size, on every screen shape
+         (a full-screen bitmap was stretched on phones taller than 16:10). Android 12+ draws its splash
+         screen from windowSplashScreen*; from Android 13 the theme the app last used is kept for it
+         (OpenNoteLaunchPlugin, Launch.<theme>). Without a theme yet: the system's light or dark. -->
     <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
-        <item name="android:background">@drawable/splash</item>
+        <item name="windowSplashScreenBackground">@color/launch_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+    </style>
+
+    <style name="Launch.Light" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_light</item>
+        <item name="android:windowBackground">@drawable/launch_screen_light</item>
+    </style>
+
+    <style name="Launch.Dark" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_dark</item>
+        <item name="android:windowBackground">@drawable/launch_screen_dark</item>
+    </style>
+
+    <style name="Launch.Sepia" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_sepia</item>
+        <item name="android:windowBackground">@drawable/launch_screen_sepia</item>
+    </style>
+
+    <style name="Launch.Midnight" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_midnight</item>
+        <item name="android:windowBackground">@drawable/launch_screen_midnight</item>
+    </style>
+
+    <style name="Launch.Oled" parent="AppTheme.NoActionBarLaunch">
+        <item name="windowSplashScreenBackground">@color/launch_oled</item>
+        <item name="android:windowBackground">@drawable/launch_screen_oled</item>
     </style>
 </resources>

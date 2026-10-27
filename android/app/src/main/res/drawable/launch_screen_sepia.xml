@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launch window of the sepia theme: its background, the mark centred at its own size (never
+     stretched to the screen's shape). -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/launch_sepia" />
+    <item android:drawable="@drawable/launch_icon" android:gravity="center" android:width="288dp" android:height="288dp" />
+</layer-list>

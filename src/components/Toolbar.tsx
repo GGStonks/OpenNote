@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
@@ -105,7 +105,7 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
   <button
     onClick={onClick}
     title={title}
-    className={`h-10 min-w-10 px-1.5 sm:h-11 sm:min-w-11 sm:px-2.5 rounded-2xl flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-95 ${
+    className={`h-10 min-w-8 px-1 min-[360px]:min-w-10 min-[360px]:px-1.5 sm:h-11 sm:min-w-11 sm:px-2.5 rounded-2xl flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-95 ${
       active
         ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30'
         : 'text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-white/10'
@@ -169,6 +169,38 @@ const LevelControl: React.FC<{ value: number; min: number; max: number; log?: bo
 const PEN_WIDTH_RANGE = { min: 0.5, max: 24 };
 const HIGHLIGHTER_WIDTH_RANGE = { min: 1, max: 20 };
 const ERASER_SIZE_RANGE = { min: 2, max: 100 };
+
+/**
+ * Header buttons moved into the "…" menu, in this order, when the top bar's row has no room for
+ * them; after them the title may shrink away. Measured, not set per screen size: on a 360 px phone
+ * the buttons on the left (title, undo, redo) slid under the ones on the right.
+ */
+const FOLDABLE = ['paper', 'export', 'settings'] as const;
+const FOLD_TITLE = FOLDABLE.length + 1;
+
+/** How many of FOLDABLE (then the title) give way so that the left group's buttons are not covered. */
+function useHeaderFold(row: React.RefObject<HTMLElement | null>, left: React.RefObject<HTMLElement | null>): number {
+  const [fold, setFold] = useState(0);
+  // One more at a time while the left group's content is wider than its room (before paint).
+  useLayoutEffect(() => {
+    const el = left.current;
+    if (el && fold < FOLD_TITLE && el.scrollWidth > el.clientWidth + 1) setFold(fold + 1);
+  }, [fold, left]);
+  // Any change of the header's size (rotation, split screen, the pages panel) starts over.
+  useEffect(() => {
+    const el = row.current;
+    if (!el) return;
+    let width = el.clientWidth;
+    const ro = new ResizeObserver(() => {
+      if (el.clientWidth === width) return;
+      width = el.clientWidth;
+      setFold(0);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [row]);
+  return fold;
+}
 
 export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const { tools, setTools } = p;
@@ -329,18 +361,23 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   );
 
   const menu = usePopover();
+  const rowRef = useRef<HTMLDivElement>(null);
+  const leftRef = useRef<HTMLDivElement>(null);
+  const fold = useHeaderFold(rowRef, leftRef);
+  const folded = (id: (typeof FOLDABLE)[number]) => FOLDABLE.indexOf(id) < fold;
+  const iconBtn = 'p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition';
 
   return (
     <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[env(safe-area-inset-top)]">
-      <div className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 px-3 py-2">
-        <div className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
-          <button onClick={p.onBack} className="flex items-center text-blue-600 dark:text-blue-400 px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">
+      <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 px-3 py-2">
+        <div ref={leftRef} className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
+          <button onClick={p.onBack} className="flex-none flex items-center text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">
             <ChevronLeft className="w-6 h-6" />
             <span className="hidden 2xl:inline">Notes</span>
           </button>
           <button
             onClick={p.onTogglePages}
-            className={`p-2.5 rounded-xl active:scale-95 transition ${p.pagesOpen ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'}`}
+            className={`flex-none p-2 sm:p-2.5 rounded-xl active:scale-95 transition ${p.pagesOpen ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'}`}
             title="Pages"
           >
             <PanelLeft className="w-6 h-6" />
@@ -348,12 +385,12 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           <input
             value={p.title}
             onChange={(e) => p.setTitle(e.target.value)}
-            className="font-semibold text-base bg-transparent rounded-lg px-2 py-1.5 min-w-0 w-full max-w-[220px] text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 select-text"
+            className={`font-semibold text-base bg-transparent rounded-lg px-2 py-1.5 w-full max-w-[220px] ${fold < FOLD_TITLE ? 'min-w-[4.5rem]' : 'min-w-0'} text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 select-text`}
           />
-          <button onClick={p.onUndo} disabled={!p.canUndo} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Undo">
+          <button onClick={p.onUndo} disabled={!p.canUndo} className="flex-none p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Undo">
             <Undo2 className="w-6 h-6" />
           </button>
-          <button onClick={p.onRedo} disabled={!p.canRedo} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Redo">
+          <button onClick={p.onRedo} disabled={!p.canRedo} className="flex-none p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Redo">
             <Redo2 className="w-6 h-6" />
           </button>
         </div>
@@ -366,18 +403,24 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <Sparkles className="w-5 h-5" />
             <span className="hidden 2xl:inline">Page → LaTeX</span>
           </button>
-          <button onClick={() => menu.setOpen(menu.open === 'paper' ? null : 'paper')} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition" title="Paper">
-            <LayoutTemplate className="w-6 h-6" />
-          </button>
-          <button onClick={() => menu.setOpen(menu.open === 'more' ? null : 'more')} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition" title="Insert & pages">
+          {!folded('paper') && (
+            <button onClick={() => menu.setOpen(menu.open === 'paper' ? null : 'paper')} className={iconBtn} title="Paper">
+              <LayoutTemplate className="w-6 h-6" />
+            </button>
+          )}
+          <button onClick={() => menu.setOpen(menu.open === 'more' ? null : 'more')} className={iconBtn} title="Insert & pages">
             <MoreHorizontal className="w-6 h-6" />
           </button>
-          <button onClick={p.onExport} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition" title="Export">
-            <Share className="w-6 h-6" />
-          </button>
-          <button onClick={p.onSettings} className="p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition" title="Settings">
-            <Settings className="w-6 h-6" />
-          </button>
+          {!folded('export') && (
+            <button onClick={p.onExport} className={iconBtn} title="Export">
+              <Share className="w-6 h-6" />
+            </button>
+          )}
+          {!folded('settings') && (
+            <button onClick={p.onSettings} className={iconBtn} title="Settings">
+              <Settings className="w-6 h-6" />
+            </button>
+          )}
 
           {menu.open === 'paper' && (
             <Popover align="right">
@@ -391,6 +434,10 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <Popover align="right">
               <div className="flex flex-col text-sm text-gray-800 dark:text-gray-200">
                 {[
+                  // Header buttons without room in the row (useHeaderFold).
+                  ...(folded('paper') ? [{ icon: <LayoutTemplate className="w-5 h-5" />, label: 'Paper', fn: () => menu.setOpen('paper') }] : []),
+                  ...(folded('export') ? [{ icon: <Share className="w-5 h-5" />, label: 'Export', fn: p.onExport }] : []),
+                  ...(folded('settings') ? [{ icon: <Settings className="w-5 h-5" />, label: 'Settings', fn: p.onSettings }] : []),
                   { icon: <Sparkles className="w-5 h-5" />, label: 'Transcribe page → LaTeX', fn: p.onConvertPage, cls: 'sm:hidden' },
                   { icon: <Sigma className="w-5 h-5" />, label: 'Insert LaTeX / TikZ', fn: p.onInsertLatex },
                   { icon: <ImageIcon className="w-5 h-5" />, label: 'Insert image', fn: () => fileRef.current?.click() },

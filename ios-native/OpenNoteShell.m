@@ -37,13 +37,25 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.4.11";
+static NSString *const kVersion = @"2.4.12";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
 static NSString *const kPageUnlockFailedKey = @"OpenNotePageUnlockFailed";
 /** Before 2.3.13: the "unlocked page frame rate" switch (on = "max"). */
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
+/** NSUserDefaults: the UI theme's background ("#RRGGBB", setLaunchTheme), shown until the page paints. */
+static NSString *const kLaunchColorKey = @"OpenNoteLaunchColor";
+
+/** The app's theme background (the system's before the app has sent one): window and web view at start. */
+static UIColor *ONLaunchColor(void) {
+    NSString *hex = [[NSUserDefaults standardUserDefaults] stringForKey:kLaunchColorKey];
+    unsigned int rgb = 0;
+    if (hex.length == 7 && [hex hasPrefix:@"#"] && [[NSScanner scannerWithString:[hex substringFromIndex:1]] scanHexInt:&rgb]) {
+        return [UIColor colorWithRed:((rgb >> 16) & 255) / 255.0 green:((rgb >> 8) & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:1];
+    }
+    return [UIColor systemGroupedBackgroundColor];
+}
 
 @interface ONFrameRateBooster : NSObject
 - (void)poke;
@@ -977,7 +989,7 @@ static const double kInkHoldSeconds = 0.06;
     self.webView.scrollView.bounces = NO;
     self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.webView.opaque = NO;
-    self.webView.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    self.webView.backgroundColor = ONLaunchColor();
     // Safari > Develop for debugging (iOS 16.4+). respondsToSelector instead of @available: the
     // Linux toolchain has no compiler-rt for ___isPlatformVersionAtLeast.
     if ([self.webView respondsToSelector:@selector(setInspectable:)]) self.webView.inspectable = YES;
@@ -1073,6 +1085,15 @@ static const double kInkHoldSeconds = 0.06;
             [[NSUserDefaults standardUserDefaults] setObject:rate forKey:kPageRateKey];
             // Choosing again also tries the display's rate again.
             [[NSUserDefaults standardUserDefaults] removeObjectForKey:kPageUnlockFailedKey];
+        }
+        replyHandler(@{}, nil);
+    } else if ([cmd isEqualToString:@"setLaunchTheme"]) {
+        NSString *hex = [msg[@"background"] description];
+        if (hex.length == 7 && [hex hasPrefix:@"#"]) {
+            [[NSUserDefaults standardUserDefaults] setObject:hex forKey:kLaunchColorKey];
+            UIColor *color = ONLaunchColor();
+            self.webView.backgroundColor = color;
+            self.view.window.backgroundColor = color;
         }
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"pageUnlockFailed"]) {
@@ -1366,7 +1387,7 @@ static void ONRemoveScribble(UIView *view) {
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     ONWindow *window = [[ONWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    window.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    window.backgroundColor = ONLaunchColor();
     ONViewController *vc = [[ONViewController alloc] init];
     window.rootViewController = vc;
     window.webView = vc.webView ?: (WKWebView *)vc.view;

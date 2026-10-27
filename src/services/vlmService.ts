@@ -3,6 +3,7 @@ import { AppSettings, resolveChatUrl, resolveModelsUrl } from '../settings';
 import { cleanModelOutput } from './latexRender';
 import { authError, describeKeyStatus, KeyStatus, serverHeaders } from './serverAuth';
 import { prepareTikz } from './tikzEngine';
+import { crashLog } from './crashLog';
 
 /**
  * Qwen3-VL (llama.cpp / OpenAI-compatible) client for handwriting → LaTeX / TikZ.
@@ -56,6 +57,11 @@ const PROMPTS: Record<ConversionMode, string> = {
 function describeError(err: unknown, url: string): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/timed out/i.test(msg)) return `${msg}. The model may still be loading; try again or raise the timeout in Settings.`;
+  // Closed before any reply (TLS cut off, connection reset): the server never answered. Seen with
+  // a relay in front of the server when its route from the device failed.
+  if (/closed|reset|connection (was )?lost|end of stream|EOF|handshake|SSL|TLS/i.test(msg)) {
+    return `The connection to ${url} was closed before the server answered (${msg}). Something between this device and the server dropped it: try again, on another network (Wi-Fi / mobile data), or with Tailscale switched the other way.`;
+  }
   if (/failed to fetch|network|refused|unreachable|ECONN|Could not connect|offline|NSURLErrorDomain/i.test(msg)) {
     return `Cannot reach ${url} (${msg}). Check the server address, that the device is on the same network / Tailscale, and that the switchboard is running.`;
   }
@@ -202,6 +208,22 @@ export function serverBaseUrl(settings: AppSettings): string {
   return resolveChatUrl(settings.vlmEndpoint).replace(/\/v1\/chat\/completions$/, '');
 }
 
+/**
+ * A GET of the connection test, tried again once if the connection is dropped before any reply
+ * (a reused connection the server or a relay had closed failed the test with "connection closed").
+ */
+async function testGet(url: string, settings: AppSettings) {
+  const get = () => httpRequest({ url, timeoutMs: 60000, headers: serverHeaders(settings) });
+  try {
+    return await get();
+  } catch (err) {
+    if (err instanceof HttpAbortError || (err instanceof HttpError && err.status) || /timed out/i.test(String((err as Error)?.message))) throw err;
+    crashLog.event('server-test-retry', { url, error: String((err as Error)?.message ?? err).slice(0, 200) });
+    await new Promise((r) => setTimeout(r, 500));
+    return get();
+  }
+}
+
 export async function testConnection(settings: AppSettings): Promise<string> {
   const keyUrl = serverBaseUrl(settings) + '/opennote/key';
   const url = resolveModelsUrl(settings.vlmEndpoint);
@@ -209,7 +231,7 @@ export async function testConnection(settings: AppSettings): Promise<string> {
   let keyInfo = '';
   try {
     // This device's access (a server without keys answers 404).
-    res = await httpRequest({ url: keyUrl, timeoutMs: 60000, headers: serverHeaders(settings) });
+    res = await testGet(keyUrl, settings);
     const refused = authError(res);
     if (refused) throw new HttpError(refused, res.status);
     if (res.status === 200 && typeof res.data === 'object' && res.data?.status) {
@@ -217,9 +239,10 @@ export async function testConnection(settings: AppSettings): Promise<string> {
       if (s.status === 'limit_reached') throw new HttpError(`This API key has used its token limit (${s.used.toLocaleString()} of ${(s.limit ?? 0).toLocaleString()} tokens). Ask the server's owner to raise it.`, 429);
       keyInfo = describeKeyStatus(s) + ' ';
     }
-    res = await httpRequest({ url, timeoutMs: 60000, headers: serverHeaders(settings) });
+    res = await testGet(url, settings);
   } catch (err) {
     if (err instanceof HttpError && err.status) throw err;
+    crashLog.event('server-test-failed', { error: String((err as Error)?.message ?? err).slice(0, 200) });
     throw new Error(describeError(err, url));
   }
   const refused = authError(res);
