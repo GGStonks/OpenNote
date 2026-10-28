@@ -12,6 +12,7 @@ import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
 import { ExportMode, exportFile, setLaunchTheme } from './platform';
 import { THEMES, applyTheme } from './theme';
+import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
 import { crashLog } from './services/crashLog';
@@ -268,9 +269,12 @@ export const App: React.FC = () => {
   const openNote = notes?.find((n) => n.id === openNoteId) ?? null;
 
   if (notes === null) {
+    // The start-up logo, where and as large as the launch screens draw it (index.html, Android's
+    // launch_icon.xml: 128 px in the middle of the screen), with the spinner below it.
     return (
-      <div className="h-full flex items-center justify-center text-gray-400">
-        <Loader2 className="w-6 h-6 animate-spin" />
+      <div className="h-full flex items-center justify-center text-gray-400 relative">
+        <Logo size={128} />
+        <Loader2 className="w-6 h-6 animate-spin absolute left-1/2 top-[calc(50%+88px)] -translate-x-1/2" />
       </div>
     );
   }

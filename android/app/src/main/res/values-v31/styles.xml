@@ -1,5 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Android 12+: the system's splash screen is always shown (and follows the app's theme from
+         Android 13, Launch.<Theme>), so the window keeps its preview. -->
+    <style name="AppTheme.NoActionBarLaunch" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/launch_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/launch_icon</item>
+        <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
+        <item name="android:windowBackground">@drawable/launch_screen</item>
+        <item name="android:windowDisablePreview">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
     <!-- Android 12+: the splash screen's own attributes set directly (not only through the
          splash screen library's ?attr), for the theme the app last used (OpenNoteLaunchPlugin). -->
     <style name="Launch.Light" parent="AppTheme.NoActionBarLaunch">

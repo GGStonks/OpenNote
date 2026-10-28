@@ -452,7 +452,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   const sectionHead = 'flex items-center justify-between px-2 mt-4 mb-1.5 text-[11px] font-bold text-gray-400 uppercase tracking-wider';
 
   const sidebar = (
-    <aside className="w-72 h-full bg-ui-side border-r border-gray-300/70 dark:border-gray-800 flex flex-col" onClick={closeMenus}>
+    <aside className="w-[calc(18rem+var(--sa-left))] pl-[var(--sa-left)] h-full bg-ui-side border-r border-gray-300/70 dark:border-gray-800 flex flex-col" onClick={closeMenus}>
       {/* Room for the brand row (logo · name · version), which sits above the sidebar. */}
       <div className="flex-shrink-0 h-14 mt-[var(--sa-top)]" />
       <div className="px-3 flex-shrink-0">
@@ -831,7 +831,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     <div className="relative h-full flex bg-ui-app text-gray-900 dark:text-gray-100 select-none overflow-hidden" onClick={closeMenus}>
       {/* Brand row: the logo toggles the sidebar and stays visible when the sidebar is closed. */}
       {/* The logo is centred in a header-high square (3.5rem) at the left edge, open or closed. */}
-      <div className={`absolute left-0 top-0 z-50 flex items-center pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${sidebarShown ? 'w-72' : ''}`}>
+      <div className={`absolute left-[var(--sa-left)] top-0 z-50 flex items-center pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${sidebarShown ? 'w-72' : ''}`}>
         <div className="w-14 h-14 flex-shrink-0 flex items-center justify-center">
           <button
             onClick={(e) => { e.stopPropagation(); setPrefs({ sidebarCollapsed: !collapsed }); }}
@@ -859,11 +859,11 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
           </div>
         )
       ) : (
-        <div className={`flex-shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out ${sidebarShown ? 'w-72' : 'w-0'}`}>{sidebar}</div>
+        <div className={`flex-shrink-0 h-full overflow-hidden transition-[width] duration-200 ease-out ${sidebarShown ? 'w-[calc(18rem+var(--sa-left))]' : 'w-0'}`}>{sidebar}</div>
       )}
 
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white dark:bg-ui-panel">
-        <header className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-3 sm:pr-6 flex-shrink-0 pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${!sidebarShown || narrow ? 'pl-[3.75rem]' : 'pl-4 sm:pl-6'}`}>
+        <header className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-[calc(0.75rem+var(--sa-right))] sm:pr-[calc(1.5rem+var(--sa-right))] flex-shrink-0 pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${!sidebarShown || narrow ? 'pl-[calc(3.75rem+var(--sa-left))]' : 'pl-4 sm:pl-6'}`}>
           <div className="flex items-center gap-2 min-w-0">
             {path.length > 1 && (
               <div className="hidden sm:flex items-center gap-1 text-sm text-gray-400 min-w-0">
@@ -906,7 +906,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* Settings: fixed in the bottom-left corner, also when the sidebar is closed. */}
       <button
         onClick={(e) => { e.stopPropagation(); p.onOpenSettings(); }}
-        className={`absolute z-50 left-3 bottom-[calc(0.75rem+var(--sa-bottom))] flex items-center gap-2 h-11 rounded-2xl text-sm font-semibold text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-ui-raised/90 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-md active:scale-95 transition ${sidebarShown ? 'px-3.5' : 'w-11 justify-center'}`}
+        className={`absolute z-50 left-[calc(0.75rem+var(--sa-left))] bottom-[calc(0.75rem+var(--sa-bottom))] flex items-center gap-2 h-11 rounded-2xl text-sm font-semibold text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-ui-raised/90 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-md active:scale-95 transition ${sidebarShown ? 'px-3.5' : 'w-11 justify-center'}`}
         title="Settings"
       >
         <SettingsIcon className="w-5 h-5" />
@@ -915,7 +915,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
       {/* "+": tap for a new note, hold (or right-click) to import files or make a folder (a tap
           already makes a note: the menu has no "New note"). */}
-      <div className="absolute z-40 right-5 bottom-[calc(1.25rem+var(--sa-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
+      <div className="absolute z-40 right-[calc(1.25rem+var(--sa-right))] bottom-[calc(1.25rem+var(--sa-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
           // Above the + button (it was given `static` too: `absolute` won, with no offsets, so the
           // menu hung from the button's top edge, mostly below the screen's bottom on a phone).

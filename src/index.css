@@ -90,19 +90,15 @@
 
 /* The safe area (notch, camera cutout, system bars that stay shown), used instead of
    env(safe-area-inset-*): iOS gives those, Android's WebView does not, so the Android shell sets
-   these on the root element (MainActivity keepClearOfSystemBars). The app draws under the whole
-   screen; its bars keep their controls clear by these, and the sides (a cutout held sideways) are
-   kept free on the app's background. */
+   these on the root element (MainActivity keepClearOfSystemBars). The app draws on the whole
+   screen, under the cutout too: only the controls along an edge keep clear by these (top bars,
+   the buttons in the corners, the sidebar and the pages panel). Padding the whole app at the
+   sides left a band of its background beside a phone's cutout held sideways. */
 :root {
   --sa-top: env(safe-area-inset-top, 0px);
   --sa-right: env(safe-area-inset-right, 0px);
   --sa-bottom: env(safe-area-inset-bottom, 0px);
   --sa-left: env(safe-area-inset-left, 0px);
-}
-#root {
-  box-sizing: border-box;
-  padding-left: var(--sa-left);
-  padding-right: var(--sa-right);
 }
 
 /* UI theme variables (src/theme.ts sets them at start-up; these are the Light theme). */

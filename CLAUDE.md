@@ -181,13 +181,21 @@ show the iPad's compositing cost).
   platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
   the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView
   colour in MainActivity) and to the iOS shell (`OpenNoteLaunchColor`, window and web view colour).
-  A failed call logs `launch-theme-failed` to the crash report. The mark (`launch_icon.xml`, from
+  A failed call logs `launch-theme-failed` to the crash report. Before Android 12 a launch preview
+  can only have its one manifest colour, so it is disabled (`windowDisablePreview`, values/ only):
+  MainActivity's window is the launch screen (`launch_screen_<theme>`, the logo) behind a
+  see-through WebView until the page's first frame, which draws the same vector logo at the same
+  place (index.html, then App's loading screen, 128 px in the middle). The launcher icon is vector
+  too (`ic_launcher_gradient` + `ic_launcher_mark`). The mark (`launch_icon.xml`, from
   public/favicon.svg) is centred at its own size on every screen shape: the old full-screen
   splash.png was stretched on 20:9 phones.
 - The safe area is `--sa-top/right/bottom/left` (index.css), never `env(safe-area-inset-*)`: iOS
   fills them from env(), the Android shell sets them from its insets (cutout, bars that stay shown;
   MainActivity `keepClearOfSystemBars`), as Android's WebView gives no env() values. The app draws on
-  the whole screen; bars pad their controls by these and `#root` keeps the sides free. Capacitor's
+  the whole screen, under the cutout too; only controls along an edge keep clear by these (top
+  bars, corner buttons, sidebar, pages panel; padding the whole app left a band beside a sideways
+  cutout). Before Android 11 the compat full-screen call adds LAYOUT_STABLE, with which the insets
+  keep the hidden bars: MainActivity clears it (Android 10 phones kept bands at both ends). Capacitor's
   SystemBars must keep `insetsHandling: 'disable'` (capacitor.config.ts): on WebViews without
   safe-area support it padded the window by the cutout and bars, and repainted it with the static
   theme's colour (grey bands on 20:9 phones, a light start before an OLED app); MainActivity

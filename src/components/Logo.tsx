@@ -2,7 +2,9 @@ import React, { useId } from 'react';
 
 /**
  * OpenNote's logo: a pen drawing an "O" on a blue-violet tile. The same artwork is in
- * assets-src/logo.svg, from which the favicon, launcher icons and splash screens are rendered.
+ * assets-src/logo.svg (from which the favicon and icon bitmaps are rendered), index.html (the
+ * start-up logo), and as vectors in the Android launcher icon (ic_launcher_gradient /
+ * ic_launcher_mark) and launch screens (launch_icon.xml).
  */
 export const Logo: React.FC<{ size?: number; className?: string }> = ({ size = 32, className }) => {
   const g = `on-logo-${useId().replace(/:/g, '')}`;

@@ -13,10 +13,21 @@
     <style>
       html, body, #root { height: 100%; margin: 0; padding: 0; overflow: hidden; }
       body { overscroll-behavior: none; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+      .boot { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
     </style>
+    <script>
+      // The theme's background before the app's code has loaded (theme.ts `ui.app`; keep in step).
+      try {
+        var t = (JSON.parse(localStorage.getItem('opennote_settings_v2') || '{}') || {}).theme;
+        var bg = { light: '#F2F2F7', dark: '#121214', sepia: '#EFE7D6', midnight: '#0F172A', oled: '#000000' }[t];
+        if (bg) document.documentElement.style.backgroundColor = bg;
+      } catch (e) {}
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- The start-up logo (a vector, as the launch screens' launch_icon.xml: 128 px in the middle),
+         until the app replaces it. -->
+    <div id="root"><div class="boot"><svg width="128" height="128" viewBox="0 0 64 64" aria-label="OpenNote"><defs><linearGradient id="boot-g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3B82F6"/><stop offset="1" stop-color="#6D28D9"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#boot-g)"/><g fill="#fff" stroke="#fff" stroke-linejoin="round"><path d="M41.3 27.4A15 15 0 1 1 34.1 21.9" fill="none" stroke-width="6.5" stroke-linecap="round"/><path d="M42.6 26.4 49.2 24.7 44.3 19.8Z" stroke-width="1.2"/><path d="M50.1 23.9 45.1 18.9 51.5 12.5 56.5 17.5Z" fill-opacity=".85" stroke-opacity=".85" stroke-width="1.6"/></g></svg></div></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

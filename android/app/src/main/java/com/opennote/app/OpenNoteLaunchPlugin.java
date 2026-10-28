@@ -40,6 +40,7 @@ public class OpenNoteLaunchPlugin extends Plugin {
         Activity activity = getActivity();
         activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(THEME, id).putInt(BACKGROUND, color).apply();
         activity.runOnUiThread(() -> {
+            // The page is up by now (it sends this at start): plain colour, opaque WebView.
             activity.getWindow().setBackgroundDrawable(new ColorDrawable(color));
             getBridge().getWebView().setBackgroundColor(color);
             if (Build.VERSION.SDK_INT >= 33) {
@@ -58,6 +59,16 @@ public class OpenNoteLaunchPlugin extends Plugin {
     static SharedPreferences saved(Context context) {
         SharedPreferences prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         return prefs.contains(BACKGROUND) ? prefs : null;
+    }
+
+    static int launchScreen(String id) {
+        switch (id) {
+            case "dark": return R.drawable.launch_screen_dark;
+            case "sepia": return R.drawable.launch_screen_sepia;
+            case "midnight": return R.drawable.launch_screen_midnight;
+            case "oled": return R.drawable.launch_screen_oled;
+            default: return R.drawable.launch_screen_light;
+        }
     }
 
     static int launchStyle(String id) {

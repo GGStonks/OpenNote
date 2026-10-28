@@ -225,7 +225,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   const dragLabel = drag ? (drag.ids.size > 1 ? `${drag.ids.size} pages` : `Page ${pages.findIndex((pg) => drag.ids.has(pg.id)) + 1}`) : '';
 
   return (
-    <aside className="h-full w-[216px] flex-shrink-0 flex flex-col bg-ui-app dark:bg-ui-side border-r border-gray-200 dark:border-gray-800 select-none" data-no-pan>
+    <aside className="h-full w-[calc(216px+var(--sa-left))] pl-[var(--sa-left)] flex-shrink-0 flex flex-col bg-ui-app dark:bg-ui-side border-r border-gray-200 dark:border-gray-800 select-none" data-no-pan>
       <div className="flex items-center gap-1 px-3 py-2 border-b border-gray-200 dark:border-gray-800">
         <div className="font-semibold text-sm text-gray-900 dark:text-gray-100 flex-1">
           {count > 1 ? `${count} selected` : `${pages.length} page${pages.length === 1 ? '' : 's'}`}

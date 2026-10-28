@@ -68,6 +68,10 @@ public class MainActivity extends BridgeActivity {
             @Override
             public void onPageCommitVisible(WebView view, String url) {
                 sendInsets();
+                if (!pagePainted) {
+                    pagePainted = true;
+                    launchColors();
+                }
             }
 
             @Override
@@ -103,17 +107,28 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
+    /** The page has drawn its first frame (until then the window shows the launch screen). */
+    private boolean pagePainted;
+
     /**
-     * Until the page has painted, the window and the WebView show the app's own theme (saved by
-     * OpenNoteLaunchPlugin): the WebView's default white, or the system's light or dark, flashed
-     * before an OLED Black or Sepia app.
+     * Until the page has painted, the window shows the launch screen of the app's own theme (its
+     * colour and the logo, saved by OpenNoteLaunchPlugin; the system's light or dark before the app
+     * has sent one) through a see-through WebView; after it, plain colour behind an opaque WebView.
+     * Before Android 12 this window is the launch screen itself (no system preview, styles.xml): a
+     * preview can only have one fixed colour, and an OLED Black app started on light grey.
      */
     private void launchColors() {
         SharedPreferences saved = OpenNoteLaunchPlugin.saved(this);
-        if (saved == null) return;
-        int color = saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE);
-        getWindow().setBackgroundDrawable(new ColorDrawable(color));
-        getBridge().getWebView().setBackgroundColor(color);
+        String theme = saved != null ? saved.getString(OpenNoteLaunchPlugin.THEME, "light") : null;
+        int color = saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : getColor(R.color.launch_background);
+        WebView web = getBridge() != null ? getBridge().getWebView() : null;
+        if (pagePainted) {
+            getWindow().setBackgroundDrawable(new ColorDrawable(color));
+            if (web != null) web.setBackgroundColor(color);
+        } else {
+            getWindow().setBackgroundDrawableResource(theme != null ? OpenNoteLaunchPlugin.launchScreen(theme) : R.drawable.launch_screen);
+            if (web != null) web.setBackgroundColor(Color.TRANSPARENT);
+        }
     }
 
     @Override
@@ -160,5 +175,12 @@ public class MainActivity extends BridgeActivity {
         WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, window.getDecorView());
         controller.setSystemBarsBehavior(WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
         controller.hide(WindowInsetsCompat.Type.systemBars());
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            // Before Android 11 the compat call above also sets LAYOUT_STABLE, with which the insets
+            // keep the hidden status and navigation bars: the page kept their room free (bands at
+            // the top and bottom, or the sides held sideways, on an Android 10 phone).
+            View decor = window.getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility() & ~View.SYSTEM_UI_FLAG_LAYOUT_STABLE);
+        }
     }
 }

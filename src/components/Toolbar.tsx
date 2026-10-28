@@ -371,7 +371,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
 
   return (
     <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[var(--sa-top)]">
-      <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 px-3 py-2">
+      <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 py-2 pl-[calc(0.75rem+var(--sa-left))] pr-[calc(0.75rem+var(--sa-right))]">
         <div ref={leftRef} className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
           <button onClick={p.onBack} className="flex-none flex items-center text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">
             <ChevronLeft className="w-6 h-6" />
