@@ -26,8 +26,12 @@
         <item name="postSplashScreenTheme">@style/AppTheme.NoActionBar</item>
         <item name="android:windowBackground">@drawable/launch_screen</item>
         <!-- Before Android 12 the system's preview of this window can only have this one colour:
-             none, so the first thing shown is MainActivity's window, in the app's theme. -->
+             none, so the first thing shown is MainActivity's window, in the app's theme. ColorOS
+             drew it anyway (the light colour and the logo, then the app's own), so the activity
+             starts see-through, which no system or launcher paints a preview for; MainActivity
+             makes it opaque once the page has drawn (becomeOpaque). -->
         <item name="android:windowDisablePreview">true</item>
+        <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="27">shortEdges</item>
     </style>
 

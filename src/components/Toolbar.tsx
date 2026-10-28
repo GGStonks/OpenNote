@@ -188,7 +188,8 @@ function useHeaderFold(row: React.RefObject<HTMLElement | null>, left: React.Ref
     const el = left.current;
     if (el && fold < FOLD_TITLE && el.scrollWidth > el.clientWidth + 1) setFold(fold + 1);
   }, [fold, left]);
-  // Any change of the header's size (rotation, split screen, the pages panel) starts over.
+  // Any change of the header's size (rotation, split screen, the pages panel) starts over. (A button
+  // moved aside from a camera cutout, services/cutout.ts, never takes room the row does not have.)
   useEffect(() => {
     const el = row.current;
     if (!el) return;
@@ -370,7 +371,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const iconBtn = 'p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition';
 
   return (
-    <header className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[var(--sa-top)]">
+    <header data-cutout-clear data-cutout-bar className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[var(--sa-top)]">
       <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 py-2 pl-[calc(0.75rem+var(--sa-left))] pr-[calc(0.75rem+var(--sa-right))]">
         <div ref={leftRef} className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
           <button onClick={p.onBack} className="flex-none flex items-center text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">

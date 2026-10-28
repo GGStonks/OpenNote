@@ -16,6 +16,7 @@ import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
 import { crashLog } from './services/crashLog';
+import { startCutoutClearance } from './services/cutout';
 import { startFrameRate } from './services/frameRate';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
@@ -82,6 +83,7 @@ export const App: React.FC = () => {
     void setLaunchTheme(settings.theme, t.ui.app, t.dark).catch((err) => crashLog.event('launch-theme-failed', { error: String(err?.message ?? err).slice(0, 200) }));
   }, [settings.theme]);
   useEffect(() => {
+    startCutoutClearance();
     crashLog.start();
     startFrameRate();
   }, []);

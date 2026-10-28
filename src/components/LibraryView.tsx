@@ -452,7 +452,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
   const sectionHead = 'flex items-center justify-between px-2 mt-4 mb-1.5 text-[11px] font-bold text-gray-400 uppercase tracking-wider';
 
   const sidebar = (
-    <aside className="w-[calc(18rem+var(--sa-left))] pl-[var(--sa-left)] h-full bg-ui-side border-r border-gray-300/70 dark:border-gray-800 flex flex-col" onClick={closeMenus}>
+    <aside data-cutout-clear className="w-[calc(18rem+var(--sa-left))] pl-[var(--sa-left)] h-full bg-ui-side border-r border-gray-300/70 dark:border-gray-800 flex flex-col" onClick={closeMenus}>
       {/* Room for the brand row (logo · name · version), which sits above the sidebar. */}
       <div className="flex-shrink-0 h-14 mt-[var(--sa-top)]" />
       <div className="px-3 flex-shrink-0">
@@ -471,7 +471,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       </div>
 
       <div className="flex-1 overflow-y-auto px-3 pb-20">
-        <div className={sectionHead}>
+        <div data-cutout-item className={sectionHead}>
           <span>Folders</span>
           <button onClick={(e) => { e.stopPropagation(); startCreateFolder(null); }} className="p-0.5 hover:text-blue-600" title="New folder"><FolderPlus className="w-4 h-4" /></button>
         </div>
@@ -488,7 +488,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
           )}
         </div>
 
-        <div className={sectionHead}>
+        <div data-cutout-item className={sectionHead}>
           <span>Tags</span>
           <button onClick={(e) => { e.stopPropagation(); setNameDraft(''); setCreatingTag(true); }} className="p-0.5 hover:text-blue-600" title="New tag"><Plus className="w-4 h-4" /></button>
         </div>
@@ -831,7 +831,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     <div className="relative h-full flex bg-ui-app text-gray-900 dark:text-gray-100 select-none overflow-hidden" onClick={closeMenus}>
       {/* Brand row: the logo toggles the sidebar and stays visible when the sidebar is closed. */}
       {/* The logo is centred in a header-high square (3.5rem) at the left edge, open or closed. */}
-      <div className={`absolute left-[var(--sa-left)] top-0 z-50 flex items-center pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${sidebarShown ? 'w-72' : ''}`}>
+      <div data-cutout-clear className={`absolute left-[var(--sa-left)] top-0 z-50 flex items-center pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${sidebarShown ? 'w-72' : ''}`}>
         <div className="w-14 h-14 flex-shrink-0 flex items-center justify-center">
           <button
             onClick={(e) => { e.stopPropagation(); setPrefs({ sidebarCollapsed: !collapsed }); }}
@@ -844,8 +844,8 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
         </div>
         {sidebarShown && (
           <div className="flex items-baseline gap-1.5 min-w-0">
-            <span className="font-bold text-lg text-gray-900 dark:text-gray-100">OpenNote</span>
-            <span className="text-[11px] font-semibold text-gray-400 tabular-nums">v{__APP_VERSION__}</span>
+            <span data-cutout-item className="font-bold text-lg text-gray-900 dark:text-gray-100 truncate">OpenNote</span>
+            <span data-cutout-item className="text-[11px] font-semibold text-gray-400 tabular-nums">v{__APP_VERSION__}</span>
           </div>
         )}
       </div>
@@ -863,7 +863,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       )}
 
       <main className="flex-1 min-w-0 flex flex-col overflow-hidden bg-white dark:bg-ui-panel">
-        <header className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-[calc(0.75rem+var(--sa-right))] sm:pr-[calc(1.5rem+var(--sa-right))] flex-shrink-0 pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${!sidebarShown || narrow ? 'pl-[calc(3.75rem+var(--sa-left))]' : 'pl-4 sm:pl-6'}`}>
+        <header data-cutout-clear data-cutout-bar className={`border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2 pr-[calc(0.75rem+var(--sa-right))] sm:pr-[calc(1.5rem+var(--sa-right))] flex-shrink-0 pt-[var(--sa-top)] h-[calc(3.5rem+var(--sa-top))] ${!sidebarShown || narrow ? 'pl-[calc(3.75rem+var(--sa-left))]' : 'pl-4 sm:pl-6'}`}>
           <div className="flex items-center gap-2 min-w-0">
             {path.length > 1 && (
               <div className="hidden sm:flex items-center gap-1 text-sm text-gray-400 min-w-0">
@@ -876,7 +876,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
               </div>
             )}
             <h1 className="text-lg sm:text-xl font-bold truncate">{viewTitle}</h1>
-            <span className="text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-500 px-2 py-0.5 rounded-full">{visibleNotes.length}</span>
+            <span data-cutout-item className="text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-500 px-2 py-0.5 rounded-full">{visibleNotes.length}</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="hidden sm:flex items-center bg-gray-100 dark:bg-ui-raised p-1 rounded-xl">
@@ -906,6 +906,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* Settings: fixed in the bottom-left corner, also when the sidebar is closed. */}
       <button
         onClick={(e) => { e.stopPropagation(); p.onOpenSettings(); }}
+        data-cutout-clear
         className={`absolute z-50 left-[calc(0.75rem+var(--sa-left))] bottom-[calc(0.75rem+var(--sa-bottom))] flex items-center gap-2 h-11 rounded-2xl text-sm font-semibold text-gray-600 dark:text-gray-300 bg-white/90 dark:bg-ui-raised/90 backdrop-blur border border-gray-200 dark:border-gray-700 shadow-md active:scale-95 transition ${sidebarShown ? 'px-3.5' : 'w-11 justify-center'}`}
         title="Settings"
       >
@@ -915,7 +916,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
       {/* "+": tap for a new note, hold (or right-click) to import files or make a folder (a tap
           already makes a note: the menu has no "New note"). */}
-      <div className="absolute z-40 right-[calc(1.25rem+var(--sa-right))] bottom-[calc(1.25rem+var(--sa-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
+      <div data-cutout-clear className="absolute z-40 right-[calc(1.25rem+var(--sa-right))] bottom-[calc(1.25rem+var(--sa-bottom))] flex flex-col items-end gap-2" onClick={(e) => e.stopPropagation()}>
         {fabMenu && (
           // Above the + button (it was given `static` too: `absolute` won, with no offsets, so the
           // menu hung from the button's top edge, mostly below the screen's bottom on a phone).

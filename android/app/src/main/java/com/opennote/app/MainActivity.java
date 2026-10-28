@@ -2,19 +2,25 @@ package com.opennote.app;
 
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.WebView;
+import android.widget.FrameLayout;
+import android.widget.ImageView;
 
 import androidx.activity.OnBackPressedCallback;
 
 import androidx.core.view.WindowCompat;
 import androidx.core.graphics.Insets;
+import androidx.core.view.DisplayCutoutCompat;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
@@ -44,21 +50,31 @@ public class MainActivity extends BridgeActivity {
     private String insetsCss;
 
     /**
-     * The app takes the whole screen, under a display cutout too, and the page keeps its controls
-     * clear of the cutout and of system bars that stay shown (devices where they do not hide) from
-     * the insets, in CSS px: its `--sa-*` variables (Android's WebView does not give
-     * `env(safe-area-inset-*)`). The content used to be padded by them instead, which left bands of
-     * the window's colour on the cutout's side (top and bottom held upright, the sides sideways).
-     * With the bars hidden their insets are zero.
+     * The app takes the whole screen, under a display cutout too. The page is told, in CSS px,
+     * where system bars that stay shown are (its `--sa-*` variables; Android's WebView gives no
+     * `env(safe-area-inset-*)`) and the cutout's own outline (`window.OpenNoteCutout`, rectangles):
+     * only a control the cutout would cover moves aside (src/services/cutout.ts). The cutout's
+     * inset is a whole band (a waterdrop notch reports the status bar's height across the full
+     * width), and keeping it free left empty bands above the top bars, or beside them sideways.
      */
     private void keepClearOfSystemBars() {
         View content = findViewById(android.R.id.content);
         ViewCompat.setOnApplyWindowInsetsListener(content, (v, insets) -> {
-            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
             float d = getResources().getDisplayMetrics().density;
+            StringBuilder cut = new StringBuilder("[");
+            DisplayCutoutCompat cutout = insets.getDisplayCutout();
+            if (cutout != null) {
+                for (Rect r : cutout.getBoundingRects()) {
+                    if (cut.length() > 1) cut.append(',');
+                    cut.append(String.format(java.util.Locale.ROOT, "[%.1f,%.1f,%.1f,%.1f]", r.left / d, r.top / d, r.right / d, r.bottom / d));
+                }
+            }
+            cut.append(']');
             insetsCss = String.format(java.util.Locale.ROOT,
-                "(function(s){s.setProperty('--sa-top','%.1fpx');s.setProperty('--sa-right','%.1fpx');s.setProperty('--sa-bottom','%.1fpx');s.setProperty('--sa-left','%.1fpx')})(document.documentElement.style)",
-                bars.top / d, bars.right / d, bars.bottom / d, bars.left / d);
+                "(function(s){s.setProperty('--sa-top','%.1fpx');s.setProperty('--sa-right','%.1fpx');s.setProperty('--sa-bottom','%.1fpx');s.setProperty('--sa-left','%.1fpx')})(document.documentElement.style);"
+                    + "window.OpenNoteCutout=%s;window.dispatchEvent(new Event('opennote-cutout'))",
+                bars.top / d, bars.right / d, bars.bottom / d, bars.left / d, cut);
             v.setPadding(0, 0, 0, 0);
             sendInsets();
             return WindowInsetsCompat.CONSUMED;
@@ -71,6 +87,7 @@ public class MainActivity extends BridgeActivity {
                 if (!pagePainted) {
                     pagePainted = true;
                     launchColors();
+                    becomeOpaque();
                 }
             }
 
@@ -107,27 +124,52 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
-    /** The page has drawn its first frame (until then the window shows the launch screen). */
+    /** The page has drawn its first frame (until then the launch logo is shown over it). */
     private boolean pagePainted;
+    private ImageView launchLogo;
 
     /**
-     * Until the page has painted, the window shows the launch screen of the app's own theme (its
-     * colour and the logo, saved by OpenNoteLaunchPlugin; the system's light or dark before the app
-     * has sent one) through a see-through WebView; after it, plain colour behind an opaque WebView.
-     * Before Android 12 this window is the launch screen itself (no system preview, styles.xml): a
-     * preview can only have one fixed colour, and an OLED Black app started on light grey.
+     * Until the page has painted, the screen is the launch screen of the app's own theme: its colour
+     * (saved by OpenNoteLaunchPlugin; the system's light or dark before the app has sent one) behind
+     * a see-through WebView, and the logo in the middle of the screen, where index.html draws it, so
+     * the page takes over without a jump (as the window's background it moved with the system bars).
+     * Before Android 12 this is the launch screen itself (no system preview, styles.xml): a preview
+     * can only have one fixed colour, and an OLED Black app started on light grey.
      */
     private void launchColors() {
         SharedPreferences saved = OpenNoteLaunchPlugin.saved(this);
-        String theme = saved != null ? saved.getString(OpenNoteLaunchPlugin.THEME, "light") : null;
         int color = saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : getColor(R.color.launch_background);
+        getWindow().setBackgroundDrawable(new ColorDrawable(color));
         WebView web = getBridge() != null ? getBridge().getWebView() : null;
-        if (pagePainted) {
-            getWindow().setBackgroundDrawable(new ColorDrawable(color));
-            if (web != null) web.setBackgroundColor(color);
-        } else {
-            getWindow().setBackgroundDrawableResource(theme != null ? OpenNoteLaunchPlugin.launchScreen(theme) : R.drawable.launch_screen);
-            if (web != null) web.setBackgroundColor(Color.TRANSPARENT);
+        if (web != null) web.setBackgroundColor(pagePainted ? color : Color.TRANSPARENT);
+        if (!pagePainted && launchLogo == null) {
+            launchLogo = new ImageView(this);
+            launchLogo.setImageResource(R.drawable.launch_icon);
+            int size = Math.round(288 * getResources().getDisplayMetrics().density);
+            ((FrameLayout) findViewById(android.R.id.content)).addView(launchLogo, new FrameLayout.LayoutParams(size, size, Gravity.CENTER));
+        } else if (pagePainted && launchLogo != null) {
+            ((ViewGroup) launchLogo.getParent()).removeView(launchLogo);
+            launchLogo = null;
+        }
+    }
+
+    /**
+     * Before Android 12 the activity starts see-through (styles.xml, so that nothing is drawn
+     * before its own themed window); once the page is up it is made opaque again, so the screen
+     * behind it is no longer kept drawn. Android 10 has only the hidden call for it.
+     */
+    private void becomeOpaque() {
+        if (Build.VERSION.SDK_INT >= 31) return;
+        if (Build.VERSION.SDK_INT >= 30) {
+            setTranslucent(false);
+            return;
+        }
+        try {
+            java.lang.reflect.Method m = android.app.Activity.class.getDeclaredMethod("convertFromTranslucent");
+            m.setAccessible(true);
+            m.invoke(this);
+        } catch (Throwable ignored) {
+            // Stays see-through: still drawn opaque (the window itself is), only the screen behind is kept.
         }
     }
 

@@ -1884,6 +1884,79 @@ if (ONLY.has('back')) {
   console.log(`back   ${ok ? 'every press went back one step' : 'WRONG'}`);
   await pctx.close();
 }
+// --only cutout: a camera cutout as Android's shell reports it (window.OpenNoteCutout, its outline):
+// the app keeps no band free for it (it used to keep the status bar's height across the whole
+// top, or a side held sideways), and no control of the marked parts (data-cutout-clear:
+// services/cutout.ts) may be under it. Phones held upright with a waterdrop notch or a corner
+// hole, and sideways with the notch at the left; library, sidebar and editor.
+if (ONLY.has('cutout')) {
+  const cases = [
+    ['notch', 360, 800, [[165, 0, 195, 26]]],
+    ['wide', 360, 800, [[132, 0, 228, 48]]],
+    ['hole', 360, 800, [[14, 10, 34, 30]]],
+    ['sideways', 800, 360, [[0, 165, 26, 195]]],
+  ];
+  let bad = 0;
+  for (const [name, width, height, cuts] of cases) {
+    const pctx = await browser.newContext({ viewport: { width, height }, deviceScaleFactor: 2, hasTouch: true });
+    const pp = await pctx.newPage();
+    pp.on('pageerror', (e) => console.error('page error:', e.message));
+    await pp.addInitScript((c) => { window.OpenNoteCutout = c; }, cuts);
+    await pp.goto(url);
+    await sleep(1800);
+    const check = (label) => pp.evaluate(([label, cuts]) => {
+      const C = 'button, input, textarea, select, a, [role="button"], [data-cutout-item]';
+      const els = [...document.querySelectorAll('[data-cutout-clear]')].flatMap((r) => [...(r.matches(C) ? [r] : []), ...r.querySelectorAll(C)]);
+      const hit = els.filter((e) => {
+        // Its content (a row of a list keeps its box and pads its content past the cutout).
+        const b = e.getBoundingClientRect(), cs = getComputedStyle(e);
+        const r = { left: b.left + parseFloat(cs.paddingLeft), right: b.right - parseFloat(cs.paddingRight), top: b.top, bottom: b.bottom, width: b.width, height: b.height };
+        if (!r.width || !r.height || getComputedStyle(e).visibility === 'hidden') return false;
+        return cuts.some(([l, t, rr, b]) => r.left < rr && r.right > l && r.top < b && r.bottom > t);
+      }).map((e) => e.getAttribute('title') || e.getAttribute('aria-label') || e.textContent.trim().slice(0, 14) || e.tagName);
+      // Nor may a control moved aside land on another.
+      const shown = els.filter((e) => { const r = e.getBoundingClientRect(); return r.width && r.height && !e.closest('[data-on-screen]'); });
+      const overlaps = [];
+      for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) {
+        const a = shown[i], b = shown[j];
+        // In the same bar (a sidebar slid over the library is over its header, not overlapping it).
+        if (a.contains(b) || b.contains(a) || a.closest('[data-cutout-clear]') !== b.closest('[data-cutout-clear]')) continue;
+        const p = a.getBoundingClientRect(), q = b.getBoundingClientRect();
+        if (Math.min(p.right, q.right) - Math.max(p.left, q.left) > 1 && Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top) > 1) overlaps.push(`${a.getAttribute('title') || a.tagName}/${b.getAttribute('title') || b.tagName}`);
+      }
+      if (overlaps.length) hit.push(`OVERLAP ${overlaps.slice(0, 4).join(' ')}`);
+      // Nor be pushed off the screen.
+      const off = shown.filter((e) => { const r = e.getBoundingClientRect(); return r.left < -0.5 || r.right > innerWidth + 0.5; });
+      if (off.length) hit.push(`OFF SCREEN ${off.map((e) => e.getAttribute('title') || e.tagName).join(' ')}`);
+      const bar = document.querySelector('header');
+      const top = bar ? Math.round(bar.getBoundingClientRect().top + parseFloat(getComputedStyle(bar).paddingTop)) : null;
+      return `${label}: ${hit.length ? `UNDER THE CUTOUT ${hit.join(', ')}` : 'clear'} (bar content from y ${top})`;
+    }, [label, cuts]);
+    const results = [await check('library')];
+    if (arg('shots')) await pp.screenshot({ path: join(arg('shots'), `cutout-${name}-library.png`) });
+    const logo = pp.locator('button[aria-expanded]').first();
+    await logo.click();
+    await sleep(600);
+    results.push(await check('sidebar'));
+    await logo.click();
+    await sleep(400);
+    await pp.getByText('Welcome to', { exact: false }).first().click();
+    await sleep(2200);
+    results.push(await check('editor'));
+    if (arg('shots')) await pp.screenshot({ path: join(arg('shots'), `cutout-${name}-editor.png`) });
+    await pp.locator('button[title="Pages"]').first().click();
+    await sleep(800);
+    results.push(await check('pages panel'));
+    // Expected: beside a 96 px notch on a 360 px phone there is no room for undo and redo (the
+    // editor's bar goes down past the notch's own depth, the last resort); the library's logo sits
+    // in a square of its own beside the title, so a hole over it leaves it there (still tappable).
+    const expected = (r) => (name === 'wide' && /^(editor|pages panel):/.test(r) && !/UNDER/.test(r)) || (name === 'hole' && /^(library|sidebar): UNDER THE CUTOUT (Show|Hide) the sidebar \(/.test(r));
+    bad += results.filter((r) => !expected(r) && (/UNDER/.test(r) || !/from y 0\)/.test(r))).length;
+    console.log(`cutout ${name.padEnd(9)} ${results.join(' | ')}`);
+    await pctx.close();
+  }
+  console.log(`cutout ${bad ? `${bad} WRONG` : 'no control under a cutout, no band kept free'}`);
+}
 // --only penhold: the pen's hold-to-snap. A line pressed firmly and held still 0.6 s must stay
 // handwriting (resting the pen at the end of a stroke straightened fraction bars); held 1.2 s it
 // snaps, at the handwriting's own width (Stroke.width x 1.4 = its median drawn width).

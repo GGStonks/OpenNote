@@ -61,16 +61,6 @@ public class OpenNoteLaunchPlugin extends Plugin {
         return prefs.contains(BACKGROUND) ? prefs : null;
     }
 
-    static int launchScreen(String id) {
-        switch (id) {
-            case "dark": return R.drawable.launch_screen_dark;
-            case "sepia": return R.drawable.launch_screen_sepia;
-            case "midnight": return R.drawable.launch_screen_midnight;
-            case "oled": return R.drawable.launch_screen_oled;
-            default: return R.drawable.launch_screen_light;
-        }
-    }
-
     static int launchStyle(String id) {
         switch (id) {
             case "dark": return R.style.Launch_Dark;

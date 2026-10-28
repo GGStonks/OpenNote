@@ -987,6 +987,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
           {/* Page indicator and zoom */}
           <div
+            data-cutout-clear
             className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
             style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
             data-no-pan

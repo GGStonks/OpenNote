@@ -182,27 +182,37 @@ show the iPad's compositing cost).
   the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView
   colour in MainActivity) and to the iOS shell (`OpenNoteLaunchColor`, window and web view colour).
   A failed call logs `launch-theme-failed` to the crash report. Before Android 12 a launch preview
-  can only have its one manifest colour, so it is disabled (`windowDisablePreview`, values/ only):
-  MainActivity's window is the launch screen (`launch_screen_<theme>`, the logo) behind a
-  see-through WebView until the page's first frame, which draws the same vector logo at the same
-  place (index.html, then App's loading screen, 128 px in the middle). The launcher icon is vector
-  too (`ic_launcher_gradient` + `ic_launcher_mark`). The mark (`launch_icon.xml`, from
+  can only have its one manifest colour, so there is none: the launch theme is see-through
+  (`windowIsTranslucent` + `windowDisablePreview`, values/ only; ColorOS drew the preview even with
+  it disabled), MainActivity's window is the theme's colour with the logo as a centred view (at the
+  middle of the screen; as the window background it moved with the bars) over a see-through WebView
+  until the page's first frame, which draws the same vector logo at the same place (index.html, then
+  App's loading screen, 128 px), then the activity is made opaque (`becomeOpaque`). The launcher
+  icon is vector too (`ic_launcher_gradient` + `ic_launcher_mark`). The mark (`launch_icon.xml`, from
   public/favicon.svg) is centred at its own size on every screen shape: the old full-screen
   splash.png was stretched on 20:9 phones.
 - The safe area is `--sa-top/right/bottom/left` (index.css), never `env(safe-area-inset-*)`: iOS
-  fills them from env(), the Android shell sets them from its insets (cutout, bars that stay shown;
-  MainActivity `keepClearOfSystemBars`), as Android's WebView gives no env() values. The app draws on
-  the whole screen, under the cutout too; only controls along an edge keep clear by these (top
-  bars, corner buttons, sidebar, pages panel; padding the whole app left a band beside a sideways
-  cutout). Before Android 11 the compat full-screen call adds LAYOUT_STABLE, with which the insets
-  keep the hidden bars: MainActivity clears it (Android 10 phones kept bands at both ends). Capacitor's
-  SystemBars must keep `insetsHandling: 'disable'` (capacitor.config.ts): on WebViews without
+  fills them from env(), the Android shell from system bars that stay shown (MainActivity
+  `keepClearOfSystemBars`; Android's WebView gives no env() values). A camera cutout is not a band
+  kept free: Android reports one as a whole strip (a waterdrop notch: the status bar's height across
+  the width), which left empty bands above the top bars and beside them sideways. The shell sends
+  the cutout's outline (`window.OpenNoteCutout`, CSS px) and `src/services/cutout.ts` moves only a
+  control it would cover, in parts marked `data-cutout-clear` (top bars, brand row, sidebar, pages
+  panel, corner buttons): a margin within its row (never overflowing the row, off the bar or onto
+  another control), more padding in a row of a list, a cut-off text (the note's title, "All notes")
+  giving up room, and as the last resort a `data-cutout-bar` going down by the cutout's own depth.
+  New edge UI gets `data-cutout-clear` (text in it that must stay visible: `data-cutout-item`).
+  `--only cutout [--shots <dir>]` (waterdrop notch, wide notch, corner hole, sideways). Before
+  Android 11 the compat full-screen call adds LAYOUT_STABLE (insets keep the hidden bars):
+  MainActivity clears it. Capacitor's SystemBars must keep `insetsHandling: 'disable'` (capacitor.config.ts): on WebViews without
   safe-area support it padded the window by the cutout and bars, and repainted it with the static
   theme's colour (grey bands on 20:9 phones, a light start before an OLED app); MainActivity
   re-applies the theme's colour after it. An emulator (`~/.android/avd/on20x9`, Pixel 7, API 35,
   headless) shows the launch and insets; driving the WebView: `adb forward` its
   `webview_devtools_remote_<pid>` and raw CDP (Playwright cannot attach). Headless qemu crashes on
-  any display change (rotation, cutout overlays).
+  any display change (rotation, cutout overlays on API 35). Android 10 (the owner's Oppo A53s):
+  AVD `a53s` (720x1600, API 29, the "tall" cutout overlay); its WebView is Chrome 74, so test with
+  `npx vite build --target chrome74` + `npx cap sync android` + assembleDebug (never release that).
 - The device's back (Android button or gesture) goes back one step: whatever can be closed
   registers with `useBack(active, close)` (src/services/backStack.ts) while shown, MainActivity
   asks `window.OpenNoteBack()`, which closes the newest (menus, popovers, dialogs, sheets, the pages
