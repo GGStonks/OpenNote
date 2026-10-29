@@ -5,7 +5,7 @@ import { Editor } from './components/Editor';
 import { SettingsModal } from './components/SettingsModal';
 import { Folder, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, SCHEMA_VERSION, Tag, newId } from './types';
 import {
-  createBlankPage, deleteNote, exportLibrary, getAllFolders, getAllNotes, getAllTags, importBackup,
+  collectUnusedFiles, createBlankPage, deleteNote, exportLibrary, saveRecording, getAllFolders, getAllNotes, getAllTags, importBackup,
   requestPersistentStorage, saveFolders, saveNote, saveTags,
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
@@ -15,6 +15,8 @@ import { THEMES, applyTheme } from './theme';
 import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
+import { importPdf, storePdf } from './import/pdf';
+import { loadPicture, solidImage } from './import/images';
 import { crashLog } from './services/crashLog';
 import { startCutoutClearance } from './services/cutout';
 import { startFrameRate } from './services/frameRate';
@@ -140,6 +142,8 @@ export const App: React.FC = () => {
   const removeNote = async (id: string) => {
     await deleteNote(id);
     setNotes((prev) => (prev ?? []).filter((n) => n.id !== id));
+    // Its PDFs, unless another note (a copy) shows them too.
+    void collectUnusedFiles().catch(() => undefined);
   };
 
   // --- Folders -------------------------------------------------------------------------------
@@ -195,7 +199,7 @@ export const App: React.FC = () => {
     for (const n of notesRef.current ?? []) if (n.tagIds?.includes(id)) await updateNoteMeta(n.id, (cur) => ({ tagIds: (cur.tagIds ?? []).filter((t) => t !== id) }), false);
   };
 
-  /** Imports files from outside: .opennote notes / backups, Notability notes, images and text files (each a new note). */
+  /** Imports files from outside: .opennote notes / backups, PDFs, Notability notes, images and text files (each a new note). */
   const importExternal = async (files: File[]) => {
     let made = 0;
     const failed: string[] = [];
@@ -204,19 +208,37 @@ export const App: React.FC = () => {
     for (const file of files) {
       const name = file.name.replace(/\.[^.]+$/, '') || 'Imported';
       try {
-        if (/\.note$/i.test(file.name)) {
-          const nb = await importNotability(new Uint8Array(await file.arrayBuffer()), file.name, (blob) => readImage(new File([blob], 'image', { type: blob.type })));
+        if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
+          const pdf = await importPdf(new Uint8Array(await file.arrayBuffer()), file.name, async (wrong) =>
+            window.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '')
+          );
+          last = { ...blankNote(pdf.title), paperStyle: 'blank', sheets: pdf.sheets };
+          crashLog.event('import', { kind: 'pdf', pages: pdf.pages, kb: Math.round(file.size / 1024) });
+          upsertLocal(await saveNote(last, false));
+          made++;
+        } else if (/\.note$/i.test(file.name)) {
+          const nb = await importNotability(new Uint8Array(await file.arrayBuffer()), file.name, {
+            readImage: (blob, o) => loadPicture(blob, o),
+            storePdf: (name, bytes) =>
+              storePdf(bytes, name, async (wrong) => window.prompt(`${wrong ? 'Wrong password. ' : ''}A PDF in “${file.name}” is protected by a password:`, '')),
+            solidImage,
+          });
           const now = Date.now();
           last = {
             ...blankNote(nb.title),
             createdAt: nb.createdAt,
             updatedAt: now,
-            paperStyle: 'blank',
-            ...(nb.pageSize !== 'letter' ? { pageSize: nb.pageSize } : {}),
+            paperStyle: nb.paperStyle,
+            paperColor: nb.paperColor,
             pages: [nb.surface],
             sheets: nb.sheets,
           };
           upsertLocal(await saveNote(last, false));
+          crashLog.event('import', { kind: 'notability', pages: nb.sheets.length, ...nb.counts, recordings: nb.recordings.length, skipped: nb.skipped.length, kb: Math.round(file.size / 1024) });
+          const noteId = last.id;
+          for (const r of nb.recordings) {
+            await saveRecording({ id: newId('rec'), noteId, createdAt: r.createdAt, durationMs: r.durationMs, mimeType: r.mime }, new Blob([r.bytes as Uint8Array<ArrayBuffer>], { type: r.mime }));
+          }
           made++;
           if (nb.skipped.length) partial.push(`${file.name}: ${nb.skipped.join(', ')}`);
         } else if (/\.(opennote|json)$/i.test(file.name) || file.type === 'application/json') {
@@ -236,12 +258,13 @@ export const App: React.FC = () => {
           failed.push(file.name);
         }
       } catch (err) {
+        if (err instanceof Error && err.message === 'cancelled') continue;
         failed.push(`${file.name} (${err instanceof Error ? err.message : String(err)})`);
       }
     }
     await reload();
     const notImported = partial.length ? `\nLeft out:\n${partial.join('\n')}` : '';
-    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: .opennote, Notability .note, images, .txt / .md / .tex.${notImported}`);
+    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Notability .note, .opennote, images, .txt / .md / .tex.${notImported}`);
     else if (partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`);
     if (!failed.length && files.length === 1 && last) setOpenNoteId(last.id);
     else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);

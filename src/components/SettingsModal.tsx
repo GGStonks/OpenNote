@@ -237,7 +237,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               <button onClick={() => importRef.current?.click()} className="flex items-center gap-2 px-3 py-2 rounded-xl bg-gray-100 dark:bg-ui-raised text-sm font-semibold text-gray-800 dark:text-gray-100">
                 <Upload className="w-4 h-4" /> Import .opennote
               </button>
-              <input ref={importRef} type="file" accept=".opennote,.json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }} />
+              <input ref={importRef} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onImport(f); e.target.value = ''; }} />
             </div>
           </section>
 

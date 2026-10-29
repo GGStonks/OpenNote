@@ -301,7 +301,7 @@ class Builder {
       }
       ({ first: hatchFirst, count: hatchCount } = this.pushCaps(lines, rgba(s.color, 0.5)));
     }
-    this.ops.push({ k: 'fill', first, count: area.length, mode, rgba: mode === 'solid' ? rgba(s.color, 0.22) : rgba(s.color, 1), box, hatchFirst, hatchCount });
+    this.ops.push({ k: 'fill', first, count: area.length, mode, rgba: mode === 'solid' ? rgba(s.fillColor ?? s.color, s.fillOpacity ?? 0.22) : rgba(s.color, 1), box, hatchFirst, hatchCount });
     this.run = null;
   }
 

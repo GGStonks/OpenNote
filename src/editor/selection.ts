@@ -15,11 +15,11 @@ export function isEmptySelection(s: Selection | null): boolean {
   return !s || s.strokeIds.length + s.latexIds.length + s.textIds.length + s.imageIds.length === 0;
 }
 
-export function textHeight(t: { text: string; fontSize: number; width: number; height?: number }): number {
+export function textHeight(t: { text: string; fontSize: number; width: number; height?: number; lineHeight?: number }): number {
   // Approximation used for hit-testing (rendered height is not stored); at least the box's set height.
   const charsPerLine = Math.max(8, t.width / (t.fontSize * 0.5));
   const lines = t.text.split('\n').reduce((n, l) => n + Math.max(1, Math.ceil(l.length / charsPerLine)), 0);
-  return Math.max(lines * t.fontSize * 1.35, t.height ?? 0);
+  return Math.max(lines * t.fontSize * (t.lineHeight ?? 1.35), t.height ?? 0);
 }
 
 /** Normalises an angle in degrees to (-180, 180], rounded to 0.01°. */

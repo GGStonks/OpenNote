@@ -11,7 +11,7 @@ import { AudioRecording, Folder, NoteDocument, NotePage, Point, SCHEMA_VERSION, 
  */
 
 const DB_NAME = 'OpenNote_Database';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 const STORE_NOTES = 'notes';
 /** Before v1.13: flat subjects. Read once to turn them into folders, then emptied. */
 const STORE_SUBJECTS = 'subjects';
@@ -20,6 +20,8 @@ const STORE_TAGS = 'tags';
 const STORE_AUDIO = 'audio';
 /** Library thumbnails: each note's first-page ink as images (thumbCache.ts), by `noteId|layer`. */
 const STORE_THUMBS = 'thumbs';
+/** Files pages refer to (imported PDFs: PageSheet.pdf), kept once however many pages and notes show them. */
+const STORE_FILES = 'files';
 
 export function createBlankPage(pageNumber: number): NotePage {
   return { id: newId('page'), pageNumber, strokes: [], latexBlocks: [], textBlocks: [], imageBlocks: [] };
@@ -226,6 +228,7 @@ function openDb(): Promise<IDBDatabase> {
         const s = db.createObjectStore(STORE_THUMBS, { keyPath: 'id' });
         s.createIndex('noteId', 'noteId');
       }
+      if (!db.objectStoreNames.contains(STORE_FILES)) db.createObjectStore(STORE_FILES, { keyPath: 'id' });
     };
   });
   dbPromise.catch(() => (dbPromise = null));
@@ -331,6 +334,11 @@ export async function getAllThumbs(): Promise<StoredThumb[]> {
 }
 
 /** Stores a thumbnail layer, replacing the note's out-of-date ones for that layer. */
+export async function getThumb(id: string): Promise<StoredThumb | null> {
+  const db = await openDb();
+  return ((await req(db.transaction(STORE_THUMBS, 'readonly').objectStore(STORE_THUMBS).get(id))) as StoredThumb | undefined) ?? null;
+}
+
 export async function putThumb(t: StoredThumb): Promise<void> {
   const db = await openDb();
   const tx = db.transaction(STORE_THUMBS, 'readwrite');
@@ -410,6 +418,103 @@ export async function deleteRecording(id: string): Promise<void> {
   await txDone(tx);
 }
 
+// --- Files (imported PDFs) ------------------------------------------------------------------------
+
+/** A file pages refer to (PageSheet.pdf.file). */
+export interface StoredFile {
+  id: string;
+  name: string;
+  mime: string;
+  bytes: ArrayBuffer;
+  /** A protected PDF's password (it is needed every time the PDF is drawn). */
+  password?: string;
+  createdAt: number;
+}
+
+export async function putFile(f: StoredFile): Promise<void> {
+  const db = await openDb();
+  const tx = db.transaction(STORE_FILES, 'readwrite', STRICT);
+  tx.objectStore(STORE_FILES).put(f);
+  await txDone(tx);
+}
+
+export async function getFile(id: string): Promise<StoredFile | null> {
+  const db = await openDb();
+  return ((await req(db.transaction(STORE_FILES, 'readonly').objectStore(STORE_FILES).get(id))) as StoredFile | undefined) ?? null;
+}
+
+/** The files a note's pages refer to. */
+export function noteFileIds(n: Pick<NoteDocument, 'sheets'>): string[] {
+  return [...new Set((n.sheets ?? []).flatMap((s) => (s.pdf?.file ? [s.pdf.file] : [])))];
+}
+
+/**
+ * Deletes the files no note refers to any more (after a note is deleted), with their page
+ * previews. Notes are read one by one with a cursor, sheets only.
+ */
+export async function collectUnusedFiles(): Promise<void> {
+  const db = await openDb();
+  const used = new Set<string>();
+  await new Promise<void>((resolve, reject) => {
+    const r = db.transaction(STORE_NOTES, 'readonly').objectStore(STORE_NOTES).openCursor();
+    r.onerror = () => reject(r.error);
+    r.onsuccess = () => {
+      const c = r.result;
+      if (!c) return resolve();
+      for (const id of noteFileIds(c.value as NoteDocument)) used.add(id);
+      c.continue();
+    };
+  });
+  const ids = (await req(db.transaction(STORE_FILES, 'readonly').objectStore(STORE_FILES).getAllKeys())) as string[];
+  const gone = ids.filter((id) => !used.has(id));
+  if (!gone.length) return;
+  const tx = db.transaction([STORE_FILES, STORE_THUMBS], 'readwrite');
+  for (const id of gone) {
+    tx.objectStore(STORE_FILES).delete(id);
+    const os = tx.objectStore(STORE_THUMBS);
+    for (const k of await req(os.index('noteId').getAllKeys(`file:${id}`))) os.delete(k);
+  }
+  await txDone(tx);
+}
+
+/** A file in a backup or an exported note: its bytes as base64. */
+export interface BackupFile {
+  id: string;
+  name: string;
+  mime: string;
+  base64: string;
+  password?: string;
+}
+
+function toBase64(bytes: ArrayBuffer): string {
+  const b = new Uint8Array(bytes);
+  let out = '';
+  for (let i = 0; i < b.length; i += 0x8000) out += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(out);
+}
+
+/** The files `notes` refer to, for a backup or an exported note. */
+export async function filesForBackup(notes: Pick<NoteDocument, 'sheets'>[]): Promise<BackupFile[]> {
+  const out: BackupFile[] = [];
+  for (const id of new Set(notes.flatMap(noteFileIds))) {
+    const f = await getFile(id);
+    if (f) out.push({ id: f.id, name: f.name, mime: f.mime, base64: toBase64(f.bytes), ...(f.password ? { password: f.password } : {}) });
+  }
+  return out;
+}
+
+async function restoreFiles(files: unknown): Promise<void> {
+  if (!Array.isArray(files)) return;
+  for (const f of files as BackupFile[]) {
+    if (!f || typeof f.id !== 'string' || typeof f.base64 !== 'string') continue;
+    if (await getFile(f.id)) continue;
+    const bin = atob(f.base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    await putFile({ id: f.id, name: f.name ?? 'file', mime: f.mime ?? 'application/octet-stream', bytes: bytes.buffer, ...(f.password ? { password: f.password } : {}), createdAt: Date.now() });
+  }
+}
+
 // --- Backup ---------------------------------------------------------------------------------------
 
 export interface LibraryBackup {
@@ -421,16 +526,21 @@ export interface LibraryBackup {
   folders?: Folder[];
   tags?: Tag[];
   notes: NoteDocument[];
+  /** Files the notes' pages refer to (imported PDFs). */
+  files?: BackupFile[];
 }
 
 export async function exportLibrary(): Promise<LibraryBackup> {
-  return { format: 'opennote-backup', version: 2, exportedAt: Date.now(), folders: await getAllFolders(), tags: await getAllTags(), notes: await getAllNotes() };
+  const notes = await getAllNotes();
+  return { format: 'opennote-backup', version: 2, exportedAt: Date.now(), folders: await getAllFolders(), tags: await getAllTags(), notes, files: await filesForBackup(notes) };
 }
 
 /** Imports a backup or a single exported note; existing notes with the same id are replaced. */
 export async function importBackup(data: unknown): Promise<number> {
-  const obj = data as Partial<LibraryBackup> & Partial<NoteDocument>;
+  const obj = data as Partial<LibraryBackup> & Partial<NoteDocument> & { files?: BackupFile[] };
   let notes: NoteDocument[] = [];
+  // Files first: a note is never saved pointing at a file that is not there.
+  await restoreFiles(obj?.files);
   if (obj?.format === 'opennote-backup' && Array.isArray(obj.notes)) {
     notes = obj.notes;
     const now = Date.now();

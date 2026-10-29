@@ -35,6 +35,7 @@ import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
 import { useDragInk, usePinchInk } from '../editor/usePinchInk';
 import { frameRate } from '../services/frameRate';
+import { PdfBackground } from './PdfBackground';
 
 export interface ToolSettings {
   tool: ToolType;
@@ -78,6 +79,13 @@ interface CanvasPageProps {
   setEditingTextId: (id: string | null) => void;
   onEditLatex: (pageId: string, block: LatexBlock) => void;
   printMode: boolean;
+  /**
+   * Print layout for the PDF export: pages showing a PDF are printed without it and without their
+   * paper (the export lays the original PDF page under them, pdfExport.ts).
+   */
+  printBare?: boolean;
+  /** Print layout of one page: only that page's paper (each printed page mounts the whole layout). */
+  printSheet?: string;
   scrollRoot: HTMLElement | null;
   /** The surface's size and the pages it is cut into (editor/sheets.ts). */
   layout: SurfaceLayout;
@@ -146,20 +154,23 @@ export function paperBackground(
   const grid = ink(dark ? 0.09 : 0.08, '0,0,0', '255,255,255');
   const margin = dark ? 'rgba(239,68,68,0.35)' : 'rgba(239,68,68,0.4)';
   const css: React.CSSProperties = { backgroundColor: base };
-  if ((style === 'ruled' || style === 'narrow') && swatch) {
+  const lined = style === 'ruled' || style === 'narrow' || style === 'lines' || style === 'narrowLines';
+  // Lines and narrow lines: as ruled paper without its margin.
+  const marginLine = style === 'ruled' || style === 'narrow' ? margin : 'transparent';
+  if (lined && swatch) {
     // A small sample of the pattern (paper picker): lines and the margin, without the blank band a
     // page keeps at its top (taller than the sample, which then looked blank).
-    const gap = style === 'narrow' ? 6 : 9;
+    const gap = style === 'narrow' || style === 'narrowLines' ? 6 : 9;
     css.backgroundImage = [
-      `linear-gradient(to right, transparent 9px, ${margin} 9px, ${margin} 10px, transparent 10px)`,
+      `linear-gradient(to right, transparent 9px, ${marginLine} 9px, ${marginLine} 10px, transparent 10px)`,
       `linear-gradient(to bottom, transparent ${gap - 1}px, ${line} ${gap - 1}px, ${line} ${gap}px)`,
     ].join(',');
     css.backgroundSize = `100% 100%, 100% ${gap}px`;
     css.backgroundRepeat = 'no-repeat, repeat';
-  } else if (style === 'ruled' || style === 'narrow') {
-    const gap = style === 'narrow' ? 24 : 32;
+  } else if (lined) {
+    const gap = style === 'narrow' || style === 'narrowLines' ? 24 : 32;
     css.backgroundImage = [
-      `linear-gradient(to right, transparent 79px, ${margin} 79px, ${margin} ${79 + lw}px, transparent ${79 + lw}px)`,
+      `linear-gradient(to right, transparent 79px, ${marginLine} 79px, ${marginLine} ${79 + lw}px, transparent ${79 + lw}px)`,
       `linear-gradient(${base}, ${base})`,
       `linear-gradient(to bottom, transparent ${gap - lw}px, ${line} ${gap - lw}px, ${line} ${gap}px)`,
     ].join(',');
@@ -1186,7 +1197,7 @@ function dampedPrediction(points: Point[], q: Point | null): Point[] {
 const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const {
     page, tools, zoom, editor, gestures, selection, setSelection,
-    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, scrollRoot, layout,
+    selectedBlockId, setSelectedBlockId, editingTextId, setEditingTextId, onEditLatex, printMode, printBare, printSheet, scrollRoot, layout,
   } = props;
   const pageIndex = 0;
   const PAGE_W = layout.width, PAGE_H = layout.height;
@@ -2650,12 +2661,20 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       data-page-index={pageIndex}
     >
       {/* The pages' paper: one continuous strip, cut where a page ends (a hairline). */}
-      {layout.sheets.map((sh) => (
+      {layout.sheets.filter((sh) => !printMode || !printSheet || sh.id === printSheet).map((sh) => (
         <div
           key={sh.id}
+          data-sheet={sh.index}
           className={`absolute pointer-events-none ${printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]'}`}
-          style={{ left: sh.left, top: sh.top, width: sh.width, height: sh.height, ...paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor) }}
-        />
+          style={{
+            left: sh.left, top: sh.top, width: sh.width, height: sh.height,
+            ...(sh.pdf && printMode && printBare ? {} : paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor)),
+          }}
+        >
+          {sh.pdf && (
+            <PdfBackground pdf={sh.pdf} width={sh.width} height={sh.height} zoom={zoom} baseZoom={pageZoom} scrollRoot={scrollRoot ?? null} paper={paperHex(sh.paperColor)} printMode={printMode} printBare={printMode && printBare} />
+          )}
+        </div>
       ))}
       {/*
         Stacking: the paper, then the content in the order it was made (editor/zorder.ts): strokes
@@ -2742,7 +2761,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
               const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
               if (!cur) return;
               if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
-              else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text } : x)) }));
+              // (Edited text loses its styled parts: their ranges no longer fit it.)
+              else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text, spans: undefined } : x)) }));
             }}
             onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
             onSilentUpdate={() => undefined}

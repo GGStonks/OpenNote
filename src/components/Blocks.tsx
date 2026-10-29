@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Pencil, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
 import { ImageBlock, LatexBlock, TextBlock } from '../types';
-import { TEXT_LINE_HEIGHT, textCss } from '../editor/textStyle';
+import { textCss, textPieces } from '../editor/textStyle';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview, renderTikzWithTeX } from '../services/tikzEngine';
 import { OnScreen } from './onScreen';
@@ -400,7 +400,7 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
   }, [editing]);
   const color = darkPaper && block.color === '#111827' ? '#F3F4F6' : block.color;
   const style: React.CSSProperties = {
-    left: block.x, top: block.y, width: block.width, minHeight: block.height, fontSize: block.fontSize, color, lineHeight: TEXT_LINE_HEIGHT,
+    left: block.x, top: block.y, width: block.width, minHeight: block.height, fontSize: block.fontSize, color,
     ...textCss(block), ...rotationStyle(block.rotation),
   };
   // The handles keep their size on screen whatever the zoom.
@@ -454,7 +454,7 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
       }}
     >
       {selected && <ActionPill zoom={zoom} onDelete={onDelete} />}
-      {block.text}
+      {block.spans?.length ? textPieces(block).map((p, i) => (p.css ? <span key={i} style={p.css}>{p.text}</span> : p.text)) : block.text}
     </div>
   );
 }, sameData);

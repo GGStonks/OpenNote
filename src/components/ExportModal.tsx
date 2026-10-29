@@ -10,9 +10,11 @@ import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { paperHex, paperIsDark } from './CanvasPage';
 import { textHeight } from '../editor/selection';
 import { ExportMode, canMakePdf, exportFile, exportOffersBoth } from '../platform';
-import { textCssString } from '../editor/textStyle';
+import { textCssString, textPieces } from '../editor/textStyle';
 import type { TextBlock } from '../types';
 import { useBack } from '../services/backStack';
+import { filesForBackup } from '../storage/db';
+import { pdfPageImage } from '../services/pdf';
 
 /** A text box's text with its style as LaTeX / Markdown markup. */
 function texText(t: TextBlock): string {
@@ -117,9 +119,16 @@ function buildMarkdown(doc: NoteDocument): string {
 /** Wraps an SVG element in a rotation about (cx, cy) when the item is turned. */
 const turn = (el: string, deg: number | undefined, cx: number, cy: number) => (deg ? `<g transform="rotate(${deg} ${cx.toFixed(2)} ${cy.toFixed(2)})">${el}</g>` : el);
 
-function buildSvg(doc: NoteDocument): string {
+async function buildSvg(doc: NoteDocument): Promise<string> {
   const gap = 24;
   const pages = splitIntoPages(doc).map(({ page, box }) => ({ p: page, setup: box }));
+  // Pages showing a PDF: the PDF page as a picture under their content (SVG cannot hold the PDF).
+  const pdfImages = new Map<string, string>();
+  for (const { setup } of pages) {
+    if (!setup.pdf) continue;
+    const url = await pdfPageImage(setup.pdf, setup.width, setup.height);
+    if (url) pdfImages.set(setup.id, url);
+  }
   const W = Math.max(...pages.map((x) => x.setup.width));
   const total = pages.reduce((h, x) => h + x.setup.height + gap, 0) - gap;
   let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;
@@ -130,6 +139,7 @@ function buildSvg(doc: NoteDocument): string {
     const paper = paperHex(setup.paperColor);
     const ink = paperIsDark(setup.paperColor) ? '#F3F4F6' : '#111827';
     out += `<g id="page-${i + 1}"${setup.width < W ? ` transform="translate(${(W - setup.width) / 2} 0)"` : ''}>\n<rect x="0" y="${dy}" width="${setup.width}" height="${setup.height}" fill="${paper}"/>\n`;
+    if (pdfImages.has(setup.id)) out += `<image href="${pdfImages.get(setup.id)}" x="0" y="${dy}" width="${setup.width}" height="${setup.height}"/>\n`;
     // In stacking order (editor/zorder.ts), as on screen.
     for (const l of zLayers(p)) {
       if (l.kind === 'ink') {
@@ -144,7 +154,7 @@ function buildSvg(doc: NoteDocument): string {
       }
       if (l.kind === 'text') {
         const t = l.block;
-        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, t.fontSize * 1.4 * (t.text.split('\n').length + 4))}"><xhtml:div style="${textCssString(t)};color:${t.color};white-space:pre-wrap">${escapeHtml(t.text)}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
+        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, t.fontSize * 1.4 * (t.text.split('\n').length + 4))}"><xhtml:div style="${textCssString(t)};color:${t.color};white-space:pre-wrap">${textPieces(t).map((p) => (p.css ? `<xhtml:span style="${Object.entries(p.css).map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}:${v}`).join(';')}">${escapeHtml(p.text)}</xhtml:span>` : escapeHtml(p.text))).join('')}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
         continue;
       }
       const b = l.block;
@@ -172,10 +182,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
 
   const both = exportOffersBoth();
 
-  const run = async (name: string, content: string | Blob, type: string, mode?: ExportMode) => {
+  const run = async (name: string, made: string | Blob | (() => Promise<string | Blob>), type: string, mode?: ExportMode) => {
     setBusy(true);
     setSaved(null);
     try {
+      const content = typeof made === 'function' ? await made() : made;
       const where = await exportFile(name, content instanceof Blob ? content : new Blob([content], { type }), mode);
       if (where) setSaved(where);
       else onClose();
@@ -250,7 +261,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
             sub={canMakePdf() ? 'Vector PDF, every page at its own size and orientation' : 'Vector PDF through the system print dialog (Save as PDF / Save to Files)'}
             onExport={onPdf}
           />
-          <Format icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onExport={(m) => run(`${b}.svg`, buildSvg(doc), 'image/svg+xml', m)} />
+          <Format icon={<Download className="w-5 h-5" />} tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40" title="Vector SVG" sub="All pages, ink, TikZ diagrams and math" onExport={(m) => run(`${b}.svg`, () => buildSvg(doc), 'image/svg+xml', m)} />
           <Format icon={<FileCode className="w-5 h-5" />} tint="bg-indigo-100 text-indigo-600 dark:bg-indigo-900/40" title="LaTeX (.tex)" sub="Compilable document: math, text, TikZ" onExport={(m) => run(`${b}.tex`, buildLatex(doc, includeInk), 'application/x-tex', m)}>
             <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
               <input type="checkbox" checked={includeInk} onChange={(e) => setIncludeInk(e.target.checked)} />
@@ -258,7 +269,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
             </label>
           </Format>
           <Format icon={<FileText className="w-5 h-5" />} tint="bg-blue-100 text-blue-600 dark:bg-blue-900/40" title="Markdown (.md)" sub="Obsidian / GitHub compatible ($$ math, latex code blocks)" onExport={(m) => run(`${b}.md`, buildMarkdown(doc), 'text/markdown', m)} />
-          <Format icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onExport={(m) => run(`${b}.opennote`, JSON.stringify(doc), 'application/json', m)} />
+          <Format icon={<Save className="w-5 h-5" />} tint="bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300" title="OpenNote file (.opennote)" sub="Full-fidelity note (ink with pressure, blocks) for backup or another device" onExport={(m) => run(`${b}.opennote`, async () => JSON.stringify({ ...doc, files: await filesForBackup([doc]) }), 'application/json', m)} />
           {canMakePdf() && (
             <button disabled={busy} onClick={onPrint} className="w-full flex items-center p-3 rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition text-left disabled:opacity-50">
               <div className="p-2.5 rounded-xl mr-3 bg-gray-100 text-gray-600 dark:bg-gray-800"><Printer className="w-5 h-5" /></div>

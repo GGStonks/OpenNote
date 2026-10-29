@@ -461,7 +461,7 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
     let hatch: FillType | null = null;
     if (closed && s.fill && s.fill !== 'none') {
       opts.push('even odd rule');
-      if (s.fill === 'solid') opts.push(`fill=${color}`, 'fill opacity=0.22');
+      if (s.fill === 'solid') opts.push(`fill=${s.fillColor ? tikzColor(s.fillColor) : color}`, `fill opacity=${s.fillOpacity ?? 0.22}`);
       else if (s.fill === 'hole') opts.push('fill=white');
       else hatch = s.fill;
     }

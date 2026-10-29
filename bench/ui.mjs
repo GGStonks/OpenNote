@@ -1078,6 +1078,114 @@ if (ONLY.has('pdfsize')) {
   const images = (txt.match(/\/Subtype\s*\/Image/g) ?? []).length;
   console.log(`pdfsize  ${process.argv.includes('--hl') ? 'with highlighter' : 'ink only'}: 3 pages ${(pdf.length / 1024).toFixed(0)} KB, ${images} images, ${ms} ms`);
 }
+// --only pdfimport --shots <dir>: a PDF (made here: Letter portrait, A4 landscape, a page turned 90°)
+// imported through the + menu's file input: the note's pages, the PDF drawn on them (fitting the
+// width and zoomed in), and the PDF export's joining (a transparent printed page over the original).
+if (ONLY.has('pdfimport') && arg('shots')) {
+  const { PDFDocument, StandardFonts, rgb, degrees } = await import('pdf-lib');
+  const mk = await PDFDocument.create();
+  const font = await mk.embedFont(StandardFonts.Helvetica);
+  const pageWith = (w, h, label, rot = 0) => {
+    const pg = mk.addPage([w, h]);
+    pg.drawRectangle({ x: 20, y: 20, width: w - 40, height: h - 40, borderColor: rgb(0.1, 0.3, 0.8), borderWidth: 3 });
+    pg.drawText(label, { x: 40, y: h - 80, size: 36, font, color: rgb(0, 0, 0) });
+    for (let i = 0; i < 12; i++) pg.drawText(`line ${i + 1}: small text that must stay sharp when zoomed in`, { x: 40, y: h - 130 - i * 16, size: 9, font });
+    pg.drawCircle({ x: w / 2, y: h / 3, size: 60, color: rgb(0.9, 0.2, 0.2) });
+    if (rot) pg.setRotation(degrees(rot));
+  };
+  pageWith(612, 792, 'Page one: Letter');
+  pageWith(842, 595, 'Page two: A4 landscape');
+  pageWith(595, 842, 'Page three: turned 90', 90);
+  const pdfBytes = await mk.save();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await sleep(2500);
+  await page.locator('input[type=file]').first().setInputFiles({ name: 'Bench lecture.pdf', mimeType: 'application/pdf', buffer: Buffer.from(pdfBytes) });
+  await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
+  await sleep(2500);
+  const info = await page.evaluate(() => [...document.querySelectorAll('[data-pdf-page]')].map((e) => {
+    const r = e.getBoundingClientRect(), c = e.querySelector('canvas');
+    return { page: e.getAttribute('data-pdf-page').split(':')[1], w: Math.round(r.width), h: Math.round(r.height), drawn: c ? `${c.width}x${c.height} ${c.style.visibility}` : 'none' };
+  }));
+  console.log(`pdfimport pages: ${JSON.stringify(info)}`);
+  await page.screenshot({ path: join(arg('shots'), 'pdf-fit.png') });
+  for (let i = 0; i < 5; i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
+  await sleep(2500);
+  const sharp = await page.evaluate(() => [...document.querySelectorAll('[data-pdf-page] canvas')].filter((c) => c.style.display !== 'none' && c.width > 0).map((c) => `${c.width}x${c.height}`));
+  console.log(`pdfimport zoomed in: ${await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1])}%, canvases ${JSON.stringify(sharp)}`);
+  // The sharp part: shown 1:1 (device px per canvas px) and on whole device px, covering the view?
+  console.log(`pdfimport sharp part: ${JSON.stringify(await page.evaluate(() => {
+    const dpr = window.devicePixelRatio;
+    return [...document.querySelectorAll('[data-pdf-page] canvas')].filter((c) => c.style.left).map((c) => {
+      const r = c.getBoundingClientRect();
+      return { scale: +(r.width * dpr / c.width).toFixed(4), left: +(r.left * dpr).toFixed(2), top: +(r.top * dpr).toFixed(2), right: Math.round(r.right), bottom: Math.round(r.bottom), view: [innerWidth, innerHeight] };
+    });
+  }))}`);
+  await page.screenshot({ path: join(arg('shots'), 'pdf-zoomed.png') });
+  if (process.env.BENCH_DEBUG) {
+    await page.evaluate(() => document.querySelectorAll('[data-pdf-page] canvas').forEach((c) => { if (!c.style.left || c.style.left === '0px') c.style.opacity = '0'; }));
+    await page.screenshot({ path: join(arg('shots'), 'pdf-zoomed-sharponly.png') });
+  }
+  // The export's joining: a transparent printed page (a red line) over pages 1 and 3 of the PDF.
+  const over = await PDFDocument.create();
+  const sizes = [[816, 1056], [842 * 4 / 3, 595 * 4 / 3]];
+  for (const [w, h] of sizes) {
+    const pg = over.addPage([w * 0.75, h * 0.75]);
+    pg.drawLine({ start: { x: 30, y: 30 }, end: { x: w * 0.75 - 30, y: h * 0.75 - 30 }, thickness: 4, color: rgb(1, 0, 0) });
+  }
+  const overPages = await Promise.all([0, 1].map(async (i) => { const d = await PDFDocument.create(); const [c] = await d.copyPages(over, [i]); d.addPage(c); return Array.from(await d.save()); }));
+  const joined = await page.evaluate(async ([a, b]) => {
+    const file = document.querySelector('[data-pdf-page]').getAttribute('data-pdf-page').split(':')[0];
+    const { joinPdfPages } = window.__opennotePdfExport;
+    const out = await joinPdfPages([{ bytes: new Uint8Array(a), under: { file, page: 1, paper: '#ffffff' } }, { bytes: new Uint8Array(b), under: { file, page: 3, paper: '#fff8e1' } }], 'joined');
+    return Array.from(out);
+  }, overPages);
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(arg('shots'), 'pdf-joined.pdf'), Buffer.from(joined));
+  console.log(`pdfimport joined export: ${joined.length} bytes -> pdf-joined.pdf`);
+  // The pages panel (PDF previews in the thumbnails) and the library card.
+  await page.keyboard.press('Control+0');
+  await page.locator('button[title="Pages"]').first().click();
+  await sleep(2500);
+  await page.screenshot({ path: join(arg('shots'), 'pdf-pages.png') });
+  await page.locator('button[title="Pages"]').first().click();
+  await sleep(300);
+  await page.evaluate(() => [...document.querySelectorAll('button')].find((b) => b.className.includes('text-blue-600') && b.querySelector('svg'))?.click());
+  await sleep(3000);
+  await page.screenshot({ path: join(arg('shots'), 'pdf-library.png') });
+}
+// --only nbcompare --shots <dir> --notes <a.note,b.note,…>: Notability notes imported through the + menu,
+// each page screenshotted (nb-<note>-<page>.png) beside Notability's own PDF export of it when a
+// <note>.pdf lies next to the note (nbcmp-<note>-<page>.png).
+if (ONLY.has('nbcompare') && arg('shots')) {
+  const { readFileSync, existsSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  await page.setViewportSize({ width: 860, height: 1700 });
+  for (const file of arg('notes', '').split(',').filter(Boolean)) {
+    const name = file.split('/').pop().replace(/\.note$/, '');
+    await page.reload();
+    await sleep(2000);
+    await page.locator('input[type=file]').first().setInputFiles({ name: `${name}.note`, mimeType: 'application/octet-stream', buffer: readFileSync(file) });
+    await page.waitForSelector('[data-sheet]', { timeout: 30000 });
+    await sleep(2500);
+    const n = await page.evaluate(() => document.querySelectorAll('[data-sheet]').length);
+    const ref = file.replace(/\.note$/, '.pdf');
+    const limit = Number(arg('pages', 3));
+    for (let i = 0; i < Math.min(n, limit); i++) {
+      await page.evaluate((i) => document.querySelector(`[data-sheet="${i}"]`).scrollIntoView({ block: 'start' }), i);
+      await sleep(1200);
+      const box = await page.evaluate((i) => { const r = document.querySelector(`[data-sheet="${i}"]`).getBoundingClientRect(); return { x: r.left, y: Math.max(0, r.top), width: r.width, height: Math.min(r.height, innerHeight - Math.max(0, r.top)) }; }, i);
+      const shot = join(arg('shots'), `nb-${name}-${i + 1}.png`);
+      await page.screenshot({ path: shot, clip: box });
+      if (existsSync(ref)) {
+        const refPng = join(arg('shots'), `ref-${name}`);
+        execFileSync('pdftoppm', ['-r', '96', '-f', `${i + 1}`, '-l', `${i + 1}`, '-png', '-singlefile', ref, refPng]);
+        execFileSync('magick', [`${refPng}.png`, '-resize', '600x', `(`, shot, '-resize', '600x', `)`, '+append', join(arg('shots'), `nbcmp-${name}-${i + 1}.png`)]);
+      }
+    }
+    console.log(`nbcompare ${name}: ${n} pages`);
+  }
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));

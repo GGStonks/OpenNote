@@ -925,7 +925,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
               <Upload className="w-4 h-4" />
               <span className="flex-1">
                 Import file…
-                <span className="block text-[11px] text-gray-400 font-normal">.opennote, images, .txt / .md / .tex</span>
+                <span className="block text-[11px] text-gray-400 font-normal">PDF, Notability (.note), .opennote, images, .txt / .md / .tex</span>
               </span>
             </button>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); startCreateFolder(current); if (collapsed) setPrefs({ sidebarCollapsed: false }); }}>
@@ -945,11 +945,15 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
         >
           <Plus className="w-7 h-7" strokeWidth={2.4} />
         </button>
+        {/*
+          Every file can be picked (no accept list): Android lets only the listed MIME types be
+          chosen and iOS only known file types, and a Notability note (.note) or an .opennote file
+          has neither, so they could not be picked at all. importExternal tells the kinds apart.
+        */}
         <input
           ref={importRef}
           type="file"
           multiple
-          accept=".opennote,.note,.json,application/json,application/zip,image/*,.txt,.md,.tex,text/plain,text/markdown"
           className="hidden"
           onChange={(e) => {
             const files = Array.from(e.target.files ?? []);

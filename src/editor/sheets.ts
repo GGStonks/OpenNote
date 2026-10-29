@@ -297,9 +297,18 @@ export function setSheetsSetup(d: NoteDocument, ids: ReadonlySet<string>, patch:
   return recut(d, (es) =>
     es.map((e) => {
       if (!ids.has(e.sheet.id)) return e;
-      if (patch === 'reset') return { ...e, sheet: { id: e.sheet.id } };
+      if (patch === 'reset') {
+        // A PDF page and its own size are the page's content, not its paper: they stay.
+        const { id, pdf, width, height } = e.sheet;
+        return { ...e, sheet: { id, ...(pdf ? { pdf } : {}), ...(width && height ? { width, height } : {}) } };
+      }
       const { patternColor, ...rest } = patch;
       const sheet: PageSheet = { ...e.sheet, ...rest };
+      // A format or an orientation chosen for a page of its own size: that format (a PDF page is fitted to it).
+      if (patch.size || patch.orientation) {
+        delete sheet.width;
+        delete sheet.height;
+      }
       if (patternColor) sheet.patternColor = patternColor;
       else if (patternColor === null) delete sheet.patternColor;
       return { ...e, sheet };
@@ -411,7 +420,8 @@ export function printedSheets(d: NoteDocument): SheetBox[] {
   const L = surfaceLayout(d);
   const own = ownership(d.pages[0], L);
   let n = own.length;
-  while (n > 1 && isEmpty(own[n - 1])) n--;
+  // (A page showing a PDF is never empty.)
+  while (n > 1 && isEmpty(own[n - 1]) && !L.sheets[n - 1].pdf) n--;
   return L.sheets.slice(0, n);
 }
 

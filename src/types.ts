@@ -10,7 +10,8 @@ export type PenStyle = 'fountain' | 'ballpoint';
 
 export type EraserMode = 'stroke' | 'partial';
 
-export type PaperStyle = 'blank' | 'ruled' | 'narrow' | 'grid' | 'graph' | 'dots';
+/** ruled / narrow: lines with a margin; lines / narrowLines: lines only. */
+export type PaperStyle = 'blank' | 'ruled' | 'narrow' | 'lines' | 'narrowLines' | 'grid' | 'graph' | 'dots';
 
 export type PaperColorName = 'white' | 'cream' | 'yellow' | 'ochre' | 'blue' | 'green' | 'pink' | 'gray' | 'dark';
 /** A named paper colour, or any colour as #RRGGBB. */
@@ -56,6 +57,12 @@ export interface Stroke {
   shapeKind?: ShapeKind;
   /** Fill of a closed stroke (even-odd rule). */
   fill?: FillType;
+  /**
+   * A solid fill's own colour (#RRGGBB) and opacity, instead of the stroke's colour at 0.22
+   * (imported shapes: Notability fills shapes with any colour, opaque).
+   */
+  fillColor?: string;
+  fillOpacity?: number;
   /** Arrowhead at the end of an open stroke. */
   arrow?: boolean;
   /**
@@ -134,9 +141,30 @@ export interface TextBlock {
   underline?: boolean;
   /** Missing: sans. */
   fontFamily?: TextFont;
+  /** Missing: left. */
+  align?: 'left' | 'center' | 'right';
+  /** Line height as a multiple of the font size (missing: TEXT_LINE_HEIGHT; imported text keeps its own). */
+  lineHeight?: number;
+  /** Struck through (a checked checklist item). */
+  strike?: boolean;
+  /**
+   * Parts of the text styled apart from the box (imported text: a bold or coloured word), as
+   * character ranges [start, end). Editing the text drops them (the box's own style remains).
+   */
+  spans?: TextSpan[];
   /** Degrees, clockwise about the block's centre. */
   rotation?: number;
   createdAt: number;
+}
+
+export interface TextSpan {
+  start: number;
+  end: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  color?: string;
 }
 
 export interface ImageBlock {
@@ -173,6 +201,22 @@ export interface PageSheet {
   patternColor?: string;
   size?: PageSize;
   orientation?: PageOrientation;
+  /**
+   * A page of its own size (px), not one of the formats: an imported PDF's page, a Notability
+   * page. Both or neither; they take the place of size and orientation.
+   */
+  width?: number;
+  height?: number;
+  /** A page of a stored PDF (storage/db.ts files) drawn as the paper of this page, fitted to it. */
+  pdf?: PdfPageRef;
+}
+
+/** One page of a PDF kept in the library's file store. */
+export interface PdfPageRef {
+  /** The file's id (db.ts getFile). */
+  file: string;
+  /** 1-based page number in the PDF. */
+  page: number;
 }
 
 export interface AudioRecording {

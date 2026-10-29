@@ -7,16 +7,16 @@
  *     && node node_modules/.cache/nb-import.mjs <file.note> [...]
  */
 import { readFileSync } from 'node:fs';
-import { importNotability } from '../src/import/notability';
+import { NotabilityDeps, importNotability } from '../src/import/notability';
 import { inkGeometry, styleOf } from '../src/ink/strokeRenderer';
-import { KeyedArchive, parsePlist } from '../src/import/plist';
+import { KeyedArchive, PlistValue, parsePlist } from '../src/import/plist';
 import { readZip } from '../src/import/zip';
 
 /** Per ink curve, straight from the file: [min, max] of curve width x fractional width (page points). */
 async function expectedWidths(bytes: Uint8Array): Promise<{ range: [number, number]; style: number }[]> {
   const z = readZip(bytes).find((e) => e.name.endsWith('Session.plist'))!;
   const ar = new KeyedArchive(parsePlist(await z.read()));
-  const store = [...ar.walk(ar.root())].find((o) => 'curvespoints' in o)!;
+  const store = ar.get(ar.field(ar.field(ar.field(ar.root(), 'richText'), 'Handwriting Overlay'), 'SpatialHash')) as Record<string, PlistValue>;
   const b = (k: string) => ar.get(store[k]) as Uint8Array;
   const n = b('curvesnumpoints'), w = b('curveswidth'), fw = b('curvesfractionalwidths'), styles = store.curvesstyles ? b('curvesstyles') : null;
   const dv = (x: Uint8Array) => new DataView(x.buffer, x.byteOffset, x.byteLength);
@@ -37,31 +37,51 @@ if (!files.length) {
   process.exit(2);
 }
 let bad = 0;
+/** The importer's link to the device, in Node: pictures are not decoded, PDFs' page sizes come from pdf-lib. */
+const deps: NotabilityDeps = {
+  readImage: async () => ({ dataUrl: 'data:image/png;base64,', w: 1, h: 1 }),
+  storePdf: async (name, bytes) => {
+    const { PDFDocument } = await import('pdf-lib');
+    const d = await PDFDocument.load(bytes, { ignoreEncryption: true });
+    return {
+      fileId: `file_${name}`,
+      sizes: d.getPages().map((pg) => {
+        const b = pg.getCropBox(), rot = pg.getRotation().angle % 180 !== 0;
+        return rot ? { w: b.height, h: b.width } : { w: b.width, h: b.height };
+      }),
+    };
+  },
+  solidImage: (c) => `solid:${c}`,
+};
+
 for (const f of files) {
-  const r = await importNotability(new Uint8Array(readFileSync(f)), f.split('/').pop()!);
+  const r = await importNotability(new Uint8Array(readFileSync(f)), f.split('/').pop()!, deps);
   const st = r.surface.strokes;
   const expected = (await expectedWidths(new Uint8Array(readFileSync(f)))).filter((e) => ![1, 2, 6, 7].includes(e.style));
-  console.log(`${f.split('/').pop()}: "${r.title}", ${r.sheets.length} page(s) ${r.pageSize}, ${r.counts.strokes} strokes, ${r.counts.shapes} shapes, ${r.counts.images} images, text ${r.counts.text ? 'yes' : 'no'}`);
+  const heights = r.sheets.map((sh) => `${Math.round(sh.height ?? 0)}${sh.pdf ? 'p' : ''}`);
+  console.log(`${f.split('/').pop()}: "${r.title}" paper ${r.paperColor} ${r.paperStyle}, ${r.sheets.length} page(s) [${heights.slice(0, 12).join(' ')}${heights.length > 12 ? ' …' : ''}], ${r.counts.strokes} strokes, ${r.counts.shapes} shapes, ${r.counts.images} images, ${r.counts.texts} text boxes, ${r.counts.pdfPages} PDF pages, ${r.recordings.length} recordings`);
   if (r.skipped.length) console.log(`  left out: ${r.skipped.join(', ')}`);
-  let ci = 0;
-  for (const s of st) {
+  for (const t of r.surface.textBlocks ?? []) console.log(`  text  ${JSON.stringify(t.text.slice(0, 40))} at ${t.x.toFixed(0)},${t.y.toFixed(0)} w ${t.width.toFixed(0)} ${t.fontSize}px ${t.fontFamily ?? 'sans'}${t.bold ? ' bold' : ''}${t.italic ? ' italic' : ''} ${t.color}${t.align ? ' ' + t.align : ''}`);
+  for (const b of r.surface.imageBlocks ?? []) console.log(`  image ${b.dataUrl.slice(0, 18)} at ${b.x.toFixed(0)},${b.y.toFixed(0)} ${b.width.toFixed(0)}x${b.height.toFixed(0)} rot ${b.rotation ?? 0}`);
+  const ink = st.filter((s) => !s.isShape);
+  const paired = ink.length === expected.length;
+  if (!paired) console.log(`  (widths not checked: ${ink.length} ink strokes for ${expected.length} curves, groups or skipped curves)`);
+  ink.forEach((s, i) => {
     const g = inkGeometry(s.points, styleOf(s));
-    const exp = !s.isShape ? expected[ci++] : null;
-    const drawn = g.widths ?? g.pts.map(() => g.width * (s.tool === 'highlighter' ? 1 : 1));
-    const kind = s.isShape ? `${s.shapeKind}` : s.tool === 'highlighter' ? 'highlighter' : s.modeled === 'proportional' ? 'variable' : 'uniform';
-    const w = drawn.map((x) => x.toFixed(2));
-    console.log(`  ${kind.padEnd(11)} ${s.color} opacity ${s.opacity.toFixed(2)}  ${s.points.length} pts  drawn width ${Math.min(...drawn).toFixed(2)}..${Math.max(...drawn).toFixed(2)}  x ${Math.min(...s.points.map((p) => p.x)).toFixed(0)}..${Math.max(...s.points.map((p) => p.x)).toFixed(0)} y ${Math.min(...s.points.map((p) => p.y)).toFixed(0)}..${Math.max(...s.points.map((p) => p.y)).toFixed(0)}${w.length < 3 ? ` (${w.join(', ')})` : ''}`);
+    const drawn = g.widths ?? g.pts.map(() => g.width);
     if (g.pts.length < 1 || drawn.some((x) => !Number.isFinite(x) || x <= 0)) bad++;
+    const exp = paired ? expected[i] : null;
     if (exp && s.tool !== 'highlighter') {
-      // Notability's widths in OpenNote px: the import scale is the drawn/expected ratio of the widest point.
       const k = r.importScale;
       const [lo, hi] = [exp.range[0] * k, exp.range[1] * k];
       const [dlo, dhi] = [Math.min(...drawn), Math.max(...drawn)];
       const err = Math.max(Math.abs(dhi - hi) / hi, Math.abs(dlo - Math.max(lo, 0.3)) / Math.max(lo, 0.3));
-      console.log(`              expected ${lo.toFixed(2)}..${hi.toFixed(2)}  error ${(err * 100).toFixed(1)}%`);
-      if (err > 0.03) bad++;
+      if (err > 0.03) {
+        bad++;
+        console.log(`  stroke ${i}: width ${dlo.toFixed(2)}..${dhi.toFixed(2)}, expected ${lo.toFixed(2)}..${hi.toFixed(2)}`);
+      }
     }
-  }
+  });
 }
 if (bad) {
   console.log(`${bad} stroke(s) with invalid geometry or widths off by more than 3%`);

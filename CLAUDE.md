@@ -72,14 +72,34 @@ this public repo: never add anything here about how keys are generated, stored, 
 metered, or about the server's internals. Every request the app sends to the server must use
 `serverHeaders(settings)` (`src/services/serverAuth.ts`).
 
-## Notability import
+## PDF and Notability import
 
-`src/import/notability.ts` (with `zip.ts`, `plist.ts`) turns a Notability `.note` (ZIP with a keyed-archive
-`Session.plist`) into a note. What it reads is specified in `docs/notability-note-format.md`; keep the
-two in step. Each curve is a chain of cubic Béziers with one fractional width per segment end; drawn
-width = curveswidth x fractional width. Imported ink becomes ordinary strokes with
-`modeled: 'proportional'` (each point's pressure = its width / the widest), so it is editable and exact
-at any zoom. `bench/notabilityImport.ts` checks widths against the file (see its header for the command).
+"Import file…" (hold the library's + button; the file input has no `accept` list: Android and iOS
+pickers greyed out .note / .opennote files) imports PDFs, Notability notes, .opennote, pictures and
+text (App.tsx `importExternal`).
+
+- PDFs (`src/import/pdf.ts`): the file is kept once in IndexedDB `files` (db.ts `putFile`, with a
+  protected PDF's password), and each page becomes a page of its own size (PageSheet `width` /
+  `height`, which take the place of size and orientation) showing that PDF page (PageSheet `pdf`).
+  `src/services/pdf.ts` draws it with pdf.js (legacy build, data in public/pdfjs from
+  scripts/copy-pdfjs.mjs) from its vectors: `PdfBackground` in each page's paper draws the page at
+  the fit-width zoom near the view, the part in view at the zoom once zooming rests (opaque on the
+  paper: see-through, the stretched page showed through as a halo), and a preview (thumbs store)
+  for thumbnails. Files nobody refers to go when a note is deleted (`collectUnusedFiles`); backups
+  and .opennote exports carry them (`files`). The PDF export prints such pages bare and lays the
+  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text.
+  `npm run bench:ui -- --only pdfimport --shots <dir>` (import, zoom, export joining, thumbnails).
+- Notability (`src/import/notability.ts` with `zip.ts`, `plist.ts`, `images.ts`): what it reads is
+  specified in `docs/notability-note-format.md`; keep the two in step. Each curve is a chain of cubic
+  Béziers with one fractional width per segment end; drawn width = curveswidth x fractional width;
+  imported ink is ordinary strokes with `modeled: 'proportional'` (exact at any zoom). Shapes,
+  partly erased shapes (path data), ink groups, pictures (crop, flip, rotation), text boxes (styled
+  words as TextBlock `spans`, `align`, `lineHeight`), stickies and box colours (SVG image blocks),
+  formulas, PDF pages, paper and recordings come through. Never name the app's internal code here.
+  Checks: `bench/notabilityImport.ts` (Node: structure and widths against the file, see its header)
+  and `npm run bench:ui -- --only nbcompare --shots <dir> --notes a.note,b.note` (each page beside
+  the note's own PDF export when `<note>.pdf` lies next to it). Real sample notes with Notability's
+  exports: github.com/samuelsadok/notesconverter `samples/notability`.
 
 ## Crashes on the iPad
 

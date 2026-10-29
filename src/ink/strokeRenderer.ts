@@ -24,6 +24,9 @@ export interface InkStyle {
   closed?: boolean;
   shapeKind?: ShapeKind;
   fill?: FillType;
+  /** A solid fill's own colour and opacity (Stroke.fillColor / fillOpacity). */
+  fillColor?: string;
+  fillOpacity?: number;
   arrow?: boolean;
   /** The points are already the modelled centre line (Stroke.modeled). */
   modeled?: 'variable' | 'uniform' | 'proportional';
@@ -379,8 +382,8 @@ function paintFill(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opt
   if (!b.area || !style.fill || style.fill === 'none') return;
   ctx.save();
   if (style.fill === 'solid') {
-    ctx.globalAlpha = 0.22;
-    ctx.fillStyle = style.color;
+    ctx.globalAlpha = style.fillOpacity ?? 0.22;
+    ctx.fillStyle = style.fillColor ?? style.color;
     ctx.fill(b.area, 'evenodd');
   } else if (style.fill === 'hole') {
     if (opts.holeColor) ctx.fillStyle = opts.holeColor;
@@ -412,6 +415,17 @@ function paintFill(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opt
   ctx.restore();
 }
 
+/**
+ * A highlighter's dashes (imported: Notability dashes highlighters too), in its drawn width W
+ * (5.5 x width): dashes W long, round ends, a gap of 0.6 W; dots W across, 1.6 W apart.
+ */
+export function highlighterDash(style: InkStyle): { on: number; off: number } | null {
+  const ls = style.lineStyle ?? 'solid';
+  if (style.tool !== 'highlighter' || ls === 'solid') return null;
+  const w = style.width * 5.5;
+  return ls === 'dashed' ? { on: w, off: w * 1.6 } : { on: 0.1, off: w * 1.6 };
+}
+
 function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opacity: number) {
   if (style.fillOnly) return;
   ctx.save();
@@ -421,6 +435,8 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
     ctx.lineWidth = style.width * 5.5;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    const dash = highlighterDash(style);
+    if (dash) ctx.setLineDash([dash.on, dash.off]);
     ctx.stroke(b.path);
     ctx.restore();
     return;
@@ -466,6 +482,8 @@ export function styleOf(s: Stroke): InkStyle {
     closed: s.closed,
     shapeKind: s.shapeKind,
     fill: s.fill,
+    fillColor: s.fillColor,
+    fillOpacity: s.fillOpacity,
     arrow: s.arrow,
     modeled: s.modeled,
     dashOffset: s.dashOffset,
@@ -598,7 +616,7 @@ export function strokeGlGeometry(s: Stroke): { caps: number[]; area: XY[] | null
   const caps: number[] = [];
   let area: XY[] | null = null;
   const highlighter = style.tool === 'highlighter';
-  const stroked = (pts: XY[]) => strokeCaps(caps, pts, highlighter ? style.width * 5.5 : strokeWidth(style), highlighter ? 'solid' : style.lineStyle ?? 'solid', style);
+  const stroked = (pts: XY[]) => strokeCaps(caps, pts, highlighter ? style.width * 5.5 : strokeWidth(style), style.lineStyle ?? 'solid', style);
   if (style.shapeKind === 'point') {
     const p = points[0], r = Math.max(2.5, style.width * 1.7);
     caps.push(p.x, p.y, r, p.x, p.y, r);
@@ -681,9 +699,10 @@ function strokeCaps(out: number[], pts: XY[], width: number, ls: LineStyle, styl
     return;
   }
   // Dashes: the canvas's pattern ([on, off], shifted by dashOffset) walked along the line.
-  const on = ls === 'dashed' ? style.width * 4 : 0.1;
-  const off = style.width * 3;
-  if (ls === 'dotted') r = (style.width * 1.8) / 2;
+  const hl = highlighterDash(style);
+  const on = hl ? hl.on : ls === 'dashed' ? style.width * 4 : 0.1;
+  const off = hl ? hl.off : style.width * 3;
+  if (ls === 'dotted' && !hl) r = (style.width * 1.8) / 2;
   const period = on + off;
   let at = (((style.dashOffset ?? 0) % period) + period) % period;
   for (let i = 1; i < pts.length; i++) {
@@ -734,7 +753,7 @@ let svgIds = 0;
 
 function svgFill(style: InkStyle, areaD: string, pts: XY[], paper: string): string {
   if (!style.fill || style.fill === 'none') return '';
-  if (style.fill === 'solid') return `<path d="${areaD}" fill="${style.color}" fill-opacity="0.22" fill-rule="evenodd" stroke="none"/>`;
+  if (style.fill === 'solid') return `<path d="${areaD}" fill="${style.fillColor ?? style.color}" fill-opacity="${style.fillOpacity ?? 0.22}" fill-rule="evenodd" stroke="none"/>`;
   if (style.fill === 'hole') return `<path d="${areaD}" fill="${paper}" fill-rule="evenodd" stroke="none"/>`;
   const id = `onh${(svgIds++).toString(36)}`;
   const b = boundsOf(pts, 0);
@@ -803,7 +822,8 @@ function svgParts(s: Stroke, dy: number, paper: string): { fill: string; ink: st
     if (ink.pts.length === 1) d = capsuleSvg(ink.pts[0], w[0] / 2, ink.pts[0], w[0] / 2, f2);
     out += `<path d="${d}" fill="${s.color}" fill-opacity="${opacity}" fill-rule="nonzero"/>`;
   } else if (style.tool === 'highlighter') {
-    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${s.highlightAlpha ?? 0.35}" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"/>`;
+    const dash = highlighterDash(style);
+    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${s.highlightAlpha ?? 0.35}" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"${dash ? ` stroke-dasharray="${f2(dash.on)},${f2(dash.off)}"` : ''}/>`;
   } else {
     const ls = style.lineStyle ?? 'solid';
     const dash =

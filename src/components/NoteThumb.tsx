@@ -1,14 +1,15 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { zLayers } from '../editor/zorder';
-import { LatexBlock, NoteDocument, NotePage, PaperColor, PaperStyle, Stroke } from '../types';
+import { LatexBlock, NoteDocument, NotePage, PaperColor, PaperStyle, PdfPageRef, Stroke } from '../types';
 import { sheetSlice, surfaceLayout } from '../editor/sheets';
 import { drawStrokes, strokeBounds } from '../ink/strokeRenderer';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
 import { paperBackground, paperIsDark } from './CanvasPage';
 import { rotationStyle } from './Blocks';
-import { textCss } from '../editor/textStyle';
+import { textCss, textPieces } from '../editor/textStyle';
 import { requestThumb } from '../services/thumbCache';
+import { pdfPreview } from '../services/pdf';
 
 /**
  * Page thumbnails (library cards: the first page; page manager: every page), drawn with the same content as the editor:
@@ -134,9 +135,9 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
           <div
             key={l.key}
             className="absolute whitespace-pre-wrap break-words"
-            style={{ left: t.x, top: t.y, width: t.width, minHeight: t.height, fontSize: t.fontSize, lineHeight: 1.35, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...textCss(t), ...rotationStyle(t.rotation) }}
+            style={{ left: t.x, top: t.y, width: t.width, minHeight: t.height, fontSize: t.fontSize, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...textCss(t), ...rotationStyle(t.rotation) }}
           >
-            {t.text}
+            {t.spans?.length ? textPieces(t).map((p, i) => (p.css ? <span key={i} style={p.css}>{p.text}</span> : p.text)) : t.text}
           </div>
         );
       })}
@@ -150,9 +151,20 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
  */
 export const PageThumb: React.FC<{
   page: NotePage; width: number; height: number; paperStyle: PaperStyle; paperColor: PaperColor; patternColor?: string | null; scale: number; root?: Element | null; cache?: ThumbCache;
-}> = React.memo(({ page, width, height, paperStyle, paperColor, patternColor, scale, root, cache }) => {
+  /** The PDF page shown as this page's paper: its preview under the ink. */
+  pdf?: PdfPageRef | null;
+}> = React.memo(({ page, width, height, paperStyle, paperColor, patternColor, scale, root, cache, pdf }) => {
   const ref = useRef<HTMLDivElement>(null);
   const [near, setNear] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pdf || !near) return;
+    let live = true;
+    void pdfPreview(pdf).then((u) => live && setPdfUrl(u));
+    return () => {
+      live = false;
+    };
+  }, [pdf?.file, pdf?.page, near]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const el = ref.current;
     if (!el || near) return;
@@ -171,6 +183,7 @@ export const PageThumb: React.FC<{
         className="relative overflow-hidden pointer-events-none select-none"
         style={{ width, height, transform: `scale(${scale})`, transformOrigin: '0 0', ...paperBackground(paperStyle, paperColor, undefined, scale, false, patternColor) }}
       >
+        {pdf && pdfUrl && <img src={pdfUrl} alt="" draggable={false} className="absolute inset-0 w-full h-full" style={{ objectFit: 'contain', maxWidth: 'none' }} />}
         {near && (
           // Sized to reach the page's far corner: images are capped to their container's width.
           <div className="absolute" style={{ left: cache?.offset.x ?? 0, top: cache?.offset.y ?? 0, width: width - (cache?.offset.x ?? 0), height: height - (cache?.offset.y ?? 0) }}>
@@ -206,6 +219,7 @@ export const NoteThumb: React.FC<{ note: NoteDocument }> = React.memo(({ note })
           paperStyle={setup.paperStyle}
           paperColor={setup.paperColor}
           patternColor={setup.patternColor}
+          pdf={setup.pdf}
           scale={scale}
           cache={{ noteId: note.id, updatedAt: note.updatedAt, offset: { x: -setup.left, y: -setup.top } }}
         />

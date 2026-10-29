@@ -8,7 +8,7 @@ import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard
 import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
 import { markMoved } from '../ink/strokeRenderer';
 import { useNoteEditor } from '../state/useNoteEditor';
-import { CanvasPage, ToolSettings } from './CanvasPage';
+import { CanvasPage, ToolSettings, paperHex } from './CanvasPage';
 import { Toolbar } from './Toolbar';
 import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal, baseName } from './ExportModal';
@@ -34,7 +34,8 @@ import {
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
-import { joinPdfPages } from '../services/pdfExport';
+import { PrintedPage, joinPdfPages, underlayFiles } from '../services/pdfExport';
+import { pdfPrintReady } from './PdfBackground';
 import { useBack } from '../services/backStack';
 
 /** Margin around the surface (content px). */
@@ -251,6 +252,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [printMode, setPrintMode] = useState(false);
   /** PDF export: the one page the print layout shows (null: all pages). */
   const [printOnly, setPrintOnly] = useState<string | null>(null);
+  /** PDF export: files whose pages are printed without them, the original laid under (pdfExport.ts). */
+  const [printBare, setPrintBare] = useState<ReadonlySet<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(0);
   const curSheet = sl.sheets[Math.min(currentPage, pageCount - 1)];
   curSheetRef.current = curSheet;
@@ -815,8 +818,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     setExportOpen(false);
     await editor.flush();
     const sheets = printedSheets(doc);
-    const pages: Uint8Array[] = [];
+    const pages: PrintedPage[] = [];
     setBusy({ label: 'Making the PDF…' });
+    // Pages showing a PDF are printed bare and the original page is laid under them (pdfExport.ts),
+    // where pdf-lib can read the PDF; elsewhere they are printed with a picture of it.
+    const bare = await underlayFiles(sheets.flatMap((s) => (s.pdf ? [s.pdf.file] : []))).catch(() => new Set<string>());
+    setPrintBare(bare);
+    if (bare.size) document.documentElement.classList.add('on-print-bare');
     try {
       for (let i = 0; i < sheets.length; i++) {
         const s = sheets[i];
@@ -828,20 +836,26 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         });
         // Let TikZ / KaTeX lay out (longer for the first page, which mounts the print layout).
         await new Promise((r) => setTimeout(r, i === 0 ? 450 : 200));
-        pages.push(await pdfOfPrintLayout(doc.title, s.width, s.height));
+        await pdfPrintReady();
+        const under = s.pdf && bare.has(s.pdf.file) ? { file: s.pdf.file, page: s.pdf.page, paper: paperHex(s.paperColor) } : undefined;
+        pages.push({ bytes: await pdfOfPrintLayout(doc.title, s.width, s.height), under });
       }
+      document.documentElement.classList.remove('on-print-bare');
       const pdf = await joinPdfPages(pages, doc.title);
       // The pages' own PDFs are not needed any more (memory for the save that follows).
-      const pageKB = pages.map((p) => Math.round(p.length / 1024));
+      const pageKB = pages.map((p) => Math.round(p.bytes.length / 1024));
       pages.length = 0;
       setPrintMode(false);
       setPrintOnly(null);
+      setPrintBare(new Set());
       setBusy(null);
       crashLog.event('export', { kind: 'pdf', pages: sheets.length, pageKB, kb: Math.round(pdf.length / 1024) });
       const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), mode);
       crashLog.event('export-saved', { kind: 'pdf', saved: !!where, mode: mode ?? 'setting' });
       if (where) showToast(where);
     } catch (err) {
+      document.documentElement.classList.remove('on-print-bare');
+      setPrintBare(new Set());
       setBusy(null);
       setPrintMode(false);
       setPrintOnly(null);
@@ -856,8 +870,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     setExportOpen(false);
     await editor.flush();
     flushSync(() => setPrintMode(true));
-    // Let TikZ/KaTeX layout settle before handing the view to the print system.
+    // Let TikZ/KaTeX layout settle before handing the view to the print system, and the PDF pages draw.
     await new Promise((r) => setTimeout(r, 400));
+    await pdfPrintReady();
     try {
       await printDocument(doc.title);
     } catch (err) {
@@ -1150,6 +1165,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                     setEditingTextId={() => undefined}
                     onEditLatex={() => undefined}
                     printMode
+                    printSheet={s.id}
+                    printBare={!!s.pdf && printBare.has(s.pdf.file)}
                     scrollRoot={null}
                   />
                 </div>

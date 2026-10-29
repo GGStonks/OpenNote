@@ -1,10 +1,10 @@
 {
   "name": "opennote",
   "private": true,
-  "version": "2.4.15",
+  "version": "2.6.0",
   "type": "module",
   "scripts": {
-    "copy-tikzjax": "node scripts/copy-tikzjax.mjs",
+    "copy-tikzjax": "node scripts/copy-tikzjax.mjs && node scripts/copy-pdfjs.mjs",
     "dev": "npm run copy-tikzjax && vite --host 0.0.0.0 --port 5173",
     "build": "npm run test:engine && npm run test:storage && npm run copy-tikzjax && tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -29,6 +29,7 @@
     "katex": "^0.16.21",
     "lucide-react": "^0.575.0",
     "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.4.299",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

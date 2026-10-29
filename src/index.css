@@ -70,6 +70,8 @@
 @media print {
   @page { size: 8.5in 11in; margin: 0; }
   html, body { height: auto !important; overflow: visible !important; background: #fff !important; }
+  /* The PDF export lays original PDF pages under the printed ones: nothing may cover them. */
+  html.on-print-bare, html.on-print-bare body { background: transparent !important; }
   #root { display: none !important; }
   .on-print-root { display: block; }
   .on-print-page {

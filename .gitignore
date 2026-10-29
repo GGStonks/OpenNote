@@ -40,6 +40,8 @@ releases/
 
 # Generated at build time from node_modules/@drgrice1/tikzjax
 public/tikzjax/
+# Generated at build time from node_modules/pdfjs-dist
+public/pdfjs/
 
 # Synced web assets inside native projects
 android/app/src/main/assets/public/
