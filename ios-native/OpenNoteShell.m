@@ -11,6 +11,7 @@
 //             which a WebView would block as mixed content / CORS),
 //      share  writes an exported file and opens the share sheet (Save to Files, AirDrop, ...),
 //      print  prints the web view (print layout) -> "Save to Files" gives a PDF.
+//      pdfPage the print layout as a PDF without the dialog (PDF export); printPdf prints a PDF.
 //      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
 //  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
@@ -37,7 +38,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.6.2";
+static NSString *const kVersion = @"2.6.3";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -1079,6 +1080,10 @@ static const double kInkHoldSeconds = 0.06;
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"print"]) {
         [self handlePrint:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"pdfPage"]) {
+        [self handlePdfPage:msg reply:replyHandler];
+    } else if ([cmd isEqualToString:@"printPdf"]) {
+        [self handlePrintPdf:msg reply:replyHandler];
     } else if ([cmd isEqualToString:@"setPageRate"]) {
         NSString *rate = [msg[@"rate"] description];
         if ([@[ @"auto", @"60", @"max" ] containsObject:rate]) {
@@ -1294,8 +1299,72 @@ static NSString *ONUpdatesDir(void) {
     info.outputType = UIPrintInfoOutputGeneral;
     info.jobName = msg[@"name"] ?: @"OpenNote";
     pc.printInfo = info;
+    pc.printingItem = nil;
     pc.printFormatter = self.webView.viewPrintFormatter;
     void (^done)(UIPrintInteractionController *, BOOL, NSError *) = ^(UIPrintInteractionController *c, BOOL completed, NSError *error) {
+        reply(error ? @{@"error": error.localizedDescription} : @{@"ok": @(completed)}, nil);
+    };
+    if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {
+        [pc presentFromRect:CGRectMake(CGRectGetMidX(self.view.bounds), 60, 1, 1) inView:self.view animated:YES completionHandler:done];
+    } else {
+        [pc presentAnimated:YES completionHandler:done];
+    }
+}
+
+/**
+ * The print layout as a PDF without the print dialog (the PDF export): WebKit's print formatter
+ * draws it into a PDF context, as vectors, on pages of exactly widthPx x heightPx (CSS px, 0.75 pt
+ * each). The web app shows only the pages to print, all of that size, and measures once how WebKit
+ * placed a page on the sheet (src/services/printCalibration.ts): it corrects any scale or offset
+ * when joining the pages, and falls back to the print dialog if the pages do not come out as laid
+ * out. Replies { base64, pages }.
+ */
+- (void)handlePdfPage:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    double w = [msg[@"widthPx"] doubleValue], h = [msg[@"heightPx"] doubleValue];
+    if (!(w > 0 && h > 0)) {
+        reply(@{@"error": @"Page size missing"}, nil);
+        return;
+    }
+    @try {
+        CGRect sheet = CGRectMake(0, 0, w * 0.75, h * 0.75);
+        UIPrintPageRenderer *renderer = [[UIPrintPageRenderer alloc] init];
+        UIViewPrintFormatter *formatter = self.webView.viewPrintFormatter;
+        formatter.perPageContentInsets = UIEdgeInsetsZero;
+        [renderer addPrintFormatter:formatter startingAtPageAtIndex:0];
+        // Read-only properties a renderer normally gets from the print dialog's paper.
+        [renderer setValue:[NSValue valueWithCGRect:sheet] forKey:@"paperRect"];
+        [renderer setValue:[NSValue valueWithCGRect:sheet] forKey:@"printableRect"];
+        NSInteger pages = renderer.numberOfPages;
+        NSMutableData *data = [NSMutableData data];
+        UIGraphicsBeginPDFContextToData(data, sheet, @{});
+        [renderer prepareForDrawingPages:NSMakeRange(0, pages)];
+        for (NSInteger i = 0; i < pages; i++) {
+            UIGraphicsBeginPDFPageWithInfo(sheet, @{});
+            [renderer drawPageAtIndex:i inRect:sheet];
+        }
+        UIGraphicsEndPDFContext();
+        reply(@{@"base64": [data base64EncodedStringWithOptions:0], @"pages": @(pages)}, nil);
+    } @catch (NSException *e) {
+        reply(@{@"error": [NSString stringWithFormat:@"PDF export unavailable: %@", e.reason ?: e.name]}, nil);
+    }
+}
+
+/** Prints a PDF the web app made (Print…: the same vector PDF as the export) with the print dialog. */
+- (void)handlePrintPdf:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    NSData *pdf = [[NSData alloc] initWithBase64EncodedString:[msg[@"base64"] description] ?: @"" options:0];
+    if (!pdf.length || ![UIPrintInteractionController canPrintData:pdf]) {
+        reply(@{@"error": @"Nothing to print"}, nil);
+        return;
+    }
+    UIPrintInteractionController *pc = [UIPrintInteractionController sharedPrintController];
+    UIPrintInfo *info = [UIPrintInfo printInfo];
+    info.outputType = UIPrintInfoOutputGeneral;
+    info.jobName = msg[@"name"] ?: @"OpenNote";
+    pc.printInfo = info;
+    pc.printFormatter = nil;
+    pc.printingItem = pdf;
+    void (^done)(UIPrintInteractionController *, BOOL, NSError *) = ^(UIPrintInteractionController *c, BOOL completed, NSError *error) {
+        c.printingItem = nil;
         reply(error ? @{@"error": error.localizedDescription} : @{@"ok": @(completed)}, nil);
     };
     if (UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad) {

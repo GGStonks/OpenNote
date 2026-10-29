@@ -89,7 +89,16 @@ text (App.tsx `importExternal`).
   (NoteThumb.tsx) draw everything the editor does: keep them in step with Blocks.tsx (e.g. a
   formula's `stretchX`). Imported notes are named after the file. Files nobody refers to go when a note is deleted (`collectUnusedFiles`); backups
   and .opennote exports carry them (`files`). The PDF export prints such pages bare and lays the
-  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text. Pages of
+  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text, on Android
+  and iOS, for the export and Print… (which prints that PDF: `printPdfDocument`). iOS prints the
+  layout with WebKit's print formatter into a PDF (shell `pdfPage`); a calibration print per page
+  size (printCalibration.ts, two pages with marks) measures how it placed the page and the joiner
+  draws pages through the inverse (`fix`); an unusable print (cut off, wrong page count, native
+  error) throws PrintUnusable and the print dialog is used for the session (`pdfPrintingFailed`).
+  Encrypted or damaged PDFs pdf-lib cannot read are copied plain by pdf.js (`plainPdfCopy`:
+  extractPages with a blank second document, else pdf.js keeps the encryption). A web view that
+  prints its own colour behind a bare page gets `on-print-white` and is multiplied; the PDF is a
+  picture only when even that is coloured, or for the print dialog fallback. Pages of
   one size in a row are printed in one native call (Editor `PRINT_RUN`, page by page again when the
   print has another page count) and split here: a print per page made long notes slow. The print
   layout's named `@page` rules must have CSS-identifier names (`printPageName`): imported sizes have
@@ -104,7 +113,11 @@ text (App.tsx `importExternal`).
   `npm run bench:ui -- --only pdfimport --shots <dir>` (import, zoom, export joining, thumbnails),
   `--only pdfexport --shots <dir>` (the export of an A4 note: how far each drawn cross lies from
   its target dot, with `BENCH_PRINT_BG=white|#1c1c1e` for an opaque
-  printed page, `BENCH_EXPORT=print` for iOS's print dialog), `--only pdfinsert --shots <dir>`,
+  printed page (`…!` even over the page's white), `BENCH_PRINT_DISTORT=1` (a printer that scales
+  and moves pages, as iOS's may: calibration), `BENCH_ENCRYPT=1` (an encrypted PDF),
+  `BENCH_EXPORT=printpdf` (Print…), `BENCH_EXPORT=print` (the browser's print dialog); it prints
+  the fonts and images in the file: images mean a PDF page went in as a picture),
+  `--only pdfinsert --shots <dir>`,
   `--only pdfthumb --shots <dir>` (a PDF page's paper colour on its library card).
 - Notability (`src/import/notability.ts` with `zip.ts`, `plist.ts`, `images.ts`): what it reads is
   specified in `docs/notability-note-format.md`; keep the two in step. Each curve is a chain of cubic

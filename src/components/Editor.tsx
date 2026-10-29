@@ -33,7 +33,8 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
+import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
+import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
 import { printedBackground } from '../services/pdf';
@@ -148,6 +149,12 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
 /** Most pages printed together in one PDF export print (a long note is printed in parts). */
 const PRINT_RUN = 20;
 
+/** How prints of each page size are placed (iOS), measured once a session. */
+const printCalibrations = new Map<string, Calibration>();
+
+/** This device's page printer gives prints that cannot be used (the print dialog is used instead). */
+class PrintUnusable extends Error {}
+
 const printPageName = (w: number, h: number) => `on-${Math.round(w * 100)}x${Math.round(h * 100)}`;
 
 export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onSaved, onBack, onOpenSettings }) => {
@@ -260,6 +267,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [printMode, setPrintMode] = useState(false);
   /** PDF export: the one page the print layout shows (null: all pages). */
   const [printOnly, setPrintOnly] = useState<ReadonlySet<string> | null>(null);
+  /** A calibration print of this page size is shown instead of pages (printCalibration.ts). */
+  const [printCalibration, setPrintCalibration] = useState<{ w: number; h: number } | null>(null);
   /** PDF export: files whose pages are printed without them, the original laid under (pdfExport.ts). */
   const [printBare, setPrintBare] = useState<ReadonlySet<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(0);
@@ -848,41 +857,75 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
    * services/pdfExport.ts); elsewhere through the print dialog.
    */
   /** `mode`: saved or shared (the Android export menu asks for each file); missing: Settings' choice. */
-  const exportPdf = async (mode?: ExportMode) => {
-    if (!canMakePdf()) return printNote();
-    setExportOpen(false);
+  /**
+   * The note as one PDF, each page at its own size, the original pages of imported PDFs laid
+   * under the ink as vectors (pdfExport.ts): the PDF export and Print… (Android, iOS: canMakePdf).
+   * Pages of one size in a row are printed together (one page size per print): a note is usually
+   * one or a few prints instead of one per page, each of which lays the page out and starts the
+   * web view's PDF printer again. Throws PrintUnusable when this device's page printer cannot be
+   * used (the print dialog is used instead).
+   */
+  const makePdf = async (): Promise<Uint8Array> => {
     await editor.flush();
     const t0 = performance.now();
     const sheets = printedSheets(doc);
     const pages: PrintedPage[] = [];
     setBusy({ label: 'Making the PDF…' });
-    // Pages showing a PDF are printed bare and the original page is laid under them (pdfExport.ts),
-    // where pdf-lib can read the PDF; elsewhere they are printed with a picture of it.
+    // Pages showing a PDF are printed bare and the original page is laid under them.
     const sources = await loadUnderlays(sheets.flatMap((s) => (s.pdf ? [s.pdf.file] : []))).catch(() => new Map<string, PdfSource>());
     const bare = new Set(sources.keys());
     const isBare = (s: SheetBox) => !!s.pdf && bare.has(s.pdf.file);
+    const html = document.documentElement;
     setPrintBare(bare);
-    if (bare.size) document.documentElement.classList.add('on-print-bare');
+    if (bare.size) html.classList.add('on-print-bare');
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     let first = true;
-    /** Shows these pages in the print layout and prints them: one PDF, a page for each. */
-    const print = async (run: SheetBox[], transparent: boolean) => {
+    /** Shows these pages (or a calibration print of their size) in the print layout and prints them: a page for each. */
+    const print = async (run: SheetBox[] | { w: number; h: number }, transparent: boolean) => {
+      const size = Array.isArray(run) ? { w: run[0].width, h: run[0].height } : run;
       flushSync(() => {
-        setPrintOnly(new Set(run.map((s) => s.id)));
+        setPrintCalibration(Array.isArray(run) ? null : run);
+        setPrintOnly(Array.isArray(run) ? new Set(run.map((s) => s.id)) : new Set());
         setPrintMode(true);
       });
       // Let TikZ / KaTeX lay out (longer the first time, which mounts the print layout).
       await wait(first ? 450 : 200);
       first = false;
       await pdfPrintReady();
-      return pdfOfPrintLayout(doc.title, run[0].width, run[0].height, transparent);
+      try {
+        return await pdfOfPrintLayout(doc.title, size.w, size.h, transparent);
+      } catch (err) {
+        // iOS: a print formatter that cannot print without the dialog: the dialog then.
+        if (printNeedsCalibration() && !/cancel/i.test(String(err))) throw new PrintUnusable(err instanceof Error ? err.message : String(err));
+        throw err;
+      }
     };
-    // How this web view prints a bare page (see below): the same for every page, so found once.
+    /** iOS: how a print of this size is placed on its sheet (printCalibration.ts), measured once a session. */
+    const calibrate = async (w: number, h: number) => {
+      const key = `${w}x${h}`;
+      let c = printCalibrations.get(key);
+      if (!c) {
+        c = await measureCalibration(await print({ w, h }, true), w, h).catch((e): Calibration => ({ ok: false, reason: String(e) }));
+        printCalibrations.set(key, c);
+        crashLog.event('export-calibration', { w, h, ...(c.ok ? { fix: c.fix, samePages: c.samePages } : { reason: c.reason }) });
+      }
+      if (!c.ok) throw new PrintUnusable(c.reason);
+      return c;
+    };
+    // How this web view prints a bare page, found once: 'clear' (see-through, as asked), 'white'
+    // (opaque white: multiplied over the PDF page, which its white leaves as it is), 'colored'
+    // (its own background colour behind the page). Colored, the pages are printed on white
+    // (`on-print-white`) and multiplied; only if even that comes out coloured is the PDF page
+    // drawn as a picture in the printed page.
     let background: 'clear' | 'white' | 'colored' | null = null;
+    let onWhite = false;
+    const classify = async (bytes: Uint8Array, run: SheetBox[], done: number) => {
+      const at = run.findIndex(isBare);
+      const bg = await printedBackground(bytes, at + 1).catch(() => 'clear' as const);
+      crashLog.event('export-page', { page: done + at + 1, background: bg, onWhite });
+      return bg;
+    };
     try {
-      // Pages of one size in a row are printed together (one page size per print): a note is
-      // usually one or a few prints instead of one per page, each of which lays the page out and
-      // starts the web view's PDF printer again.
       const runs: SheetBox[][] = [];
       for (const s of sheets) {
         const last = runs[runs.length - 1];
@@ -890,78 +933,128 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         else runs.push([s]);
       }
       let done = 0;
-      for (const run of runs) {
+      /** The printed pages of `run` (page i of `bytes`), with their PDF page under them when bare. */
+      const placed = (run: SheetBox[], bytes: Uint8Array, fix: PrintFix | null): PrintedPage[] =>
+        run.map((s, i) => {
+          const at: PrintedPage = { bytes, index: i, ...(fix ? { fix, size: { w: s.width * 0.75, h: s.height * 0.75 } } : {}) };
+          if (!isBare(s)) return at;
+          const under = { file: s.pdf!.file, page: s.pdf!.page, paper: paperHex(s.paperColor) };
+          return { ...at, under: background === 'white' ? { ...under, multiply: true } : under };
+        });
+      const queue = [...runs];
+      while (queue.length) {
+        const run = queue.shift()!;
+        const cal = printNeedsCalibration() ? await calibrate(run[0].width, run[0].height) : null;
+        if (cal && !cal.samePages && run.length > 1) {
+          // Pages of one print placed differently: one page per print.
+          queue.unshift(...run.map((s) => [s]));
+          continue;
+        }
+        const fix = cal ? cal.fix : null;
         setBusy({ label: 'Making the PDF…', detail: run.length > 1 ? `Pages ${done + 1}–${done + run.length} of ${sheets.length}` : `Page ${done + 1} of ${sheets.length}` });
         const anyBare = run.some(isBare);
-        let bytes = await print(run, anyBare);
-        let count = await pdfPageCount(bytes);
-        if (count !== run.length && run.length > 1) {
-          // Printed on another number of pages (something reaching past its page): one at a time.
-          crashLog.event('export-run-split', { pages: run.length, printed: count });
-          for (const s of run) {
-            const one = await print([s], isBare(s));
-            pages.push(...(await placed([s], one)));
-          }
+        if (anyBare && background === 'colored') {
+          // Not even on white: the PDF drawn as a picture in the printed page.
+          html.classList.remove('on-print-bare', 'on-print-white');
+          flushSync(() => setPrintBare(new Set()));
+          const bytes = await print(run, false);
+          flushSync(() => setPrintBare(bare));
+          html.classList.add('on-print-bare');
+          if (onWhite) html.classList.add('on-print-white');
+          pages.push(...placed(run, bytes, fix).map(({ under, ...p }) => p));
           done += run.length;
           continue;
         }
-        if (anyBare && !background) {
-          // A page printed for a PDF page to go under it must be see-through where it is empty. A
-          // web view that printed it opaque (its own background) would hide the PDF page: white,
-          // it is multiplied over it; another colour, the pages are printed again with the PDF
-          // drawn in them as a picture.
-          const at = run.findIndex(isBare);
-          background = await printedBackground(bytes, at + 1).catch(() => 'clear' as const);
-          crashLog.event('export-page', { page: done + at + 1, background });
+        let bytes = await print(run, anyBare);
+        const count = await pdfPageCount(bytes);
+        if (count !== run.length) {
+          crashLog.event('export-run-split', { pages: run.length, printed: count });
+          // Printed on another number of pages (something reaching past its page): one at a time.
+          if (run.length > 1) {
+            queue.unshift(...run.map((s) => [s]));
+            continue;
+          }
+          if (cal || count < 1) throw new PrintUnusable(`a page printed on ${count} sheets`);
         }
-        if (anyBare && background === 'colored') {
-          document.documentElement.classList.remove('on-print-bare');
-          flushSync(() => setPrintBare(new Set()));
-          bytes = await print(run, false);
-          count = await pdfPageCount(bytes);
-          flushSync(() => setPrintBare(bare));
-          document.documentElement.classList.add('on-print-bare');
-          pages.push(...run.map((_, i) => ({ bytes, index: Math.min(i, count - 1) })));
-        } else pages.push(...(await placed(run, bytes)));
+        if (anyBare && !background) {
+          background = await classify(bytes, run, done);
+          if (background === 'colored') {
+            onWhite = true;
+            html.classList.add('on-print-white');
+            bytes = await print(run, false);
+            background = await classify(bytes, run, done);
+            if (background === 'clear') background = 'white';
+            if (background === 'colored') {
+              queue.unshift(run);
+              continue;
+            }
+          }
+        }
+        pages.push(...placed(run, bytes, fix));
         done += run.length;
       }
-      document.documentElement.classList.remove('on-print-bare');
       const pdf = await joinPdfPages(pages, doc.title, sources);
-      const prints = new Set(pages.map((p) => p.bytes));
-      const printKB = [...prints].map((b) => Math.round(b.length / 1024));
+      const printKB = [...new Set(pages.map((p) => p.bytes))].map((b) => Math.round(b.length / 1024));
+      crashLog.event('export', { kind: 'pdf', pages: sheets.length, prints: printKB.length, printKB, kb: Math.round(pdf.length / 1024), ms: Math.round(performance.now() - t0) });
+      return pdf;
+    } finally {
       pages.length = 0;
+      html.classList.remove('on-print-bare', 'on-print-white');
       setPrintMode(false);
       setPrintOnly(null);
+      setPrintCalibration(null);
       setPrintBare(new Set());
       setBusy(null);
-      crashLog.event('export', { kind: 'pdf', pages: sheets.length, prints: printKB.length, printKB, kb: Math.round(pdf.length / 1024), ms: Math.round(performance.now() - t0) });
+    }
+  };
+
+  /** `mode`: saved or shared (the Android export menu asks for each file); missing: Settings' choice. */
+  const exportPdf = async (mode?: ExportMode) => {
+    if (!canMakePdf()) return printNote();
+    setExportOpen(false);
+    let pdf: Uint8Array;
+    try {
+      pdf = await makePdf();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof PrintUnusable) {
+        // This device's page printer cannot be used: the print dialog ("Save to Files") instead.
+        crashLog.event('export-unusable', { reason: msg });
+        pdfPrintingFailed();
+        return printWithDialog();
+      }
+      if (!/cancel/i.test(msg)) showToast(`PDF export failed (${msg}). Use Print… instead.`, true);
+      return;
+    }
+    try {
       const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), mode);
       crashLog.event('export-saved', { kind: 'pdf', saved: !!where, mode: mode ?? 'setting' });
       if (where) showToast(where);
     } catch (err) {
-      document.documentElement.classList.remove('on-print-bare');
-      setPrintBare(new Set());
-      setBusy(null);
-      setPrintMode(false);
-      setPrintOnly(null);
       const msg = err instanceof Error ? err.message : String(err);
-      if (/cancel/i.test(msg)) return;
-      showToast(`PDF export failed (${msg}). Use Print… instead.`, true);
-    }
-
-    /** The printed pages of `run` (page i of `bytes`), with their PDF page under them when bare. */
-    async function placed(run: SheetBox[], bytes: Uint8Array): Promise<PrintedPage[]> {
-      return run.map((s, i) => {
-        if (!isBare(s)) return { bytes, index: i };
-        const under = { file: s.pdf!.file, page: s.pdf!.page, paper: paperHex(s.paperColor) };
-        return { bytes, index: i, under: background === 'white' ? { ...under, multiply: true } : under };
-      });
+      if (!/cancel/i.test(msg)) showToast(`Saving the PDF failed (${msg})`, true);
     }
   };
 
-  /** Print… : the system print dialog (on Android also "Save as PDF", with one paper size for all pages). */
+  /** Print…: the same PDF as the export (vectors, the original PDF pages) to the print dialog. */
   const printNote = async () => {
     setExportOpen(false);
+    if (canMakePdf()) {
+      try {
+        await printPdfDocument(doc.title, await makePdf());
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/cancel/i.test(msg)) return;
+        crashLog.event('print-pdf-failed', { reason: msg });
+        if (err instanceof PrintUnusable) pdfPrintingFailed();
+      }
+    }
+    return printWithDialog();
+  };
+
+  /** The print dialog printing the print layout itself (browsers; a device whose page printer failed). */
+  const printWithDialog = async () => {
     await editor.flush();
     flushSync(() => setPrintMode(true));
     // Let TikZ/KaTeX layout settle before handing the view to the print system, and the PDF pages draw.
@@ -1241,13 +1334,21 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                 wide), and a name with a dot dropped its rule, so the page was printed at the default
                 Letter size and fitted into its own: the ink came out smaller and lower than the PDF. */}
             <style>
-              {[...new Set(printed.map((x) => `${x.width}x${x.height}`))]
+              {[...new Set([...printed.map((x) => `${x.width}x${x.height}`), ...(printCalibration ? [`${printCalibration.w}x${printCalibration.h}`] : [])])]
                 .map((k) => {
                   const [w, h] = k.split('x').map(Number);
                   return `@page ${printPageName(w, h)} { size: ${w}px ${h}px; margin: 0; }`;
                 })
                 .join('\n')}
             </style>
+            {printCalibration &&
+              [0, 1].map((i) => (
+                <div key={`cal${i}`} className="on-print-page relative" style={{ width: printCalibration.w, height: printCalibration.h, page: printPageName(printCalibration.w, printCalibration.h) } as React.CSSProperties}>
+                  {calibrationMarks(printCalibration.w, printCalibration.h).map(([x, y]) => (
+                    <div key={`${x},${y}`} className="absolute" style={{ left: x - CALIBRATION_MARK / 2, top: y - CALIBRATION_MARK / 2, width: CALIBRATION_MARK, height: CALIBRATION_MARK, background: '#000', printColorAdjust: 'exact', WebkitPrintColorAdjust: 'exact' } as React.CSSProperties} />
+                  ))}
+                </div>
+              ))}
             {printed.map((s) => (
               <div key={s.id} className="on-print-page" style={{ width: s.width, height: s.height, page: printPageName(s.width, s.height) } as React.CSSProperties}>
                 <div style={{ transform: `translate(${-s.left}px, ${-s.top}px)` }}>

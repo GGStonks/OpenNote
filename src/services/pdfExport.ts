@@ -1,4 +1,6 @@
 import { getFile } from '../storage/db';
+import { plainPdfCopy } from './pdf';
+import type { PrintFix } from './printCalibration';
 
 
 /**
@@ -26,6 +28,12 @@ export interface PrintedPage {
    * the PDF page: its white leaves the PDF page as it is, its ink darkens it as ink on paper.
    */
   under?: { file: string; page: number; paper: string; multiply?: boolean };
+  /**
+   * How the print placed the page on its sheet (printCalibration.ts, iOS): the page is drawn through
+   * the inverse, on a sheet of `size` (pt), the page's own.
+   */
+  fix?: PrintFix;
+  size?: { w: number; h: number };
 }
 
 type PdfLib = typeof import('pdf-lib');
@@ -34,18 +42,25 @@ type Doc = Awaited<ReturnType<PdfLib['PDFDocument']['load']>>;
 export type PdfSource = Doc;
 
 /**
- * The stored PDFs pdf-lib can lay under printed pages (not those it cannot read, e.g. encrypted
- * ones), read once for the whole export.
+ * The stored PDFs to lay under printed pages, read once for the whole export. pdf-lib cannot read
+ * an encrypted PDF (also one with only an owner password, common for downloaded scores and papers)
+ * or some damaged ones: pdf.js, which shows them, writes a plain copy of them (services/pdf.ts
+ * `plainPdfCopy`), still vectors. Only a PDF neither can read is drawn as a picture.
  */
 export async function loadUnderlays(ids: string[]): Promise<Map<string, Doc>> {
   const { PDFDocument } = await import('pdf-lib');
   const ok = new Map<string, Doc>();
   for (const id of new Set(ids)) {
+    const f = await getFile(id).catch(() => null);
+    if (!f) continue;
     try {
-      const f = await getFile(id);
-      if (f) ok.set(id, await PDFDocument.load(f.bytes, { updateMetadata: false }));
+      ok.set(id, await PDFDocument.load(f.bytes, { updateMetadata: false }));
     } catch {
-      /* drawn as a picture instead */
+      try {
+        ok.set(id, await PDFDocument.load(await plainPdfCopy(id), { updateMetadata: false }));
+      } catch {
+        /* drawn as a picture instead */
+      }
     }
   }
   return ok;
@@ -93,14 +108,22 @@ export async function joinPdfPages(pages: PrintedPage[], title: string, loaded?:
     const src = await load;
     const index = printed.index ?? 0;
     if (index >= src.getPageCount()) continue;
-    if (!printed.under) {
+    if (!printed.under && !printed.fix) {
       const [page] = await out.copyPages(src, [index]);
       out.addPage(page);
       continue;
     }
     const top = src.getPage(index);
-    const { width: W, height: H } = top.getSize();
+    const { width: Wp, height: Hp } = top.getSize();
+    const { w: W, h: H } = printed.fix && printed.size ? printed.size : { w: Wp, h: Hp };
     const page = out.addPage([W, H]);
+    // The printed page, put back where it was laid out (printed = s x laid out + d, from the top-left).
+    const f = printed.fix ?? { sx: 1, sy: 1, dx: 0, dy: 0 };
+    const place = { x: -f.dx / f.sx, y: H - Hp / f.sy + f.dy / f.sy, xScale: 1 / f.sx, yScale: 1 / f.sy };
+    if (!printed.under) {
+      page.drawPage(await out.embedPage(top), place);
+      continue;
+    }
     const [r, g, b] = rgbOf(printed.under.paper);
     page.drawRectangle({ x: 0, y: 0, width: W, height: H, color: rgb(r, g, b) });
     const orig = await source(printed.under.file);
@@ -124,7 +147,7 @@ export async function joinPdfPages(pages: PrintedPage[], title: string, loaded?:
       const xobj = out.context.lookup(printedPage.ref) as unknown as { dict: { set(k: unknown, v: unknown): void } };
       xobj.dict.set(lib.PDFName.of('Group'), out.context.obj({ Type: 'Group', S: 'Transparency', I: true, CS: 'DeviceRGB' }));
     }
-    page.drawPage(printedPage, { x: 0, y: 0, width: W, height: H, ...(printed.under.multiply ? { blendMode: lib.BlendMode.Multiply } : {}) });
+    page.drawPage(printedPage, { ...place, ...(printed.under.multiply ? { blendMode: lib.BlendMode.Multiply } : {}) });
   }
   return out.save();
 }

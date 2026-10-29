@@ -239,6 +239,20 @@ export async function printedBackground(bytes: Uint8Array, pageNo = 1): Promise<
   }
 }
 
+/**
+ * A stored PDF as a plain (not encrypted) PDF, written by pdf.js from what it reads (with the
+ * PDF's password): for pdf-lib, which cannot decrypt, to lay its pages under the export's ink as
+ * vectors. pdf.js keeps a single document's encryption when it writes it, so a one-page blank PDF
+ * comes along as a second document; its page is the last and never used.
+ */
+export async function plainPdfCopy(file: string): Promise<Uint8Array> {
+  const doc = await openPdf(file);
+  const { PDFDocument } = await import('pdf-lib');
+  const blank = await PDFDocument.create();
+  blank.addPage([10, 10]);
+  return doc.extractPages([{ document: null }, { document: await blank.save() }]);
+}
+
 /** The page sizes of a PDF (points, rotation applied), for laying out its pages. */
 export async function pdfPageSizes(doc: PDFDocumentProxy): Promise<{ w: number; h: number }[]> {
   const out: { w: number; h: number }[] = [];

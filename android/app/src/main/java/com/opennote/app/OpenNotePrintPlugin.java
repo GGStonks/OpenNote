@@ -135,6 +135,60 @@ public class OpenNotePrintPlugin extends Plugin {
         });
     }
 
+    /**
+     * Prints a PDF the web app made (Print…: the same vector PDF as the export, the original PDF
+     * pages under the ink) with the system print dialog. Resolves when the job is done.
+     */
+    @PluginMethod
+    public void printPdf(PluginCall call) {
+        String name = call.getString("name", "OpenNote");
+        String base64 = call.getString("base64", "");
+        final byte[] pdf;
+        try {
+            pdf = android.util.Base64.decode(base64, android.util.Base64.DEFAULT);
+        } catch (IllegalArgumentException e) {
+            call.reject("Nothing to print");
+            return;
+        }
+        if (pdf.length == 0) {
+            call.reject("Nothing to print");
+            return;
+        }
+        getActivity().runOnUiThread(() -> {
+            try {
+                PrintManager manager = (PrintManager) getActivity().getSystemService(Context.PRINT_SERVICE);
+                PrintDocumentAdapter adapter = new PrintDocumentAdapter() {
+                    @Override
+                    public void onLayout(PrintAttributes oldAttributes, PrintAttributes newAttributes, android.os.CancellationSignal cancel,
+                                         LayoutResultCallback callback, android.os.Bundle extras) {
+                        if (cancel.isCanceled()) {
+                            callback.onLayoutCancelled();
+                            return;
+                        }
+                        callback.onLayoutFinished(new android.print.PrintDocumentInfo.Builder(name + ".pdf")
+                                .setContentType(android.print.PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                .build(), true);
+                    }
+
+                    @Override
+                    public void onWrite(android.print.PageRange[] pages, ParcelFileDescriptor destination, android.os.CancellationSignal cancel,
+                                        WriteResultCallback callback) {
+                        try (java.io.FileOutputStream out = new java.io.FileOutputStream(destination.getFileDescriptor())) {
+                            out.write(pdf);
+                            callback.onWriteFinished(new android.print.PageRange[] { android.print.PageRange.ALL_PAGES });
+                        } catch (IOException e) {
+                            callback.onWriteFailed(e.getMessage());
+                        }
+                    }
+                };
+                PrintJob job = manager.print(name, adapter, null);
+                waitForJob(job, call, new Handler(Looper.getMainLooper()));
+            } catch (Exception e) {
+                call.reject("Printing failed: " + e.getMessage());
+            }
+        });
+    }
+
     private static byte[] readAll(File file) throws IOException {
         try (FileInputStream in = new FileInputStream(file); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             byte[] buf = new byte[64 * 1024];

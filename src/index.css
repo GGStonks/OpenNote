@@ -72,6 +72,8 @@
   html, body { height: auto !important; overflow: visible !important; background: #fff !important; }
   /* The PDF export lays original PDF pages under the printed ones: nothing may cover them. */
   html.on-print-bare, html.on-print-bare body { background: transparent !important; }
+  /* A web view that printed its own colour behind a bare page: printed on white instead (multiplied over the PDF page). */
+  html.on-print-white, html.on-print-white body { background: #fff !important; }
   #root { display: none !important; }
   .on-print-root { display: block; }
   .on-print-page {

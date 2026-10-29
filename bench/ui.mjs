@@ -1205,18 +1205,43 @@ if (ONLY.has('pdfexport') && arg('shots')) {
     pg.drawCircle({ x: w / 2, y: h / 2 - 150, size: 60, color: rgb(0.2, 0.7, 0.3) });
     if (w < h) for (const [x, y] of DOTS) pg.drawCircle({ x, y: h - y, size: 5, color: rgb(1, 0, 0) });
   }
-  const bytes = await mk.save();
+  let bytes = await mk.save();
+  if (process.env.BENCH_ENCRYPT) {
+    // Encrypted with an empty user password (an owner password only), as many downloaded PDFs are.
+    const enc = join(arg('shots'), 'encrypted.pdf');
+    writeFileSync(join(arg('shots'), 'plain.pdf'), bytes);
+    execFileSync('python3', ['-I', '-c', 'import sys\nfrom pypdf import PdfWriter\nw = PdfWriter(clone_from=sys.argv[1]); w.encrypt(user_password="", owner_password="owner", algorithm="RC4-128"); w.write(sys.argv[2])', join(arg('shots'), 'plain.pdf'), enc]);
+    bytes = (await import('node:fs')).readFileSync(enc);
+  }
   let saved = null;
   // BENCH_PRINT_BG=white / #1c1c1e: a web view that prints an opaque page (its own background
-  // behind the page), as Android's did. BENCH_EXPORT=print: the print dialog's path (iOS).
+  // behind the page), as Android's did; `#1c1c1e!` even on white. BENCH_EXPORT=print: the print
+  // dialog printing the layout (browsers); BENCH_EXPORT=printpdf: Print… with the export's PDF.
+  // BENCH_PRINT_DISTORT: a printer that scales and moves each page on its sheet, as iOS's may (the
+  // export must measure it and put the pages back).
   const printBg = process.env.BENCH_PRINT_BG;
   let prints = 0;
+  if (process.env.BENCH_PRINT_DISTORT) await page.evaluate(() => { window.__opennoteBenchCalibrate = true; });
+  if (process.env.BENCH_EXPORT === 'printpdf') await page.exposeFunction('__opennoteBenchPrintPdf', async (name, b64) => { saved = Buffer.from(b64, 'base64'); writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved); });
   if (process.env.BENCH_EXPORT !== 'print') await page.exposeFunction('__opennoteBenchPrint', async (_name, w, h) => {
     prints++;
-    if (printBg) await page.addStyleTag({ content: `@media print { html, body, html.on-print-bare, html.on-print-bare body { background: ${printBg} !important; } }` });
-    // The page's own @page size (preferCSSPageSize): a page whose rule is lost comes out at the
-    // print layout's default size, and its PDF page lands off the ink, as on Android.
-    return (await page.pdf({ width: `${w}px`, height: `${h}px`, preferCSSPageSize: true, printBackground: true })).toString('base64');
+    const added = [];
+    if (printBg) {
+      // A web view's own background shows where the page is see-through (`!`: always, even over the page's white).
+      const always = printBg.endsWith('!'), bg = printBg.replace('!', '');
+      await page.emulateMedia({ media: 'print' });
+      const own = await page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
+      await page.emulateMedia({ media: null });
+      if (always || own === 'rgba(0, 0, 0, 0)' || own === 'transparent') added.push(await page.addStyleTag({ content: `@media print { :root:root:root, :root:root:root body { background: ${bg} !important; } }` }));
+    }
+    if (process.env.BENCH_PRINT_DISTORT) added.push(await page.addStyleTag({ content: '@media print { .on-print-page { transform: translate(9px, 14px) scale(0.96); transform-origin: 0 0; } }' }));
+    try {
+      // The page's own @page size (preferCSSPageSize): a page whose rule is lost comes out at the
+      // print layout's default size, and its PDF page lands off the ink, as on Android.
+      return (await page.pdf({ width: `${w}px`, height: `${h}px`, preferCSSPageSize: true, printBackground: true })).toString('base64');
+    } finally {
+      for (const el of added) await el.evaluate((e) => e.remove());
+    }
   });
 
   await page.exposeFunction('__opennoteBenchSave', async (name, b64) => { saved = Buffer.from(b64, 'base64'); writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved); });
@@ -1224,6 +1249,7 @@ if (ONLY.has('pdfexport') && arg('shots')) {
   await page.reload();
   await sleep(2500);
   await page.locator('input[type=file]').first().setInputFiles({ name: 'Export test.pdf', mimeType: 'application/pdf', buffer: Buffer.from(bytes) });
+  if (process.env.BENCH_PRINT_DISTORT) await page.evaluate(() => { window.__opennoteBenchCalibrate = true; });
   await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
   await sleep(2000);
   // A cross on each dot of page 1 that is on screen.
@@ -1246,7 +1272,8 @@ if (ONLY.has('pdfexport') && arg('shots')) {
   if (await exportBtn.isVisible()) await exportBtn.click();
   else { await page.locator('button[title="Insert & pages"]').first().click(); await sleep(300); await page.getByText('Export', { exact: true }).last().click(); }
   await sleep(600);
-  await page.getByText('PDF', { exact: true }).first().click();
+  if (process.env.BENCH_EXPORT === 'printpdf') await page.getByText('Print…', { exact: true }).first().click();
+  else await page.getByText('PDF', { exact: true }).first().click();
   if (process.env.BENCH_EXPORT === 'print') {
     await page.waitForFunction(() => window.__printed, null, { timeout: 30000 });
     saved = await page.pdf({ printBackground: true, preferCSSPageSize: true });
@@ -1257,7 +1284,8 @@ if (ONLY.has('pdfexport') && arg('shots')) {
   else {
     const took = ((Date.now() - t0) / 1000).toFixed(1);
     execFileSync('pdftoppm', ['-r', '72', '-png', join(arg('shots'), 'pdfexport.pdf'), join(arg('shots'), 'pdfexport')]);
-    console.log(`pdfexport: export log ${JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => /^export/.test(c.kind)).map(({ t, ...c }) => c)))}`);
+    console.log(`pdfexport: export log ${JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => /^(export|print)/.test(c.kind)).map(({ t, ...c }) => c)))}`);
+    console.log(`pdfexport: fonts in the file (the PDF's text kept as text): ${execFileSync('pdffonts', [join(arg('shots'), 'pdfexport.pdf')]).toString().split('\n').slice(2).filter(Boolean).map((l) => l.split(/\s+/)[0]).join(', ') || 'none'}; images: ${execFileSync('pdfimages', ['-list', join(arg('shots'), 'pdfexport.pdf')]).toString().split('\n').slice(2).filter(Boolean).length}`);
     console.log(`pdfexport: saved ${saved.length} bytes in ${took} s (${prints} page prints), pages: ${execFileSync('pdfinfo', [join(arg('shots'), 'pdfexport.pdf')]).toString().match(/Pages:\s+(\d+)/)?.[1]}`);
     // Each red dot (72 dpi: 1 px = 1 pt) and the dark ink pixels around it: the cross's centre.
     const img = execFileSync('python3', ['-I', '-c', `

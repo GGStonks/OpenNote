@@ -188,33 +188,78 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 interface PrintPlugin {
   print(opts: { name: string }): Promise<void>;
   pdfPage(opts: { name: string; widthPx: number; heightPx: number; transparent?: boolean }): Promise<{ base64: string }>;
+  printPdf(opts: { name: string; base64: string }): Promise<void>;
 }
 
-/**
- * The app can make a PDF itself, each page at its own size (Android: the WebView's PDF renderer
- * run per page, OpenNotePrintPlugin.pdfPage). Elsewhere PDF goes through the print dialog.
- */
-/** The UI benchmark (bench/ui.mjs --only pdfexport) stands in for Android's page printer and the save dialog. */
+/** The UI benchmark (bench/ui.mjs --only pdfexport) stands in for the page printer, the save and print dialogs. */
 interface BenchExport {
   __opennoteBenchPrint?: (name: string, widthPx: number, heightPx: number) => Promise<string>;
   __opennoteBenchSave?: (name: string, base64: string) => Promise<void>;
+  __opennoteBenchPrintPdf?: (name: string, base64: string) => Promise<void>;
+  /** The bench's printer moves pages as iOS's may: the export must measure it (printNeedsCalibration). */
+  __opennoteBenchCalibrate?: boolean;
 }
 const bench = () => window as unknown as BenchExport;
 
+/**
+ * The app can make a PDF itself, each page at its own size, the original pages of imported PDFs
+ * under the ink as vectors (Editor exportPdf): Android (the WebView's PDF printer run without the
+ * dialog, OpenNotePrintPlugin.pdfPage) and iOS (WebKit's print formatter into a PDF, the shell's
+ * pdfPage), until a print there turns out unusable (`pdfPrintingFailed`). Elsewhere PDF goes
+ * through the print dialog.
+ */
+let printingFailed = false;
 export function canMakePdf(): boolean {
-  return (platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android') || !!bench().__opennoteBenchPrint;
+  if (bench().__opennoteBenchPrint) return true;
+  if (platformKind() === 'ios') return !printingFailed;
+  return platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android';
+}
+/** The page printer gave something unusable: PDF goes through the print dialog for the rest of the session. */
+export function pdfPrintingFailed(): void {
+  printingFailed = true;
 }
 
-/** The print layout as currently shown, as a one-page PDF of exactly widthPx x heightPx (CSS px). */
-/** `transparent`: printed see-through where the page has no content (a PDF page goes under it). */
-export async function pdfOfPrintLayout(name: string, widthPx: number, heightPx: number, transparent = false): Promise<Uint8Array> {
-  const stand = bench().__opennoteBenchPrint;
-  const { registerPlugin } = await import('@capacitor/core');
-  const { base64 } = stand ? { base64: await stand(name, widthPx, heightPx) } : await registerPlugin<PrintPlugin>('OpenNotePrint').pdfPage({ name, widthPx, heightPx, transparent });
+/** Whether a print must be measured before use (printCalibration.ts): iOS's print formatter may scale or move the page. */
+export function printNeedsCalibration(): boolean {
+  return platformKind() === 'ios' || !!bench().__opennoteBenchCalibrate;
+}
+
+const fromBase64 = (base64: string) => {
   const bin = atob(base64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+};
+
+/**
+ * The print layout as currently shown, as a PDF with a page of exactly widthPx x heightPx (CSS px)
+ * for each page shown. `transparent`: printed see-through where the page has no content (a PDF page
+ * goes under it).
+ */
+export async function pdfOfPrintLayout(name: string, widthPx: number, heightPx: number, transparent = false): Promise<Uint8Array> {
+  const stand = bench().__opennoteBenchPrint;
+  if (stand) return fromBase64(await stand(name, widthPx, heightPx));
+  if (platformKind() === 'ios') {
+    const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'pdfPage', name, widthPx, heightPx });
+    if (!res || res.error || !res.base64) throw new Error(String(res?.error ?? 'No PDF'));
+    return fromBase64(res.base64);
+  }
+  const { registerPlugin } = await import('@capacitor/core');
+  return fromBase64((await registerPlugin<PrintPlugin>('OpenNotePrint').pdfPage({ name, widthPx, heightPx, transparent })).base64);
+}
+
+/** Prints a PDF the app made (Print…: the export's vector PDF) with the system print dialog. */
+export async function printPdfDocument(name: string, pdf: Uint8Array): Promise<void> {
+  const base64 = bytesToBase64(pdf);
+  const stand = bench().__opennoteBenchPrintPdf;
+  if (stand) return stand(name, base64);
+  if (platformKind() === 'ios') {
+    const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'printPdf', name, base64 });
+    if (res?.error) throw new Error(String(res.error));
+    return;
+  }
+  const { registerPlugin } = await import('@capacitor/core');
+  await registerPlugin<PrintPlugin>('OpenNotePrint').printPdf({ name, base64 });
 }
 
 /**
