@@ -87,8 +87,16 @@ text (App.tsx `importExternal`).
   paper: see-through, the stretched page showed through as a halo), and a preview (thumbs store)
   for thumbnails. Files nobody refers to go when a note is deleted (`collectUnusedFiles`); backups
   and .opennote exports carry them (`files`). The PDF export prints such pages bare and lays the
-  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text.
-  `npm run bench:ui -- --only pdfimport --shots <dir>` (import, zoom, export joining, thumbnails).
+  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text. Android's
+  web view prints its own background colour behind the page; the plugin's `transparent` flag clears
+  it for bare pages, and Editor.exportPdf still checks each printed page (pdf.ts
+  `printedBackground`): a white page goes over the original with Multiply (isolated transparency
+  group, or the page's own graphics state undoes the blend mode), a coloured one is printed again
+  with its paper and no underlay. The editor's "…" menu has Insert PDF: the PDF's pages go after the
+  current page (sheets.ts `insertSheets`; later pages move down with their content).
+  `npm run bench:ui -- --only pdfimport --shots <dir>` (import, zoom, export joining, thumbnails),
+  `--only pdfexport --shots <dir>` (the export, with `BENCH_PRINT_BG=white|#1c1c1e` for an opaque
+  printed page, `BENCH_EXPORT=print` for iOS's print dialog), `--only pdfinsert --shots <dir>`.
 - Notability (`src/import/notability.ts` with `zip.ts`, `plist.ts`, `images.ts`): what it reads is
   specified in `docs/notability-note-format.md`; keep the two in step. Each curve is a chain of cubic
   Béziers with one fractional width per segment end; drawn width = curveswidth x fractional width;

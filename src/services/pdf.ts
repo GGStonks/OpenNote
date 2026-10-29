@@ -204,6 +204,38 @@ export function pdfPreview(ref: PdfPageRef): Promise<string | null> {
   return p;
 }
 
+/**
+ * What a printed page has where it has no content: 'clear' (see-through), 'white', or 'colored'
+ * (opaque in another colour). Drawn small on a see-through canvas and its pixels counted.
+ */
+export async function printedBackground(bytes: Uint8Array): Promise<'clear' | 'white' | 'colored'> {
+  const doc = await openPdfBytes(bytes);
+  try {
+    const page = await doc.getPage(1);
+    const v = page.getViewport({ scale: 1 });
+    const k = Math.min(1, 160 / Math.max(v.width, v.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(v.width * k));
+    c.height = Math.max(1, Math.round(v.height * k));
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return 'clear';
+    await page.render({ canvas: c, canvasContext: ctx, viewport: page.getViewport({ scale: k }), background: 'rgba(0,0,0,0)' }).promise;
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let opaque = 0, white = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i + 3] <= 250) continue;
+      opaque++;
+      if (d[i] > 245 && d[i + 1] > 245 && d[i + 2] > 245) white++;
+    }
+    c.width = c.height = 0;
+    // Opaque over most of the page: a background (ink seldom covers half a page). Mostly white: white.
+    const n = d.length / 4;
+    return opaque < 0.6 * n ? 'clear' : white > 0.8 * opaque ? 'white' : 'colored';
+  } finally {
+    void doc.loadingTask.destroy();
+  }
+}
+
 /** The page sizes of a PDF (points, rotation applied), for laying out its pages. */
 export async function pdfPageSizes(doc: PDFDocumentProxy): Promise<{ w: number; h: number }[]> {
   const out: { w: number; h: number }[] = [];

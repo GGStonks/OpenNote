@@ -1,6 +1,8 @@
 package com.opennote.app;
 
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.graphics.Color;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
@@ -56,17 +58,31 @@ public class OpenNotePrintPlugin extends Plugin {
      * media size of the page's width x height, so every page of the exported PDF keeps its own size
      * and orientation; the dialog forces one paper size on all of them. Resolves { base64 }.
      */
+    /**
+     * `transparent`: the page must print see-through where it has no content (the PDF export lays an
+     * imported PDF's original page under it). The WebView prints the colour it is given
+     * (setBackgroundColor: the app theme's, OpenNoteLaunchPlugin) behind a page without a background
+     * of its own, which covered the original page: the export showed only the ink. It is made
+     * transparent for the print and given the theme's colour back afterwards.
+     */
     @PluginMethod
     public void pdfPage(PluginCall call) {
         Double widthPx = call.getDouble("widthPx"), heightPx = call.getDouble("heightPx");
         String name = call.getString("name", "OpenNote");
+        boolean transparent = Boolean.TRUE.equals(call.getBoolean("transparent", false));
         if (widthPx == null || heightPx == null || widthPx <= 0 || heightPx <= 0) {
             call.reject("Page size missing");
             return;
         }
         getActivity().runOnUiThread(() -> {
+            WebView webView = getBridge().getWebView();
+            Runnable restore = () -> {
+                if (!transparent) return;
+                SharedPreferences saved = OpenNoteLaunchPlugin.saved(getContext());
+                webView.setBackgroundColor(saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : Color.WHITE);
+            };
+            if (transparent) webView.setBackgroundColor(Color.TRANSPARENT);
             try {
-                WebView webView = getBridge().getWebView();
                 PrintDocumentAdapter adapter = webView.createPrintDocumentAdapter(name);
                 // Media sizes are in thousandths of an inch; the page is in CSS px (96 per inch).
                 int wMils = (int) Math.round(widthPx / 96.0 * 1000), hMils = (int) Math.round(heightPx / 96.0 * 1000);
@@ -83,6 +99,7 @@ public class OpenNotePrintPlugin extends Plugin {
                 OpenNotePdfWriter.write(adapter, attributes, out, new OpenNotePdfWriter.Done() {
                     @Override
                     public void ok() {
+                        restore.run();
                         try {
                             out.close();
                             byte[] bytes = readAll(file);
@@ -99,6 +116,7 @@ public class OpenNotePrintPlugin extends Plugin {
 
                     @Override
                     public void fail(String message) {
+                        restore.run();
                         try {
                             out.close();
                         } catch (Exception ignored) {
@@ -110,6 +128,7 @@ public class OpenNotePrintPlugin extends Plugin {
                     }
                 });
             } catch (Throwable t) {
+                restore.run();
                 // E.g. a system that refuses the android.print helper: the web app falls back to the print dialog.
                 call.reject("PDF export unavailable: " + t);
             }

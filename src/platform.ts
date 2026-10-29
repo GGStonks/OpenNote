@@ -187,21 +187,30 @@ export async function blobToBase64(blob: Blob): Promise<string> {
 
 interface PrintPlugin {
   print(opts: { name: string }): Promise<void>;
-  pdfPage(opts: { name: string; widthPx: number; heightPx: number }): Promise<{ base64: string }>;
+  pdfPage(opts: { name: string; widthPx: number; heightPx: number; transparent?: boolean }): Promise<{ base64: string }>;
 }
 
 /**
  * The app can make a PDF itself, each page at its own size (Android: the WebView's PDF renderer
  * run per page, OpenNotePrintPlugin.pdfPage). Elsewhere PDF goes through the print dialog.
  */
+/** The UI benchmark (bench/ui.mjs --only pdfexport) stands in for Android's page printer and the save dialog. */
+interface BenchExport {
+  __opennoteBenchPrint?: (name: string, widthPx: number, heightPx: number) => Promise<string>;
+  __opennoteBenchSave?: (name: string, base64: string) => Promise<void>;
+}
+const bench = () => window as unknown as BenchExport;
+
 export function canMakePdf(): boolean {
-  return platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android';
+  return (platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android') || !!bench().__opennoteBenchPrint;
 }
 
 /** The print layout as currently shown, as a one-page PDF of exactly widthPx x heightPx (CSS px). */
-export async function pdfOfPrintLayout(name: string, widthPx: number, heightPx: number): Promise<Uint8Array> {
+/** `transparent`: printed see-through where the page has no content (a PDF page goes under it). */
+export async function pdfOfPrintLayout(name: string, widthPx: number, heightPx: number, transparent = false): Promise<Uint8Array> {
+  const stand = bench().__opennoteBenchPrint;
   const { registerPlugin } = await import('@capacitor/core');
-  const { base64 } = await registerPlugin<PrintPlugin>('OpenNotePrint').pdfPage({ name, widthPx, heightPx });
+  const { base64 } = stand ? { base64: await stand(name, widthPx, heightPx) } : await registerPlugin<PrintPlugin>('OpenNotePrint').pdfPage({ name, widthPx, heightPx, transparent });
   const bin = atob(base64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
@@ -297,6 +306,11 @@ const STAGE_CHUNK = 3 * 256 * 1024;
  */
 export async function exportFile(filename: string, blob: Blob, mode: ExportMode = 'save'): Promise<string | null> {
   const safeName = filename.replace(/[\\/:*?"<>|]+/g, '_');
+  const save = bench().__opennoteBenchSave;
+  if (save) {
+    await save(safeName, await blobToBase64(blob));
+    return `Saved “${safeName}”.`;
+  }
   if (mode === 'share') {
     await shareFile(safeName, blob);
     return null;

@@ -23,8 +23,12 @@ import { tileWork } from '../editor/tileWork';
  */
 const BASE_PIXELS = 5_600_000;
 const SHARP_PIXELS = 12_000_000;
-/** Printed pages: canvas px per page px (2.5 x 96 = 240 dpi). */
-const PRINT_RATIO = 2.5;
+/**
+ * Printed pages: px per page px (2 x 96 = 192 dpi), as a JPEG image each. Canvases (one per
+ * printed page, all at once in the print layout) went past WebKit's canvas memory and printed
+ * empty: the PDF was missing from the export.
+ */
+const PRINT_RATIO = 2;
 /** The part in view is drawn this much wider and taller (a little scrolling stays sharp). */
 const SHARP_MARGIN = 0.25;
 const SHARP_REST_MS = 160;
@@ -37,6 +41,8 @@ export async function pdfPrintReady(): Promise<void> {
   // A layout mounted in this frame registers its pages in its effects.
   await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   while (printing.size) await Promise.all([...printing]);
+  // And the pictures are on the page (React shows them in its next commit).
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null))));
 }
 
 interface Props {
@@ -60,6 +66,8 @@ export const PdfBackground = React.memo(function PdfBackground({ pdf, width: W, 
   const [preview, setPreview] = useState<string | null>(null);
   const [near, setNear] = useState(false);
   const [baseDrawn, setBaseDrawn] = useState(false);
+  /** Print layout: the page as a picture (object URL). */
+  const [printUrl, setPrintUrl] = useState<string | null>(null);
   const key = `${pdf.file}|${pdf.page}|${Math.round(W)}x${Math.round(H)}`;
   const slot = useRef(`${key}|${Math.random().toString(36).slice(2)}`).current;
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
@@ -94,23 +102,47 @@ export const PdfBackground = React.memo(function PdfBackground({ pdf, width: W, 
 
   // The whole page.
   const baseRatio = printMode ? Math.min(PRINT_RATIO, Math.sqrt(BASE_PIXELS / (W * H))) : Math.min(Math.max(0.25, baseZoom) * dpr, Math.sqrt(BASE_PIXELS / (W * H)));
+  // Print layout: the whole page as a JPEG picture, its canvas given back at once.
+  useLayoutEffect(() => {
+    if (!printMode || printBare) return;
+    let live = true, url: string | null = null;
+    const c = document.createElement('canvas');
+    const done = drawPdfRegion(`${slot}|print`, pdf, { w: W, h: H }, { x0: 0, y0: 0, x1: W, y1: H }, baseRatio, c, '#ffffff')
+      .then((ok) => (ok ? new Promise<Blob | null>((r) => c.toBlob(r, 'image/jpeg', 0.92)) : null))
+      .then(async (blob) => {
+        c.width = c.height = 0;
+        if (!blob || !live) return;
+        url = URL.createObjectURL(blob);
+        const img = new Image();
+        img.src = url;
+        await img.decode().catch(() => undefined);
+        if (live) setPrintUrl(url);
+      });
+    printing.add(done);
+    void done.finally(() => printing.delete(done));
+    return () => {
+      live = false;
+      if (url) URL.revokeObjectURL(url);
+      setPrintUrl(null);
+    };
+  }, [printMode, printBare, baseRatio, key]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useLayoutEffect(() => {
     const c = baseRef.current;
     if (!c) return;
-    if (printBare) return;
+    if (printMode) return;
     if (!printMode && !near) {
       c.width = c.height = 0;
       setBaseDrawn(false);
       return;
     }
     let live = true;
-    const done = drawPdfRegion(`${slot}|base`, pdf, { w: W, h: H }, { x0: 0, y0: 0, x1: W, y1: H }, baseRatio, c).then((ok) => {
-      if (live && ok) setBaseDrawn(true);
+    void drawPdfRegion(`${slot}|base`, pdf, { w: W, h: H }, { x0: 0, y0: 0, x1: W, y1: H }, baseRatio, c).then((ok) => {
+      if (!live || !ok) return;
+      // Shown in the same task as its pixels.
+      c.style.visibility = 'visible';
+      setBaseDrawn(true);
     });
-    if (printMode) {
-      printing.add(done);
-      void done.finally(() => printing.delete(done));
-    }
     return () => {
       live = false;
     };
@@ -192,8 +224,14 @@ export const PdfBackground = React.memo(function PdfBackground({ pdf, width: W, 
   const fill: React.CSSProperties = { position: 'absolute', left: 0, top: 0, width: W, height: H };
   return (
     <div ref={holderRef} className="absolute inset-0 pointer-events-none" data-pdf-page={`${pdf.file}:${pdf.page}`}>
-      {!printBare && preview && !baseDrawn && <img src={preview} alt="" draggable={false} style={{ ...fill, objectFit: 'contain' }} />}
-      {!printBare && <canvas ref={baseRef} style={{ ...fill, visibility: baseDrawn ? 'visible' : 'hidden' }} />}
+      {printMode ? (
+        !printBare && printUrl && <img src={printUrl} alt="" draggable={false} style={{ ...fill, maxWidth: 'none' }} />
+      ) : (
+        <>
+          {preview && !baseDrawn && <img src={preview} alt="" draggable={false} style={{ ...fill, objectFit: 'contain', maxWidth: 'none' }} />}
+          <canvas ref={baseRef} style={{ ...fill, visibility: baseDrawn ? 'visible' : 'hidden' }} />
+        </>
+      )}
       {!printMode && (
         <canvas
           ref={sharpRef}

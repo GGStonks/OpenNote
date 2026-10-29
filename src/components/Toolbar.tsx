@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
-  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft,
+  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText,
 } from 'lucide-react';
 import { EraserMode, FillType, LineStyle, PenStyle, ShapeMode, ToolType } from '../types';
 import { SetupPatch } from '../editor/pageSetup';
@@ -81,6 +81,8 @@ interface ToolbarProps {
   onDeletePage: () => void;
   onInsertLatex: () => void;
   onInsertImage: (file: File) => void;
+  /** A PDF's pages, inserted after the current page. */
+  onInsertPdf: (file: File) => void;
   /** Paste the clipboard (undefined: nothing copied). */
   onPaste?: () => void;
   currentPage: number;
@@ -209,6 +211,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const { tools, setTools } = p;
   const pop = usePopover();
   const fileRef = useRef<HTMLInputElement>(null);
+  const pdfRef = useRef<HTMLInputElement>(null);
 
   const selectTool = (tool: ToolType, menu?: string) => {
     if (tools.tool === tool && menu) pop.setOpen(pop.open === menu ? null : menu);
@@ -444,6 +447,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                   { icon: <Sparkles className="w-5 h-5" />, label: 'Transcribe page → LaTeX', fn: p.onConvertPage, cls: 'sm:hidden' },
                   { icon: <Sigma className="w-5 h-5" />, label: 'Insert LaTeX / TikZ', fn: p.onInsertLatex },
                   { icon: <ImageIcon className="w-5 h-5" />, label: 'Insert image', fn: () => fileRef.current?.click() },
+                  { icon: <FileText className="w-5 h-5" />, label: 'Insert PDF after this page', fn: () => pdfRef.current?.click() },
                   ...(p.onPaste ? [{ icon: <ClipboardPaste className="w-5 h-5" />, label: 'Paste copied items', fn: p.onPaste }] : []),
                   { icon: <Copy className="w-5 h-5" />, label: 'Duplicate current page', fn: p.onDuplicatePage },
                   { icon: <Trash2 className="w-5 h-5" />, label: 'Delete current page', fn: p.onDeletePage, danger: true },
@@ -474,6 +478,17 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             onChange={(e) => {
               const f = e.target.files?.[0];
               if (f) p.onInsertImage(f);
+              e.target.value = '';
+            }}
+          />
+          {/* No `accept`: Android's picker greys out PDFs offered by some apps when it is set. */}
+          <input
+            ref={pdfRef}
+            type="file"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) p.onInsertPdf(f);
               e.target.value = '';
             }}
           />

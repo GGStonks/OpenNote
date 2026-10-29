@@ -1,7 +1,7 @@
 {
   "name": "opennote",
   "private": true,
-  "version": "2.6.0",
+  "version": "2.6.1",
   "type": "module",
   "scripts": {
     "copy-tikzjax": "node scripts/copy-tikzjax.mjs && node scripts/copy-pdfjs.mjs",

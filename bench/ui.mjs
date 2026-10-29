@@ -1186,6 +1186,110 @@ if (ONLY.has('nbcompare') && arg('shots')) {
     console.log(`nbcompare ${name}: ${n} pages`);
   }
 }
+// --only pdfexport --shots <dir>: a note made by importing a PDF, written on, exported through the
+// PDF button (the browser's own printing stands in for Android's page printer, as in the app the
+// web view prints each page): the saved file, rendered (pdfexport-<page>.png).
+if (ONLY.has('pdfexport') && arg('shots')) {
+  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const { writeFileSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const mk = await PDFDocument.create();
+  const font = await mk.embedFont(StandardFonts.Helvetica);
+  for (const [w, h, label] of [[612, 792, 'Imported page one'], [842, 595, 'Imported page two (landscape)']]) {
+    const pg = mk.addPage([w, h]);
+    pg.drawRectangle({ x: 0, y: 0, width: w, height: h, color: rgb(0.93, 0.96, 1) });
+    pg.drawText(label, { x: 40, y: h - 80, size: 30, font, color: rgb(0, 0, 0) });
+    pg.drawCircle({ x: w / 2, y: h / 2, size: 80, color: rgb(0.9, 0.2, 0.2) });
+  }
+  const bytes = await mk.save();
+  let saved = null;
+  // BENCH_PRINT_BG=white / #1c1c1e: a web view that prints an opaque page (its own background
+  // behind the page), as Android's did. BENCH_EXPORT=print: the print dialog's path (iOS).
+  const printBg = process.env.BENCH_PRINT_BG;
+  if (process.env.BENCH_EXPORT !== 'print') await page.exposeFunction('__opennoteBenchPrint', async (_name, w, h) => {
+    if (printBg) await page.addStyleTag({ content: `@media print { html, body, html.on-print-bare, html.on-print-bare body { background: ${printBg} !important; } }` });
+    return (await page.pdf({ width: `${w}px`, height: `${h}px`, printBackground: true, pageRanges: '1' })).toString('base64');
+  });
+
+  await page.exposeFunction('__opennoteBenchSave', async (name, b64) => { saved = Buffer.from(b64, 'base64'); writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved); });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await sleep(2500);
+  await page.locator('input[type=file]').first().setInputFiles({ name: 'Export test.pdf', mimeType: 'application/pdf', buffer: Buffer.from(bytes) });
+  await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
+  await sleep(2000);
+  // A stroke across the first page.
+  await mouse('mousePressed', 200, 700, 0.5);
+  for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 200 + i * 12, 700 + Math.sin(i / 3) * 40, 0.5); await sleep(10); }
+  await mouse('mouseReleased', 560, 700, 0);
+  await sleep(1500);
+  if (process.env.BENCH_EXPORT === 'print') await page.evaluate(() => { window.__printed = false; window.print = () => { window.__printed = true; }; });
+  await page.locator('button[title="Export"]').first().click();
+  await sleep(600);
+  await page.getByText('PDF', { exact: true }).first().click();
+  if (process.env.BENCH_EXPORT === 'print') {
+    await page.waitForFunction(() => window.__printed, null, { timeout: 30000 });
+    saved = await page.pdf({ printBackground: true, preferCSSPageSize: true });
+    writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved);
+  }
+  for (let i = 0; i < 60 && !saved; i++) await sleep(500);
+  if (!saved) { console.log('pdfexport: nothing saved'); }
+  else {
+    execFileSync('pdftoppm', ['-r', '40', '-png', join(arg('shots'), 'pdfexport.pdf'), join(arg('shots'), 'pdfexport')]);
+    console.log(`pdfexport: export log ${JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => /^export/.test(c.kind))))}`);
+    console.log(`pdfexport: saved ${saved.length} bytes, pages: ${execFileSync('pdfinfo', [join(arg('shots'), 'pdfexport.pdf')]).toString().match(/Pages:\s+(\d+)/)?.[1]}`);
+  }
+}
+// --only pdfinsert --shots <dir>: a 3-page PDF note, written on its second page, then the "…" menu's
+// Insert PDF with a 2-page PDF while on page 2: the order of the pages (A1 A2 X1 X2 A3) and the
+// pages panel (the writing stays on A2).
+if (ONLY.has('pdfinsert') && arg('shots')) {
+  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const make = async (labels, color) => {
+    const mk = await PDFDocument.create();
+    const font = await mk.embedFont(StandardFonts.Helvetica);
+    for (const label of labels) {
+      const pg = mk.addPage([612, 792]);
+      pg.drawRectangle({ x: 0, y: 0, width: 612, height: 792, color });
+      pg.drawText(label, { x: 200, y: 400, size: 90, font, color: rgb(0, 0, 0) });
+    }
+    return Buffer.from(await mk.save());
+  };
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await sleep(2500);
+  await page.locator('input[type=file]').first().setInputFiles({ name: 'Base.pdf', mimeType: 'application/pdf', buffer: await make(['A1', 'A2', 'A3'], rgb(0.93, 0.96, 1)) });
+  await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
+  await sleep(1500);
+  // To page 2, and a stroke on it.
+  await page.evaluate(() => {
+    const el = document.querySelectorAll('[data-pdf-page]')[1];
+    let sc = el.parentElement;
+    while (sc && !(sc.scrollHeight > sc.clientHeight + 10 && /auto|scroll/.test(getComputedStyle(sc).overflowY))) sc = sc.parentElement;
+    sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().top + 100;
+  });
+  await sleep(1200);
+  await mouse('mousePressed', 200, 500, 0.5);
+  for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 200 + i * 12, 500 + Math.sin(i / 3) * 40, 0.5); await sleep(10); }
+  await mouse('mouseReleased', 560, 500, 0);
+  await sleep(1200);
+  await page.locator('button[title="Insert & pages"]').first().click();
+  await sleep(400);
+  console.log(`pdfinsert before: ${await page.evaluate(() => document.body.innerText.match(/Page \d+ of \d+/)?.[0])}`);
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByText('Insert PDF after this page').click();
+  await (await chooser).setFiles({ name: 'Insert.pdf', mimeType: 'application/pdf', buffer: await make(['X1', 'X2'], rgb(1, 0.95, 0.85)) });
+  await sleep(3000);
+  const order = await page.evaluate(() => [...document.querySelectorAll('[data-pdf-page]')].map((e) => e.getAttribute('data-pdf-page')));
+  const files = [...new Set(order.map((o) => o.split(':')[0]))];
+  console.log(`pdfinsert order: ${order.map((o) => `${'AX'[files.indexOf(o.split(':')[0])]}${o.split(':')[1]}`).join(' ')}`);
+  console.log(`pdfinsert toast: ${await page.evaluate(() => document.body.innerText.match(/Inserted[^\n]*|Couldn't[^\n]*/)?.[0])}`);
+  await page.screenshot({ path: join(arg('shots'), 'insert-view.png') });
+  await page.keyboard.press('Control+0');
+  await page.locator('button[title="Pages"]').first().click();
+  await sleep(2500);
+  await page.screenshot({ path: join(arg('shots'), 'insert-pages.png') });
+}
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {
   console.log('glinfo  ', await page.evaluate(() => { const gl = document.createElement('canvas').getContext('webgl2'); const x = gl?.getExtension('WEBGL_debug_renderer_info'); return gl ? gl.getParameter(x ? x.UNMASKED_RENDERER_WEBGL : gl.RENDERER) : 'no webgl2'; }));

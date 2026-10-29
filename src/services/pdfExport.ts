@@ -1,5 +1,6 @@
 import { getFile } from '../storage/db';
 
+
 /**
  * PDF export: one PDF made of the note's pages, each at its own size and orientation.
  *
@@ -18,8 +19,12 @@ import { getFile } from '../storage/db';
 export interface PrintedPage {
   /** The page as printed: a one-page PDF. */
   bytes: Uint8Array;
-  /** The PDF page to lay under it, and the paper's colour (#RRGGBB) under that. */
-  under?: { file: string; page: number; paper: string };
+  /**
+   * The PDF page to lay under it, and the paper's colour (#RRGGBB) under that. `multiply`: the
+   * printed page came out opaque white (not see-through where it is empty), and is multiplied over
+   * the PDF page: its white leaves the PDF page as it is, its ink darkens it as ink on paper.
+   */
+  under?: { file: string; page: number; paper: string; multiply?: boolean };
 }
 
 type PdfLib = typeof import('pdf-lib');
@@ -94,7 +99,15 @@ export async function joinPdfPages(pages: PrintedPage[], title: string): Promise
     const at =
       rot === 0 ? { x: bx, y: by } : rot === 90 ? { x: bx, y: by + dh * k } : rot === 180 ? { x: bx + dw * k, y: by + dh * k } : { x: bx + dw * k, y: by };
     page.drawPage(emb, { ...at, width: ew * k, height: eh * k, rotate: degrees(-rot) });
-    page.drawPage(await out.embedPage(top), { x: 0, y: 0, width: W, height: H });
+    const printedPage = await out.embedPage(top);
+    if (printed.under.multiply) {
+      // Multiplied as a whole: an isolated transparency group (the printed page sets its own blend
+      // mode for what it draws, which would replace the multiplying inside it).
+      await printedPage.embed();
+      const xobj = out.context.lookup(printedPage.ref) as unknown as { dict: { set(k: unknown, v: unknown): void } };
+      xobj.dict.set(lib.PDFName.of('Group'), out.context.obj({ Type: 'Group', S: 'Transparency', I: true, CS: 'DeviceRGB' }));
+    }
+    page.drawPage(printedPage, { x: 0, y: 0, width: W, height: H, ...(printed.under.multiply ? { blendMode: lib.BlendMode.Multiply } : {}) });
   }
   return out.save();
 }

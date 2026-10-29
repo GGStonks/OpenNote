@@ -29,13 +29,15 @@ import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRe
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { SetupPatch } from '../editor/pageSetup';
 import {
-  appendBlankSheet, copySheets, deleteSheets, duplicateSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
+  appendBlankSheet, copySheets, deleteSheets, duplicateSheets, insertSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
 import { PrintedPage, joinPdfPages, underlayFiles } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
+import { printedBackground } from '../services/pdf';
+import { importPdf } from '../import/pdf';
 import { useBack } from '../services/backStack';
 
 /** Margin around the surface (content px). */
@@ -809,6 +811,33 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   };
 
   /**
+   * A PDF's pages, each at its own size, between the current page and the next (the pages after
+   * move down with their content). One undo step.
+   */
+  const insertPdf = async (file: File) => {
+    const after = Math.min(currentPage, pageCount - 1);
+    const token = ++busyToken.current;
+    setBusy({ label: 'Inserting the PDF…' });
+    try {
+      if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') throw new Error(`“${file.name}” is not a PDF`);
+      const pdf = await importPdf(new Uint8Array(await file.arrayBuffer()), file.name, async (wrong) =>
+        window.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '')
+      );
+      if (token !== busyToken.current) return;
+      editor.commit((d) => insertSheets(d, after + 1, pdf.sheets));
+      crashLog.event('insert-pdf', { pages: pdf.pages, after: after + 1, kb: Math.round(file.size / 1024) });
+      showToast(`Inserted ${pdf.pages} page${pdf.pages > 1 ? 's' : ''} after page ${after + 1}`);
+      setTimeout(() => jumpToPage(after + 1), 0);
+    } catch (err) {
+      if (token !== busyToken.current || (err as Error).message === 'cancelled') return;
+      crashLog.event('insert-pdf-failed', { message: String((err as Error).message ?? err) });
+      showToast(`Couldn't insert the PDF: ${(err as Error).message ?? err}`, true);
+    } finally {
+      if (token === busyToken.current) setBusy(null);
+    }
+  };
+
+  /**
    * PDF: each page at its own size and orientation (Android: made by the app, page by page, see
    * services/pdfExport.ts); elsewhere through the print dialog.
    */
@@ -838,7 +867,28 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         await new Promise((r) => setTimeout(r, i === 0 ? 450 : 200));
         await pdfPrintReady();
         const under = s.pdf && bare.has(s.pdf.file) ? { file: s.pdf.file, page: s.pdf.page, paper: paperHex(s.paperColor) } : undefined;
-        pages.push({ bytes: await pdfOfPrintLayout(doc.title, s.width, s.height), under });
+        let bytes = await pdfOfPrintLayout(doc.title, s.width, s.height, !!under);
+        if (under) {
+          // A page printed for a PDF page to go under it must be see-through where it is empty. A
+          // web view that printed it opaque (its own background) would hide the PDF page: white,
+          // it is multiplied over it; another colour, the page is printed again with the PDF drawn
+          // in it as a picture.
+          const bg = await printedBackground(bytes).catch(() => 'clear' as const);
+          crashLog.event('export-page', { page: i + 1, background: bg });
+          if (bg === 'white') pages.push({ bytes, under: { ...under, multiply: true } });
+          else if (bg === 'colored') {
+            document.documentElement.classList.remove('on-print-bare');
+            flushSync(() => setPrintBare(new Set()));
+            await new Promise((r) => setTimeout(r, 200));
+            await pdfPrintReady();
+            bytes = await pdfOfPrintLayout(doc.title, s.width, s.height);
+            pages.push({ bytes });
+            flushSync(() => setPrintBare(bare));
+            document.documentElement.classList.add('on-print-bare');
+          } else pages.push({ bytes, under });
+          continue;
+        }
+        pages.push({ bytes });
       }
       document.documentElement.classList.remove('on-print-bare');
       const pdf = await joinPdfPages(pages, doc.title);
@@ -871,8 +921,11 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     await editor.flush();
     flushSync(() => setPrintMode(true));
     // Let TikZ/KaTeX layout settle before handing the view to the print system, and the PDF pages draw.
+    const pdfPages = doc.sheets.some((s) => s.pdf);
+    if (pdfPages) setBusy({ label: 'Preparing the PDF pages…' });
     await new Promise((r) => setTimeout(r, 400));
     await pdfPrintReady();
+    if (pdfPages) setBusy(null);
     try {
       await printDocument(doc.title);
     } catch (err) {
@@ -921,6 +974,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onDeletePage={() => deletePagesOf(currentIds(), true)}
         onInsertLatex={insertLatexManually}
         onInsertImage={insertImage}
+        onInsertPdf={(f) => void insertPdf(f)}
         onPaste={clipboard ? paste : undefined}
         currentPage={currentPage + 1}
         totalPages={pageCount}

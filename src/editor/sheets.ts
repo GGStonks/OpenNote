@@ -263,6 +263,15 @@ export function trailingSheetFor(before: NotePage, d: NoteDocument): NoteDocumen
   return bottom > last.top + last.height * ROLL_ZONE ? appendBlankSheet(d) : d;
 }
 
+/** Inserts new pages (with nothing on them) before index `at`; the pages after them keep their content. */
+export function insertSheets(d: NoteDocument, at: number, sheets: PageSheet[]): NoteDocument {
+  return recut(d, (es) => {
+    const list = [...es];
+    list.splice(Math.max(0, Math.min(list.length, at)), 0, ...sheets.map((sheet) => ({ sheet, content: null, origin: { x: 0, y: 0 } })));
+    return list;
+  });
+}
+
 export function deleteSheets(d: NoteDocument, ids: ReadonlySet<string>): NoteDocument {
   return recut(d, (es) => es.filter((e) => !ids.has(e.sheet.id)));
 }
