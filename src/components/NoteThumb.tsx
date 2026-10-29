@@ -57,11 +57,13 @@ const ThumbImage: React.FC<{ src: string; style: React.CSSProperties }> = ({ src
 const ThumbMath: React.FC<{ block: LatexBlock; color: string }> = ({ block, color }) => {
   const html = useMemo(() => renderLatexContent(block.latexCode).html, [block.latexCode]);
   const textual = html.includes('<p>') || html.includes('on-h');
+  // Stretched sideways by the resize handles (Blocks.tsx MathBlockView).
+  const sx = block.stretchX ?? 1;
   return (
     <div className="absolute" style={{ left: block.x, top: block.y, width: textual ? block.width : undefined, color: block.color ?? color, ...rotationStyle(block.rotation) }}>
       <div
         className={`on-math ${textual ? 'on-math-text' : 'inline-block whitespace-nowrap'}`}
-        style={{ fontSize: BASE_MATH_PX * (block.scale ?? 1) }}
+        style={{ fontSize: BASE_MATH_PX * (block.scale ?? 1), width: textual ? block.width / sx : undefined, ...(sx !== 1 ? { transform: `scaleX(${sx})`, transformOrigin: '0 0' } : {}) }}
         dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>
@@ -71,7 +73,12 @@ const ThumbMath: React.FC<{ block: LatexBlock; color: string }> = ({ block, colo
 const ThumbTikz: React.FC<{ block: LatexBlock; color: string; darkPaper: boolean }> = ({ block, color, darkPaper }) => {
   // The TeX-rendered SVG the editor cached; otherwise the built-in preview (a thumbnail never runs TeX).
   const cached = !!block.tikzSvg && block.tikzSvgSource === block.latexCode;
-  const svg = useMemo(() => (cached ? block.tikzSvg! : renderTikzPreview(block.latexCode).svg), [cached, block.tikzSvg, block.latexCode]);
+  const stretched = (block.stretchX ?? 1) !== 1;
+  const svg = useMemo(() => {
+    const raw = cached ? block.tikzSvg! : renderTikzPreview(block.latexCode).svg;
+    // Stretched by the resize handles: the drawing fills its box, as in the editor (Blocks.tsx).
+    return stretched ? raw.replace(/<svg\b([^>]*?)(\s+preserveAspectRatio="[^"]*")?([^>]*)>/, '<svg$1$3 preserveAspectRatio="none">') : raw;
+  }, [cached, block.tikzSvg, block.latexCode, stretched]);
   return (
     <div className="absolute" style={{ left: block.x, top: block.y, width: block.width, height: block.height, color: block.color ?? color, ...rotationStyle(block.rotation) }}>
       <div className={`on-tikz w-full h-full ${cached && darkPaper ? 'on-tikz-dark' : ''}`} dangerouslySetInnerHTML={{ __html: svg }} />

@@ -17,8 +17,9 @@ import { getFile } from '../storage/db';
  */
 
 export interface PrintedPage {
-  /** The page as printed: a one-page PDF. */
+  /** The PDF the page was printed in (with other pages of its size), and its page there (0-based). */
   bytes: Uint8Array;
+  index?: number;
   /**
    * The PDF page to lay under it, and the paper's colour (#RRGGBB) under that. `multiply`: the
    * printed page came out opaque white (not see-through where it is empty), and is multiplied over
@@ -29,18 +30,20 @@ export interface PrintedPage {
 
 type PdfLib = typeof import('pdf-lib');
 type Doc = Awaited<ReturnType<PdfLib['PDFDocument']['load']>>;
+/** A stored PDF, read by pdf-lib. */
+export type PdfSource = Doc;
 
-/** The stored PDFs pdf-lib can lay under printed pages (not those it cannot read, e.g. encrypted ones). */
-export async function underlayFiles(ids: string[]): Promise<Set<string>> {
+/**
+ * The stored PDFs pdf-lib can lay under printed pages (not those it cannot read, e.g. encrypted
+ * ones), read once for the whole export.
+ */
+export async function loadUnderlays(ids: string[]): Promise<Map<string, Doc>> {
   const { PDFDocument } = await import('pdf-lib');
-  const ok = new Set<string>();
+  const ok = new Map<string, Doc>();
   for (const id of new Set(ids)) {
     try {
       const f = await getFile(id);
-      if (f) {
-        await PDFDocument.load(f.bytes, { updateMetadata: false });
-        ok.add(id);
-      }
+      if (f) ok.set(id, await PDFDocument.load(f.bytes, { updateMetadata: false }));
     } catch {
       /* drawn as a picture instead */
     }
@@ -48,13 +51,22 @@ export async function underlayFiles(ids: string[]): Promise<Set<string>> {
   return ok;
 }
 
+/** The number of pages of a printed PDF. */
+export async function pdfPageCount(bytes: Uint8Array): Promise<number> {
+  const { PDFDocument } = await import('pdf-lib');
+  return (await PDFDocument.load(bytes, { updateMetadata: false })).getPageCount();
+}
+
 const rgbOf = (hex: string): [number, number, number] => {
   const n = parseInt(hex.replace('#', '').slice(0, 6), 16);
   return Number.isFinite(n) ? [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255] : [1, 1, 1];
 };
 
-/** Joins the first page of each printed PDF, in order, into one PDF (with the PDF pages they lie on). */
-export async function joinPdfPages(pages: PrintedPage[], title: string): Promise<Uint8Array> {
+/**
+ * Joins the printed pages, in order, into one PDF (with the PDF pages they lie on). `loaded`: stored
+ * PDFs already read (loadUnderlays).
+ */
+export async function joinPdfPages(pages: PrintedPage[], title: string, loaded?: Map<string, Doc>): Promise<Uint8Array> {
   const lib = await import('pdf-lib');
   const { PDFDocument, rgb, degrees } = lib;
   const out = await PDFDocument.create();
@@ -62,6 +74,7 @@ export async function joinPdfPages(pages: PrintedPage[], title: string): Promise
   out.setCreator('OpenNote');
   out.setProducer('OpenNote');
   const sources = new Map<string, Promise<Doc>>();
+  loaded?.forEach((d, id) => sources.set(id, Promise.resolve(d)));
   const source = (id: string) => {
     let p = sources.get(id);
     if (!p) {
@@ -73,15 +86,19 @@ export async function joinPdfPages(pages: PrintedPage[], title: string): Promise
     }
     return p;
   };
+  const prints = new Map<Uint8Array, Promise<Doc>>();
   for (const printed of pages) {
-    const src = await PDFDocument.load(printed.bytes);
-    if (!src.getPageCount()) continue;
+    let load = prints.get(printed.bytes);
+    if (!load) prints.set(printed.bytes, (load = PDFDocument.load(printed.bytes)));
+    const src = await load;
+    const index = printed.index ?? 0;
+    if (index >= src.getPageCount()) continue;
     if (!printed.under) {
-      const [page] = await out.copyPages(src, [0]);
+      const [page] = await out.copyPages(src, [index]);
       out.addPage(page);
       continue;
     }
-    const top = src.getPage(0);
+    const top = src.getPage(index);
     const { width: W, height: H } = top.getSize();
     const page = out.addPage([W, H]);
     const [r, g, b] = rgbOf(printed.under.paper);
@@ -113,4 +130,4 @@ export async function joinPdfPages(pages: PrintedPage[], title: string): Promise
 }
 
 // For the UI benchmark (bench/ui.mjs --only pdfimport): the joining of printed pages and PDF pages.
-(window as unknown as { __opennotePdfExport?: unknown }).__opennotePdfExport = { joinPdfPages, underlayFiles };
+(window as unknown as { __opennotePdfExport?: unknown }).__opennotePdfExport = { joinPdfPages, loadUnderlays };

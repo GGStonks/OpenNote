@@ -1186,29 +1186,37 @@ if (ONLY.has('nbcompare') && arg('shots')) {
     console.log(`nbcompare ${name}: ${n} pages`);
   }
 }
-// --only pdfexport --shots <dir>: a note made by importing a PDF, written on, exported through the
-// PDF button (the browser's own printing stands in for Android's page printer, as in the app the
-// web view prints each page): the saved file, rendered (pdfexport-<page>.png).
+// --only pdfexport --shots <dir> [--width 360 --dpr 2]: a note made by importing a PDF (red target
+// dots), a cross drawn on each dot of page 1, exported through the PDF button (the browser's own
+// printing stands in for Android's page printer, as in the app the web view prints each page): the
+// saved file, rendered (pdfexport-<page>.png), and how far each cross lies from its dot (export px).
 if (ONLY.has('pdfexport') && arg('shots')) {
   const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
   const { writeFileSync } = await import('node:fs');
   const { execFileSync } = await import('node:child_process');
   const mk = await PDFDocument.create();
   const font = await mk.embedFont(StandardFonts.Helvetica);
-  for (const [w, h, label] of [[612, 792, 'Imported page one'], [842, 595, 'Imported page two (landscape)']]) {
+  // Page 1 is A4: a size of fractional CSS px (793.71 x 1122.52), as most imported PDFs have.
+  const DOTS = [[100, 100], [297.64, 420.95], [495.28, 100], [100, 741.89], [495.28, 741.89]];
+  for (const [w, h, label] of [[595.28, 841.89, 'Imported page one'], [595.28, 841.89, 'Imported page two'], [842, 595, 'Imported page three (landscape)']]) {
     const pg = mk.addPage([w, h]);
     pg.drawRectangle({ x: 0, y: 0, width: w, height: h, color: rgb(0.93, 0.96, 1) });
-    pg.drawText(label, { x: 40, y: h - 80, size: 30, font, color: rgb(0, 0, 0) });
-    pg.drawCircle({ x: w / 2, y: h / 2, size: 80, color: rgb(0.9, 0.2, 0.2) });
+    pg.drawText(label, { x: 40, y: h - 60, size: 30, font, color: rgb(0, 0, 0) });
+    pg.drawCircle({ x: w / 2, y: h / 2 - 150, size: 60, color: rgb(0.2, 0.7, 0.3) });
+    if (w < h) for (const [x, y] of DOTS) pg.drawCircle({ x, y: h - y, size: 5, color: rgb(1, 0, 0) });
   }
   const bytes = await mk.save();
   let saved = null;
   // BENCH_PRINT_BG=white / #1c1c1e: a web view that prints an opaque page (its own background
   // behind the page), as Android's did. BENCH_EXPORT=print: the print dialog's path (iOS).
   const printBg = process.env.BENCH_PRINT_BG;
+  let prints = 0;
   if (process.env.BENCH_EXPORT !== 'print') await page.exposeFunction('__opennoteBenchPrint', async (_name, w, h) => {
+    prints++;
     if (printBg) await page.addStyleTag({ content: `@media print { html, body, html.on-print-bare, html.on-print-bare body { background: ${printBg} !important; } }` });
-    return (await page.pdf({ width: `${w}px`, height: `${h}px`, printBackground: true, pageRanges: '1' })).toString('base64');
+    // The page's own @page size (preferCSSPageSize): a page whose rule is lost comes out at the
+    // print layout's default size, and its PDF page lands off the ink, as on Android.
+    return (await page.pdf({ width: `${w}px`, height: `${h}px`, preferCSSPageSize: true, printBackground: true })).toString('base64');
   });
 
   await page.exposeFunction('__opennoteBenchSave', async (name, b64) => { saved = Buffer.from(b64, 'base64'); writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved); });
@@ -1218,13 +1226,25 @@ if (ONLY.has('pdfexport') && arg('shots')) {
   await page.locator('input[type=file]').first().setInputFiles({ name: 'Export test.pdf', mimeType: 'application/pdf', buffer: Buffer.from(bytes) });
   await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
   await sleep(2000);
-  // A stroke across the first page.
-  await mouse('mousePressed', 200, 700, 0.5);
-  for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 200 + i * 12, 700 + Math.sin(i / 3) * 40, 0.5); await sleep(10); }
-  await mouse('mouseReleased', 560, 700, 0);
+  // A cross on each dot of page 1 that is on screen.
+  const targets = await page.evaluate((dots) => {
+    const r = document.querySelector('[data-pdf-page]').getBoundingClientRect(), k = r.width / ((595.28 * 4) / 3);
+    return dots.map(([x, y]) => [r.left + (x * 4) / 3 * k, r.top + (y * 4) / 3 * k]).filter(([x, y]) => x > 20 && y > 140 && x < innerWidth - 20 && y < innerHeight - 60);
+  }, DOTS);
+  for (const [cx, cy] of targets) {
+    for (const [dx, dy] of [[1, 0], [0, 1]]) {
+      await mouse('mousePressed', cx - 16 * dx, cy - 16 * dy, 0.5);
+      for (let i = 1; i <= 16; i++) { await mouse('mouseMoved', cx - 16 * dx + 2 * i * dx, cy - 16 * dy + 2 * i * dy, 0.5); await sleep(8); }
+      await mouse('mouseReleased', cx + 16 * dx, cy + 16 * dy, 0);
+      await sleep(250);
+    }
+  }
   await sleep(1500);
   if (process.env.BENCH_EXPORT === 'print') await page.evaluate(() => { window.__printed = false; window.print = () => { window.__printed = true; }; });
-  await page.locator('button[title="Export"]').first().click();
+  const t0 = Date.now();
+  const exportBtn = page.locator('button[title="Export"]').first();
+  if (await exportBtn.isVisible()) await exportBtn.click();
+  else { await page.locator('button[title="Insert & pages"]').first().click(); await sleep(300); await page.getByText('Export', { exact: true }).last().click(); }
   await sleep(600);
   await page.getByText('PDF', { exact: true }).first().click();
   if (process.env.BENCH_EXPORT === 'print') {
@@ -1232,12 +1252,32 @@ if (ONLY.has('pdfexport') && arg('shots')) {
     saved = await page.pdf({ printBackground: true, preferCSSPageSize: true });
     writeFileSync(join(arg('shots'), 'pdfexport.pdf'), saved);
   }
-  for (let i = 0; i < 60 && !saved; i++) await sleep(500);
+  for (let i = 0; i < 240 && !saved; i++) await sleep(250);
   if (!saved) { console.log('pdfexport: nothing saved'); }
   else {
-    execFileSync('pdftoppm', ['-r', '40', '-png', join(arg('shots'), 'pdfexport.pdf'), join(arg('shots'), 'pdfexport')]);
-    console.log(`pdfexport: export log ${JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => /^export/.test(c.kind))))}`);
-    console.log(`pdfexport: saved ${saved.length} bytes, pages: ${execFileSync('pdfinfo', [join(arg('shots'), 'pdfexport.pdf')]).toString().match(/Pages:\s+(\d+)/)?.[1]}`);
+    const took = ((Date.now() - t0) / 1000).toFixed(1);
+    execFileSync('pdftoppm', ['-r', '72', '-png', join(arg('shots'), 'pdfexport.pdf'), join(arg('shots'), 'pdfexport')]);
+    console.log(`pdfexport: export log ${JSON.stringify(await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => /^export/.test(c.kind)).map(({ t, ...c }) => c)))}`);
+    console.log(`pdfexport: saved ${saved.length} bytes in ${took} s (${prints} page prints), pages: ${execFileSync('pdfinfo', [join(arg('shots'), 'pdfexport.pdf')]).toString().match(/Pages:\s+(\d+)/)?.[1]}`);
+    // Each red dot (72 dpi: 1 px = 1 pt) and the dark ink pixels around it: the cross's centre.
+    const img = execFileSync('python3', ['-I', '-c', `
+import sys, json
+from PIL import Image
+im = Image.open(sys.argv[1]).convert('RGB'); W, H = im.size; px = im.load()
+out = []
+for (x0, y0) in json.loads(sys.argv[2]):
+    red = []; ink = []
+    for y in range(max(0, int(y0) - 30), min(H, int(y0) + 31)):
+        for x in range(max(0, int(x0) - 30), min(W, int(x0) + 31)):
+            r, g, b = px[x, y]
+            if r > 200 and g < 90 and b < 90: red.append((x, y))
+            elif r < 110 and g < 110 and b < 140: ink.append((x, y))
+    c = lambda p: [round(sum(a for a, _ in p) / len(p), 1), round(sum(b for _, b in p) / len(p), 1)] if p else None
+    out.append({'dot': c(red), 'ink': c(ink)})
+print(json.dumps(out))
+`, join(arg('shots'), 'pdfexport-1.png'), JSON.stringify(DOTS)]).toString();
+    const found = JSON.parse(img).filter((m) => m.dot && m.ink).map((m) => [+(m.ink[0] - m.dot[0]).toFixed(1), +(m.ink[1] - m.dot[1]).toFixed(1)]);
+    console.log(`pdfexport: crosses off their dots by (pt) ${JSON.stringify(found)} of ${targets.length} drawn`);
   }
 }
 // --only pdfinsert --shots <dir>: a 3-page PDF note, written on its second page, then the "…" menu's
@@ -1289,6 +1329,32 @@ if (ONLY.has('pdfinsert') && arg('shots')) {
   await page.locator('button[title="Pages"]').first().click();
   await sleep(2500);
   await page.screenshot({ path: join(arg('shots'), 'insert-pages.png') });
+}
+// --only pdfthumb --shots <dir>: a PDF without a background of its own, its paper turned yellow in
+// the Paper menu: the page and the library card must both show the yellow paper under the PDF.
+if (ONLY.has('pdfthumb') && arg('shots')) {
+  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const mk = await PDFDocument.create();
+  const font = await mk.embedFont(StandardFonts.Helvetica);
+  const pg = mk.addPage([612, 792]);
+  pg.drawText('Thumb', { x: 150, y: 450, size: 100, font, color: rgb(0, 0, 0) });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await sleep(2500);
+  await page.locator('input[type=file]').first().setInputFiles({ name: 'Thumb test.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await mk.save()) });
+  await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
+  await sleep(1500);
+  console.log(`pdfthumb title: ${await page.evaluate(() => document.querySelector('header')?.innerText.split('\n').find((t) => /Thumb/.test(t)) ?? document.title)}`);
+  await page.locator('button[title="Paper"]').first().click();
+  await sleep(300);
+  await page.locator('button[title="#FEF9C3"]').first().click();
+  await sleep(300);
+  await page.locator('button[title="Paper"]').first().click();
+  await sleep(1500);
+  await page.screenshot({ path: join(arg('shots'), 'thumb-page.png') });
+  await page.evaluate(() => [...document.querySelectorAll('header button')][0].click());
+  await sleep(3000);
+  await page.screenshot({ path: join(arg('shots'), 'thumb-library.png') });
 }
 // --only glinfo: which WebGL renderer the benchmark's browser has.
 if (ONLY.has('glinfo')) {

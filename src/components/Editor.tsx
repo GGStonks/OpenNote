@@ -29,12 +29,12 @@ import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRe
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { SetupPatch } from '../editor/pageSetup';
 import {
-  appendBlankSheet, copySheets, deleteSheets, duplicateSheets, insertSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
+  SheetBox, appendBlankSheet, copySheets, deleteSheets, duplicateSheets, insertSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, printDocument, exportFile } from '../platform';
-import { PrintedPage, joinPdfPages, underlayFiles } from '../services/pdfExport';
+import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
 import { printedBackground } from '../services/pdf';
 import { importPdf } from '../import/pdf';
@@ -143,6 +143,12 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
   }
   return base;
 }
+
+/** The print layout's @page name for a page size (a CSS identifier: hundredths of a px, no dots). */
+/** Most pages printed together in one PDF export print (a long note is printed in parts). */
+const PRINT_RUN = 20;
+
+const printPageName = (w: number, h: number) => `on-${Math.round(w * 100)}x${Math.round(h * 100)}`;
 
 export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onSaved, onBack, onOpenSettings }) => {
   const gestures = useMemo(() => new GestureBus(), []);
@@ -253,7 +259,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [exportOpen, setExportOpen] = useState(false);
   const [printMode, setPrintMode] = useState(false);
   /** PDF export: the one page the print layout shows (null: all pages). */
-  const [printOnly, setPrintOnly] = useState<string | null>(null);
+  const [printOnly, setPrintOnly] = useState<ReadonlySet<string> | null>(null);
   /** PDF export: files whose pages are printed without them, the original laid under (pdfExport.ts). */
   const [printBare, setPrintBare] = useState<ReadonlySet<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(0);
@@ -846,60 +852,89 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     if (!canMakePdf()) return printNote();
     setExportOpen(false);
     await editor.flush();
+    const t0 = performance.now();
     const sheets = printedSheets(doc);
     const pages: PrintedPage[] = [];
     setBusy({ label: 'Making the PDF…' });
     // Pages showing a PDF are printed bare and the original page is laid under them (pdfExport.ts),
     // where pdf-lib can read the PDF; elsewhere they are printed with a picture of it.
-    const bare = await underlayFiles(sheets.flatMap((s) => (s.pdf ? [s.pdf.file] : []))).catch(() => new Set<string>());
+    const sources = await loadUnderlays(sheets.flatMap((s) => (s.pdf ? [s.pdf.file] : []))).catch(() => new Map<string, PdfSource>());
+    const bare = new Set(sources.keys());
+    const isBare = (s: SheetBox) => !!s.pdf && bare.has(s.pdf.file);
     setPrintBare(bare);
     if (bare.size) document.documentElement.classList.add('on-print-bare');
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let first = true;
+    /** Shows these pages in the print layout and prints them: one PDF, a page for each. */
+    const print = async (run: SheetBox[], transparent: boolean) => {
+      flushSync(() => {
+        setPrintOnly(new Set(run.map((s) => s.id)));
+        setPrintMode(true);
+      });
+      // Let TikZ / KaTeX lay out (longer the first time, which mounts the print layout).
+      await wait(first ? 450 : 200);
+      first = false;
+      await pdfPrintReady();
+      return pdfOfPrintLayout(doc.title, run[0].width, run[0].height, transparent);
+    };
+    // How this web view prints a bare page (see below): the same for every page, so found once.
+    let background: 'clear' | 'white' | 'colored' | null = null;
     try {
-      for (let i = 0; i < sheets.length; i++) {
-        const s = sheets[i];
-        setBusy({ label: 'Making the PDF…', detail: `Page ${i + 1} of ${sheets.length}` });
-        // The print layout shows only this page; the WebView's PDF renderer then makes it a page of exactly its size.
-        flushSync(() => {
-          setPrintOnly(s.id);
-          setPrintMode(true);
-        });
-        // Let TikZ / KaTeX lay out (longer for the first page, which mounts the print layout).
-        await new Promise((r) => setTimeout(r, i === 0 ? 450 : 200));
-        await pdfPrintReady();
-        const under = s.pdf && bare.has(s.pdf.file) ? { file: s.pdf.file, page: s.pdf.page, paper: paperHex(s.paperColor) } : undefined;
-        let bytes = await pdfOfPrintLayout(doc.title, s.width, s.height, !!under);
-        if (under) {
-          // A page printed for a PDF page to go under it must be see-through where it is empty. A
-          // web view that printed it opaque (its own background) would hide the PDF page: white,
-          // it is multiplied over it; another colour, the page is printed again with the PDF drawn
-          // in it as a picture.
-          const bg = await printedBackground(bytes).catch(() => 'clear' as const);
-          crashLog.event('export-page', { page: i + 1, background: bg });
-          if (bg === 'white') pages.push({ bytes, under: { ...under, multiply: true } });
-          else if (bg === 'colored') {
-            document.documentElement.classList.remove('on-print-bare');
-            flushSync(() => setPrintBare(new Set()));
-            await new Promise((r) => setTimeout(r, 200));
-            await pdfPrintReady();
-            bytes = await pdfOfPrintLayout(doc.title, s.width, s.height);
-            pages.push({ bytes });
-            flushSync(() => setPrintBare(bare));
-            document.documentElement.classList.add('on-print-bare');
-          } else pages.push({ bytes, under });
+      // Pages of one size in a row are printed together (one page size per print): a note is
+      // usually one or a few prints instead of one per page, each of which lays the page out and
+      // starts the web view's PDF printer again.
+      const runs: SheetBox[][] = [];
+      for (const s of sheets) {
+        const last = runs[runs.length - 1];
+        if (last && last.length < PRINT_RUN && last[0].width === s.width && last[0].height === s.height) last.push(s);
+        else runs.push([s]);
+      }
+      let done = 0;
+      for (const run of runs) {
+        setBusy({ label: 'Making the PDF…', detail: run.length > 1 ? `Pages ${done + 1}–${done + run.length} of ${sheets.length}` : `Page ${done + 1} of ${sheets.length}` });
+        const anyBare = run.some(isBare);
+        let bytes = await print(run, anyBare);
+        let count = await pdfPageCount(bytes);
+        if (count !== run.length && run.length > 1) {
+          // Printed on another number of pages (something reaching past its page): one at a time.
+          crashLog.event('export-run-split', { pages: run.length, printed: count });
+          for (const s of run) {
+            const one = await print([s], isBare(s));
+            pages.push(...(await placed([s], one)));
+          }
+          done += run.length;
           continue;
         }
-        pages.push({ bytes });
+        if (anyBare && !background) {
+          // A page printed for a PDF page to go under it must be see-through where it is empty. A
+          // web view that printed it opaque (its own background) would hide the PDF page: white,
+          // it is multiplied over it; another colour, the pages are printed again with the PDF
+          // drawn in them as a picture.
+          const at = run.findIndex(isBare);
+          background = await printedBackground(bytes, at + 1).catch(() => 'clear' as const);
+          crashLog.event('export-page', { page: done + at + 1, background });
+        }
+        if (anyBare && background === 'colored') {
+          document.documentElement.classList.remove('on-print-bare');
+          flushSync(() => setPrintBare(new Set()));
+          bytes = await print(run, false);
+          count = await pdfPageCount(bytes);
+          flushSync(() => setPrintBare(bare));
+          document.documentElement.classList.add('on-print-bare');
+          pages.push(...run.map((_, i) => ({ bytes, index: Math.min(i, count - 1) })));
+        } else pages.push(...(await placed(run, bytes)));
+        done += run.length;
       }
       document.documentElement.classList.remove('on-print-bare');
-      const pdf = await joinPdfPages(pages, doc.title);
-      // The pages' own PDFs are not needed any more (memory for the save that follows).
-      const pageKB = pages.map((p) => Math.round(p.bytes.length / 1024));
+      const pdf = await joinPdfPages(pages, doc.title, sources);
+      const prints = new Set(pages.map((p) => p.bytes));
+      const printKB = [...prints].map((b) => Math.round(b.length / 1024));
       pages.length = 0;
       setPrintMode(false);
       setPrintOnly(null);
       setPrintBare(new Set());
       setBusy(null);
-      crashLog.event('export', { kind: 'pdf', pages: sheets.length, pageKB, kb: Math.round(pdf.length / 1024) });
+      crashLog.event('export', { kind: 'pdf', pages: sheets.length, prints: printKB.length, printKB, kb: Math.round(pdf.length / 1024), ms: Math.round(performance.now() - t0) });
       const where = await exportFile(`${baseName(doc)}.pdf`, new Blob([pdf as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), mode);
       crashLog.event('export-saved', { kind: 'pdf', saved: !!where, mode: mode ?? 'setting' });
       if (where) showToast(where);
@@ -912,6 +947,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       const msg = err instanceof Error ? err.message : String(err);
       if (/cancel/i.test(msg)) return;
       showToast(`PDF export failed (${msg}). Use Print… instead.`, true);
+    }
+
+    /** The printed pages of `run` (page i of `bytes`), with their PDF page under them when bare. */
+    async function placed(run: SheetBox[], bytes: Uint8Array): Promise<PrintedPage[]> {
+      return run.map((s, i) => {
+        if (!isBare(s)) return { bytes, index: i };
+        const under = { file: s.pdf!.file, page: s.pdf!.page, paper: paperHex(s.paperColor) };
+        return { bytes, index: i, under: background === 'white' ? { ...under, multiply: true } : under };
+      });
     }
   };
 
@@ -937,7 +981,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
   // ------------------------------------------------------------------------- render
   const { totalHeight, contentWidth } = layout;
-  const printed = printMode ? printedSheets(doc).filter((s) => !printOnly || s.id === printOnly) : [];
+  const printed = printMode ? printedSheets(doc).filter((s) => !printOnly || printOnly.has(s.id)) : [];
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
   const goHome = async () => {
@@ -1192,17 +1236,20 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       {printMode &&
         createPortal(
           <div className="on-print-root">
-            {/* Each page cut from the surface, on its own sheet at its own size (named @page rules). */}
+            {/* Each page cut from the surface, on its own sheet at its own size (named @page rules).
+                The names are CSS identifiers: an imported page's size has decimals (A4: 793.71 px
+                wide), and a name with a dot dropped its rule, so the page was printed at the default
+                Letter size and fitted into its own: the ink came out smaller and lower than the PDF. */}
             <style>
               {[...new Set(printed.map((x) => `${x.width}x${x.height}`))]
                 .map((k) => {
                   const [w, h] = k.split('x').map(Number);
-                  return `@page on-${k} { size: ${(w / 96).toFixed(3)}in ${(h / 96).toFixed(3)}in; margin: 0; }`;
+                  return `@page ${printPageName(w, h)} { size: ${w}px ${h}px; margin: 0; }`;
                 })
                 .join('\n')}
             </style>
             {printed.map((s) => (
-              <div key={s.id} className="on-print-page" style={{ width: s.width, height: s.height, page: `on-${s.width}x${s.height}` } as React.CSSProperties}>
+              <div key={s.id} className="on-print-page" style={{ width: s.width, height: s.height, page: printPageName(s.width, s.height) } as React.CSSProperties}>
                 <div style={{ transform: `translate(${-s.left}px, ${-s.top}px)` }}>
                   <CanvasPage
                     page={sheetSlice(surface, s)}

@@ -212,7 +212,8 @@ export const App: React.FC = () => {
           const pdf = await importPdf(new Uint8Array(await file.arrayBuffer()), file.name, async (wrong) =>
             window.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '')
           );
-          last = { ...blankNote(pdf.title), paperStyle: 'blank', sheets: pdf.sheets };
+          // Named after the file, exactly (not the title inside the PDF).
+          last = { ...blankNote(name), paperStyle: 'blank', sheets: pdf.sheets };
           crashLog.event('import', { kind: 'pdf', pages: pdf.pages, kb: Math.round(file.size / 1024) });
           upsertLocal(await saveNote(last, false));
           made++;
@@ -225,7 +226,7 @@ export const App: React.FC = () => {
           });
           const now = Date.now();
           last = {
-            ...blankNote(nb.title),
+            ...blankNote(name),
             createdAt: nb.createdAt,
             updatedAt: now,
             paperStyle: nb.paperStyle,

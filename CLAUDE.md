@@ -84,10 +84,17 @@ text (App.tsx `importExternal`).
   `src/services/pdf.ts` draws it with pdf.js (legacy build, data in public/pdfjs from
   scripts/copy-pdfjs.mjs) from its vectors: `PdfBackground` in each page's paper draws the page at
   the fit-width zoom near the view, the part in view at the zoom once zooming rests (opaque on the
-  paper: see-through, the stretched page showed through as a halo), and a preview (thumbs store)
-  for thumbnails. Files nobody refers to go when a note is deleted (`collectUnusedFiles`); backups
+  paper: see-through, the stretched page showed through as a halo), and a preview (thumbs store,
+  `pdfa|file|page`, see-through so the page's own paper shows under it) for thumbnails. Thumbnails
+  (NoteThumb.tsx) draw everything the editor does: keep them in step with Blocks.tsx (e.g. a
+  formula's `stretchX`). Imported notes are named after the file. Files nobody refers to go when a note is deleted (`collectUnusedFiles`); backups
   and .opennote exports carry them (`files`). The PDF export prints such pages bare and lays the
-  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text. Android's
+  original PDF page under them (pdfExport.ts `joinPdfPages`, pdf-lib): text stays text. Pages of
+  one size in a row are printed in one native call (Editor `PRINT_RUN`, page by page again when the
+  print has another page count) and split here: a print per page made long notes slow. The print
+  layout's named `@page` rules must have CSS-identifier names (`printPageName`): imported sizes have
+  decimals, and a dotted name dropped the rule, so the page printed at Letter size and was fitted
+  into its own (the ink came out smaller and lower than the PDF on A4 pages). Android's
   web view prints its own background colour behind the page; the plugin's `transparent` flag clears
   it for bare pages, and Editor.exportPdf still checks each printed page (pdf.ts
   `printedBackground`): a white page goes over the original with Multiply (isolated transparency
@@ -95,8 +102,10 @@ text (App.tsx `importExternal`).
   with its paper and no underlay. The editor's "…" menu has Insert PDF: the PDF's pages go after the
   current page (sheets.ts `insertSheets`; later pages move down with their content).
   `npm run bench:ui -- --only pdfimport --shots <dir>` (import, zoom, export joining, thumbnails),
-  `--only pdfexport --shots <dir>` (the export, with `BENCH_PRINT_BG=white|#1c1c1e` for an opaque
-  printed page, `BENCH_EXPORT=print` for iOS's print dialog), `--only pdfinsert --shots <dir>`.
+  `--only pdfexport --shots <dir>` (the export of an A4 note: how far each drawn cross lies from
+  its target dot, with `BENCH_PRINT_BG=white|#1c1c1e` for an opaque
+  printed page, `BENCH_EXPORT=print` for iOS's print dialog), `--only pdfinsert --shots <dir>`,
+  `--only pdfthumb --shots <dir>` (a PDF page's paper colour on its library card).
 - Notability (`src/import/notability.ts` with `zip.ts`, `plist.ts`, `images.ts`): what it reads is
   specified in `docs/notability-note-format.md`; keep the two in step. Each curve is a chain of cubic
   Béziers with one fractional width per segment end; drawn width = curveswidth x fractional width;

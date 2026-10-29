@@ -107,7 +107,7 @@ export const PdfBackground = React.memo(function PdfBackground({ pdf, width: W, 
     if (!printMode || printBare) return;
     let live = true, url: string | null = null;
     const c = document.createElement('canvas');
-    const done = drawPdfRegion(`${slot}|print`, pdf, { w: W, h: H }, { x0: 0, y0: 0, x1: W, y1: H }, baseRatio, c, '#ffffff')
+    const done = drawPdfRegion(`${slot}|print`, pdf, { w: W, h: H }, { x0: 0, y0: 0, x1: W, y1: H }, baseRatio, c, paper)
       .then((ok) => (ok ? new Promise<Blob | null>((r) => c.toBlob(r, 'image/jpeg', 0.92)) : null))
       .then(async (blob) => {
         c.width = c.height = 0;

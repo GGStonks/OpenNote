@@ -62,6 +62,8 @@ export async function importPdf(bytes: Uint8Array, fileName: string, askPassword
       h *= k;
       return { id: newId('sheet'), width: Math.round(w * 100) / 100, height: Math.round(h * 100) / 100, paperStyle: 'blank', pdf: { file: fileId, page: i + 1 } };
     });
-    return { title: title ?? fileName.replace(/\.pdf$/i, ''), fileId, sheets, pages: sizes.length };
+    // The file's name, as the library names imported notes (the PDF's own title is often a
+    // generator's leftover, "Microsoft Word - …").
+    return { title: fileName.replace(/\.pdf$/i, '') || title || 'PDF', fileId, sheets, pages: sizes.length };
   }
 }

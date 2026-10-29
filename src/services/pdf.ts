@@ -178,11 +178,13 @@ const PREVIEW_W = 360;
 const previews = new Map<string, Promise<string | null>>();
 
 /**
- * A small picture of a PDF page (a JPEG data URL), made once and kept with the library's
- * thumbnails; null when the PDF cannot be drawn.
+ * A small picture of a PDF page, see-through where the PDF draws nothing (as the editor shows it:
+ * the page's paper, its colour and lines, under it), made once and kept with the library's
+ * thumbnails; null when the PDF cannot be drawn. (Before 2.6.2 it was a JPEG on white, `pdf|…`,
+ * which hid a page's own paper colour in thumbnails.)
  */
 export function pdfPreview(ref: PdfPageRef): Promise<string | null> {
-  const id = `pdf|${ref.file}|${ref.page}`;
+  const id = `pdfa|${ref.file}|${ref.page}`;
   let p = previews.get(id);
   if (p) return p;
   p = (async () => {
@@ -193,9 +195,10 @@ export function pdfPreview(ref: PdfPageRef): Promise<string | null> {
     const size = pageSize(page);
     const sheet = { w: PREVIEW_W, h: (PREVIEW_W * size.h) / size.w };
     const c = document.createElement('canvas');
-    const ok = await drawPdfRegion(`preview|${id}`, ref, sheet, { x0: 0, y0: 0, x1: sheet.w, y1: sheet.h }, 1, c, '#ffffff');
+    const ok = await drawPdfRegion(`preview|${id}`, ref, sheet, { x0: 0, y0: 0, x1: sheet.w, y1: sheet.h }, 1, c);
     if (!ok) return null;
-    const url = c.toDataURL('image/jpeg', 0.82);
+    // WebP keeps the transparency, small (WebKit cannot write it and gives a PNG instead).
+    const url = c.toDataURL('image/webp', 0.85);
     c.width = c.height = 0;
     await putThumb({ id, noteId: `file:${ref.file}`, updatedAt: 0, url }).catch(() => undefined);
     return url;
@@ -208,10 +211,10 @@ export function pdfPreview(ref: PdfPageRef): Promise<string | null> {
  * What a printed page has where it has no content: 'clear' (see-through), 'white', or 'colored'
  * (opaque in another colour). Drawn small on a see-through canvas and its pixels counted.
  */
-export async function printedBackground(bytes: Uint8Array): Promise<'clear' | 'white' | 'colored'> {
+export async function printedBackground(bytes: Uint8Array, pageNo = 1): Promise<'clear' | 'white' | 'colored'> {
   const doc = await openPdfBytes(bytes);
   try {
-    const page = await doc.getPage(1);
+    const page = await doc.getPage(Math.min(Math.max(1, pageNo), doc.numPages));
     const v = page.getViewport({ scale: 1 });
     const k = Math.min(1, 160 / Math.max(v.width, v.height));
     const c = document.createElement('canvas');
