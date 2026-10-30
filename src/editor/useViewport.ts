@@ -26,6 +26,14 @@ interface Options {
 
 export type FitMode = 'width' | 'page' | null;
 
+/** A view to come back to: the content point (unscaled px) at the screen's top-left corner, the zoom, and the fit. */
+export interface SavedView {
+  zoom: number;
+  cx: number;
+  cy: number;
+  fit: FitMode;
+}
+
 /** Screen px left between a page fitted to the width and each edge of the screen. */
 export const FIT_MARGIN = 2;
 /** Window event after a zoom has placed the content (scroll and sub-pixel translate): ink canvases re-align to the pixel grid. */
@@ -198,6 +206,33 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       setView(z, { cx: r.x + r.width / 2, cy: r.y + r.height / 2, sx: el.clientWidth / 2, sy: el.clientHeight / 2 }, z);
     },
     [setView]
+  );
+
+  /** The view as it is now (to come back to it: restoreView). */
+  const viewState = useCallback((): SavedView | null => {
+    const a = anchorAt(0, 0);
+    return a ? { zoom: zoomRef.current, cx: a.cx, cy: a.cy, fit: fitModeRef.current } : null;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /**
+   * Back to a saved view: the same content point at the screen's top-left corner, at its zoom. A
+   * view fitted to the width is fitted again (the screen may have turned since), at the same place.
+   */
+  const restoreView = useCallback(
+    (v: SavedView) => {
+      const el = scrollRef.current;
+      if (!el || !el.clientWidth || !Number.isFinite(v.cx) || !Number.isFinite(v.cy) || !(v.zoom > 0)) return;
+      if (v.fit === 'width') {
+        setFitMode('width');
+        const t = fitTargetRef.current?.() ?? { left: 0, width: contentWidthRef.current };
+        const z = fitWidthZoom(el, t);
+        setView(z, { cx: t.left - FIT_MARGIN / z, cy: v.cy, sx: 0, sy: 0 });
+      } else {
+        setFitMode(v.fit);
+        setView(v.zoom, { cx: v.cx, cy: v.cy, sx: 0, sy: 0 }, v.zoom);
+      }
+    },
+    [setView] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   /** Zooms by a factor about the middle of the screen (keyboard, buttons). */
@@ -739,5 +774,5 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     };
   }, [gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy };
+  return { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView };
 }

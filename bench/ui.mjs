@@ -2361,6 +2361,41 @@ if (ONLY.has('toolhold')) {
   console.log(`toolhold lasso: selection toolbar ${selected ? 'shown' : 'missing'}`);
   if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'toolhold-lasso.png') });
 }
+// --only resume [--shots <dir>]: a note left zoomed in on a later page and opened again from the
+// library comes back at the same zoom, page and place (and a note left fitted to the width, at the
+// same place).
+if (ONLY.has('resume')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const state = () => page.evaluate(() => {
+    const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+    return { top: Math.round(el.scrollTop), left: Math.round(el.scrollLeft), zoom: document.body.innerText.match(/(\d+)%/)?.[1], page: document.body.innerText.match(/(\d+)\s*\/\s*\d+/)?.[1] };
+  });
+  const back = async () => {
+    await page.locator('header button').first().click();
+    await sleep(1200);
+    await page.getByText('Bench note').first().click();
+    await sleep(2000);
+  };
+  for (const [label, zoomSteps] of [['zoomed in', 3], ['fitted to the width', 0]]) {
+    await page.keyboard.press('Control+0');
+    await sleep(400);
+    for (let i = 0; i < zoomSteps; i++) { await page.keyboard.press('Control+Equal'); await sleep(200); }
+    await page.evaluate(() => {
+      const el = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 500 && getComputedStyle(d).overflow === 'auto');
+      el.scrollTop = el.scrollHeight * 0.4;
+      el.scrollLeft = el.scrollWidth > el.clientWidth ? (el.scrollWidth - el.clientWidth) / 2 : 0;
+    });
+    await sleep(800);
+    const before = await state();
+    if (arg('shots')) await page.screenshot({ path: join(arg('shots'), `resume-${zoomSteps}-before.png`) });
+    await back();
+    const after = await state();
+    if (arg('shots')) await page.screenshot({ path: join(arg('shots'), `resume-${zoomSteps}-after.png`) });
+    const ok = before.zoom === after.zoom && before.page === after.page && Math.abs(before.top - after.top) <= 2 && Math.abs(before.left - after.left) <= 2;
+    console.log(`resume ${label}: left at ${JSON.stringify(before)}, back at ${JSON.stringify(after)}: ${ok ? 'ok' : 'WRONG'}`);
+  }
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();

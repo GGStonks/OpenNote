@@ -17,6 +17,8 @@ export interface SnappedShape {
   confidence: number;
   /** A regular polygon (equilateral triangle, square, regular pentagon…): sized keeping it regular. */
   regular?: boolean;
+  /** How far the line drawn lies from the shape (a share of its size), to compare detectors. */
+  fitError?: number;
 }
 
 const P = (x: number, y: number, pressure = 0.5): Point => ({ x, y, pressure });
@@ -129,6 +131,85 @@ function detectLine(pts: Point[], len: number): SnappedShape | null {
     }
   }
   return { kind: 'line', points: [P(a.x, a.y), P(end.x, end.y)], closed: false, confidence: 1 - rel / 0.11 * 0.8 };
+}
+
+/**
+ * A parabola: an open line that bends one way and fits y = a x² + b x + c in some turned frame
+ * (its axis any way round; snapped upright or level when within PARABOLA_AXIS_SNAP). The line must
+ * run one way along the parabola (no going back), bend clearly (its sagitta at least
+ * PARABOLA_BEND of its chord; lines are found before) and fit within PARABOLA_FIT of its size. A
+ * line with a corner (a wide V) fits a few straight sides better than a parabola: detectShape
+ * keeps the better fit of the two.
+ * Kept as a smooth curve ('curve') through PARABOLA_POINTS points of it.
+ */
+const PARABOLA_FIT = 0.022;
+const PARABOLA_BEND = 0.07;
+const PARABOLA_AXIS_SNAP = (8 * Math.PI) / 180;
+const PARABOLA_POINTS = 9;
+
+function fitParabola(pts: Point[], ang: number) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  // u across the axis, v along it.
+  const uv = pts.map((p) => [p.x * c + p.y * s, -p.x * s + p.y * c]);
+  let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+  for (const [u, v] of uv) {
+    const u2 = u * u;
+    s0++; s1 += u; s2 += u2; s3 += u2 * u; s4 += u2 * u2;
+    t0 += v; t1 += u * v; t2 += u2 * v;
+  }
+  // Normal equations for v = A u² + B u + C (Cramer's rule).
+  const det3 = (m: number[]) => m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
+  const M = [s4, s3, s2, s3, s2, s1, s2, s1, s0];
+  const d = det3(M);
+  if (!Number.isFinite(d) || Math.abs(d) < 1e-9) return null;
+  const A = det3([t2, s3, s2, t1, s2, s1, t0, s1, s0]) / d;
+  const B = det3([s4, t2, s2, s3, t1, s1, s2, t0, s0]) / d;
+  const C = det3([s4, s3, t2, s3, s2, t1, s2, s1, t0]) / d;
+  let err = 0;
+  for (const [u, v] of uv) err += (v - (A * u * u + B * u + C)) ** 2;
+  return { A, B, C, c, s, uv, rms: Math.sqrt(err / uv.length) };
+}
+
+function detectParabola(pts: Point[], diag: number): SnappedShape | null {
+  if (diag < 24) return null;
+  const a = pts[0], b = pts[pts.length - 1];
+  const chord = Math.hypot(b.x - a.x, b.y - a.y);
+  let sag = 0;
+  for (const p of pts) sag = Math.max(sag, distToSeg(p, a, b));
+  if (sag < PARABOLA_BEND * Math.max(chord, 1)) return null;
+  // The best axis direction, every 2°, then the nearest upright / level one if close.
+  let best: ReturnType<typeof fitParabola> = null, bestAng = 0;
+  for (let deg = 0; deg < 180; deg += 2) {
+    const f = fitParabola(pts, (deg * Math.PI) / 180);
+    if (f && (!best || f.rms < best.rms)) [best, bestAng] = [f, (deg * Math.PI) / 180];
+  }
+  if (!best) return null;
+  for (const t of [0, Math.PI / 2, Math.PI]) {
+    if (Math.abs(bestAng - t) < PARABOLA_AXIS_SNAP) {
+      const f = fitParabola(pts, t % Math.PI);
+      if (f && f.rms < best.rms * 1.25 + 0.002 * diag) [best, bestAng] = [f, t % Math.PI];
+    }
+  }
+  const f = best;
+  if (f.rms / diag > PARABOLA_FIT || Math.abs(f.A) < 1e-9) return null;
+  // One way along it: the drawn line's travel across the axis is (nearly) its span.
+  let travel = 0;
+  for (let i = 1; i < f.uv.length; i++) travel += Math.abs(f.uv[i][0] - f.uv[i - 1][0]);
+  const u0 = f.uv[0][0], u1 = f.uv[f.uv.length - 1][0];
+  if (travel > 1.12 * Math.abs(u1 - u0) || Math.abs(u1 - u0) < 0.3 * diag) return null;
+  const out = Array.from({ length: PARABOLA_POINTS }, (_, i) => {
+    const u = u0 + ((u1 - u0) * i) / (PARABOLA_POINTS - 1);
+    const v = f.A * u * u + f.B * u + f.C;
+    return P(u * f.c - v * f.s, u * f.s + v * f.c);
+  });
+  // How far the line drawn is from the parabola, measured as polylines are (polylineError).
+  const dense = Array.from({ length: 49 }, (_, i) => {
+    const u = u0 + ((u1 - u0) * i) / 48;
+    const v = f.A * u * u + f.B * u + f.C;
+    return P(u * f.c - v * f.s, u * f.s + v * f.c);
+  });
+  const err = polylineError(pts, dense, false) / diag;
+  return { kind: 'curve', points: out, closed: false, confidence: 1 - f.rms / diag / PARABOLA_FIT, fitError: err };
 }
 
 function detectArrow(pts: Point[], diag: number): SnappedShape | null {
@@ -266,14 +347,14 @@ function cleanVertices(v: Point[], closed: boolean): Point[] {
  * centre, perimeter and turn (the corners' directions averaged n-fold, so one corner found a little
  * off does not turn it); it is taken when the corners found are nearly regular (the longest side
  * at most REGULAR_RATIO x the shortest, every corner within REGULAR_CORNER of the regular one: a
- * 1.15 : 1 rectangle stays a rectangle) or when it
+ * 1.25 : 1 rectangle stays a rectangle) or when it
  * fits the line drawn within REGULAR_FIT (a corner found off where the pen started and ended made
  * a drawn regular hexagon fail the first test). Turned to stand on a side (or a corner up) when
  * within REGULAR_TURN of it.
  */
-const REGULAR_RATIO = 1.12;
-const REGULAR_CORNER = (10 * Math.PI) / 180;
-const REGULAR_FIT = 0.02;
+const REGULAR_RATIO = 1.16;
+const REGULAR_CORNER = (13 * Math.PI) / 180;
+const REGULAR_FIT = 0.026;
 const REGULAR_TURN = (9 * Math.PI) / 180;
 
 function regularPolygon(v: Point[], pts: Point[], diag: number): Point[] | null {
@@ -384,6 +465,10 @@ export function detectShape(points: Point[]): SnappedShape | null {
     if (arrow) return arrow;
     const poly = detectPolygon(pts, box.diag, false);
     if (poly) candidates.push(poly);
+    const parabola = detectParabola(pts, box.diag);
+    // The better fit of a parabola and a few straight sides (a wide V is not a parabola; a
+    // parabola is only roughly a few sides).
+    if (parabola && (!poly || (parabola.fitError ?? 1) <= polylineError(pts, poly.points, false) / box.diag)) return parabola;
   } else {
     const ell = detectEllipse(pts, box.diag);
     if (ell) candidates.push(ell);

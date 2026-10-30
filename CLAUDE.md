@@ -224,7 +224,14 @@ show the iPad's compositing cost).
   drawn line erased and erases along the shape (`eraseAlongSnapped`, again as the pen sizes it), the
   lasso selects with the shape. A closed polygon drawn nearly regular becomes the regular one
   (shapeRecognition.ts `regularPolygon`: equilateral triangle, square, regular pentagon…; a square
-  keeps its sides equal while sized, SnapAdjust `regular`). `--only toolhold`.
+  keeps its sides equal while sized, SnapAdjust `regular`). An open line bending one way that fits a
+  parabola (any axis) snaps to one (`detectParabola`, kept as a 'curve' through 9 of its points),
+  unless a few straight sides fit it better (a wide V). One setting for all tools (Settings > Pencil
+  & input); the tool popovers have no checkbox of their own. `--only toolhold`.
+- Each note's view (the content point at the screen's corner, zoom, fit) is kept in localStorage
+  (`opennote_note_views_v1`, Editor `saveNoteView`; on scroll, on leaving, when the app is hidden)
+  and given back when the note is opened again (useViewport `viewState` / `restoreView`; a width
+  fit is refitted). `--only resume`.
 - Menus, popovers and pop-ups are kept on the screen on every device (`src/components/onScreen.tsx`:
   `OnScreen` / `useOnScreen`): after layout each is measured against the visible screen less the safe
   area, shortened by its button (it scrolls) or else moved in, again on any resize. New floating

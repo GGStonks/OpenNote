@@ -242,10 +242,6 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <LevelControl label="Pen width" value={tools.penWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ penWidth: v })} />
             <Label>Colour</Label>
             <ColorPicker value={tools.penColor} onChange={(c) => setTools({ penColor: c })} presets={PEN_COLORS} />
-            <label className="flex items-center justify-between gap-3 py-1 mt-3 text-sm text-gray-700 dark:text-gray-300">
-              Draw &amp; hold to snap shapes
-              <input type="checkbox" checked={tools.holdToSnap} onChange={(e) => setTools({ holdToSnap: e.target.checked })} />
-            </label>
           </Popover>
         )}
       </div>
@@ -287,10 +283,6 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
             <div className="mb-2">
               <ColorPicker value={tools.shapeColor} onChange={(c) => setTools({ shapeColor: c })} presets={PEN_COLORS} size="sm" />
             </div>
-            <label className="flex items-center justify-between gap-3 py-1 mt-1 text-sm text-gray-700 dark:text-gray-300">
-              Draw &amp; hold to make a clean shape
-              <input type="checkbox" checked={tools.holdToSnap} onChange={(e) => setTools({ holdToSnap: e.target.checked })} />
-            </label>
             <label className="flex items-center justify-between gap-3 py-1 mt-1 text-sm text-gray-700 dark:text-gray-300">
               Arrowhead on open lines
               <input type="checkbox" checked={tools.shapeArrow} onChange={(e) => setTools({ shapeArrow: e.target.checked })} />

@@ -15,7 +15,7 @@ import { ExportModal, baseName } from './ExportModal';
 import { TextFormatBar } from './TextFormatBar';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
-import { MAX_ZOOM, PULL_THRESHOLD, useViewport } from '../editor/useViewport';
+import { MAX_ZOOM, PULL_THRESHOLD, SavedView, useViewport } from '../editor/useViewport';
 import { Selection, computeBounds, isEmptySelection, removeSelection } from '../editor/selection';
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
@@ -146,6 +146,32 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
 }
 
 /** The print layout's @page name for a page size (a CSS identifier: hundredths of a px, no dots). */
+/** Where each note was left (its view), most recent last; kept for this many notes. */
+const VIEWS_KEY = 'opennote_note_views_v1';
+const VIEWS_KEPT = 200;
+function readViews(): Record<string, SavedView & { at: number }> {
+  try {
+    const v = JSON.parse(localStorage.getItem(VIEWS_KEY) ?? '{}');
+    return v && typeof v === 'object' ? v : {};
+  } catch {
+    return {};
+  }
+}
+function savedNoteView(id: string): SavedView | null {
+  return readViews()[id] ?? null;
+}
+function saveNoteView(id: string, v: SavedView) {
+  const all = readViews();
+  all[id] = { zoom: Math.round(v.zoom * 1e4) / 1e4, cx: Math.round(v.cx * 10) / 10, cy: Math.round(v.cy * 10) / 10, fit: v.fit, at: Date.now() };
+  const ids = Object.keys(all).sort((a, b) => all[b].at - all[a].at);
+  for (const old of ids.slice(VIEWS_KEPT)) delete all[old];
+  try {
+    localStorage.setItem(VIEWS_KEY, JSON.stringify(all));
+  } catch {
+    /* full: not remembered */
+  }
+}
+
 /** Most pages printed together in one PDF export print (a long note is printed in parts). */
 const PRINT_RUN = 20;
 
@@ -233,7 +259,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   // Fit to width fits the page on screen (curSheetRef, set below once the current page is known).
   const curSheetRef = useRef<{ left: number; width: number } | null>(null);
   const fitTarget = useCallback(() => (curSheetRef.current ? { left: PAD + curSheetRef.current.left, width: curSheetRef.current.width } : null), []);
-  const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy } = useViewport({
+  const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView } = useViewport({
     contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget,
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
@@ -409,6 +435,41 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   useEffect(onScroll, [onScroll, layout]);
 
   /** Scrolls to the top of page `k`. */
+  // Back where it was left: each note's view (where on the page, zoom) is kept, while scrolling
+  // and when leaving, and given back when the note is opened again (once it is laid out).
+  const viewRestored = useRef(false);
+  const saveView = useCallback(() => {
+    if (!viewRestored.current) return;
+    const v = viewState();
+    if (v) saveNoteView(note.id, v);
+  }, [viewState, note.id]);
+  useEffect(() => {
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        const v = savedNoteView(note.id);
+        if (v) restoreView(v);
+        viewRestored.current = true;
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [note.id, restoreView]);
+  useEffect(() => {
+    if (!scrollEl) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const onScroll = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(saveView, 300);
+    };
+    scrollEl.addEventListener('scroll', onScroll, { passive: true });
+    const onHide = () => document.visibilityState === 'hidden' && saveView();
+    document.addEventListener('visibilitychange', onHide);
+    return () => {
+      if (timer) clearTimeout(timer);
+      scrollEl.removeEventListener('scroll', onScroll);
+      document.removeEventListener('visibilitychange', onHide);
+    };
+  }, [scrollEl, saveView]);
+
   const jumpToPage = useCallback(
     (k: number) => {
       const el = scrollRef.current, outer = outerRef.current;
@@ -1078,6 +1139,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const selectionHasInk = selStrokes.some((s) => s.tool === 'pen');
 
   const goHome = async () => {
+    saveView();
     await editor.flush();
     onBack();
   };
