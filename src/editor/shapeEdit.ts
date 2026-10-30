@@ -195,6 +195,8 @@ export interface SnapAdjust {
   base: Point[];
   closed: boolean;
   pen0: XY;
+  /** A regular polygon (a square among rectangles): scaled as a whole, so it stays regular. */
+  regular?: boolean;
 }
 
 const AXIS_SNAP = (4 * Math.PI) / 180;
@@ -236,6 +238,12 @@ export function adjustSnappedShape(a: SnapAdjust, pen: XY): Point[] {
       return ellipsePoints(c, { x: u.x * na, y: u.y * na }, nb, n);
     }
     case 'rectangle': {
+      if (a.regular) {
+        // A square: centre stays, it grows with the pen's distance from it.
+        const c = centroid(pts);
+        const k = Math.hypot(pen.x - c.x, pen.y - c.y) / Math.max(4, Math.hypot(a.pen0.x - c.x, a.pen0.y - c.y));
+        return pts.map((q) => P({ x: c.x + (q.x - c.x) * k, y: c.y + (q.y - c.y) * k }, q));
+      }
       // Centre stays; width and height follow the pen independently (right angles kept).
       const c = centroid(pts);
       const l = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y) || 1;

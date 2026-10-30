@@ -15,6 +15,8 @@ export interface SnappedShape {
   points: Point[];
   closed: boolean;
   confidence: number;
+  /** A regular polygon (equilateral triangle, square, regular pentagon…): sized keeping it regular. */
+  regular?: boolean;
 }
 
 const P = (x: number, y: number, pressure = 0.5): Point => ({ x, y, pressure });
@@ -258,6 +260,57 @@ function cleanVertices(v: Point[], closed: boolean): Point[] {
   return out;
 }
 
+/**
+ * A closed polygon drawn nearly regular becomes the regular polygon: an equilateral triangle, a
+ * square, a regular pentagon, hexagon… The candidate is the regular polygon of the drawing's own
+ * centre, perimeter and turn (the corners' directions averaged n-fold, so one corner found a little
+ * off does not turn it); it is taken when the corners found are nearly regular (the longest side
+ * at most REGULAR_RATIO x the shortest, every corner within REGULAR_CORNER of the regular one: a
+ * 1.15 : 1 rectangle stays a rectangle) or when it
+ * fits the line drawn within REGULAR_FIT (a corner found off where the pen started and ended made
+ * a drawn regular hexagon fail the first test). Turned to stand on a side (or a corner up) when
+ * within REGULAR_TURN of it.
+ */
+const REGULAR_RATIO = 1.12;
+const REGULAR_CORNER = (10 * Math.PI) / 180;
+const REGULAR_FIT = 0.02;
+const REGULAR_TURN = (9 * Math.PI) / 180;
+
+function regularPolygon(v: Point[], pts: Point[], diag: number): Point[] | null {
+  const n = v.length;
+  if (n < 3) return null;
+  const sides = v.map((p, i) => Math.hypot(v[(i + 1) % n].x - p.x, v[(i + 1) % n].y - p.y));
+  const corner = (Math.PI * (n - 2)) / n;
+  const nearlyRegular =
+    Math.min(...sides) > 0 &&
+    Math.max(...sides) <= REGULAR_RATIO * Math.min(...sides) &&
+    v.every((p, i) => Math.abs(angleAt(v[(i - 1 + n) % n], p, v[(i + 1) % n]) - corner) <= REGULAR_CORNER);
+  // Centre and size from the line drawn (evenly spaced points): its mean and its perimeter.
+  let cx = 0, cy = 0, len = 0;
+  for (let i = 0; i < pts.length; i++) {
+    cx += pts[i].x / pts.length;
+    cy += pts[i].y / pts.length;
+    const q = pts[(i + 1) % pts.length];
+    len += Math.hypot(q.x - pts[i].x, q.y - pts[i].y);
+  }
+  let area = 0, sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) {
+    area += v[i].x * v[(i + 1) % n].y - v[(i + 1) % n].x * v[i].y;
+    const a = n * Math.atan2(v[i].y - cy, v[i].x - cx);
+    sx += Math.cos(a);
+    sy += Math.sin(a);
+  }
+  let phase = Math.atan2(sy, sx) / n;
+  // Standing on a side or on a corner (a corner straight up, or a side flat on top): every π/n.
+  const up = -Math.PI / 2, every = Math.PI / n;
+  const snapped = up + Math.round((phase - up) / every) * every;
+  if (Math.abs(phase - snapped) < REGULAR_TURN) phase = snapped;
+  const step = (Math.sign(area) || 1) * ((2 * Math.PI) / n);
+  const r = len / (2 * n * Math.sin(Math.PI / n));
+  const out = Array.from({ length: n }, (_, i) => P(cx + r * Math.cos(phase + i * step), cy + r * Math.sin(phase + i * step)));
+  return nearlyRegular || polylineError(pts, out, true) / diag <= REGULAR_FIT ? out : null;
+}
+
 function detectPolygon(pts: Point[], diag: number, closed: boolean): SnappedShape | null {
   const ring = closed ? [...pts, pts[0]] : pts;
   let v = rdp(ring, Math.max(5, diag * 0.085));
@@ -270,6 +323,9 @@ function detectPolygon(pts: Point[], diag: number, closed: boolean): SnappedShap
 
   let kind: ShapeKind = closed ? (v.length === 3 ? 'triangle' : 'polygon') : 'polyline';
   let out = v.map((p) => P(p.x, p.y));
+
+  const regular = closed ? regularPolygon(v, pts, diag) : null;
+  if (regular) return { kind: v.length === 4 ? 'rectangle' : kind, points: regular, closed, confidence: 1 - err / 0.05, regular: true };
 
   if (closed && v.length === 4) {
     const right = [0, 1, 2, 3].every((i) => Math.abs(angleAt(v[(i + 3) % 4], v[i], v[(i + 1) % 4]) - Math.PI / 2) < (18 * Math.PI) / 180);

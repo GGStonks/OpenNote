@@ -119,6 +119,10 @@ text (App.tsx `importExternal`).
   the fonts and images in the file: images mean a PDF page went in as a picture),
   `--only pdfinsert --shots <dir>`,
   `--only pdfthumb --shots <dir>` (a PDF page's paper colour on its library card).
+- Notability `.ntb` (Notability 16's files; `src/import/ntb.ts` with `flatbuffer.ts`): a FlatBuffers
+  log of records, positions per page; specified at the end of `docs/notability-note-format.md`
+  (keep in step). Shares the .note importer's stroke builder (`strokeFromLine`) and text layout
+  (`layOut`). Check: `--only nbcompare --notes <file.ntb>` against the file's `thumbnail.png`.
 - Notability (`src/import/notability.ts` with `zip.ts`, `plist.ts`, `images.ts`): what it reads is
   specified in `docs/notability-note-format.md`; keep the two in step. Each curve is a chain of cubic
   Béziers with one fractional width per segment end; drawn width = curveswidth x fractional width;
@@ -216,6 +220,11 @@ show the iPad's compositing cost).
 - Hold to snap: the pen must be held still `PEN_HOLD_MS` (1 s; the Draw tool `SHAPE_HOLD_MS`, 0.45 s)
   and its snapped shape keeps the handwriting's median drawn width (`snapWidth`): resting the pen
   half a second at the end of a fraction bar snapped it to a thinner line that jumped. `--only penhold`.
+  The highlighter, eraser and lasso snap too (armHoldToSnap): the eraser then puts back what its
+  drawn line erased and erases along the shape (`eraseAlongSnapped`, again as the pen sizes it), the
+  lasso selects with the shape. A closed polygon drawn nearly regular becomes the regular one
+  (shapeRecognition.ts `regularPolygon`: equilateral triangle, square, regular pentagon…; a square
+  keeps its sides equal while sized, SnapAdjust `regular`). `--only toolhold`.
 - Menus, popovers and pop-ups are kept on the screen on every device (`src/components/onScreen.tsx`:
   `OnScreen` / `useOnScreen`): after layout each is measured against the visible screen less the safe
   area, shortened by its button (it scrolls) or else moved in, again on any resize. New floating

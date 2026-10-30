@@ -11,8 +11,10 @@ export interface Picture {
 }
 
 export interface PictureOptions {
-  /** The part of the source image to keep (source px). */
+  /** The part of the source image to keep (source px, or units of `cropUnit`). */
   crop?: { x: number; y: number; w: number; h: number } | null;
+  /** The size `crop` is measured against when not the image's own pixels (.ntb: the picture's logical size). */
+  cropUnit?: { w: number; h: number } | null;
   flipH?: boolean;
   flipV?: boolean;
   /** Longest side of the result (px). */
@@ -38,7 +40,8 @@ function decode(blob: Blob): Promise<HTMLImageElement> {
 export async function loadPicture(blob: Blob, o: PictureOptions = {}): Promise<Picture> {
   const img = await decode(blob);
   const iw = img.naturalWidth, ih = img.naturalHeight;
-  const c0 = o.crop && o.crop.w > 0 && o.crop.h > 0 ? o.crop : { x: 0, y: 0, w: iw, h: ih };
+  const ku = o.cropUnit && o.cropUnit.w > 0 && o.cropUnit.h > 0 ? { x: iw / o.cropUnit.w, y: ih / o.cropUnit.h } : { x: 1, y: 1 };
+  const c0 = o.crop && o.crop.w > 0 && o.crop.h > 0 ? { x: o.crop.x * ku.x, y: o.crop.y * ku.y, w: o.crop.w * ku.x, h: o.crop.h * ku.y } : { x: 0, y: 0, w: iw, h: ih };
   const crop = { x: Math.max(0, c0.x), y: Math.max(0, c0.y), w: Math.min(iw - Math.max(0, c0.x), c0.w), h: Math.min(ih - Math.max(0, c0.y), c0.h) };
   const s = Math.min(1, (o.maxSide ?? 2048) / Math.max(crop.w, crop.h));
   const c = document.createElement('canvas');

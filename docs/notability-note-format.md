@@ -1,7 +1,7 @@
-# Notability `.note` file format (as read by OpenNote)
+# Notability `.note` and `.ntb` file formats (as read by OpenNote)
 
-This describes the parts of a Notability note file that OpenNote's importer reads
-(`src/import/notability.ts`). It describes data found in the file, for importing notes into
+This describes the parts of a Notability note file that OpenNote's importers read
+(`src/import/notability.ts`; `.ntb`: `src/import/ntb.ts`, at the end). It describes data found in the file, for importing notes into
 OpenNote, as observed in notes written by Notability 7 to 16 (2018 to 2026). It is not a complete
 description of the format.
 
@@ -194,3 +194,86 @@ the paper's line spacings when the paper has lines. It is often only empty lines
 
 `Recordings/library.plist` (an XML property list) has `recordings`: for each, `filepath` (a file
 in `Recordings/`), `name`, `duration` (seconds) and `createddate`.
+
+# `.ntb` (Notability 16)
+
+Notability 16 also writes notes as `.ntb` files. Read by `src/import/ntb.ts`; checked against a
+real note and its `thumbnail.png` (`npm run bench:ui -- --only nbcompare --notes <file.ntb>`).
+
+## Container
+
+A ZIP holding `version` (`1`), `manifest.json` (`{"appVersion": …}`), `thumbnail.png` (the first
+page), `noteBundle` and the files the note shows, named by a hash of their content:
+`assets/<hash>.<ext>` (pictures; in some files at the top level, and PDFs as `<hash>.pdf`).
+
+## noteBundle
+
+A FlatBuffers buffer without a schema; read by field slot with `src/import/flatbuffer.ts`. All
+values little-endian. "Slot N" is the N-th field of a table's vtable.
+
+Root table: slot 4 the creation time (int64, ms since 1970), slot 6 a vector of **records**. A
+record: slot 0 its id (two uint32), slot 4 its type (uint8), slot 5 its payload (a table).
+Records refer to each other by id. Types read:
+
+| Type | Record |
+| --- | --- |
+| 1 | Document: the paper (the last one counts). |
+| 2 | A PDF: a string slot holding the file's hash (`<hex>.pdf`). |
+| 7 | A text position (an end of a range). |
+| 8 | Text. |
+| 12, 13 | Character style, paragraph style. |
+| 15 | Ink. |
+| 18 | Shape. |
+| 22 | Picture, sticky note or text box. |
+| 25 | Erased: slot 0 a vector of record ids (pairs of uint32) no longer shown. |
+
+A **page reference** is a 12-byte struct whose third uint32 is the page (from 0). Positions are on
+that page: x from its left edge, y from its top, in document units of a page `W` wide.
+
+**Document (1)**: slot 0 → table, slot 0 the title; slot 4 the default font name, slot 5 its
+size; slot 1 → table, slot 0 → layout: slot 3 the page size (2 float32: `W`, `H`), slot 4 four
+float32 (the third: the left margin, where typed text starts), slot 0 → paper: slot 0 the pattern
+(uint8: 0 lines, 1 dots, 2 grid; absent: blank), slot 1 the line spacing (float32, document
+units), slot 4 a colour (RGBA bytes) when not white.
+
+**Pages**: the PDFs, in the order records name them, give one page per PDF page from the first,
+each `W` wide at its PDF page's proportions (a file holding one PDF and no record naming it: that
+PDF); then plain pages `W x H` as far as the content reaches.
+
+**Ink (15)**: slot 0 the page reference, slot 1 the origin (2 float32), slot 2 rotation (radians,
+about the origin), slot 3 a scale (2 float32, for the points and the width), slot 4 the tool
+(1 pencil, 2 highlighter, else pen), slot 5 the line (2 dashed, 3 dotted), slot 7 the colour
+(RGBA), slot 8 the width, slot 9 the path (bytes):
+
+- byte 0 precision (0 half floats, 1 float32), bytes 1–2 the number of nodes (uint16), byte 3
+  the kind (3 cubic, 7 straight); points start at byte 8 (12 for float32).
+- Cubic: the first node, then for each further node a command byte (0 curve to: two control
+  points and the end; 3 move to: one point, starting a new piece, where an eraser cut the stroke),
+  its points (offsets from the origin, before scale and rotation), then the node. A node is 6
+  bytes: the width factor (half float), the force (half float), the opacity (byte; a pencil's
+  varies with the force), one more byte. The first point is the origin itself.
+- Straight: per further point a command byte (6 line to, 7 move to) and the point.
+
+A pencil's recorded width is drawn at 0.45 / 0.68 of it.
+
+**Shape (18)**: slot 0 the page reference, slot 1 the origin, slot 2 rotation, slot 4 the kind,
+slot 5 → shape table, slot 6 the tool (as ink), slot 7 the line, slot 9 the colour, slot 10 the
+width. Kinds: 1 line (shape slot 0 the start, slot 3 the end, slot 1 a control point making it a
+quadratic curve; offsets from the origin), 2 polygon (shape slot 0 the corners, 2 float32 each),
+3 ellipse (shape slot 1 its box size, from the origin).
+
+**Picture, sticky, text box (22)**: slot 2 the page reference, slot 3 the top-left corner of the
+turned box, slot 4 rotation (radians, about the box's centre), slot 6 the size, slot 9 the
+stacking order (uint64 first). A picture: slot 10 → table, slot 0 → asset (slot 0 the file's
+hash, 64 bytes; slot 2 its MIME type), slot 1 the picture's logical size; slot 11 a crop (4
+float32 in logical units). A sticky note: slot 15 → paper, slot 4 its colour. A text box: the text
+records whose container is this record's id.
+
+**Text**: a text record (8) appends slot 1 (a string) to its container, slot 0 (a record id;
+absent: the document's own text, which flows from the top of the first page at the left margin,
+on the paper's lines). A position is a 12-byte struct: a record id and a UTF-16 offset after
+where that record's text starts (type 7 records are positions too). Character styles (12) cover
+slot 0 to slot 1: slot 3 bold, 4 italic, 5 underline, 7 font name, 8 size, 9 colour (RGBA),
+11 strikethrough, each a table holding the value in its slot 0; later records over earlier ones.
+Paragraph styles (13): slot 2 the list level, slot 5 the list kind (1 bullet, 2 numbered,
+3 checklist).

@@ -1442,6 +1442,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** After a hold-snap the pen keeps sizing the shape until it lifts. */
     adjust: SnapAdjust | null;
     holdTimer: ReturnType<typeof setTimeout> | null;
+    /** A snapped eraser's erasing along its shape is waiting for the next frame. */
+    eraseQueued?: boolean;
     lastMove: { x: number; y: number };
     smart: SmartPenState | null;
     pressure: number;
@@ -1542,15 +1544,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ctx.lineJoin = 'round';
       ctx.fillStyle = 'rgba(59,130,246,0.07)';
       ctx.beginPath();
-      ctx.moveTo(d.points[0].x, d.points[0].y);
+      // Held still and snapped: the clean shape, its corners sharp.
+      const pts = d.snapped ? d.snapped.points : d.points;
+      ctx.moveTo(pts[0].x, pts[0].y);
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      // A smooth curve through the midpoints (the points themselves as control points).
-      const pts = d.points;
-      for (let i = 1; i < pts.length; i++) {
-        const a = pts[i - 1], b = pts[i];
-        ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      if (d.snapped) for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      else {
+        // A smooth curve through the midpoints (the points themselves as control points).
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i];
+          ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        }
+        ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
       }
-      ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
       for (const p of pts) {
         minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
       }
@@ -1559,6 +1565,26 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ctx.stroke();
       ctx.restore();
       next = { minX: minX - 2 * k, minY: minY - 2 * k, maxX: maxX + 2 * k, maxY: maxY + 2 * k };
+    }
+    if (d && d.tool === 'eraser' && d.snapped) {
+      // The band a snapped eraser erases along its shape.
+      const r = toolsRef.current.eraserSize;
+      const pts = d.snapped.points;
+      ctx.save();
+      ctx.strokeStyle = 'rgba(148,163,184,0.35)';
+      ctx.lineWidth = 2 * r;
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      if (d.snapped.closed) ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const p of pts) {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      }
+      next = unionRect(next, { minX: minX - r - 2, minY: minY - r - 2, maxX: maxX + r + 2, maxY: maxY + r + 2 });
     }
     const ep = eraserPos.current;
     if (ep && (d?.tool === 'eraser' || !d)) {
@@ -1688,7 +1714,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   /** Strokes the precision eraser made in the current gesture (the fill it leaves of a shape stays). */
   const eraseMade = useRef(new Set<string>());
-  const eraseAt = (x: number, y: number) => {
+  const eraseAt = (x: number, y: number) => eraseAlong([{ x, y }]);
+  /** Erases at each of these points (one change of the page). */
+  const eraseAlong = (at: { x: number; y: number }[]) => {
     const r = toolsRef.current.eraserSize;
     if (toolsRef.current.eraserMode === 'partial') {
       const made = eraseMade.current;
@@ -1698,15 +1726,46 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         return id;
       };
       editor.previewPage(page.id, (p) => {
-        const res = eraseStrokesPartial(p.strokes, x, y, r, makeId, made);
-        return res.changed ? { ...p, strokes: res.strokes } : p;
+        let strokes = p.strokes, changed = false;
+        for (const q of at) {
+          const res = eraseStrokesPartial(strokes, q.x, q.y, r, makeId, made);
+          if (res.changed) [strokes, changed] = [res.strokes, true];
+        }
+        return changed ? { ...p, strokes } : p;
       });
     } else {
       editor.previewPage(page.id, (p) => {
-        const keep = p.strokes.filter((s) => !strokeHitTest(s, x, y, r));
+        const keep = p.strokes.filter((s) => !at.some((q) => strokeHitTest(s, q.x, q.y, r)));
         return keep.length === p.strokes.length ? p : { ...p, strokes: keep };
       });
     }
+  };
+
+  /**
+   * An eraser held still and snapped erases along the clean shape instead of the line drawn: what
+   * the drawn line erased comes back and the shape's outline is erased, again (once a frame) each
+   * time the pen sizes the shape.
+   */
+  const eraseAlongSnapped = (d: NonNullable<typeof drawing.current>) => {
+    if (d.eraseQueued) return;
+    d.eraseQueued = true;
+    requestAnimationFrame(() => {
+      d.eraseQueued = false;
+      if (drawing.current !== d || !d.snapped) return;
+      editor.cancelGesture();
+      editor.beginGesture();
+      eraseMade.current = new Set();
+      const pts = d.snapped.closed ? [...d.snapped.points, d.snapped.points[0]] : d.snapped.points;
+      const step = Math.max(1, toolsRef.current.eraserSize * 0.5);
+      const at = [pts[0]];
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], b = pts[i];
+        const m = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+        for (let k = 1; k <= m; k++) at.push({ x: a.x + ((b.x - a.x) * k) / m, y: a.y + ((b.y - a.y) * k) / m, pressure: 0.5 });
+      }
+      eraseAlong(at);
+      requestRender();
+    });
   };
 
   /**
@@ -1714,12 +1773,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * polygon, line...), which the pen then sizes until it lifts. Pen and Draw tool (smart curve):
    * for the Draw tool the line as drawn is used, already closed when it came back to its start.
    * The pen waits longer (PEN_HOLD_MS): resting it at the end of a stroke for half a second, as one
-   * does writing, snapped fraction bars into straight lines that jumped.
+   * does writing, snapped fraction bars into straight lines that jumped. The highlighter, the
+   * eraser (it then erases along the shape) and the lasso (it selects with the shape) snap too.
    */
   const armHoldToSnap = () => {
     const d = drawing.current;
     const smartCurve = d?.tool === 'shape' && d.smart?.mode === 'curve';
-    if (!d || (d.tool !== 'pen' && !smartCurve) || !toolsRef.current.holdToSnap || d.snapped) return;
+    const snaps = d && (d.tool === 'pen' || d.tool === 'highlighter' || d.tool === 'eraser' || d.tool === 'lasso');
+    if (!d || (!snaps && !smartCurve) || !toolsRef.current.holdToSnap || d.snapped) return;
     if (d.holdTimer) clearTimeout(d.holdTimer);
     d.holdTimer = setTimeout(() => {
       const cur = drawing.current;
@@ -1732,11 +1793,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       const shape = detectShape(source);
       if (shape) {
-        cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind, ...(cur.smart ? {} : { width: snapWidth(cur.points) }) };
+        cur.snapped = { points: shape.points, closed: shape.closed, kind: shape.kind, ...(cur.smart || cur.tool !== 'pen' ? {} : { width: snapWidth(cur.points) }) };
         const pen = cur.points[cur.points.length - 1];
-        cur.adjust = { kind: shape.kind, base: shape.points, closed: shape.closed, pen0: { x: pen.x, y: pen.y } };
+        cur.adjust = { kind: shape.kind, base: shape.points, closed: shape.closed, pen0: { x: pen.x, y: pen.y }, regular: shape.regular };
         retireInk(cur);
         syncInk(cur);
+        if (cur.tool === 'eraser') eraseAlongSnapped(cur);
         haptic('snap');
         requestRender();
       }
@@ -1980,13 +2042,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       }
       if (d.tool === 'eraser') {
         eraserPos.current = pt;
-        eraseAt(pt.x, pt.y);
+        if (!d.snapped) eraseAt(pt.x, pt.y);
       }
     }
     if (snapTick) haptic('snap');
     if (d.snapped && d.adjust) {
       const pen = d.points[d.points.length - 1];
       d.snapped = { ...d.snapped, points: adjustSnappedShape(d.adjust, pen) };
+      if (d.tool === 'eraser') eraseAlongSnapped(d);
+    }
+    if (!d.smart && !d.snapped && (d.tool === 'eraser' || d.tool === 'lasso')) {
+      const last = d.points[d.points.length - 1];
+      if (Math.hypot(last.x - d.lastMove.x, last.y - d.lastMove.y) > 3) {
+        d.lastMove = { x: last.x, y: last.y };
+        armHoldToSnap();
+      }
     }
     if (d.smart?.mode === 'curve' && !d.snapped) {
       const last = d.points[d.points.length - 1];
@@ -2224,7 +2294,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           const bounds = computeBounds(pg, sel);
           if (bounds) setSelection({ ...sel, bounds });
         }
-      } else if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
+      } else if (d.snapped) setSelection(selectInLasso(pageRef.current, d.snapped.points));
+      else if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
     }
     // The committed canvas paints in the same frame as React's commit (layout effect), so the
     // live layer can be cleared on the next frame without flicker.

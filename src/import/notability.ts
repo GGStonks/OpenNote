@@ -36,7 +36,7 @@ export interface NotabilityImport {
 /** How the importer reaches the device (pictures need the web view, PDFs the file store). */
 export interface NotabilityDeps {
   /** Decodes a picture, cut to `crop` (source px) and flipped. */
-  readImage(blob: Blob, o: { crop?: { x: number; y: number; w: number; h: number } | null; flipH?: boolean; flipV?: boolean }): Promise<{ dataUrl: string; w: number; h: number }>;
+  readImage(blob: Blob, o: { crop?: { x: number; y: number; w: number; h: number } | null; cropUnit?: { w: number; h: number } | null; flipH?: boolean; flipV?: boolean }): Promise<{ dataUrl: string; w: number; h: number }>;
   /** Stores a PDF; its id and its pages' sizes (points, rotation applied). */
   storePdf(name: string, bytes: Uint8Array): Promise<{ fileId: string; sizes: { w: number; h: number }[] }>;
   /** A coloured rectangle as an image (stickies, text box backgrounds). */
@@ -44,7 +44,7 @@ export interface NotabilityDeps {
 }
 
 /** OpenNote's page width (px): every page of the note is this wide. */
-const PAGE_PX = 816;
+export const PAGE_PX = 816;
 /** Document points of a page when the note does not say (iPad, the most common). */
 const DEFAULT_W = 565;
 /** Plain pages: height / width (612 x 803.25 pt in Notability's PDF export). */
@@ -54,7 +54,7 @@ const X_INSET = 20 / 768;
 /** A PDF layout entry with this page number (or more) is a blank page (INT64_MAX; 0x7fffffff in old files). */
 const BLANK_PAGE = 2 ** 31 - 1;
 /** Text inside a text box starts this far from its corner (document points). */
-const BOX_PAD = { x: 5, y: 2 };
+export const BOX_PAD = { x: 5, y: 2 };
 /** Line height of Notability's text (Helvetica Neue's), a multiple of the font size. */
 const LINE = 1.2;
 
@@ -63,9 +63,9 @@ const STYLE_HIGHLIGHTER = 4;
 const STYLE_NOT_INK: Record<number, string> = { 1: 'selection', 2: 'partial eraser', 6: 'hidden', 7: 'eraser' };
 
 /** Notability's paper textures (paper01-15), as their average colour: Legacy:N and paperIndex N - 1. */
-const TEXTURES = ['', '#FCF9F4', '#FCF5C9', '#DADBED', '#D4EBCF', '#FCC0B6', '#E9DBB0', '#DFE9EC', '#717171', '#EFCDA2', '#88689B', '#5F4534', '#47454C', '#FFFFFF', '#000F46', '#000000'];
+export const TEXTURES = ['', '#FCF9F4', '#FCF5C9', '#DADBED', '#D4EBCF', '#FCC0B6', '#E9DBB0', '#DFE9EC', '#717171', '#EFCDA2', '#88689B', '#5F4534', '#47454C', '#FFFFFF', '#000F46', '#000000'];
 
-const MIME: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', heic: 'image/heic', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp' };
+export const MIME: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', heic: 'image/heic', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp' };
 
 type Obj = { [k: string]: PlistValue };
 const isObj = (v: PlistValue | undefined): v is Obj => !!v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Uint8Array) && !(v instanceof PlistDate);
@@ -452,32 +452,38 @@ function curvesToStrokes(ar: KeyedArchive, store: Obj, tf: Tf, ws: number, notIn
       // Points left over that do not make a whole segment: straight on.
       for (let i = 3 * j + (line.length ? 1 : 0); i < n; i++) line.push({ ...xy(i), d: base * fw(Math.min(j, k - 1)) });
     }
-    if (!line.length) {
-      out.push(null);
-      continue;
-    }
-    const ds = line.map((q) => Math.max(0.3, q.d));
-    const dMax = Math.max(...ds), dMin = Math.min(...ds);
-    const dash = dashes.get(c);
-    const common = { id: newId('stroke'), createdAt: 0, color, lineStyle: dash ?? ('solid' as const) };
-    const flat = (q: { x: number; y: number }, i: number): Point => ({ x: q.x, y: q.y, pressure: 0.5, t: i * 8 });
-
-    if (style === STYLE_HIGHLIGHTER) {
-      // OpenNote draws highlighters 5.5 x their width, as see-through as the curve's colour says.
-      // One width (OpenNote's highlighters have one): the body's, not a wider blob at an end.
-      const body = [...ds].sort((x, y) => x - y)[ds.length >> 1];
-      out.push({ ...common, tool: 'highlighter', width: body / 5.5, opacity: 1, penStyle: 'ballpoint', modeled: 'uniform', highlightAlpha: alpha < 1 ? Math.max(0.15, alpha) : 0.42, points: line.map(flat) });
-    } else if (dash || dMax - dMin < 0.02 * dMax) {
-      // Constant width (and dashed lines): a ballpoint line exactly that wide (strokeWidth = width x 1.5).
-      out.push({ ...common, tool: 'pen', width: dMax / 1.5, opacity: alpha, penStyle: 'ballpoint', modeled: 'uniform', points: line.map(flat) });
-    } else {
-      // Variable width: each point's width as a share of the widest ('proportional'; a fountain
-      // line is width x 1.4 wide at its widest).
-      const points: Point[] = ds.map((d, i) => ({ x: line[i].x, y: line[i].y, pressure: d / dMax, t: i * 8 }));
-      out.push({ ...common, tool: 'pen', width: dMax / 1.4, opacity: alpha, penStyle: 'fountain', modeled: 'proportional', points });
-    }
+    out.push(line.length ? strokeFromLine(line, { color, alpha, highlighter: style === STYLE_HIGHLIGHTER, dash: dashes.get(c) }) : null);
   }
   return out;
+}
+
+/**
+ * A stroke from its centre line (OpenNote px) and the drawn width at each point (`d`, px): a
+ * highlighter, a constant-width line or a variable-width one (shared with the .ntb importer).
+ */
+export function strokeFromLine(
+  line: { x: number; y: number; d: number }[],
+  o: { color: string; alpha: number; highlighter: boolean; dash?: 'dashed' | 'dotted' }
+): Stroke {
+  const { color, alpha, dash } = o;
+  const ds = line.map((q) => Math.max(0.3, q.d));
+  const dMax = Math.max(...ds), dMin = Math.min(...ds);
+  const common = { id: newId('stroke'), createdAt: 0, color, lineStyle: dash ?? ('solid' as const) };
+  const flat = (q: { x: number; y: number }, i: number): Point => ({ x: q.x, y: q.y, pressure: 0.5, t: i * 8 });
+  if (o.highlighter) {
+    // OpenNote draws highlighters 5.5 x their width, as see-through as the curve's colour says.
+    // One width (OpenNote's highlighters have one): the body's, not a wider blob at an end.
+    const body = [...ds].sort((x, y) => x - y)[ds.length >> 1];
+    return { ...common, tool: 'highlighter', width: body / 5.5, opacity: 1, penStyle: 'ballpoint', modeled: 'uniform', highlightAlpha: alpha < 1 ? Math.max(0.15, alpha) : 0.42, points: line.map(flat) };
+  }
+  if (dash || dMax - dMin < 0.02 * dMax) {
+    // Constant width (and dashed lines): a ballpoint line exactly that wide (strokeWidth = width x 1.5).
+    return { ...common, tool: 'pen', width: dMax / 1.5, opacity: alpha, penStyle: 'ballpoint', modeled: 'uniform', points: line.map(flat) };
+  }
+  // Variable width: each point's width as a share of the widest ('proportional'; a fountain
+  // line is width x 1.4 wide at its widest).
+  const points: Point[] = ds.map((d, i) => ({ x: line[i].x, y: line[i].y, pressure: d / dMax, t: i * 8 }));
+  return { ...common, tool: 'pen', width: dMax / 1.4, opacity: alpha, penStyle: 'fountain', modeled: 'proportional', points };
 }
 
 // ---------------------------------------------------------------------------------------- shapes
@@ -730,7 +736,7 @@ async function mediaPicture(ar: KeyedArchive, m: PlistValue, entry: (rel: string
 
 // ----------------------------------------------------------------------------------------- text
 
-interface Run {
+export interface Run {
   start: number;
   end: number;
   font: string;
@@ -818,7 +824,7 @@ function textWidth(text: string, px: number, family: TextFont, bold: boolean): n
  * boxes have one style each). `grid`: lines snap to the paper's line spacing (document points),
  * as Notability lays out a note's own typed text.
  */
-function layOut(
+export function layOut(
   t: { text: string; runs: Run[] },
   at: { x: number; y: number; w: number },
   s: number,

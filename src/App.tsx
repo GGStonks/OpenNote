@@ -15,6 +15,7 @@ import { THEMES, applyTheme } from './theme';
 import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
 import { importNotability } from './import/notability';
+import { importNtb } from './import/ntb';
 import { importPdf, storePdf } from './import/pdf';
 import { loadPicture, solidImage } from './import/images';
 import { crashLog } from './services/crashLog';
@@ -217,8 +218,10 @@ export const App: React.FC = () => {
           crashLog.event('import', { kind: 'pdf', pages: pdf.pages, kb: Math.round(file.size / 1024) });
           upsertLocal(await saveNote(last, false));
           made++;
-        } else if (/\.note$/i.test(file.name)) {
-          const nb = await importNotability(new Uint8Array(await file.arrayBuffer()), file.name, {
+        } else if (/\.(note|ntb)$/i.test(file.name)) {
+          // .note: the classic Notability file; .ntb: Notability 16's (src/import/ntb.ts).
+          const importer = /\.ntb$/i.test(file.name) ? importNtb : importNotability;
+          const nb = await importer(new Uint8Array(await file.arrayBuffer()), file.name, {
             readImage: (blob, o) => loadPicture(blob, o),
             storePdf: (name, bytes) =>
               storePdf(bytes, name, async (wrong) => window.prompt(`${wrong ? 'Wrong password. ' : ''}A PDF in “${file.name}” is protected by a password:`, '')),
@@ -235,7 +238,7 @@ export const App: React.FC = () => {
             sheets: nb.sheets,
           };
           upsertLocal(await saveNote(last, false));
-          crashLog.event('import', { kind: 'notability', pages: nb.sheets.length, ...nb.counts, recordings: nb.recordings.length, skipped: nb.skipped.length, kb: Math.round(file.size / 1024) });
+          crashLog.event('import', { kind: /\.ntb$/i.test(file.name) ? 'notability-ntb' : 'notability', pages: nb.sheets.length, ...nb.counts, recordings: nb.recordings.length, skipped: nb.skipped.length, kb: Math.round(file.size / 1024) });
           const noteId = last.id;
           for (const r of nb.recordings) {
             await saveRecording({ id: newId('rec'), noteId, createdAt: r.createdAt, durationMs: r.durationMs, mimeType: r.mime }, new Blob([r.bytes as Uint8Array<ArrayBuffer>], { type: r.mime }));
@@ -265,7 +268,7 @@ export const App: React.FC = () => {
     }
     await reload();
     const notImported = partial.length ? `\nLeft out:\n${partial.join('\n')}` : '';
-    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Notability .note, .opennote, images, .txt / .md / .tex.${notImported}`);
+    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Notability .note / .ntb, .opennote, images, .txt / .md / .tex.${notImported}`);
     else if (partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`);
     if (!failed.length && files.length === 1 && last) setOpenNoteId(last.id);
     else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);

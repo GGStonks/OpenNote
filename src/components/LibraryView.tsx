@@ -925,7 +925,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
               <Upload className="w-4 h-4" />
               <span className="flex-1">
                 Import file…
-                <span className="block text-[11px] text-gray-400 font-normal">PDF, Notability (.note), .opennote, images, .txt / .md / .tex</span>
+                <span className="block text-[11px] text-gray-400 font-normal">PDF, Notability (.note, .ntb), .opennote, images, .txt / .md / .tex</span>
               </span>
             </button>
             <button className={MENU_ITEM} onClick={() => { setFabMenu(false); startCreateFolder(current); if (collapsed) setPrefs({ sidebarCollapsed: false }); }}>

@@ -1154,7 +1154,7 @@ if (ONLY.has('pdfimport') && arg('shots')) {
   await sleep(3000);
   await page.screenshot({ path: join(arg('shots'), 'pdf-library.png') });
 }
-// --only nbcompare --shots <dir> --notes <a.note,b.note,…>: Notability notes imported through the + menu,
+// --only nbcompare --shots <dir> --notes <a.note,b.ntb,…>: Notability notes (.note, .ntb) imported through the + menu,
 // each page screenshotted (nb-<note>-<page>.png) beside Notability's own PDF export of it when a
 // <note>.pdf lies next to the note (nbcmp-<note>-<page>.png).
 if (ONLY.has('nbcompare') && arg('shots')) {
@@ -1162,14 +1162,15 @@ if (ONLY.has('nbcompare') && arg('shots')) {
   const { execFileSync } = await import('node:child_process');
   await page.setViewportSize({ width: 860, height: 1700 });
   for (const file of arg('notes', '').split(',').filter(Boolean)) {
-    const name = file.split('/').pop().replace(/\.note$/, '');
+    const ext = /\.ntb$/i.test(file) ? 'ntb' : 'note';
+    const name = file.split('/').pop().replace(/\.(note|ntb)$/i, '');
     await page.reload();
     await sleep(2000);
-    await page.locator('input[type=file]').first().setInputFiles({ name: `${name}.note`, mimeType: 'application/octet-stream', buffer: readFileSync(file) });
+    await page.locator('input[type=file]').first().setInputFiles({ name: `${name}.${ext}`, mimeType: 'application/octet-stream', buffer: readFileSync(file) });
     await page.waitForSelector('[data-sheet]', { timeout: 30000 });
     await sleep(2500);
     const n = await page.evaluate(() => document.querySelectorAll('[data-sheet]').length);
-    const ref = file.replace(/\.note$/, '.pdf');
+    const ref = file.replace(/\.(note|ntb)$/i, '.pdf');
     const limit = Number(arg('pages', 3));
     for (let i = 0; i < Math.min(n, limit); i++) {
       await page.evaluate((i) => document.querySelector(`[data-sheet="${i}"]`).scrollIntoView({ block: 'start' }), i);
@@ -2288,6 +2289,77 @@ if (ONLY.has('penhold')) {
     const ok = hold < 1000 ? !st?.isShape : st?.isShape && st.kind === 'line';
     console.log(`penhold held ${hold} ms: ${st?.isShape ? `snapped (${st.kind}), width ${st.width.toFixed(2)} = ${(st.width / penWidth).toFixed(2)} x the pen's` : 'handwriting'}: ${ok ? 'ok' : 'WRONG'}`);
   }
+}
+// --only toolhold [--shots <dir>]: draw & hold with each tool. A rough square with the pen and a
+// rough equilateral triangle with the highlighter, held still 1.2 s, must become the regular shape
+// (sides equal); the eraser held still erases along the clean line; the lasso selects with its
+// clean shape.
+if (ONLY.has('toolhold')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  let seed = 5;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 2 - 1;
+  const strokesNow = () => page.evaluate(async () => {
+    const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+    const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
+    db.close();
+    const n = notes.find((x) => x.title === 'Bench note');
+    // Stored points are packed: x, y, pressure, t, alt, az per point (db.ts).
+    const xy = (st) => (st.pts ? Array.from({ length: st.pts.length / 6 }, (_, i) => [st.pts[i * 6], st.pts[i * 6 + 1]]) : (st.points ?? []).map((q) => [q.x, q.y]));
+    return (n?.pages ?? []).flatMap((pg) => pg.strokes ?? []).map((st) => ({ id: st.id, tool: st.tool, isShape: !!st.isShape, kind: st.shapeKind ?? null, points: xy(st), createdAt: st.createdAt ?? 0 }));
+  });
+  /** A rough polygon (corners moved a little, sides wobbling), drawn and held still `hold` ms. */
+  const drawHeld = async (corners, hold) => {
+    const pts = [];
+    for (let i = 0; i < corners.length; i++) {
+      const a = corners[i], b = corners[(i + 1) % corners.length];
+      for (let t = 0; t < 1; t += 0.08) pts.push([a[0] + (b[0] - a[0]) * t + rnd() * 1.5, a[1] + (b[1] - a[1]) * t + rnd() * 1.5]);
+    }
+    pts.push([corners[0][0] + 2, corners[0][1] + 1]);
+    await mouse('mousePressed', pts[0][0], pts[0][1], 0.5);
+    for (const [x, y] of pts.slice(1)) { await mouse('mouseMoved', x, y, 0.5); await sleep(10); }
+    await sleep(hold);
+    const [x, y] = pts[pts.length - 1];
+    await mouse('mouseReleased', x, y, 0);
+    await sleep(1200);
+  };
+  const regular = (st) => {
+    const v = st.points.slice(0, st.kind === 'rectangle' ? 4 : 3);
+    const sides = v.map((p, i) => Math.hypot(v[(i + 1) % v.length][0] - p[0], v[(i + 1) % v.length][1] - p[1]));
+    return ((Math.max(...sides) - Math.min(...sides)) / Math.max(...sides) * 100).toFixed(2) + '%';
+  };
+  const tool = async (title) => { await page.locator(`button[title^="${title}"]`).first().click(); await sleep(300); };
+  // Pen: a rough square.
+  await tool('Pen');
+  await drawHeld([[230, 520], [345, 524], [342, 640], [228, 636]], 1300);
+  let all = await strokesNow();
+  let last = all.sort((a, b) => b.createdAt - a.createdAt)[0];
+  console.log(`toolhold pen: ${last.isShape ? `${last.kind}, sides off by ${regular(last)}` : 'handwriting'}`);
+  // Highlighter: a rough equilateral triangle.
+  await tool('Highlighter');
+  await drawHeld([[520, 520], [585, 633], [452, 630]], 1300);
+  all = await strokesNow();
+  last = all.sort((a, b) => b.createdAt - a.createdAt)[0];
+  console.log(`toolhold highlighter: ${last.tool} ${last.isShape ? `${last.kind}, sides off by ${regular(last)}` : 'not snapped'}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'toolhold-shapes.png') });
+  // Eraser: a wobbly line across the handwriting, held: what it erases lies along the straight line.
+  const before = await strokesNow();
+  await tool('Eraser');
+  await mouse('mousePressed', 120, 330, 0.5);
+  for (let i = 1; i <= 40; i++) { await mouse('mouseMoved', 120 + i * 15, 330 + Math.sin(i / 3) * 18, 0.5); await sleep(12); }
+  await sleep(1300);
+  await mouse('mouseReleased', 720, 330, 0);
+  await sleep(1200);
+  const after = await strokesNow();
+  const gone = before.filter((b) => !after.some((a) => a.id === b.id));
+  console.log(`toolhold eraser: ${gone.length} strokes erased (of ${before.length})`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'toolhold-eraser.png') });
+  // Lasso: a rough loop around part of the page, held: the selection's outline is the clean shape.
+  await tool('Lasso');
+  await drawHeld([[110, 700], [420, 705], [418, 860], [108, 856]], 1300);
+  const selected = await page.evaluate(() => document.body.innerText.match(/Convert|LaTeX|Copy/g)?.length ?? 0);
+  console.log(`toolhold lasso: selection toolbar ${selected ? 'shown' : 'missing'}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'toolhold-lasso.png') });
 }
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
