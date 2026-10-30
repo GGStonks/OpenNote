@@ -332,4 +332,5 @@ show the iPad's compositing cost).
   after the shell's line cleared; `--native --blank --only liftshots`).
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
+- `npm run bench:hooks` — real recordings: a stroke's end turning back where the pen did not. The points given to the engine (strokeRenderer.ts `enginePoints`) leave out a pressured stroke's trailing samples without force (the Pencil in the air after its lift) and a finger / mouse stroke's lift sample when it turns back (Android reports it ~25 ms late, a few px back along the path): both made a hook at the end of quick strokes
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release

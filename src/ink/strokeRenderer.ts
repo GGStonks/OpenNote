@@ -120,9 +120,46 @@ export function penEnd(s: Stroke): Point | null {
   return s.penEnd && !s.modeled && !s.isShape && s.points.length > 1 ? s.points[s.points.length - 1] : null;
 }
 
-/** The points the ink engine models: all but the pen end. */
+/**
+ * The points the ink engine models: all but the pen end, and without the trailing samples that
+ * have no force (the Pencil in the air after it lifted; the densifier fills the gap up to its lift
+ * sample with more of them). The engine never inks those, but they still took part in settling its
+ * last point: a fast stroke ending at speed got a last point several px back, the line's end
+ * hooking back on itself (5.8 px on a recorded flick). Strokes without real pressure (mouse,
+ * finger) keep them: their zero-force last sample is ink.
+ */
 function enginePoints(s: Stroke): Point[] {
-  return penEnd(s) ? s.points.slice(0, -1) : s.points;
+  const pts = penEnd(s) ? s.points.slice(0, -1) : s.points;
+  if (s.modeled || s.isShape) return pts;
+  if (!hasRealPressure(pts)) return withoutBackwardLift(pts);
+  let k = pts.length;
+  while (k > 1 && !(pts[k - 1].pressure > 0)) k--;
+  return k === pts.length ? pts : pts.slice(0, k);
+}
+
+/** A lift sample turning more than this from the line's last direction is left out (cosine). */
+const LIFT_TURN_COS = 0.5;
+
+/**
+ * A stroke without real pressure (finger, mouse) ends with the lift's own sample, which CanvasPage
+ * marks with pressure 0 (every other point has 0.5). Android's web view reports the lift ~25 ms
+ * after the last move and up to a few px back along the path, even when the finger was moving
+ * fast; drawn as ink, the engine bent the line's end back to reach it, a hook on quick strokes.
+ * It is left out when it turns more than 60° from the direction of the line's last 6 px; one
+ * that goes on (where the lift carries the true end) stays.
+ */
+function withoutBackwardLift(pts: Point[]): Point[] {
+  const n = pts.length;
+  if (n < 3 || pts[n - 1].pressure !== 0 || !(pts[n - 2].pressure > 0)) return pts;
+  let j = n - 2, d = 0;
+  while (j > 0 && d < 6) {
+    d += Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
+    j--;
+  }
+  const bx = pts[n - 2].x - pts[j].x, by = pts[n - 2].y - pts[j].y, bl = Math.hypot(bx, by);
+  const lx = pts[n - 1].x - pts[n - 2].x, ly = pts[n - 1].y - pts[n - 2].y, ll = Math.hypot(lx, ly);
+  if (bl < 1 || ll < 0.05) return pts;
+  return (bx * lx + by * ly) / (bl * ll) < LIFT_TURN_COS ? pts.slice(0, -1) : pts;
 }
 
 /**
