@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Circle, ClipboardCopy, ClipboardPaste, CopyPlus, GripVertical, Palette, Plus, Scissors, Trash2, X } from 'lucide-react';
+import { Bookmark, CheckCircle2, Circle, ClipboardCopy, ClipboardPaste, CopyPlus, GripVertical, Palette, Plus, Scissors, Trash2, X } from 'lucide-react';
 import { NoteDocument, NotePage } from '../types';
 import { SetupPatch, hasOwnSetup } from '../editor/pageSetup';
 import { SheetBox, SurfaceLayout, sheetView } from '../editor/sheets';
@@ -33,6 +33,8 @@ interface PageManagerProps {
   onPaste: () => void;
   canPaste: boolean;
   onSetup: (ids: ReadonlySet<string>, patch: SetupPatch | 'reset') => void;
+  /** Bookmarks the pages (or takes their bookmarks off). */
+  onBookmark: (ids: ReadonlySet<string>, on: boolean) => void;
   onAddPage: () => void;
   onClose: () => void;
 }
@@ -75,6 +77,8 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
   /** The surface, following edits at most every THUMB_THROTTLE_MS. */
   const surface = useThrottled(doc.pages[0], THUMB_THROTTLE_MS);
   const [selectMode, setSelectMode] = useState(false);
+  /** Only bookmarked pages listed. */
+  const [onlyMarked, setOnlyMarked] = useState(false);
   const [paperOpen, setPaperOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const [listEl, setListEl] = useState<HTMLDivElement | null>(null);
@@ -249,10 +253,20 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
         >
           {selectMode ? 'Done' : 'Select'}
         </button>
+        <button
+          onClick={() => setOnlyMarked(!onlyMarked)}
+          className={`p-1 rounded-lg ${onlyMarked ? 'bg-red-500 text-white' : 'text-gray-400 hover:text-gray-600'}`}
+          title={onlyMarked ? 'Show all pages' : 'Show bookmarked pages only'}
+        >
+          <Bookmark className="w-4 h-4" fill={onlyMarked ? 'currentColor' : 'none'} />
+        </button>
         <button onClick={p.onClose} className="p-1 text-gray-400 hover:text-gray-600 rounded-lg" title="Close">
           <X className="w-5 h-5" />
         </button>
       </div>
+      {onlyMarked && !pages.some((pg) => pg.bookmarked) && (
+        <div className="px-4 py-6 text-xs text-gray-500 text-center leading-snug">No bookmarked pages. Bookmark a page from the … menu, or select pages here and tap the bookmark below.</div>
+      )}
 
       <div
         ref={(el) => {
@@ -263,6 +277,7 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
         style={{ touchAction: drag ? 'none' : 'pan-y' }}
       >
         {pages.map((pg, i) => {
+          if (onlyMarked && !pg.bookmarked) return null;
           const setup = setups[i];
           const isSel = selected.has(pg.id);
           const isCur = i === p.currentPage;
@@ -290,6 +305,11 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
                   }`}
                 >
                   <LiveThumb surface={surface} box={setup} root={listEl} />
+                  {pg.bookmarked && (
+                    <svg className="absolute right-2 top-0 pointer-events-none" width="12" height="18" viewBox="0 0 22 34" aria-label="Bookmarked">
+                      <path d="M0 0h22v34l-11-8-11 8z" fill="#E5484D" />
+                    </svg>
+                  )}
                   {(selectMode || count > 1) && (
                     <span className="absolute right-1 bottom-1 text-blue-600 bg-white rounded-full">
                       {isSel ? <CheckCircle2 className="w-5 h-5" /> : <Circle className="w-5 h-5 text-gray-400" />}
@@ -350,6 +370,14 @@ export const PageManager: React.FC<PageManagerProps> = (p) => {
       <div className="flex items-center justify-between px-1.5 py-1.5 border-t border-gray-200 dark:border-gray-800 text-gray-700 dark:text-gray-200 pb-[calc(6px+var(--sa-bottom))]">
         <button disabled={!count} onClick={() => setPaperOpen(!paperOpen)} className={`${BAR_BTN} ${paperOpen ? 'bg-blue-600 text-white' : ''}`} title="Paper of the selected pages">
           <Palette className="w-5 h-5" />
+        </button>
+        <button
+          disabled={!count}
+          onClick={() => p.onBookmark(selected, !pages.filter((pg) => selected.has(pg.id)).every((pg) => pg.bookmarked))}
+          className={BAR_BTN}
+          title={count && pages.filter((pg) => selected.has(pg.id)).every((pg) => pg.bookmarked) ? 'Remove bookmark' : 'Bookmark'}
+        >
+          <Bookmark className="w-4 h-4" fill={count && pages.filter((pg) => selected.has(pg.id)).every((pg) => pg.bookmarked) ? 'currentColor' : 'none'} />
         </button>
         <button disabled={!count} onClick={() => p.onDuplicate(selected)} className={BAR_BTN} title="Duplicate">
           <CopyPlus className="w-5 h-5" />

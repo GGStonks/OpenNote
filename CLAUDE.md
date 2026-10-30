@@ -119,6 +119,20 @@ text (App.tsx `importExternal`).
   the fonts and images in the file: images mean a PDF page went in as a picture),
   `--only pdfinsert --shots <dir>`,
   `--only pdfthumb --shots <dir>` (a PDF page's paper colour on its library card).
+- Text boxes are rich text (`src/editor/richText.ts`): one HTML for the page, the editor (a
+  contenteditable holding exactly that HTML, written once per editing session and read back on
+  every change: React must not re-render its content), thumbnails and the SVG export
+  (RICH_TEXT_CSS goes into the SVG). Paragraphs carry list kind / level / checked / number / align
+  (`TextBlock.paras`, one per line of `text`), words their overrides (`spans`: weight, slant, lines,
+  colour, typeface, size); the box has `background`, `radius`, `padding` (its x/y/width are the
+  outside). The editor handles Enter / Backspace / Tab / paste itself (beforeinput); the formatting
+  bar reaches it through `editor/textEditing.ts`. Checkboxes are ticked by a tap with any writing
+  tool (CanvasPage `toggleCheck`). Typefaces: `TEXT_FONTS` (system font stacks, nothing bundled;
+  `fontFromName` maps PostScript names for the importers). `--only richtext`.
+- Pages can be bookmarked (PageSheet `bookmarked`: a ribbon on the page, the … menu, the Pages
+  panel's filter and button; imported from Notability).
+- The colour pickers' eyedropper (`services/eyedropper.ts`, Editor `colourAt`): the next tap on
+  the page gives the colour of the ink, text, formula, picture pixel, PDF pixel or paper there.
 - Notability `.ntb` (Notability 16's files; `src/import/ntb.ts` with `flatbuffer.ts`): a FlatBuffers
   log of records, positions per page; specified at the end of `docs/notability-note-format.md`
   (keep in step). Shares the .note importer's stroke builder (`strokeFromLine`) and text layout

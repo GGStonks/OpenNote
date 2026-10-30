@@ -130,3 +130,6 @@
    the colours and added sideways scrolling). */
 .no-scrollbar { scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* The colour pickers' eyedropper (Editor colourAt): menus fade and let taps through to the page. */
+.on-eyedropping [data-ui-panel], .on-eyedropping [data-text-format] { opacity: 0.18 !important; pointer-events: none !important; transition: opacity 0.15s; }

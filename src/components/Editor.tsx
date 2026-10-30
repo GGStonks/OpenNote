@@ -6,7 +6,8 @@ import {
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
 import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
-import { markMoved } from '../ink/strokeRenderer';
+import { markMoved, strokeHitTest } from '../ink/strokeRenderer';
+import { setColourPicker } from '../services/eyedropper';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings, paperHex } from './CanvasPage';
 import { Toolbar } from './Toolbar';
@@ -16,7 +17,7 @@ import { TextFormatBar } from './TextFormatBar';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
 import { MAX_ZOOM, PULL_THRESHOLD, SavedView, useViewport } from '../editor/useViewport';
-import { Selection, computeBounds, isEmptySelection, removeSelection } from '../editor/selection';
+import { Selection, computeBounds, isEmptySelection, removeSelection, textHeight } from '../editor/selection';
 import { AppSettings, saveSettings } from '../settings';
 import { ConversionMode, convertImage } from '../services/vlmService';
 import { crashLog } from '../services/crashLog';
@@ -29,7 +30,7 @@ import { TikzLabel, convertStrokesToTikz, snapStroke } from '../services/shapeRe
 import { FILL_OPTIONS, FillSwatch } from './Toolbar';
 import { SetupPatch } from '../editor/pageSetup';
 import {
-  SheetBox, appendBlankSheet, copySheets, deleteSheets, duplicateSheets, insertSheets, moveSheets, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
+  SheetBox, appendBlankSheet, copySheets, deleteSheets, duplicateSheets, insertSheets, moveSheets, setSheetsBookmarked, pasteSheets, printedSheets, setNotePaper, setSheetsSetup, trailingSheetFor,
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
@@ -470,6 +471,56 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     };
   }, [scrollEl, saveView]);
 
+  // The colour pickers' eyedropper (services/eyedropper.ts): the next tap on the page gives its
+  // colour; a tap on a menu or bar instead cancels it (and does what it does).
+  const colourAtRef = useRef<(cx: number, cy: number) => Promise<string | null>>(async () => null);
+  useEffect(() => {
+    setColourPicker(
+      () =>
+        new Promise<string | null>((resolve) => {
+          showToast('Tap the page to take its colour');
+          // Menus fade and let taps through to the page under them while picking.
+          document.documentElement.classList.add('on-eyedropping');
+          const end = () => document.documentElement.classList.remove('on-eyedropping');
+          const swallow = (e: Event) => {
+            e.preventDefault();
+            e.stopPropagation();
+            e.stopImmediatePropagation();
+          };
+          const done = () => {
+            window.removeEventListener('pointerdown', onDown, true);
+            // The tap's pointerup and click must not reach the page either.
+            setTimeout(() => {
+              window.removeEventListener('pointerup', swallow, true);
+              window.removeEventListener('click', swallow, true);
+            }, 400);
+          };
+          const onDown = (e: PointerEvent) => {
+            const target = e.target as HTMLElement | null;
+            if (target?.closest?.('header, aside, [role="dialog"]')) {
+              window.removeEventListener('pointerdown', onDown, true);
+              window.removeEventListener('pointerup', swallow, true);
+              window.removeEventListener('click', swallow, true);
+              end();
+              resolve(null);
+              return;
+            }
+            swallow(e);
+            done();
+            end();
+            void colourAtRef.current(e.clientX, e.clientY).then((c) => {
+              if (c) showToast(`Colour ${c} taken`);
+              resolve(c);
+            });
+          };
+          window.addEventListener('pointerdown', onDown, true);
+          window.addEventListener('pointerup', swallow, true);
+          window.addEventListener('click', swallow, true);
+        })
+    );
+    return () => setColourPicker(null);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const jumpToPage = useCallback(
     (k: number) => {
       const el = scrollRef.current, outer = outerRef.current;
@@ -799,6 +850,12 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     showToast(`Duplicated ${ids.size} page${ids.size > 1 ? 's' : ''}`);
   };
 
+  const bookmarkPages = (ids: ReadonlySet<string>, on: boolean) => {
+    if (!ids.size) return;
+    editor.commit((d) => setSheetsBookmarked(d, ids, on));
+    showToast(on ? `Bookmarked ${ids.size > 1 ? `${ids.size} pages` : 'this page'}` : `Bookmark removed`);
+  };
+
   const deletePagesOf = (ids: ReadonlySet<string>, confirm = false) => {
     if (!ids.size) return;
     if (confirm && !window.confirm(`Delete page ${currentPage + 1} and what is on it? (Undo can bring it back)`)) return;
@@ -848,6 +905,80 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     const cy = Math.max(0, Math.min(L.height, y));
     return { index: sheetIndexAt(L, cy), x: Math.max(0, Math.min(L.width, x)), y: cy };
   };
+  /**
+   * The colour on the page under a screen point (the colour pickers' eyedropper): ink, then a text
+   * box (the word's colour under the point, else the box's colour), a formula, a picture (its
+   * pixel), an imported PDF page (its drawn pixel), and last the paper.
+   */
+  const colourAt = async (cx: number, cy: number): Promise<string | null> => {
+    const el = scrollRef.current;
+    if (!el) return null;
+    const box = el.getBoundingClientRect();
+    if (cx < box.left || cx > box.right || cy < box.top || cy > box.bottom) return null;
+    const at = pagePointAt(cx - box.left, cy - box.top);
+    const pg = docRef.current.pages[0];
+    const hexOfCss = (c: string) => {
+      const m = /rgba?\((\d+)[, ]+(\d+)[, ]+(\d+)/.exec(c);
+      return m ? `#${[m[1], m[2], m[3]].map((v) => (+v).toString(16).padStart(2, '0')).join('')}`.toUpperCase() : null;
+    };
+    const ink = [...pg.strokes].reverse().find((st) => strokeHitTest(st, at.x, at.y, 5 / zoom));
+    if (ink) return ink.color;
+    for (const t of [...(pg.textBlocks ?? [])].reverse()) {
+      if (at.x < t.x || at.x > t.x + t.width || at.y < t.y || at.y > t.y + textHeight(t)) continue;
+      const root = document.querySelector<HTMLElement>(`[data-text-id="${t.id}"] .on-text`);
+      if (root) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+          const range = document.createRange();
+          range.selectNodeContents(n);
+          for (const r of Array.from(range.getClientRects())) {
+            if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) return hexOfCss(getComputedStyle(n.parentElement!).color) ?? t.color;
+          }
+        }
+      }
+      if (t.background) return t.background;
+    }
+    const tex = [...pg.latexBlocks].reverse().find((b) => at.x >= b.x && at.x <= b.x + b.width && at.y >= b.y && at.y <= b.y + b.height);
+    if (tex) return tex.color ?? '#111827';
+    // A pixel of a picture or of a drawn PDF page (its canvas) under the point.
+    const pixel = (src: CanvasImageSource, sw: number, sh: number, u: number, v: number) => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 1;
+      const ctx = c.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+      ctx.drawImage(src, Math.max(0, Math.min(sw - 1, u)), Math.max(0, Math.min(sh - 1, v)), 1, 1, 0, 0, 1, 1);
+      const d = ctx.getImageData(0, 0, 1, 1).data;
+      return d[3] > 20 ? `#${[d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('')}`.toUpperCase() : null;
+    };
+    for (const im of [...(pg.imageBlocks ?? [])].reverse()) {
+      // In the picture's own frame (it may be turned about its centre).
+      const a = (-(im.rotation ?? 0) * Math.PI) / 180, mx = im.x + im.width / 2, my = im.y + im.height / 2;
+      const lx = mx + (at.x - mx) * Math.cos(a) - (at.y - my) * Math.sin(a), ly = my + (at.x - mx) * Math.sin(a) + (at.y - my) * Math.cos(a);
+      if (lx < im.x || lx > im.x + im.width || ly < im.y || ly > im.y + im.height) continue;
+      const img = new Image();
+      img.src = im.dataUrl;
+      try {
+        await img.decode();
+        const c = pixel(img, img.naturalWidth, img.naturalHeight, ((lx - im.x) / im.width) * img.naturalWidth, ((ly - im.y) / im.height) * img.naturalHeight);
+        if (c) return c;
+      } catch {
+        /* the next layer */
+      }
+    }
+    for (const cv of Array.from(document.querySelectorAll<HTMLCanvasElement>('[data-pdf-page] canvas'))) {
+      const r = cv.getBoundingClientRect();
+      if (!cv.width || cv.style.visibility === 'hidden' || cx < r.left || cx > r.right || cy < r.top || cy > r.bottom) continue;
+      try {
+        const c = pixel(cv, cv.width, cv.height, ((cx - r.left) / r.width) * cv.width, ((cy - r.top) / r.height) * cv.height);
+        if (c) return c;
+      } catch {
+        /* the paper */
+      }
+    }
+    return paperHex(slRef.current.sheets[at.index]?.paperColor ?? doc.paperColor);
+  };
+  colourAtRef.current = colourAt;
+
   /** The page at the top of the screen and the surface y there (for placing new content). */
   const visibleTopOnPage = () => {
     const at = pagePointAt(0, 0);
@@ -1170,6 +1301,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onExport={() => setExportOpen(true)}
         onSettings={onOpenSettings}
         onDuplicatePage={() => duplicatePagesOf(currentIds())}
+        pageBookmarked={!!curSheet.bookmarked}
+        onToggleBookmark={() => bookmarkPages(currentIds(), !curSheet.bookmarked)}
         onDeletePage={() => deletePagesOf(currentIds(), true)}
         onInsertLatex={insertLatexManually}
         onInsertImage={insertImage}
@@ -1201,6 +1334,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                 onPaste={pastePages}
                 canPaste={!!pageClipboard}
                 onSetup={(ids, patch) => editor.commit((d) => setSheetsSetup(d, ids, patch))}
+                onBookmark={bookmarkPages}
                 onAddPage={addPage}
                 onClose={() => setPagesOpen(false)}
               />

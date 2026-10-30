@@ -17,7 +17,7 @@ import { ZipEntry, readZip } from './zip';
  */
 
 // Record types.
-const DOCUMENT = 1, PDF = 2, BOUNDARY = 7, TEXT = 8, CHAR_STYLE = 12, PARA_STYLE = 13, INK = 15, SHAPE = 18, MEDIA = 22, ERASE = 25;
+const DOCUMENT = 1, PDF = 2, CREATE_PAGE = 3, BOUNDARY = 7, TEXT = 8, CHAR_STYLE = 12, PARA_STYLE = 13, INK = 15, SHAPE = 18, MEDIA = 22, ERASE = 25;
 /** Page size when the document record does not say (Notability's iPad page). */
 const DEFAULT_PAGE = { w: 679, h: 891.1875 };
 /** A pencil's recorded width is wider than the line it draws by this. */
@@ -218,15 +218,17 @@ export async function importNtb(bytes: Uint8Array, fileName: string, deps: Notab
     const deg = (rot * 180) / Math.PI;
     const rotation = Math.abs(deg) > 0.01 ? { rotation: Math.round(deg * 100) / 100 } : {};
     const sticky = fb.ref(p, 15);
-    if (sticky !== null) {
-      const c = fb.rgba(sticky, 4);
-      imageBlocks.push({ id: newId('image'), x: box.x, y: box.y, width: box.w, height: box.h, dataUrl: deps.solidImage(c ? hexOf(c) : '#FFF48E', box.w, box.h, 0), ...rotation, createdAt: stampBelow() });
-    }
+    const stickyColor = sticky !== null ? fb.rgba(sticky, 4) : null;
     const boxText = stores.get(r.id);
     if (boxText) {
+      // A text box: one rich text box (its colour the box's own).
       stores.delete(r.id);
-      textBlocks.push(...layOut(runsOf(boxText), { x: box.x + BOX_PAD.x * s, y: box.y + BOX_PAD.y * s, w: Math.max(20, box.w - 2 * BOX_PAD.x * s) }, s, 'left', deg, stampBelow));
+      const background = sticky !== null ? (stickyColor ? hexOf(stickyColor) : '#FFF48E') : null;
+      textBlocks.push(...layOut(runsOf(boxText), { x: box.x, y: box.y, w: Math.max(20, box.w) }, s, 'left', deg, stampBelow, null, { pad: [BOX_PAD.x * s, BOX_PAD.y * s], background, height: box.h }));
       continue;
+    }
+    if (sticky !== null) {
+      imageBlocks.push({ id: newId('image'), x: box.x, y: box.y, width: box.w, height: box.h, dataUrl: deps.solidImage(stickyColor ? hexOf(stickyColor) : '#FFF48E', box.w, box.h, 0), ...rotation, createdAt: stampBelow() });
     }
     const m = fb.ref(p, 10);
     const asset = fb.ref(m, 0);
@@ -273,6 +275,19 @@ export async function importNtb(bytes: Uint8Array, fileName: string, deps: Notab
   if (main?.text.trim()) textBlocks.push(...layOut(runsOf(main), { x: inset * s, y: 3 * s, w: (W - 2 * inset) * s }, s, 'left', 0, stampBelow, lineSpacing));
   const lost = [...stores.values()].filter((st) => st.text.trim()).length;
   if (lost) skipped.push(`${lost} text${lost === 1 ? '' : 's'} whose place the note does not say`);
+
+  // Bookmarks: page creation records (CreatePage) in order, each creating its page count (slot 2,
+  // default 1) of pages, bookmarked when slot 3 (Notability's PageBookmarked) is 1.
+  let pageAt = 0;
+  for (const r of live) {
+    if (r.type !== CREATE_PAGE) continue;
+    const count = Math.max(1, Math.min(1000, fb.u32At(r.p, 2) ?? 1));
+    if (fb.u8At(r.p, 3) === 1) for (let k = 0; k < count; k++) {
+      while (sheets.length <= pageAt + k) sheets.push(plainSheet());
+      sheets[pageAt + k] = { ...sheets[pageAt + k], bookmarked: true };
+    }
+    pageAt += count;
+  }
 
   // Pages as far as the content reaches.
   let bottom = 0;

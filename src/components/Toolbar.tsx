@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
-  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText,
+  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText, Bookmark,
 } from 'lucide-react';
 import { EraserMode, FillType, LineStyle, PenStyle, ShapeMode, ToolType } from '../types';
 import { SetupPatch } from '../editor/pageSetup';
@@ -78,6 +78,9 @@ interface ToolbarProps {
   onExport: () => void;
   onSettings: () => void;
   onDuplicatePage: () => void;
+  /** Whether the current page is bookmarked, and its toggle. */
+  pageBookmarked: boolean;
+  onToggleBookmark: () => void;
   onDeletePage: () => void;
   onInsertLatex: () => void;
   onInsertImage: (file: File) => void;
@@ -123,6 +126,7 @@ const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void
 // went partly past it.
 const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
   <OnScreen
+    data-ui-panel
     className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto overflow-x-hidden no-scrollbar ${
       align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
     }`}
@@ -441,6 +445,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                   { icon: <ImageIcon className="w-5 h-5" />, label: 'Insert image', fn: () => fileRef.current?.click() },
                   { icon: <FileText className="w-5 h-5" />, label: 'Insert PDF after this page', fn: () => pdfRef.current?.click() },
                   ...(p.onPaste ? [{ icon: <ClipboardPaste className="w-5 h-5" />, label: 'Paste copied items', fn: p.onPaste }] : []),
+                  { icon: <Bookmark className="w-5 h-5" fill={p.pageBookmarked ? 'currentColor' : 'none'} />, label: p.pageBookmarked ? 'Remove bookmark from this page' : 'Bookmark this page', fn: p.onToggleBookmark },
                   { icon: <Copy className="w-5 h-5" />, label: 'Duplicate current page', fn: p.onDuplicatePage },
                   { icon: <Trash2 className="w-5 h-5" />, label: 'Delete current page', fn: p.onDeletePage, danger: true },
                 ].map((it) => (

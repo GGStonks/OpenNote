@@ -75,6 +75,7 @@ Pages are stacked top to bottom with no gap:
   rotation applied; `version` 1 files: `ceil(h × W / 612)`), the PDF page drawn in it. Any other
   entry (page number 2⁶³ − 1, or 2³¹ − 1 in old files) is a plain page.
 - Content below the last listed page lies on plain pages.
+- An entry with `kPageLayoutPageIsBookmarkedKey` true is a bookmarked page.
 
 ### Paper
 
@@ -170,7 +171,7 @@ Media lie under the ink.
 | Class | Read |
 | --- | --- |
 | `ImageMediaObject` | `figure.FigureBackgroundObjectKey.kImageObjectSnapshotKey.relativePath`: the picture's file. `figure.FigureCropRectKey`: the part shown (source pixels), applied when `figure.$0` holds data. `isFlippedHorizontal`, `isFlippedVertical`. `isGif` with `assetsIdKey`: `Assets/<id>/media.gif`. |
-| `TextBlockMediaObject` | A text box: `textStore.attributedString` (below), `textStore.formattedStringTextAlignmentKey` (0 left, 1 centre, 2 right); text starts 5 points right and 2 points down of the box's corner. Its colour: `paperStyleObject.paperColor` (a UIColor: `UIRed`, `UIGreen`, `UIBlue`, `UIAlpha` 0–1, or `UIWhite`) or `kCanvasMediaObjectPaperAttributes.paperIdentifier` (`Color:#RRGGBB`); `cornerMode` 2: rounded corners. |
+| `TextBlockMediaObject` | A text box: `textStore.attributedString` (below), `textStore.formattedStringTextAlignmentKey` (0 left, 1 centre, 2 right); text starts 5 points right and 2 points down of the box's corner. Its colour: `paperStyleObject.paperColor` (a UIColor: `UIRed`, `UIGreen`, `UIBlue`, `UIAlpha` 0–1, or `UIWhite`) or `kCanvasMediaObjectPaperAttributes.paperIdentifier` (`Color:#RRGGBB`); `cornerMode` 2: rounded corners (8 points). Imported as one OpenNote text box: the box (outside, colour, corners, the 5 x 2 point inset as padding), the most used run as its style, other runs as styled spans, lists as list paragraphs (kind, level, Notability's own item number, ticked). |
 | `CanvasMediaObject` | A sticky note: its colour as for text boxes (its ink is in the curve store). |
 | `MathMediaObject` | A formula: `latex` (LaTeX source), `color`. |
 
@@ -219,13 +220,23 @@ Records refer to each other by id. Types read:
 | --- | --- |
 | 1 | Document: the paper (the last one counts). |
 | 2 | A PDF: a string slot holding the file's hash (`<hex>.pdf`). |
+| 3 | Page creation (CreatePage): slot 2 the number of pages (default 1), slot 3 bookmarked (1). |
 | 7 | A text position (an end of a range). |
 | 8 | Text. |
 | 12, 13 | Character style, paragraph style. |
 | 15 | Ink. |
 | 18 | Shape. |
+| 20 | A group: slot 0 the ids of its records (they are drawn as usual). |
 | 22 | Picture, sticky note or text box. |
 | 25 | Erased: slot 0 a vector of record ids (pairs of uint32) no longer shown. |
+
+The types are Notability's record kinds in order (the app's model names them: 3 CreatePage,
+5 ModifyPage, 6 CreateRecording, 7 InsertChar, 8 InsertString, 12 ModifyStyle,
+13 ModifyParagraphStyle, 14 UpdateCheckbox, 15 CreateInk, 18 CreateShape, 20 CreateGroup,
+22 CreateBlock, 25 DeleteEntities). Page bookmarks are read from CreatePage records only (page
+count then bookmark, as Notability's createPage(index, background, pageCount, bookmarked)); no
+sample with a bookmarked page has been seen, so this is unconfirmed. ModifyPage, UpdateCheckbox
+(a ticked checkbox) and recordings are not read.
 
 A **page reference** is a 12-byte struct whose third uint32 is the page (from 0). Positions are on
 that page: x from its left edge, y from its top, in document units of a page `W` wide.
@@ -275,5 +286,10 @@ on the paper's lines). A position is a 12-byte struct: a record id and a UTF-16 
 where that record's text starts (type 7 records are positions too). Character styles (12) cover
 slot 0 to slot 1: slot 3 bold, 4 italic, 5 underline, 7 font name, 8 size, 9 colour (RGBA),
 11 strikethrough, each a table holding the value in its slot 0; later records over earlier ones.
-Paragraph styles (13): slot 2 the list level, slot 5 the list kind (1 bullet, 2 numbered,
-3 checklist).
+Paragraph styles (13): slot 2 the list level, slot 4 the line spacing, slot 5 the list kind
+(1 bullet, 2 numbered, 3 checklist).
+
+A text box becomes one OpenNote text box: its outside is the record's box, its text inset 5 x 2
+points, its colour (a sticky's paper colour) the box's own; runs that differ from the most used
+one are styled spans (typeface, size, weight, slant, colour, lines), list paragraphs keep their
+kind, level and number.

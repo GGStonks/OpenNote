@@ -2396,6 +2396,130 @@ if (ONLY.has('resume')) {
     console.log(`resume ${label}: left at ${JSON.stringify(before)}, back at ${JSON.stringify(after)}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }
+// --only richtext [--shots <dir>]: a text box typed with the Text tool: a title, then items made a
+// checklist, Enter continuing it, a sub-item indented with Tab and made a bullet, a box colour,
+// rounded corners and centring; what is saved (paragraph styles, box), editing it again keeps the
+// lists, and a tap on a checkbox ticks it.
+if (ONLY.has('richtext')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const saved = () => page.evaluate(async () => {
+    const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+    const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
+    db.close();
+    const n = notes.find((x) => x.title === 'Bench note');
+    const tb = (n?.pages ?? []).flatMap((pg) => pg.textBlocks ?? []).sort((a, b) => b.createdAt - a.createdAt)[0];
+    return tb ? { text: tb.text, paras: tb.paras, background: tb.background, radius: tb.radius, align: tb.align, padding: tb.padding, strike: tb.strike } : null;
+  });
+  const bar = (title) => page.locator(`[data-text-format] button[title="${title}"]`).first().dispatchEvent('pointerdown');
+  await page.locator('button[title="Text"]').first().click();
+  await sleep(300);
+  await page.mouse.click(300, 980);
+  await sleep(600);
+  await page.keyboard.type('Shopping');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('Milk');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('Bread');
+  // Select the two items and make them a checklist.
+  await page.keyboard.down('Shift');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('Home');
+  await page.keyboard.up('Shift');
+  await bar('Checklist');
+  await sleep(200);
+  await page.keyboard.press('End');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('Eggs');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Tab');
+  await bar('Bulleted list');
+  await page.keyboard.type('free range');
+  await bar('Centre');
+  await page.locator('[data-text-format] button[title="Box colour and corners"]').first().dispatchEvent('pointerdown');
+  await sleep(300);
+  await page.locator('[data-text-format] button[title="Box colour"]').nth(1).dispatchEvent('pointerdown');
+  await sleep(200);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'richtext-editing.png') });
+  // End editing: tap the page away from the box.
+  await page.mouse.click(150, 700);
+  await sleep(1500);
+  const first = await saved();
+  console.log(`richtext saved: ${JSON.stringify(first)}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'richtext-shown.png') });
+  // Tap the first checkbox (Text tool: boxes are interactive).
+  const box = await page.evaluate(() => {
+    const p = [...document.querySelectorAll('.on-text .on-p[data-list="check"]')][0];
+    if (!p) return null;
+    // The box: beside the text when the list is centred (inline marker), else at the paragraph's left.
+    const before = getComputedStyle(p, '::before');
+    const r = p.getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(p);
+    const first = range.getClientRects()[0];
+    const k = r.width / p.offsetWidth;
+    return before.position === 'static' ? { x: first.left + parseFloat(before.width) * k * 0.5, y: first.top + first.height / 2 } : { x: r.left + 6, y: r.top + r.height / 2 };
+  });
+  if (box) await page.mouse.click(box.x, box.y);
+  await sleep(1200);
+  const second = await saved();
+  console.log(`richtext after tapping the first checkbox: ${JSON.stringify(second?.paras)}`);
+  // Edit again: the lists survive a round trip through the editor.
+  await page.mouse.click(box ? box.x + 120 : 400, box ? box.y : 980);
+  await sleep(500);
+  await page.keyboard.press('End');
+  await page.keyboard.type('!');
+  await page.mouse.click(150, 700);
+  await sleep(1500);
+  const third = await saved();
+  console.log(`richtext edited again: ${JSON.stringify(third)}`);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'richtext-final.png') });
+}
+// --only eyedropper: the pen's custom colour, "Pick from page", a tap on the handwriting: the pen
+// takes the ink's colour; a tap on empty paper gives the paper's colour.
+if (ONLY.has('eyedropper')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const penColor = () => page.evaluate(() => JSON.parse(localStorage.getItem('opennote_tools_v2') || '{}').penColor);
+  const pick = async (x, y) => {
+    await page.locator('button[title^="Pen"]').first().click();
+    await sleep(200);
+    if (!(await page.locator('button[title^="Any colour"]').first().isVisible())) { await page.locator('button[title^="Pen"]').first().click(); await sleep(200); }
+    await page.locator('button[title^="Any colour"]').first().click();
+    await sleep(300);
+    await page.locator('button[title="Pick a colour from the page"]').first().dispatchEvent('pointerdown');
+    await sleep(200);
+    await mouse('mousePressed', x, y, 0.5);
+    await mouse('mouseReleased', x, y, 0);
+    await sleep(800);
+    return penColor();
+  };
+  // A point on a stroke of the handwriting (its 30th point).
+  const inkHit = await page.evaluate(async () => {
+    const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+    const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
+    db.close();
+    const n = notes.find((x) => x.title === 'Bench note');
+    // Packed (x, y, … per point) once saved by the app, plain points as seeded.
+    const xy = (s, i) => (s.pts ? [s.pts[i * 6], s.pts[i * 6 + 1]] : [s.points[i].x, s.points[i].y]);
+    const st = n.pages[0].strokes.find((s) => s.tool !== 'highlighter' && (s.pts ? s.pts.length / 6 : s.points?.length ?? 0) > 60);
+    const [x, y] = xy(st, 30);
+    return { x, y, color: st.color };
+  });
+  const surfaceToScreen = await page.evaluate(({ x, y }) => {
+    const page0 = document.querySelector('[data-sheet="0"]').getBoundingClientRect();
+    const w = document.querySelector('[data-sheet="0"]').offsetWidth;
+    const k = page0.width / w;
+    return { x: page0.left + x * k, y: page0.top + y * k };
+  }, inkHit);
+  // The paper first (the pen's colour changes from the ink's), then the ink.
+  const fromPaper = await pick(790, 1150);
+  console.log(`eyedropper on the paper: pen colour ${fromPaper}`);
+  const fromInk = await pick(surfaceToScreen.x, surfaceToScreen.y);
+  console.log(`eyedropper on ink (${inkHit.color}): pen colour ${fromInk} ${fromInk?.toUpperCase() === inkHit.color.toUpperCase() ? 'ok' : 'WRONG'}`);
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();

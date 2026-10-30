@@ -31,6 +31,7 @@ import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
 } from '../editor/selection';
 import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox } from './Blocks';
+import { checkboxAt, compactParas, paragraphsOf, parasOf } from '../editor/richText';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
 import { useDragInk, usePinchInk } from '../editor/usePinchInk';
@@ -1823,6 +1824,20 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     setEditingTextId(block.id);
   };
 
+  /** Ticks (or unticks) checkbox paragraph `i` of a text box. */
+  const toggleCheck = (id: string, i: number) => {
+    if (i < 0) return;
+    editor.commitPage(page.id, (p) => ({
+      ...p,
+      textBlocks: (p.textBlocks ?? []).map((x) => {
+        if (x.id !== id) return x;
+        const paras = parasOf(x).map((q, k) => (k === i && q.list === 'check' ? { ...q, checked: !q.checked } : q));
+        return { ...x, paras: compactParas(paras) };
+      }),
+    }));
+    haptic('snap');
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const tool = tools.tool;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
@@ -1844,6 +1859,22 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     e.preventDefault();
     if (selectedBlockId) setSelectedBlockId(null);
+
+    // A tap on a checkbox of a text box (not being edited) ticks it, with any writing tool: the
+    // drawing layer lies over the boxes, so they never see the tap.
+    if (tool === 'text' || tool === 'pen' || tool === 'highlighter' || tool === 'shape') {
+      const at = toPoint(e, performance.now());
+      for (const t of [...(pageRef.current.textBlocks ?? [])].reverse()) {
+        if (t.id === editingTextId || !t.paras?.some((q) => q.list === 'check')) continue;
+        if (at.x < t.x - 6 || at.x > t.x + t.width + 6 || at.y < t.y - 6 || at.y > t.y + textHeight(t) + 6) continue;
+        const root = (e.currentTarget.parentElement ?? document).querySelector<HTMLElement>(`[data-text-id="${t.id}"] .on-text`);
+        const p = root ? checkboxAt(root, e.clientX, e.clientY) : null;
+        if (root && p) {
+          toggleCheck(t.id, paragraphsOf(root).indexOf(p));
+          return;
+        }
+      }
+    }
 
     if (tool === 'text') {
       const pt = toPoint(e, performance.now());
@@ -2745,6 +2776,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           {sh.pdf && (
             <PdfBackground pdf={sh.pdf} width={sh.width} height={sh.height} zoom={zoom} baseZoom={pageZoom} scrollRoot={scrollRoot ?? null} paper={paperHex(sh.paperColor)} printMode={printMode} printBare={printMode && printBare} />
           )}
+          {sh.bookmarked && !printMode && (
+            // A bookmarked page's ribbon (not printed or exported).
+            <svg className="absolute pointer-events-none" style={{ right: 28, top: 0, width: 22, height: 34, zIndex: 2 }} viewBox="0 0 22 34" data-bookmark-ribbon>
+              <path d="M0 0h22v34l-11-8-11 8z" fill="#E5484D" />
+            </svg>
+          )}
         </div>
       ))}
       {/*
@@ -2827,14 +2864,18 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
               if (toolsRef.current.tool === 'lasso') setSelection(singleBlockSelection(pageRef.current, 'text', t.id));
               else setEditingTextId(t.id);
             }}
-            onCommit={(text) => {
+            onCommit={(edit) => {
               setEditingTextId(null);
               const cur = (pageRef.current.textBlocks ?? []).find((x) => x.id === t.id);
               if (!cur) return;
-              if (!text.trim()) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
-              // (Edited text loses its styled parts: their ranges no longer fit it.)
-              else if (text !== cur.text) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text, spans: undefined } : x)) }));
+              const paras = compactParas(edit.paras);
+              const spans = edit.spans.length ? edit.spans : undefined;
+              // A box left without text (and without list items, which show even empty) goes.
+              if (!edit.text.trim() && !paras?.some((q) => q.list)) editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }));
+              else if (edit.text !== cur.text || JSON.stringify(spans) !== JSON.stringify(cur.spans) || JSON.stringify(paras) !== JSON.stringify(cur.paras))
+                editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === t.id ? { ...x, text: edit.text, spans, paras } : x)) }));
             }}
+            onToggleCheck={(i) => toggleCheck(t.id, i)}
             onDelete={() => editor.commitPage(page.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).filter((x) => x.id !== t.id) }))}
             onSilentUpdate={() => undefined}
             onResize={(patch, phase) => {

@@ -124,7 +124,30 @@ export interface LatexBlock {
 }
 
 /** Typeface of a text box (editor/textStyle.ts maps each to the fonts every platform has). */
-export type TextFont = 'sans' | 'serif' | 'mono' | 'script';
+/** Text box typefaces (editor/textStyle.ts TEXT_FONTS: each a CSS stack of that font and lookalikes). */
+export type TextFont =
+  | 'sans' | 'serif' | 'mono' | 'script'
+  | 'helvetica-neue' | 'helvetica' | 'arial' | 'avenir' | 'futura' | 'gill-sans' | 'optima' | 'verdana' | 'trebuchet'
+  | 'georgia' | 'times' | 'palatino' | 'baskerville' | 'didot' | 'hoefler' | 'american-typewriter'
+  | 'courier' | 'menlo'
+  | 'impact'
+  | 'snell' | 'bradley-hand' | 'marker-felt' | 'noteworthy' | 'chalkboard' | 'chalkduster' | 'papyrus' | 'zapfino';
+
+/** A list paragraph's kind: • bullets, 1. numbers (A. / a. when indented), a. letters, checkboxes. */
+export type ListKind = 'bullet' | 'number' | 'letter' | 'check';
+
+/** One paragraph of a text box (TextBlock.paras, by paragraph: the text split at newlines). */
+export interface TextPara {
+  list?: ListKind;
+  /** Indent level (0: none; each level 2.1 em). */
+  level?: number;
+  /** A ticked checkbox (list 'check'). */
+  checked?: boolean;
+  /** This item's number when not counted from the items before it (imported text laid out a paragraph per box). */
+  num?: number;
+  /** The paragraph's own alignment (missing: the box's). */
+  align?: 'left' | 'center' | 'right';
+}
 
 export interface TextBlock {
   id: string;
@@ -148,10 +171,18 @@ export interface TextBlock {
   /** Struck through (a checked checklist item). */
   strike?: boolean;
   /**
-   * Parts of the text styled apart from the box (imported text: a bold or coloured word), as
-   * character ranges [start, end). Editing the text drops them (the box's own style remains).
+   * Parts of the text styled apart from the box (a bold or coloured word, a larger title), as
+   * character ranges [start, end) of `text`. Kept through editing (editor/richText.ts).
    */
   spans?: TextSpan[];
+  /** Paragraph styles (lists, indents, checkboxes), one per paragraph of `text` (missing: plain). */
+  paras?: TextPara[];
+  /** The box's colour behind its text (missing: none). */
+  background?: string;
+  /** Rounding of the box's corners (px). */
+  radius?: number;
+  /** Space between the box's edge and its text (px: sideways, up and down); the box's x, y and width are its outside. */
+  padding?: [number, number];
   /** Degrees, clockwise about the block's centre. */
   rotation?: number;
   createdAt: number;
@@ -165,6 +196,9 @@ export interface TextSpan {
   underline?: boolean;
   strike?: boolean;
   color?: string;
+  /** Another typeface or size than the box's (imported text: a title in a box). */
+  font?: TextFont;
+  size?: number;
 }
 
 export interface ImageBlock {
@@ -209,6 +243,8 @@ export interface PageSheet {
   height?: number;
   /** A page of a stored PDF (storage/db.ts files) drawn as the paper of this page, fitted to it. */
   pdf?: PdfPageRef;
+  /** Bookmarked (the Pages panel lists bookmarked pages; imported from Notability's bookmarks). */
+  bookmarked?: boolean;
 }
 
 /** One page of a PDF kept in the library's file store. */

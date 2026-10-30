@@ -22,6 +22,7 @@ export interface SheetBox extends PageSetup {
   /** Position on the surface (surface px). */
   top: number;
   left: number;
+  bookmarked?: boolean;
 }
 
 export interface SurfaceLayout {
@@ -36,7 +37,7 @@ export function surfaceLayout(doc: NoteDocument): SurfaceLayout {
   const width = Math.max(...setups.map((s) => s.width));
   let top = 0;
   const sheets = setups.map((s, i) => {
-    const b: SheetBox = { ...s, id: list[i].id, index: i, top, left: (width - s.width) / 2 };
+    const b: SheetBox = { ...s, id: list[i].id, index: i, top, left: (width - s.width) / 2, ...((list[i] as PageSheet).bookmarked ? { bookmarked: true } : {}) };
     top += s.height;
     return b;
   });
@@ -301,6 +302,11 @@ export function moveSheets(d: NoteDocument, ids: ReadonlySet<string>, to: number
   });
 }
 
+/** Bookmarks the pages (or takes their bookmarks off). */
+export function setSheetsBookmarked(d: NoteDocument, ids: ReadonlySet<string>, on: boolean): NoteDocument {
+  return { ...d, sheets: d.sheets.map((sh) => (!ids.has(sh.id) ? sh : on ? { ...sh, bookmarked: true } : (({ bookmarked: _off, ...rest }) => rest)(sh))) };
+}
+
 /** Paper of the pages; 'reset': back to the note's paper. The content stays on its pages. */
 export function setSheetsSetup(d: NoteDocument, ids: ReadonlySet<string>, patch: SetupPatch | 'reset'): NoteDocument {
   return recut(d, (es) =>
@@ -308,8 +314,8 @@ export function setSheetsSetup(d: NoteDocument, ids: ReadonlySet<string>, patch:
       if (!ids.has(e.sheet.id)) return e;
       if (patch === 'reset') {
         // A PDF page and its own size are the page's content, not its paper: they stay.
-        const { id, pdf, width, height } = e.sheet;
-        return { ...e, sheet: { id, ...(pdf ? { pdf } : {}), ...(width && height ? { width, height } : {}) } };
+        const { id, pdf, width, height, bookmarked } = e.sheet;
+        return { ...e, sheet: { id, ...(pdf ? { pdf } : {}), ...(width && height ? { width, height } : {}), ...(bookmarked ? { bookmarked } : {}) } };
       }
       const { patternColor, ...rest } = patch;
       const sheet: PageSheet = { ...e.sheet, ...rest };

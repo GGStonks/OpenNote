@@ -10,27 +10,49 @@ import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { paperHex, paperIsDark } from './CanvasPage';
 import { textHeight } from '../editor/selection';
 import { ExportMode, canMakePdf, exportFile, exportOffersBoth } from '../platform';
-import { textCssString, textPieces } from '../editor/textStyle';
+import { textCssString } from '../editor/textStyle';
+import { RICH_TEXT_CSS, listMarkers, parasOf, richTextClass, textBlockHtml } from '../editor/richText';
 import type { TextBlock } from '../types';
 import { useBack } from '../services/backStack';
 import { filesForBackup } from '../storage/db';
 import { pdfPageImage } from '../services/pdf';
 
+/** Each paragraph with its list marker in front ("- [x] " in Markdown), indented by its level. */
+function listLines(t: TextBlock, md: boolean, wrap: (s: string) => string): string {
+  const paras = parasOf(t);
+  const markers = listMarkers(paras);
+  return t.text
+    .split('\n')
+    .map((line, i) => {
+      const p = paras[i];
+      const body = line.trim() ? wrap(line) : line;
+      if (!p.list) return (md ? '  ' : '\\quad ').repeat(p.level ?? 0) + body;
+      const mark = p.list === 'check' ? (md ? `- [${p.checked ? 'x' : ' '}]` : p.checked ? '$\\boxtimes$' : '$\\square$') : p.list === 'bullet' ? (md ? '-' : '\\textbullet') : markers[i];
+      return (md ? '  ' : '\\quad ').repeat(p.level ?? 0) + `${mark} ${body}`;
+    })
+    .join(md ? '\n' : '\\\\\n');
+}
 /** A text box's text with its style as LaTeX / Markdown markup. */
 function texText(t: TextBlock): string {
-  let s = t.text.replace(/([#%&_{}$])/g, '\\$1');
-  if (t.bold) s = `\\textbf{${s}}`;
-  if (t.italic) s = `\\textit{${s}}`;
-  if (t.underline) s = `\\underline{${s}}`;
-  return s;
+  return listLines(t, false, (line) => {
+    let s = line.replace(/([#%&_{}$])/g, '\\$1');
+    if (t.bold) s = `\\textbf{${s}}`;
+    if (t.italic) s = `\\textit{${s}}`;
+    if (t.underline) s = `\\underline{${s}}`;
+    if (t.strike) s = `\\sout{${s}}`;
+    return s;
+  });
 }
 function mdText(t: TextBlock): string {
   if (!t.text.trim()) return t.text;
-  let s = t.text;
-  if (t.bold) s = `**${s}**`;
-  if (t.italic) s = `*${s}*`;
-  if (t.underline) s = `<u>${s}</u>`;
-  return s;
+  return listLines(t, true, (line) => {
+    let s = line;
+    if (t.bold) s = `**${s}**`;
+    if (t.italic) s = `*${s}*`;
+    if (t.underline) s = `<u>${s}</u>`;
+    if (t.strike) s = `~~${s}~~`;
+    return s;
+  });
 }
 
 interface ExportModalProps {
@@ -131,7 +153,7 @@ async function buildSvg(doc: NoteDocument): Promise<string> {
   }
   const W = Math.max(...pages.map((x) => x.setup.width));
   const total = pages.reduce((h, x) => h + x.setup.height + gap, 0) - gap;
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n`;
+  let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n<style>${RICH_TEXT_CSS.replace(/\s+/g, ' ')}</style>\n`;
   let top = 0;
   pages.forEach(({ p, setup }, i) => {
     const dy = top;
@@ -154,7 +176,8 @@ async function buildSvg(doc: NoteDocument): Promise<string> {
       }
       if (l.kind === 'text') {
         const t = l.block;
-        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, t.fontSize * 1.4 * (t.text.split('\n').length + 4))}"><xhtml:div style="${textCssString(t)};color:${t.color};white-space:pre-wrap">${textPieces(t).map((p) => (p.css ? `<xhtml:span style="${Object.entries(p.css).map(([k, v]) => `${k.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase())}:${v}`).join(';')}">${escapeHtml(p.text)}</xhtml:span>` : escapeHtml(p.text))).join('')}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
+        // The same HTML as on the page (lists, checkboxes, styled words; RICH_TEXT_CSS in the SVG's <style>).
+        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, textHeight(t) + t.fontSize * 4)}"><xhtml:div class="${richTextClass(t)}" style="${textCssString(t)};color:${t.color};min-height:${t.height ?? 0}px">${textBlockHtml(t, 'xhtml:div')}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
         continue;
       }
       const b = l.block;

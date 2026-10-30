@@ -1,4 +1,6 @@
-import { ImageBlock, LatexBlock, NotePage, PageSheet, PaperColor, PaperStyle, Point, Stroke, TextBlock, TextFont, TextSpan, newId } from '../types';
+import { ImageBlock, LatexBlock, ListKind, NotePage, PageSheet, PaperColor, PaperStyle, Point, Stroke, TextBlock, TextFont, TextPara, TextSpan, newId } from '../types';
+import { fontFromName, fontStack } from '../editor/textStyle';
+import { compactParas } from '../editor/richText';
 import { ellipsePoints } from '../editor/shapeEdit';
 import { TEXT_LINE_HEIGHT } from '../editor/textStyle';
 import { KeyedArchive, PlistDate, PlistValue, parsePlist } from './plist';
@@ -179,10 +181,12 @@ export async function importNotability(bytes: Uint8Array, fileName: string, deps
     const fileObj = d.get('kPageLayoutPDFFileKey') ?? null;
     const name = ar.string(d.get('kPageLayoutPDFFileNameKey') ?? null) ?? ar.string(ar.field(fileObj, 'pdfFileName'));
     const version = ar.number(ar.field(fileObj, 'version'));
-    return n !== null && n < BLANK_PAGE && name ? { pdf: name, page: n, version } : null;
+    // A bookmarked page (Notability's page manager bookmarks).
+    const bookmarked = ar.get(d.get('kPageLayoutPageIsBookmarkedKey') ?? null) === true;
+    return { pdf: n !== null && n < BLANK_PAGE && name ? { pdf: name, page: n, version } : null, bookmarked };
   });
   // Page numbers are 1-based; a note holding a 0 counts from 0.
-  const zeroBased = items.some((i) => i && i.page === 0);
+  const zeroBased = items.some((i) => i.pdf && i.pdf.page === 0);
   const sheets: PageSheet[] = [];
   let pdfPages = 0;
   let missingPdf = 0;
@@ -194,7 +198,8 @@ export async function importNotability(bytes: Uint8Array, fileName: string, deps
     height: plainH * s,
     ...(templateFile ? { pdf: { file: templateFile.fileId, page: 1 }, paperStyle: 'blank' as const } : {}),
   });
-  for (const it of items) {
+  for (const { pdf: it, bookmarked } of items) {
+    const mark = bookmarked ? { bookmarked: true } : {};
     if (it) {
       const f = await pdfFile(it.pdf);
       const page = it.page + (zeroBased ? 1 : 0);
@@ -202,14 +207,14 @@ export async function importNotability(bytes: Uint8Array, fileName: string, deps
       if (f && size) {
         // Version 1 (old notes): the page keeps its height in inches at 8.5 in wide.
         const h = Math.ceil(it.version === 1 ? (size.h * W) / 612 : (size.h * W) / size.w);
-        sheets.push({ id: newId('sheet'), width: PAGE_PX, height: h * s, paperStyle: 'blank', pdf: { file: f.fileId, page } });
+        sheets.push({ id: newId('sheet'), width: PAGE_PX, height: h * s, paperStyle: 'blank', pdf: { file: f.fileId, page }, ...mark });
         top += h;
         pdfPages++;
         continue;
       }
       missingPdf++;
     }
-    sheets.push(plainSheet());
+    sheets.push({ ...plainSheet(), ...mark });
     top += plainH;
   }
   if (missingPdf) skipped.push(`${missingPdf} PDF page${missingPdf === 1 ? '' : 's'} whose PDF is not in the file (blank pages instead)`);
@@ -290,8 +295,10 @@ export async function importNotability(bytes: Uint8Array, fileName: string, deps
     const rotation = ((num(m, 'rotationDegrees') ?? 0) * 180) / Math.PI;
     const rot = Math.abs(rotation) > 0.01 ? { rotation: Math.round(rotation * 100) / 100 } : {};
     const background = mediaBackground(ar, m);
-    if (background) {
-      const radius = num(m, 'cornerMode') === 2 ? 8 * s : 0;
+    const radius = num(m, 'cornerMode') === 2 ? 8 * s : 0;
+    const isTextBox = /TextBlockMediaObject$/.test(cls);
+    // A text box's colour is the box's own (TextBlock background); other objects' (stickies) a coloured rectangle.
+    if (background && !isTextBox) {
       imageBlocks.push({ id: newId('image'), x: box.x, y: box.y, width: box.w, height: box.h, dataUrl: deps.solidImage(background, box.w, box.h, radius), ...rot, createdAt: stampBelow() });
     }
     if (/ImageMediaObject$/.test(cls)) {
@@ -312,7 +319,7 @@ export async function importNotability(bytes: Uint8Array, fileName: string, deps
       const store = ar.field(m, 'textStore');
       const align = (['left', 'center', 'right'] as const)[num(store, 'formattedStringTextAlignmentKey') ?? 0] ?? 'left';
       const runs = attributed(ar, ar.field(store, 'attributedString'));
-      textBlocks.push(...layOut(runs, { x: box.x + BOX_PAD.x * s, y: box.y + BOX_PAD.y * s, w: Math.max(20, box.w - 2 * BOX_PAD.x * s) }, s, align, rotation, stampBelow));
+      textBlocks.push(...layOut(runs, { x: box.x, y: box.y, w: Math.max(20, box.w) }, s, align, rotation, stampBelow, null, { pad: [BOX_PAD.x * s, BOX_PAD.y * s], background, radius, height: box.h }));
     } else if (/CanvasMediaObject$/.test(cls)) {
       // A sticky note: its colour (above); its ink is with the rest.
       if (!background) unsupported[cls] = (unsupported[cls] ?? 0) + 1;
@@ -776,53 +783,94 @@ function attributed(ar: KeyedArchive, v: PlistValue): { text: string; runs: Run[
   return { text, runs };
 }
 
-/** A group's styled runs as ranges of its text (paragraphs joined by newlines). */
-function spansOf(paras: { text: string; spans: TextSpan[] }[]): { spans?: TextSpan[] } {
-  const out: TextSpan[] = [];
-  let at = 0;
-  for (const p of paras) {
-    for (const sp of p.spans) out.push({ ...sp, start: sp.start + at, end: sp.end + at });
-    at += p.text.length + 1;
-  }
-  return out.length ? { spans: out } : {};
-}
-
-function fontOf(name: string): { family: TextFont; bold: boolean; italic: boolean } {
-  const n = name.toLowerCase();
-  const family: TextFont = /courier|menlo|mono|consol|code|typewriter/.test(n)
-    ? 'mono'
-    : /papyrus|marker|chalk|noteworthy|zapfino|snell|bradley|script|hand|comic/.test(n)
-      ? 'script'
-      : /times|georgia|palatino|baskerville|garamond|didot|charter|cambria|bodoni|hoefler|(^|[^-])serif/.test(n) && !/sans/.test(n)
-        ? 'serif'
-        : 'sans';
-  return { family, bold: /bold|black|heavy|semibold|demi|impact/.test(n), italic: /italic|oblique/.test(n) };
-}
-
-const ROMAN_UPPER = (n: number) => String.fromCharCode(65 + ((n - 1) % 26));
-const ROMAN_LOWER = (n: number) => String.fromCharCode(97 + ((n - 1) % 26));
-
-/** A list item's marker, as Notability numbers each level (1. / A. / a. / 1.; • ◦ ▪; checklists). */
-function marker(r: Run): string {
-  if (r.decoration === 1) return ['•', '◦', '▪'][r.level % 3];
-  if (r.decoration === 2) return [`${r.number}.`, `${ROMAN_UPPER(r.number)}.`, `${ROMAN_LOWER(r.number)}.`][r.level % 3] ?? `${r.number}.`;
-  if (r.decoration === 3) return r.checked ? '☑' : '☐';
-  return '';
-}
-
 let measureCtx: CanvasRenderingContext2D | null | undefined;
 /** Width (px) of `text` in a font (an estimate where there is no canvas, e.g. tests). */
 function textWidth(text: string, px: number, family: TextFont, bold: boolean): number {
   if (measureCtx === undefined) measureCtx = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null;
-  if (!measureCtx) return text.length * px * (family === 'mono' ? 0.6 : 0.52);
-  measureCtx.font = `${bold ? 700 : 400} ${px}px ${family === 'mono' ? 'monospace' : family === 'serif' ? 'serif' : 'sans-serif'}`;
+  if (!measureCtx) return text.length * px * (family === 'mono' || family === 'courier' || family === 'menlo' ? 0.6 : 0.52);
+  measureCtx.font = `${bold ? 700 : 400} ${px}px ${fontStack(family)}`;
   return measureCtx.measureText(text).width;
 }
 
+const LIST_KIND: Record<number, ListKind> = { 1: 'bullet', 2: 'number', 3: 'check' };
+
+/** A run's look: typeface, weight, slant, size (px), colour, lines. */
+function lookOf(r: Run | null, s: number) {
+  const f = fontFromName(r?.font ?? 'HelveticaNeue');
+  return { family: f.family, bold: f.bold, italic: f.italic, size: Math.round((r?.size ?? 12) * s * 10) / 10, color: r?.color ?? '#000000', underline: !!r?.underline, strike: !!r?.strike };
+}
+
 /**
- * Text laid out from `at` down, a text box per run of paragraphs in one style (OpenNote's text
- * boxes have one style each). `grid`: lines snap to the paper's line spacing (document points),
- * as Notability lays out a note's own typed text.
+ * Text as one rich text box (editor/richText.ts): the box's style is its most used run's, the
+ * other runs are spans (a bold word, a larger title, another typeface or colour), each paragraph's
+ * list (bullet, numbered with Notability's own number, checkbox ticked or not) and indent level
+ * are paragraph styles. `range`: the paragraphs taken (from, to: character offsets).
+ */
+function richText(t: { text: string; runs: Run[] }, s: number, from = 0, to = t.text.length): Pick<TextBlock, 'text' | 'spans' | 'paras' | 'fontSize' | 'color' | 'fontFamily' | 'bold' | 'italic' | 'underline' | 'strike'> {
+  const text = t.text.slice(from, to);
+  const runs = t.runs.map((r) => ({ ...r, start: Math.max(r.start, from) - from, end: Math.min(r.end, to) - from })).filter((r) => r.end > r.start);
+  // The box's style: the run covering most text.
+  const weight = new Map<string, { r: Run; n: number }>();
+  for (const r of runs) {
+    const k = JSON.stringify(lookOf(r, s));
+    const w = weight.get(k);
+    if (w) w.n += r.end - r.start;
+    else weight.set(k, { r, n: r.end - r.start });
+  }
+  const baseRun = [...weight.values()].sort((a, b) => b.n - a.n)[0]?.r ?? null;
+  const base = lookOf(baseRun, s);
+  const spans: TextSpan[] = [];
+  for (const r of runs) {
+    const l = lookOf(r, s);
+    const sp: TextSpan = { start: r.start, end: r.end };
+    if (l.family !== base.family) sp.font = l.family;
+    if (l.bold !== base.bold) sp.bold = l.bold;
+    if (l.italic !== base.italic) sp.italic = l.italic;
+    if (Math.abs(l.size - base.size) > 0.05) sp.size = l.size;
+    if (l.color !== base.color) sp.color = l.color;
+    if (l.underline !== base.underline) sp.underline = l.underline;
+    if (l.strike !== base.strike) sp.strike = l.strike;
+    if (Object.keys(sp).length > 2) spans.push(sp);
+  }
+  const paras: TextPara[] = [];
+  let pos = 0;
+  for (const line of text.split('\n')) {
+    // The paragraph's list: its longest run's.
+    let run: Run | null = null, best = -1;
+    for (const r of runs) {
+      const ov = Math.min(r.end, pos + Math.max(1, line.length)) - Math.max(r.start, pos);
+      if (ov > best) [run, best] = [r, ov];
+    }
+    const list = run && line.trim() ? LIST_KIND[run.decoration] : undefined;
+    const p: TextPara = {};
+    if (list) {
+      p.list = list;
+      if (list === 'number') p.num = run!.number;
+      if (list === 'check' && run!.checked) p.checked = true;
+    }
+    if (run?.level && line.trim()) p.level = run.level;
+    paras.push(p);
+    pos += line.length + 1;
+  }
+  return {
+    text,
+    ...(spans.length ? { spans } : {}),
+    ...(compactParas(paras) ? { paras: compactParas(paras) } : {}),
+    fontSize: base.size,
+    color: base.color,
+    ...(base.family !== 'sans' ? { fontFamily: base.family } : {}),
+    ...(base.bold ? { bold: true } : {}),
+    ...(base.italic ? { italic: true } : {}),
+    ...(base.underline ? { underline: true } : {}),
+    ...(base.strike ? { strike: true } : {}),
+  };
+}
+
+/**
+ * Text laid out from `at` (shared with the .ntb importer). A text box (`box`) is one rich text box:
+ * `at` is its outside, its text inset by `box.pad`, with the box's colour, rounded corners and
+ * height. The note's own typed text (`grid`: the paper's line spacing in document points) is a
+ * box per paragraph, each paragraph's lines snapped to the paper's lines as Notability lays them.
  */
 export function layOut(
   t: { text: string; runs: Run[] },
@@ -831,78 +879,38 @@ export function layOut(
   align: 'left' | 'center' | 'right',
   rotation: number,
   stampBelow: () => number,
-  grid: number | null = null
+  grid: number | null = null,
+  box: { pad: [number, number]; background?: string | null; radius?: number; height?: number } | null = null
 ): TextBlock[] {
+  const rot = Math.abs(rotation) > 0.01 ? { rotation: Math.round(rotation * 100) / 100 } : {};
+  const al = align !== 'left' ? { align } : {};
+  if (!grid) {
+    if (!t.text.trim()) return [];
+    const rich = richText(t, s);
+    return [
+      {
+        id: newId('text'), x: at.x, y: at.y, width: at.w, ...rich, lineHeight: LINE,
+        ...(box ? { padding: box.pad, ...(box.background ? { background: box.background } : {}), ...(box.radius ? { radius: box.radius } : {}), ...(box.height ? { height: box.height } : {}) } : {}),
+        ...al, ...rot, createdAt: stampBelow(),
+      },
+    ];
+  }
   const out: TextBlock[] = [];
-  const runAt = (i: number) => t.runs.find((r) => i >= r.start && i < r.end) ?? t.runs[t.runs.length - 1] ?? null;
-  let y = at.y;
-  let pos = 0;
-  type Para = { text: string; run: Run | null; height: number; lines: number; spans: TextSpan[] };
-  let group: { key: string; paras: Para[]; y: number; run: Run | null } | null = null;
-  const flush = () => {
-    if (!group) return;
-    const g = group;
-    group = null;
-    if (!g.paras.some((p) => p.text.trim())) return;
-    const r = g.run;
-    const f = fontOf(r?.font ?? 'HelveticaNeue');
-    const px = (r?.size ?? 12) * s;
-    const checked = r?.decoration === 3 && r.checked;
-    out.push({
-      id: newId('text'), x: at.x, y: g.y, width: at.w, height: g.paras.reduce((h, p) => h + p.height, 0),
-      ...spansOf(g.paras),
-      text: g.paras.map((p) => p.text).join('\n'), fontSize: Math.round(px * 10) / 10, color: checked ? '#9CA3AF' : r?.color ?? '#000000',
-      lineHeight: grid ? Math.round((g.paras[0].height / Math.max(1, g.paras[0].lines) / px) * 1000) / 1000 : LINE,
-      ...(f.bold ? { bold: true } : {}), ...(f.italic ? { italic: true } : {}), ...(r?.underline ? { underline: true } : {}), ...(r?.strike || checked ? { strike: true } : {}),
-      ...(f.family !== 'sans' ? { fontFamily: f.family } : {}), ...(align !== 'left' ? { align } : {}),
-      ...(Math.abs(rotation) > 0.01 ? { rotation: Math.round(rotation * 100) / 100 } : {}),
-      createdAt: stampBelow(),
-    });
-  };
+  let y = at.y, pos = 0;
   for (const para of t.text.split('\n')) {
-    // The paragraph's style: its longest run.
-    let run: Run | null = null, best = -1;
-    for (const r of t.runs) {
-      const ov = Math.min(r.end, pos + para.length) - Math.max(r.start, pos);
-      if (ov > best) [run, best] = [r, ov];
+    const from = pos, to = pos + para.length;
+    pos = to + 1;
+    const run = t.runs.find((r) => from >= r.start && from < r.end) ?? t.runs.find((r) => r.end > from) ?? null;
+    const l = lookOf(run, s);
+    const indent = run && para.trim() ? (run.level + (run.decoration ? 1 : 0)) * 1.6 * l.size : 0;
+    const wraps = Math.max(1, Math.ceil((textWidth(para, l.size, l.family, l.bold) + indent) / at.w));
+    const height = Math.max(1, Math.ceil((wraps * l.size * LINE) / (grid * s))) * grid * s;
+    if (para.trim()) {
+      const rich = richText(t, s, from, to);
+      out.push({ id: newId('text'), x: at.x, y, width: at.w, height, ...rich, lineHeight: Math.round((height / wraps / rich.fontSize) * 1000) / 1000, ...al, ...rot, createdAt: stampBelow() });
     }
-    run ??= runAt(pos);
-    pos += para.length + 1;
-    const px = (run?.size ?? 12) * s;
-    const f = fontOf(run?.font ?? 'HelveticaNeue');
-    const mark = run && para.trim() ? marker(run) : '';
-    // List items: indented 1.5 em a level, the marker then a gap (as Notability lays them out).
-    const text = mark ? `${'\u2003\u2002'.repeat(run!.level)}${mark}\u2002 ${para}` : para;
-    const wraps = Math.max(1, Math.ceil(textWidth(text, px, f.family, f.bold) / at.w));
-    let height = wraps * px * LINE;
-    if (grid) height = Math.max(1, Math.ceil(height / (grid * s))) * grid * s;
-    const key = run ? `${run.font}|${run.size}|${run.color}|${run.underline}|${run.strike}|${run.decoration === 3 && run.checked}` : '';
-    if (!group || group.key !== key || grid) {
-      flush();
-      group = { key, paras: [], y, run };
-    }
-    // Runs of the paragraph styled apart from it (a bold word, a coloured one).
-    const spans: TextSpan[] = [];
-    if (run) {
-      const pf = fontOf(run.font);
-      const from = pos - para.length - 1, shift = text.length - para.length;
-      for (const r of t.runs) {
-        const a = Math.max(r.start, from), b = Math.min(r.end, from + para.length);
-        if (b <= a || r === run) continue;
-        const rf = fontOf(r.font);
-        const sp: TextSpan = { start: a - from + shift, end: b - from + shift };
-        if (rf.bold !== pf.bold) sp.bold = rf.bold;
-        if (rf.italic !== pf.italic) sp.italic = rf.italic;
-        if (r.underline !== run.underline) sp.underline = r.underline;
-        if (r.strike !== run.strike) sp.strike = r.strike;
-        if (r.color !== run.color) sp.color = r.color;
-        if (Object.keys(sp).length > 2) spans.push(sp);
-      }
-    }
-    group.paras.push({ text, run, height, lines: wraps, spans });
     y += height;
   }
-  flush();
   return out;
 }
 

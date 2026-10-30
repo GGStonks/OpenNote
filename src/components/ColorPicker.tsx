@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import { Plus, Star, X } from 'lucide-react';
+import { Pipette, Plus, Star, X } from 'lucide-react';
+import { canPickColour, onColourPickerChange, pickColour } from '../services/eyedropper';
 
 /**
  * The "any colour" button: a small colour sphere, every hue around it fading to white at the
@@ -118,6 +119,28 @@ export const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void
   };
   const sv = useDrag((u, w) => apply(hsv[0], u, 1 - w));
   const hue = useDrag((u) => apply(u * 360, hsv[1], hsv[2]));
+  // The eyedropper: one tap on the page gives its colour there (services/eyedropper.ts).
+  const canPick = useSyncExternalStore(onColourPickerChange, canPickColour, canPickColour);
+  const dropper = (cls: string) => (
+    <button
+      onPointerDown={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void pickColour().then((c) => {
+          const n = c && normalizeHex(c);
+          if (!n) return;
+          const h = hexToHsv(n);
+          setHsv(h[1] === 0 ? [hsv[0], h[1], h[2]] : h);
+          onChange(n);
+        });
+      }}
+      className={`h-8 px-2.5 rounded-lg flex items-center gap-1.5 text-xs font-semibold flex-shrink-0 bg-black/5 dark:bg-white/10 active:scale-95 transition ${cls}`}
+      title="Pick a colour from the page"
+    >
+      <Pipette className="w-4 h-4" />
+      {cls ? 'Pick from page' : ''}
+    </button>
+  );
   return (
     <div className="mt-2">
       <div
@@ -139,9 +162,16 @@ export const Spectrum: React.FC<{ value: string; onChange: (hex: string) => void
       >
         <span className="absolute top-1/2 w-4 h-4 -ml-2 -mt-2 rounded-full border-2 border-white shadow ring-1 ring-black/30 pointer-events-none" style={{ left: `${(hsv[0] / 360) * 100}%`, backgroundColor: `hsl(${hsv[0]} 100% 50%)` }} />
       </div>
+      {pointerOnly && canPick && (
+        <div className="flex items-center gap-2 mt-2">
+          <span className="w-8 h-8 rounded-lg border border-white/20 flex-shrink-0" style={{ backgroundColor: value }} />
+          {dropper('flex-1 justify-center')}
+        </div>
+      )}
       {!pointerOnly && (
         <div className="flex items-center gap-2 mt-2">
           <span className="w-8 h-8 rounded-lg border border-black/10 flex-shrink-0" style={{ backgroundColor: value }} />
+          {canPick && dropper('')}
           <input
             value={hex}
             onChange={(e) => {

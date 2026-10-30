@@ -1,7 +1,9 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Pencil, Trash2, AlertTriangle, Loader2 } from 'lucide-react';
-import { ImageBlock, LatexBlock, TextBlock } from '../types';
-import { textCss, textPieces } from '../editor/textStyle';
+import { ImageBlock, LatexBlock, TextBlock, TextPara, TextSpan } from '../types';
+import { textCss } from '../editor/textStyle';
+import { checkboxAt, indentParagraphs, listAtCaret, paragraphsOf, readTextHtml, refreshMarkers, richTextClass, textBlockHtml, toggleList } from '../editor/richText';
+import { activeTextEditor } from '../editor/textEditing';
 import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview, renderTikzWithTeX } from '../services/tikzEngine';
 import { OnScreen } from './onScreen';
@@ -291,9 +293,12 @@ interface TextBlockViewProps {
   zoom: number;
   darkPaper: boolean;
   onStartEdit: () => void;
-  onCommit: (text: string) => void;
+  /** Editing ended: the box's text, its styled parts and its paragraph styles as edited. */
+  onCommit: (edit: { text: string; spans: TextSpan[]; paras: TextPara[] }) => void;
   onDelete: () => void;
   onSilentUpdate: (patch: Partial<TextBlock>) => void;
+  /** A checkbox tapped while the box is not being edited (paragraph index). */
+  onToggleCheck?: (paragraph: number) => void;
   /** Resize handle dragged: 'start' and 'end' bracket one undo step, 'move' previews the box. */
   onResize?: (patch: Partial<Pick<TextBlock, 'x' | 'y' | 'width' | 'height' | 'fontSize'>>, phase: 'start' | 'move' | 'end') => void;
 }
@@ -319,29 +324,54 @@ export function handleBox(x: -1 | 0 | 1, y: -1 | 0 | 1, zoom: number, out = 0): 
   return { left: `calc(${(x + 1) * 50}% + ${x * out}px)`, top: `calc(${(y + 1) * 50}% + ${y * out}px)`, width: 24, height: 24, marginLeft: -12, marginTop: -12, transform: `scale(${1 / Math.max(0.05, zoom)})`, touchAction: 'none' };
 }
 
-export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete, onResize }) {
-  const [draft, setDraft] = useState(block.text);
-  const areaRef = useRef<HTMLTextAreaElement>(null);
-  useEffect(() => setDraft(block.text), [block.text]);
+/** The paragraph element `el` is in (a direct child of the editor's root). */
+function paragraphIn(root: HTMLElement, node: Node | null): HTMLElement | null {
+  let n: Node | null = node;
+  while (n && n.parentNode !== root) n = n.parentNode;
+  return n && n.nodeType === Node.ELEMENT_NODE ? (n as HTMLElement) : null;
+}
+
+/** Whether the caret is at the very start of its paragraph. */
+function caretAtStart(p: HTMLElement, r: Range): boolean {
+  if (!r.collapsed) return false;
+  const before = document.createRange();
+  before.setStart(p, 0);
+  before.setEnd(r.startContainer, r.startOffset);
+  return before.toString().length === 0;
+}
+
+/**
+ * A text box. Shown and edited as the same HTML (editor/richText.ts): while editing it is a
+ * contenteditable holding that HTML, written once when editing starts and read back on every
+ * change (React does not touch its content meanwhile: the formatting bar can restyle the box while
+ * the text is typed). Enter starts a new paragraph continuing the list (an empty list item ends
+ * the list instead); Backspace at the start of a list item takes the list off, of an indented
+ * paragraph the indent; Tab / Shift-Tab indent; a tap on a checkbox ticks it; pasting inserts
+ * plain text.
+ */
+export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockView({ block, interactive, editing, selected, zoom, darkPaper, onStartEdit, onCommit, onDelete, onToggleCheck, onResize }) {
+  const edRef = useRef<HTMLDivElement>(null);
+  const shownRef = useRef<HTMLDivElement>(null);
+  const html = useMemo(() => textBlockHtml(block), [block.text, block.spans, block.paras, block.underline, block.strike]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The editor's starting content: written once per editing session.
+  const editHtml = useMemo(() => (editing ? html : ''), [editing]); // eslint-disable-line react-hooks/exhaustive-deps
   // Leaving the editor saves what was typed. A tap on the page ends editing without a blur
-  // event (the page's pointerdown prevents the focus change and the textarea is just removed),
-  // and v1.x then dropped the text: the box was left empty and disappeared. The page keeps the
-  // box unless its text is empty.
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
+  // event (the page's pointerdown prevents the focus change and the editor is just removed),
+  // and v1.x then dropped the text: the box was left empty and disappeared. The draft is read on
+  // every change, so it is there when the editor is gone.
+  const draftRef = useRef<{ text: string; spans: TextSpan[]; paras: TextPara[] }>({ text: block.text, spans: block.spans ?? [], paras: block.paras ?? [] });
   const commitRef = useRef(onCommit);
   commitRef.current = onCommit;
   const wasEditing = useRef(editing);
+  const readDraft = () => {
+    const el = edRef.current;
+    if (el) draftRef.current = readTextHtml(el);
+  };
   useEffect(() => {
+    if (!wasEditing.current && editing) draftRef.current = { text: block.text, spans: block.spans ?? [], paras: block.paras ?? [] };
     if (wasEditing.current && !editing) commitRef.current(draftRef.current);
     wasEditing.current = editing;
-  }, [editing]);
-  useLayoutEffect(() => {
-    const el = areaRef.current;
-    if (!el) return;
-    el.style.height = '0px';
-    el.style.height = `${Math.max(el.scrollHeight, block.height ?? 0)}px`;
-  });
+  }, [editing]); // eslint-disable-line react-hooks/exhaustive-deps
   const boxRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef(onResize);
   resizeRef.current = onResize;
@@ -391,17 +421,113 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
     handle.addEventListener('pointerup', up);
     handle.addEventListener('pointercancel', up);
   };
+
+  // Editing: focus with the caret at the end, the paragraph commands for the formatting bar, and
+  // the editor's own handling of new paragraphs and deletions (beforeinput: every keyboard, the
+  // on-screen ones included, sends it).
   useEffect(() => {
-    if (editing) {
-      const el = areaRef.current;
-      el?.focus();
-      el?.setSelectionRange(el.value.length, el.value.length);
+    const el = edRef.current;
+    if (!editing || !el) return;
+    el.focus();
+    const sel = window.getSelection();
+    if (sel && el.lastElementChild) {
+      sel.selectAllChildren(el.lastElementChild);
+      sel.collapseToEnd();
     }
-  }, [editing]);
+    const changed = () => {
+      refreshMarkers(el);
+      readDraft();
+    };
+    activeTextEditor.current = {
+      toggleList: (kind) => {
+        toggleList(el, kind);
+        readDraft();
+      },
+      indent: (d) => {
+        indentParagraphs(el, d);
+        readDraft();
+      },
+      listAtCaret: () => listAtCaret(el),
+    };
+    const onBeforeInput = (e: InputEvent) => {
+      const s = window.getSelection();
+      if (!s || !s.rangeCount) return;
+      const r = s.getRangeAt(0);
+      if (e.inputType === 'insertParagraph' || e.inputType === 'insertLineBreak') {
+        e.preventDefault();
+        if (!r.collapsed) r.deleteContents();
+        paragraphsOf(el);
+        const p = paragraphIn(el, r.startContainer) ?? el.lastElementChild as HTMLElement | null;
+        if (!p) return;
+        if (p.dataset.list && !p.textContent) {
+          // Enter on an empty list item: the list ends here.
+          delete p.dataset.list;
+          delete p.dataset.checked;
+          delete p.dataset.num;
+          changed();
+          return;
+        }
+        const tail = document.createRange();
+        tail.setStart(r.startContainer, r.startOffset);
+        tail.setEnd(p, p.childNodes.length);
+        const rest = tail.extractContents();
+        const np = p.cloneNode(false) as HTMLElement;
+        delete np.dataset.checked;
+        delete np.dataset.num;
+        np.appendChild(rest);
+        if (!np.textContent) np.innerHTML = '<br>';
+        if (!p.textContent) p.innerHTML = '<br>';
+        p.after(np);
+        const at = document.createRange();
+        at.setStart(np, 0);
+        at.collapse(true);
+        s.removeAllRanges();
+        s.addRange(at);
+        changed();
+        np.scrollIntoView?.({ block: 'nearest' });
+        return;
+      }
+      if (e.inputType === 'deleteContentBackward') {
+        const p = paragraphIn(el, r.startContainer);
+        if (p && caretAtStart(p, r) && (p.dataset.list || p.dataset.level)) {
+          e.preventDefault();
+          if (p.dataset.list) {
+            delete p.dataset.list;
+            delete p.dataset.checked;
+            delete p.dataset.num;
+          } else indentParagraphs(el, -1);
+          changed();
+        }
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        indentParagraphs(el, e.shiftKey ? -1 : 1);
+        readDraft();
+      }
+    };
+    const onPaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      const text = e.clipboardData?.getData('text/plain') ?? '';
+      if (text) document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
+    };
+    el.addEventListener('beforeinput', onBeforeInput);
+    el.addEventListener('keydown', onKey);
+    el.addEventListener('paste', onPaste);
+    return () => {
+      el.removeEventListener('beforeinput', onBeforeInput);
+      el.removeEventListener('keydown', onKey);
+      el.removeEventListener('paste', onPaste);
+      if (activeTextEditor.current?.listAtCaret && el.isConnected === false) activeTextEditor.current = null;
+      activeTextEditor.current = null;
+    };
+  }, [editing]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const color = darkPaper && block.color === '#111827' ? '#F3F4F6' : block.color;
   const style: React.CSSProperties = {
     left: block.x, top: block.y, width: block.width, minHeight: block.height, fontSize: block.fontSize, color,
-    ...textCss(block), ...rotationStyle(block.rotation),
+    ...(textCss(block) as React.CSSProperties), ...rotationStyle(block.rotation),
   };
   // The handles keep their size on screen whatever the zoom.
   const handles = onResize
@@ -422,22 +548,40 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
 
   if (editing) {
     return (
-      <div ref={boxRef} className="absolute z-30" style={style} onPointerDown={(e) => e.stopPropagation()}>
-        <textarea
-          ref={areaRef}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+      <div ref={boxRef} className="absolute z-30 outline outline-2 outline-blue-400 rounded" style={style} onPointerDown={(e) => e.stopPropagation()}>
+        <div
+          ref={edRef}
+          contentEditable
+          suppressContentEditableWarning
+          className={`${richTextClass(block)} outline-none select-text min-h-[1em]`}
+          style={{ userSelect: 'text', WebkitUserSelect: 'text', caretColor: color }}
+          data-text-editor
+          dangerouslySetInnerHTML={{ __html: editHtml }}
+          onInput={() => {
+            const el = edRef.current;
+            if (!el) return;
+            refreshMarkers(el);
+            readDraft();
+          }}
+          onPointerDown={(e) => {
+            const el = edRef.current;
+            const p = el ? checkboxAt(el, e.clientX, e.clientY) : null;
+            if (!p || !el) return;
+            // A tap on a checkbox ticks it, the caret stays where it was.
+            e.preventDefault();
+            if (p.dataset.checked !== undefined) delete p.dataset.checked;
+            else p.dataset.checked = '';
+            readDraft();
+          }}
           onBlur={(e) => {
             // Focus taken by the formatting bar (TextFormatBar): keep editing.
             if ((e.relatedTarget as HTMLElement | null)?.closest?.('[data-text-format]')) {
-              requestAnimationFrame(() => areaRef.current?.focus());
+              requestAnimationFrame(() => edRef.current?.focus());
               return;
             }
-            onCommit(draft);
+            readDraft();
+            onCommit(draftRef.current);
           }}
-          className="w-full bg-blue-50/40 outline outline-2 outline-blue-400 rounded resize-none overflow-hidden p-0 m-0 border-0 select-text"
-          style={{ font: 'inherit', color: 'inherit', lineHeight: 'inherit', textDecoration: 'inherit', userSelect: 'text', WebkitUserSelect: 'text' }}
-          placeholder="Type…"
         />
         {handles}
       </div>
@@ -445,16 +589,24 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
   }
   return (
     <div
-      className={`absolute whitespace-pre-wrap break-words ${interactive ? 'pointer-events-auto cursor-text' : 'pointer-events-none'} ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4 rounded' : ''}`}
+      className={`absolute ${interactive ? 'pointer-events-auto cursor-text' : 'pointer-events-none'} ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4 rounded' : ''}`}
       style={style}
+      data-text-id={block.id}
       onPointerDown={(e) => {
         if (!interactive) return;
         e.stopPropagation();
+        const el = shownRef.current;
+        const p = el && onToggleCheck ? checkboxAt(el, e.clientX, e.clientY) : null;
+        if (p && el) {
+          e.preventDefault();
+          onToggleCheck!(paragraphsOf(el).indexOf(p));
+          return;
+        }
         onStartEdit();
       }}
     >
       {selected && <ActionPill zoom={zoom} onDelete={onDelete} />}
-      {block.spans?.length ? textPieces(block).map((p, i) => (p.css ? <span key={i} style={p.css}>{p.text}</span> : p.text)) : block.text}
+      <div ref={shownRef} className={richTextClass(block)} dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
 }, sameData);

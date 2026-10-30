@@ -7,7 +7,8 @@ import { renderLatexContent } from '../services/latexRender';
 import { renderTikzPreview } from '../services/tikzEngine';
 import { paperBackground, paperIsDark } from './CanvasPage';
 import { rotationStyle } from './Blocks';
-import { textCss, textPieces } from '../editor/textStyle';
+import { textCss } from '../editor/textStyle';
+import { richTextClass, textBlockHtml } from '../editor/richText';
 import { requestThumb } from '../services/thumbCache';
 import { pdfPreview } from '../services/pdf';
 
@@ -138,14 +139,14 @@ const ThumbContent: React.FC<{ page: NotePage; dark: boolean; scale: number; wid
           return b.isTikz ? <ThumbTikz key={l.key} block={b} color={ink} darkPaper={dark} /> : <ThumbMath key={l.key} block={b} color={ink} />;
         }
         const t = l.block;
+        // The same HTML as on the page (editor/richText.ts): lists, checkboxes, styled words, the box.
         return (
           <div
             key={l.key}
-            className="absolute whitespace-pre-wrap break-words"
-            style={{ left: t.x, top: t.y, width: t.width, minHeight: t.height, fontSize: t.fontSize, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...textCss(t), ...rotationStyle(t.rotation) }}
-          >
-            {t.spans?.length ? textPieces(t).map((p, i) => (p.css ? <span key={i} style={p.css}>{p.text}</span> : p.text)) : t.text}
-          </div>
+            className={`absolute ${richTextClass(t)}`}
+            style={{ left: t.x, top: t.y, width: t.width, minHeight: t.height, fontSize: t.fontSize, color: dark && t.color === '#111827' ? '#F3F4F6' : t.color, ...(textCss(t) as React.CSSProperties), ...rotationStyle(t.rotation) }}
+            dangerouslySetInnerHTML={{ __html: textBlockHtml(t) }}
+          />
         );
       })}
     </>
