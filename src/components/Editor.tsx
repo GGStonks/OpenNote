@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
-  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy, FileDown,
+  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy, Share,
   ClipboardPaste, CopyPlus, Plus, Minus, Maximize, MoveHorizontal,
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
@@ -1479,7 +1479,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             )}
             <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" /></button>
             <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" /></button>
-            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><FileDown className="w-5 h-5" /></button>
+            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><Share className="w-5 h-5" /></button>
             <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" /></button>
             <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
             <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
@@ -1593,6 +1593,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           crashLog.event('export', { kind: 'selection-svg', items: sel.strokeIds.length + sel.latexIds.length + sel.textIds.length + sel.imageIds.length, kb: Math.round(svg.length / 1024) });
           return svg;
         }}
+        onDone={(m) => showToast(m)}
         onError={(m) => showToast(m, true)}
       />
     </div>

@@ -2582,6 +2582,9 @@ if (ONLY.has('selsvg')) {
   if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'selsvg-sheet.png') });
   await page.getByText('Vector SVG', { exact: true }).first().click();
   for (let i = 0; i < 40 && !saved; i++) await sleep(250);
+  await sleep(300);
+  // As the note's PDF export: the sheet closes and a message names the file.
+  console.log(`selsvg: after saving: sheet ${await page.getByText('Export the selection').count() ? 'still open' : 'closed'}, message "${await page.evaluate(() => document.body.innerText.match(/Saved “[^”]*”[^\n]*/)?.[0] ?? '')}"`);
   if (!saved) { console.log('selsvg: nothing saved'); }
   else {
     const facts = await page.evaluate((svg) => {

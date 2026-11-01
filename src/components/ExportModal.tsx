@@ -238,7 +238,9 @@ const SavedNote: React.FC<{ saved: string | null }> = ({ saved }) =>
 
 /**
  * The selection as an SVG file (Editor's selection bar): only the selected items, framed by the
- * selection, on no paper; vectors stay vectors (services/svgExport.ts).
+ * selection, on no paper; vectors stay vectors (services/svgExport.ts). It behaves as the note's
+ * PDF export: once the file is saved or shared (or the dialog cancelled) the sheet closes, and
+ * `onDone` gets the message to show (the file's name, and where it was saved or that it was shared).
  */
 export const SelectionExportModal: React.FC<{
   isOpen: boolean;
@@ -246,11 +248,28 @@ export const SelectionExportModal: React.FC<{
   name: string;
   count: number;
   make: () => Promise<string>;
+  onDone: (message: string) => void;
   onError: (msg: string) => void;
-}> = ({ isOpen, onClose, name, count, make, onError }) => {
-  const { busy, saved, run } = useExportRun(onClose, onError);
+}> = ({ isOpen, onClose, name, count, make, onDone, onError }) => {
+  const [busy, setBusy] = useState(false);
   useBack(isOpen, onClose);
   if (!isOpen) return null;
+  const run = async (mode?: ExportMode) => {
+    setBusy(true);
+    const file = `${name}.svg`;
+    try {
+      const where = await exportFile(file, new Blob([await make()], { type: 'image/svg+xml' }), mode);
+      onClose();
+      if (where) onDone(where);
+      else if (mode === 'share') onDone(`Shared “${file.replace(/[\\/:*?"<>|]+/g, '_')}”.`);
+    } catch (err) {
+      onClose();
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/cancel/i.test(msg)) onError(`Export failed: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
       <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[var(--sa-bottom)] max-h-[calc(100dvh-16px)] flex flex-col">
@@ -261,14 +280,13 @@ export const SelectionExportModal: React.FC<{
           </button>
         </div>
         <div className="p-5 space-y-2.5 flex-1 min-h-0 overflow-y-auto">
-          <SavedNote saved={saved} />
           <FormatCard
             icon={<Download className="w-5 h-5" />}
             tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40"
             title="Vector SVG"
             sub={`${count} item${count === 1 ? '' : 's'}: ink, shapes, TikZ and math as vectors, text as text, pictures as they are`}
             busy={busy}
-            onExport={(m) => run(`${name}.svg`, make, 'image/svg+xml', m)}
+            onExport={(m) => void run(m)}
           />
         </div>
       </div>
