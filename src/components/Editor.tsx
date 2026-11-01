@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import {
-  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy,
+  Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy, FileDown,
   ClipboardPaste, CopyPlus, Plus, Minus, Maximize, MoveHorizontal,
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
@@ -9,10 +9,11 @@ import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, Line
 import { markMoved, strokeHitTest } from '../ink/strokeRenderer';
 import { setColourPicker } from '../services/eyedropper';
 import { useNoteEditor } from '../state/useNoteEditor';
-import { CanvasPage, ToolSettings, paperHex } from './CanvasPage';
+import { CanvasPage, ToolSettings, paperHex, paperIsDark } from './CanvasPage';
 import { Toolbar } from './Toolbar';
 import { LatexModal, LatexModalState } from './LatexModal';
-import { ExportModal, baseName } from './ExportModal';
+import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
+import { selectionSvg } from '../services/svgExport';
 import { TextFormatBar } from './TextFormatBar';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
@@ -291,6 +292,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   useEffect(() => () => conversionAbort.current?.abort(), []);
   const [toast, setToast] = useState<{ msg: string; error?: boolean } | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  /** The selection's SVG export sheet. */
+  const [selExportOpen, setSelExportOpen] = useState(false);
   const [printMode, setPrintMode] = useState(false);
   /** PDF export: the one page the print layout shows (null: all pages). */
   const [printOnly, setPrintOnly] = useState<ReadonlySet<string> | null>(null);
@@ -1476,6 +1479,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             )}
             <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" /></button>
             <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" /></button>
+            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><FileDown className="w-5 h-5" /></button>
             <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" /></button>
             <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
             <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
@@ -1575,6 +1579,22 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         )}
 
       <ExportModal isOpen={exportOpen} onClose={() => setExportOpen(false)} document={doc} onPdf={exportPdf} onPrint={printNote} onError={(m) => showToast(m, true)} />
+      <SelectionExportModal
+        isOpen={selExportOpen && !!selection && !!selPage}
+        onClose={() => setSelExportOpen(false)}
+        name={`${baseName(doc)} selection`}
+        count={selection ? selection.strokeIds.length + selection.latexIds.length + selection.textIds.length + selection.imageIds.length : 0}
+        make={async () => {
+          const sel = selection!;
+          // The paper and default ink of the page under the selection (highlighters, formulas without a colour).
+          const sheet = slRef.current.sheets[sheetIndexAt(slRef.current, sel.bounds.y + sel.bounds.height / 2)];
+          const paper = paperHex(sheet?.paperColor ?? doc.paperColor);
+          const svg = await selectionSvg(selPage!, sel, paper, paperIsDark(sheet?.paperColor ?? doc.paperColor) ? '#F3F4F6' : '#111827');
+          crashLog.event('export', { kind: 'selection-svg', items: sel.strokeIds.length + sel.latexIds.length + sel.textIds.length + sel.imageIds.length, kb: Math.round(svg.length / 1024) });
+          return svg;
+        }}
+        onError={(m) => showToast(m, true)}
+      />
     </div>
   );
 };

@@ -3,8 +3,8 @@ import { zLayers } from '../editor/zorder';
 import React, { useState } from 'react';
 import { X, FileText, FileCode, Printer, Download, Save, Check, FolderDown, Share2 } from 'lucide-react';
 import { NoteDocument } from '../types';
-import { strokeToSvg } from '../ink/strokeRenderer';
 import { latexForDocument, renderLatexContent, escapeHtml } from '../services/latexRender';
+import { layerSvg, svgHead } from '../services/svgExport';
 import { prepareTikz, renderTikzPreview } from '../services/tikzEngine';
 import { convertStrokesToTikz } from '../services/shapeRecognition';
 import { paperHex, paperIsDark } from './CanvasPage';
@@ -138,12 +138,9 @@ function buildMarkdown(doc: NoteDocument): string {
   return md;
 }
 
-/** Wraps an SVG element in a rotation about (cx, cy) when the item is turned. */
-const turn = (el: string, deg: number | undefined, cx: number, cy: number) => (deg ? `<g transform="rotate(${deg} ${cx.toFixed(2)} ${cy.toFixed(2)})">${el}</g>` : el);
-
 async function buildSvg(doc: NoteDocument): Promise<string> {
   const gap = 24;
-  const pages = splitIntoPages(doc).map(({ page, box }) => ({ p: page, setup: box }));
+  const pages = splitIntoPages(doc).map(({ page, box }) => ({ p: page, setup: box, layers: zLayers(page) }));
   // Pages showing a PDF: the PDF page as a picture under their content (SVG cannot hold the PDF).
   const pdfImages = new Map<string, string>();
   for (const { setup } of pages) {
@@ -153,58 +150,67 @@ async function buildSvg(doc: NoteDocument): Promise<string> {
   }
   const W = Math.max(...pages.map((x) => x.setup.width));
   const total = pages.reduce((h, x) => h + x.setup.height + gap, 0) - gap;
-  let out = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xhtml="http://www.w3.org/1999/xhtml" viewBox="0 0 ${W} ${total}" width="${W}" height="${total}">\n<style>${RICH_TEXT_CSS.replace(/\s+/g, ' ')}</style>\n`;
+  let out = await svgHead([0, 0, W, total], pages.flatMap((x) => x.layers));
   let top = 0;
-  pages.forEach(({ p, setup }, i) => {
+  pages.forEach(({ setup, layers }, i) => {
     const dy = top;
     top += setup.height + gap;
     const paper = paperHex(setup.paperColor);
     const ink = paperIsDark(setup.paperColor) ? '#F3F4F6' : '#111827';
     out += `<g id="page-${i + 1}"${setup.width < W ? ` transform="translate(${(W - setup.width) / 2} 0)"` : ''}>\n<rect x="0" y="${dy}" width="${setup.width}" height="${setup.height}" fill="${paper}"/>\n`;
-    if (pdfImages.has(setup.id)) out += `<image href="${pdfImages.get(setup.id)}" x="0" y="${dy}" width="${setup.width}" height="${setup.height}"/>\n`;
+    const pdf = pdfImages.get(setup.id);
+    if (pdf) out += `<image href="${pdf}" xlink:href="${pdf}" x="0" y="${dy}" width="${setup.width}" height="${setup.height}"/>\n`;
     // In stacking order (editor/zorder.ts), as on screen.
-    for (const l of zLayers(p)) {
-      if (l.kind === 'ink') {
-        const order = [...l.strokes.filter((s) => s.tool === 'highlighter'), ...l.strokes.filter((s) => s.tool !== 'highlighter')];
-        for (const s of order) out += strokeToSvg(s, dy, paper) + '\n';
-        continue;
-      }
-      if (l.kind === 'image') {
-        const im = l.block;
-        out += turn(`<image href="${im.dataUrl}" x="${im.x}" y="${im.y + dy}" width="${im.width}" height="${im.height}"/>`, im.rotation, im.x + im.width / 2, im.y + dy + im.height / 2) + '\n';
-        continue;
-      }
-      if (l.kind === 'text') {
-        const t = l.block;
-        // The same HTML as on the page (lists, checkboxes, styled words; RICH_TEXT_CSS in the SVG's <style>).
-        out += turn(`<foreignObject x="${t.x}" y="${t.y + dy}" width="${t.width}" height="${Math.max(t.height ?? 0, textHeight(t) + t.fontSize * 4)}"><xhtml:div class="${richTextClass(t)}" style="${textCssString(t)};color:${t.color};min-height:${t.height ?? 0}px">${textBlockHtml(t, 'xhtml:div')}</xhtml:div></foreignObject>`, t.rotation, t.x + t.width / 2, t.y + dy + textHeight(t) / 2) + '\n';
-        continue;
-      }
-      const b = l.block;
-      if (b.isTikz) {
-        const svg = b.tikzSvg && b.tikzSvgSource === b.latexCode ? b.tikzSvg : renderTikzPreview(b.latexCode).svg;
-        const inner = svg.replace(/<svg\b/, `<svg x="${b.x}" y="${b.y + dy}" width="${b.width}" height="${b.height}"`).replace(/currentColor/g, b.color ?? ink);
-        out += turn(inner, b.rotation, b.x + b.width / 2, b.y + dy + b.height / 2) + '\n';
-      } else {
-        const html = renderLatexContent(b.latexCode).html;
-        out += turn(`<foreignObject x="${b.x}" y="${b.y + dy}" width="${Math.max(b.width, 40) + 20}" height="${Math.max(b.height, 30) + 10}"><xhtml:div style="font-size:${22 * (b.scale ?? 1)}px;color:${b.color ?? ink}">${html}</xhtml:div></foreignObject>`, b.rotation, b.x + b.width / 2, b.y + dy + b.height / 2) + '\n';
-      }
-    }
+    for (const l of layers) out += layerSvg(l, dy, paper, ink) + '\n';
     out += '</g>\n';
   });
   return out + '</svg>\n';
 }
 
-export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onPrint, onError }) => {
-  const [includeInk, setIncludeInk] = useState(true);
+/**
+ * One export format. In the apps (exportOffersBoth): "Save to…" (a folder the user picks) and
+ * "Share" (Drive, Mail, a chat…) side by side; in a browser the whole card saves.
+ */
+const FormatCard: React.FC<{ icon: React.ReactNode; title: string; sub: string; tint: string; busy: boolean; onExport: (mode?: ExportMode) => void; children?: React.ReactNode }> = ({ icon, title, sub, tint, busy, onExport, children }) => {
+  const head = (
+    <>
+      <div className={`p-2.5 rounded-xl mr-3 flex-shrink-0 ${tint}`}>{icon}</div>
+      <div className="min-w-0">
+        <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</div>
+        <div className="text-xs text-gray-500">{sub}</div>
+      </div>
+    </>
+  );
+  const option = children && <div className="px-3 pb-3 pl-[4.25rem]">{children}</div>;
+  if (!exportOffersBoth()) {
+    return (
+      <div className="rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition">
+        <button disabled={busy} onClick={() => onExport()} className={`w-full flex items-center p-3 text-left disabled:opacity-50 ${children ? 'pb-2' : ''}`}>{head}</button>
+        {option}
+      </div>
+    );
+  }
+  const action = 'flex-1 flex items-center justify-center gap-2 h-10 rounded-xl text-sm font-semibold transition disabled:opacity-50';
+  return (
+    <div className="rounded-2xl border border-gray-200 dark:border-gray-700">
+      <div className="flex items-center p-3 pb-2">{head}</div>
+      {option}
+      <div className="flex gap-2 px-3 pb-3">
+        <button disabled={busy} onClick={() => onExport('save')} className={`${action} bg-gray-100 text-gray-800 active:bg-gray-200 dark:bg-ui-raised dark:text-gray-100`}>
+          <FolderDown className="w-4 h-4" /> Save to…
+        </button>
+        <button disabled={busy} onClick={() => onExport('share')} className={`${action} bg-blue-600 text-white active:bg-blue-700`}>
+          <Share2 className="w-4 h-4" /> Share
+        </button>
+      </div>
+    </div>
+  );
+};
+
+/** Exports a file, keeping where it went to show (null: the dialog may close). */
+function useExportRun(onClose: () => void, onError: (msg: string) => void) {
   const [busy, setBusy] = useState(false);
-  /** Where the last export went (shown until the dialog closes). */
   const [saved, setSaved] = useState<string | null>(null);
-  useBack(isOpen, onClose);
-  if (!isOpen) return null;
-
-  const both = exportOffersBoth();
-
   const run = async (name: string, made: string | Blob | (() => Promise<string | Blob>), type: string, mode?: ExportMode) => {
     setBusy(true);
     setSaved(null);
@@ -220,47 +226,64 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
       setBusy(false);
     }
   };
+  return { busy, saved, setSaved, run };
+}
 
-  const b = baseName(doc);
-  /**
-   * One format. In the apps (exportOffersBoth): "Save to…" (a folder the user picks) and "Share"
-   * (Drive, Mail, a chat…) side by side; in a browser the whole card saves.
-   */
-  const Format: React.FC<{ icon: React.ReactNode; title: string; sub: string; tint: string; onExport: (mode?: ExportMode) => void; children?: React.ReactNode }> = ({ icon, title, sub, tint, onExport, children }) => {
-    const head = (
-      <>
-        <div className={`p-2.5 rounded-xl mr-3 flex-shrink-0 ${tint}`}>{icon}</div>
-        <div className="min-w-0">
-          <div className="font-semibold text-sm text-gray-900 dark:text-gray-100">{title}</div>
-          <div className="text-xs text-gray-500">{sub}</div>
-        </div>
-      </>
-    );
-    const option = children && <div className="px-3 pb-3 pl-[4.25rem]">{children}</div>;
-    if (!both) {
-      return (
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-700 hover:border-blue-500 transition">
-          <button disabled={busy} onClick={() => onExport()} className={`w-full flex items-center p-3 text-left disabled:opacity-50 ${children ? 'pb-2' : ''}`}>{head}</button>
-          {option}
-        </div>
-      );
-    }
-    const action = 'flex-1 flex items-center justify-center gap-2 h-10 rounded-xl text-sm font-semibold transition disabled:opacity-50';
-    return (
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-700">
-        <div className="flex items-center p-3 pb-2">{head}</div>
-        {option}
-        <div className="flex gap-2 px-3 pb-3">
-          <button disabled={busy} onClick={() => onExport('save')} className={`${action} bg-gray-100 text-gray-800 active:bg-gray-200 dark:bg-ui-raised dark:text-gray-100`}>
-            <FolderDown className="w-4 h-4" /> Save to…
+const SavedNote: React.FC<{ saved: string | null }> = ({ saved }) =>
+  saved ? (
+    <div className="flex items-start gap-2 text-sm rounded-2xl bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200 px-3 py-2.5">
+      <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> {saved}
+    </div>
+  ) : null;
+
+/**
+ * The selection as an SVG file (Editor's selection bar): only the selected items, framed by the
+ * selection, on no paper; vectors stay vectors (services/svgExport.ts).
+ */
+export const SelectionExportModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  name: string;
+  count: number;
+  make: () => Promise<string>;
+  onError: (msg: string) => void;
+}> = ({ isOpen, onClose, name, count, make, onError }) => {
+  const { busy, saved, run } = useExportRun(onClose, onError);
+  useBack(isOpen, onClose);
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
+      <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-md shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden pb-[var(--sa-bottom)] max-h-[calc(100dvh-16px)] flex flex-col">
+        <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
+          <h3 className="font-bold text-base text-gray-900 dark:text-gray-100">Export the selection</h3>
+          <button onClick={onClose} className="p-1.5 text-gray-400 hover:text-gray-600 rounded-full" title="Close">
+            <X className="w-5 h-5" />
           </button>
-          <button disabled={busy} onClick={() => onExport('share')} className={`${action} bg-blue-600 text-white active:bg-blue-700`}>
-            <Share2 className="w-4 h-4" /> Share
-          </button>
+        </div>
+        <div className="p-5 space-y-2.5 flex-1 min-h-0 overflow-y-auto">
+          <SavedNote saved={saved} />
+          <FormatCard
+            icon={<Download className="w-5 h-5" />}
+            tint="bg-emerald-100 text-emerald-600 dark:bg-emerald-900/40"
+            title="Vector SVG"
+            sub={`${count} item${count === 1 ? '' : 's'}: ink, shapes, TikZ and math as vectors, text as text, pictures as they are`}
+            busy={busy}
+            onExport={(m) => run(`${name}.svg`, make, 'image/svg+xml', m)}
+          />
         </div>
       </div>
-    );
-  };
+    </div>
+  );
+};
+
+export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, document: doc, onPdf, onPrint, onError }) => {
+  const [includeInk, setIncludeInk] = useState(true);
+  const { busy, saved, run } = useExportRun(onClose, onError);
+  useBack(isOpen, onClose);
+  if (!isOpen) return null;
+
+  const b = baseName(doc);
+  const Format: React.FC<{ icon: React.ReactNode; title: string; sub: string; tint: string; onExport: (mode?: ExportMode) => void; children?: React.ReactNode }> = (props) => <FormatCard {...props} busy={busy} />;
 
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
@@ -272,11 +295,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, docum
           </button>
         </div>
         <div className="p-5 space-y-2.5 flex-1 min-h-0 overflow-y-auto">
-          {saved && (
-            <div className="flex items-start gap-2 text-sm rounded-2xl bg-emerald-50 dark:bg-emerald-900/30 text-emerald-800 dark:text-emerald-200 px-3 py-2.5">
-              <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> {saved}
-            </div>
-          )}
+          <SavedNote saved={saved} />
           <Format
             icon={<FileText className="w-5 h-5" />}
             tint="bg-red-100 text-red-600 dark:bg-red-900/40"

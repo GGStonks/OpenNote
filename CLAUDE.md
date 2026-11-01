@@ -298,6 +298,14 @@ show the iPad's compositing cost).
   asks `window.OpenNoteBack()`, which closes the newest (menus, popovers, dialogs, sheets, the pages
   panel, the selection, then the note as its back button), and moves the app to the background
   only when nothing was open. New closable UI must call useBack. `--only back`.
+- SVG export (`src/services/svgExport.ts`, `layerSvg` / `svgHead`): the note's pages (ExportModal)
+  and a selection (the selection bar's "Export as SVG", `SelectionExportModal`: only the selected
+  items, framed by the selection, no paper) are written by the same code, and vectors stay vectors:
+  strokes are paths, TikZ its own SVG (its own size attributes replaced, repeated they made invalid
+  XML), text boxes and formulas XHTML in foreignObjects (serialized with XMLSerializer in the XHTML
+  namespace, so the file is well-formed XML), styled by RICH_TEXT_CSS and KaTeX's style sheet with
+  its woff2 fonts inside (only when a formula is in it), pictures as images. `--only selsvg --latex
+  --shots <dir>` (well-formed, counts of paths / text / images, rendered on its own; the whole note too).
 - Exports go through `exportFile` (platform.ts): the system save dialog (iOS Files picker,
   Android `OpenNoteSavePlugin`), with a confirmation of where, or with `mode` 'share' the share
   sheet. In the apps (`exportOffersBoth`: iOS and Android) every export offers both, "Save to…" and

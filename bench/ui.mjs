@@ -2520,6 +2520,115 @@ if (ONLY.has('eyedropper')) {
   const fromInk = await pick(surfaceToScreen.x, surfaceToScreen.y);
   console.log(`eyedropper on ink (${inkHit.color}): pen colour ${fromInk} ${fromInk?.toUpperCase() === inkHit.color.toUpperCase() ? 'ok' : 'WRONG'}`);
 }
+// --only selsvg --latex [--shots <dir>]: a lasso selection of handwriting, the formula, a typed
+// text box, a picture and a TikZ diagram, exported with the selection bar's "Export as SVG": the
+// file must be well-formed XML framed by the selection, the ink paths, formula and text live text
+// (KaTeX's fonts inside), the picture an image, nothing turned into a picture; rendered on its own.
+if (ONLY.has('selsvg')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  let saved = null;
+  await page.exposeFunction('__opennoteBenchSave', async (name, b64) => { saved = { name, svg: Buffer.from(b64, 'base64').toString('utf8') }; });
+  const toScreen = async (x, y) => page.evaluate(([x, y]) => {
+    const el = document.querySelector('[data-sheet="0"]');
+    const r = el.getBoundingClientRect(), k = r.width / el.offsetWidth;
+    return [r.left + x * k, r.top + y * k];
+  }, [x, y]);
+  // A text box with a styled list.
+  await page.locator('button[title="Text"]').first().click();
+  await sleep(200);
+  const [tx, ty] = await toScreen(450, 360);
+  await page.mouse.click(tx, ty);
+  await sleep(400);
+  await page.keyboard.type('Export me');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('item one');
+  await page.locator('[data-text-format] button[title="Bulleted list"]').first().dispatchEvent('pointerdown');
+  await page.locator('[data-text-format] button[title="Bold"]').first().dispatchEvent('pointerdown');
+  const [ox, oy] = await toScreen(780, 1000);
+  await page.mouse.click(ox, oy);
+  await sleep(800);
+  // A picture and a TikZ diagram, straight into the stored note.
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAANUlEQVR4nGN8ZmPDAANONgvg7H1HErCKMzGQCJhoroFRo+IOQXfvQxIfjH54NhoPhAHt4wEABAEX0VJB+R4AAAAASUVORK5CYII=';
+  await page.evaluate(async (png) => {
+    const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
+    const tx = db.transaction('notes', 'readwrite');
+    const store = tx.objectStore('notes');
+    const notes = await new Promise((res) => { const q = store.getAll(); q.onsuccess = () => res(q.result); });
+    const n = notes.find((x) => x.title === 'Bench note');
+    n.pages[0].imageBlocks = [...(n.pages[0].imageBlocks ?? []), { id: 'img_sel', x: 560, y: 420, width: 80, height: 80, dataUrl: `data:image/png;base64,${png}`, createdAt: Date.now() }];
+    n.pages[0].latexBlocks = [...n.pages[0].latexBlocks, { id: 'tikz_sel', x: 120, y: 420, width: 120, height: 80, isTikz: true, latexCode: '\\begin{tikzpicture}\\draw (0,0) circle (1); \\draw (-1,0) -- (1,0);\\end{tikzpicture}', createdAt: Date.now() }];
+    store.put(n);
+    await new Promise((res) => { tx.oncomplete = res; });
+    db.close();
+  }, png);
+  await page.reload();
+  await page.getByText('Bench note').first().click();
+  await sleep(2500);
+  // Lasso round the region.
+  await page.locator('button[title^="Lasso"]').first().click();
+  await sleep(200);
+  const loop = [[80, 260], [720, 260], [720, 530], [80, 530], [80, 262]];
+  const pts = [];
+  for (let i = 0; i < loop.length - 1; i++) for (let t = 0; t < 1; t += 0.1) pts.push([loop[i][0] + (loop[i + 1][0] - loop[i][0]) * t, loop[i][1] + (loop[i + 1][1] - loop[i][1]) * t]);
+  const screen = [];
+  for (const [x, y] of pts) screen.push(await toScreen(x, y));
+  await mouse('mousePressed', screen[0][0], screen[0][1], 0.5);
+  for (const [x, y] of screen.slice(1)) { await mouse('mouseMoved', x, y, 0.5); await sleep(8); }
+  await mouse('mouseReleased', screen[screen.length - 1][0], screen[screen.length - 1][1], 0);
+  await sleep(800);
+  await page.locator('button[title="Export as SVG"]').first().click();
+  await sleep(400);
+  if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'selsvg-sheet.png') });
+  await page.getByText('Vector SVG', { exact: true }).first().click();
+  for (let i = 0; i < 40 && !saved; i++) await sleep(250);
+  if (!saved) { console.log('selsvg: nothing saved'); }
+  else {
+    const facts = await page.evaluate((svg) => {
+      const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+      const err = doc.querySelector('parsererror');
+      const root = doc.documentElement;
+      const count = (sel) => doc.getElementsByTagNameNS('*', sel).length;
+      const fo = [...doc.getElementsByTagNameNS('http://www.w3.org/2000/svg', 'foreignObject')];
+      return {
+        wellFormed: !err, error: err?.textContent?.slice(0, 200),
+        viewBox: root.getAttribute('viewBox'), paths: count('path'), foreignObjects: fo.length,
+        xhtml: fo.every((f) => f.firstElementChild?.namespaceURI === 'http://www.w3.org/1999/xhtml'),
+        katexFonts: (svg.match(/data:font\/woff2/g) || []).length, images: count('image'), innerSvgs: count('svg') - 1,
+        bytes: svg.length,
+      };
+    }, saved.svg);
+    console.log(`selsvg: saved "${saved.name}": ${JSON.stringify(facts)}`);
+    if (arg('shots')) {
+      const { writeFileSync } = await import('node:fs');
+      writeFileSync(join(arg('shots'), 'selection.svg'), saved.svg);
+      const view = await ctx.newPage();
+      await view.setContent(`<body style="margin:0;background:#ddd"><img style="background:#fff" src="data:image/svg+xml;base64,${Buffer.from(saved.svg).toString('base64')}"></body>`);
+      await sleep(1500);
+      await view.screenshot({ path: join(arg('shots'), 'selsvg-rendered.png'), fullPage: true });
+      await view.close();
+    }
+  }
+  // The whole note's SVG (Export → Vector SVG) is written by the same code.
+  saved = null;
+  await page.keyboard.press('Escape');
+  await page.locator('button[title="Done"]').first().click().catch(() => undefined);
+  await sleep(300);
+  const exportBtn = page.locator('button[title="Export"]').first();
+  if (await exportBtn.isVisible()) await exportBtn.click();
+  else { await page.locator('button[title="Insert & pages"]').first().click(); await sleep(300); await page.getByText('Export', { exact: true }).last().click(); }
+  await sleep(500);
+  await page.getByText('Vector SVG', { exact: true }).first().click();
+  for (let i = 0; i < 80 && !saved; i++) await sleep(250);
+  if (saved) {
+    const whole = await page.evaluate((svg) => {
+      const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+      const count = (sel) => doc.getElementsByTagNameNS('*', sel).length;
+      return { wellFormed: !doc.querySelector('parsererror'), pages: doc.querySelectorAll('g[id^="page-"]').length, paths: count('path'), foreignObjects: count('foreignObject'), images: count('image'), innerSvgs: count('svg') - 1, katexFonts: (svg.match(/data:font\/woff2/g) || []).length };
+    }, saved.svg);
+    console.log(`selsvg: whole note "${saved.name}": ${JSON.stringify(whole)}`);
+  } else console.log('selsvg: whole note: nothing saved');
+}
 // Not in the default run: --only pull checks that one finger pulling past the end adds a page.
 if (ONLY.has('pull')) {
   await reopen();
