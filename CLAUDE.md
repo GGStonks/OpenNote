@@ -345,16 +345,21 @@ show the iPad's compositing cost).
   Zoomed in over empty paper there are no tiles and the page canvases are hidden: SharpInk must
   still paint a new stroke there (it once returned early without tiles: the stroke stayed invisible
   after the shell's line cleared; `--native --blank --only liftshots`).
-- Fountain-pen width (`src/ink/inkWidth.ts`, outside the engine; since 2.9.0): pressure 0.61x-1.55x
-  and speed (+-10%, log scale, measured along the line over `SPEED_ARC` px), calibrated on the
-  owner's recordings so everyday writing keeps its old weight (the engine's `pressureWidth` is only
-  its own frozen painter's). Widths are computed on the whole modelled line, then thinned with it,
-  in the finished stroke and the live one alike: `SPEED_ARC` + 3 sigma must stay inside
-  `SMOOTH_SETTLE`, so the live line's final part (and the native ink, which draws its widths) is
-  the finished stroke exactly. `npm run bench:look`: accuracy, wobble, width range and live =
-  finished on the recordings. Stronger `SMOOTH_SIGMA` was measured worse (each stroke's unsmoothed
-  last 6 sigma grows); smoothing the whole finished line would move ends 0.2-0.4 px at lift.
-  Thumbnails carry the look (`thumbCache` `INK_LOOK`): bump it when the ink's look changes.
+- Fountain-pen width (`src/ink/inkWidth.ts`, outside the engine): pressure 0.61x-1.55x, calibrated
+  on the owner's recordings so everyday writing keeps its weight (the engine's `pressureWidth` is
+  only its own frozen painter's), from the force averaged along the line (`PRESSURE_SIGMA`, 2 px).
+  2.9.0 also narrowed fast strokes (speed over a few px): the Pencil's timing jitter made the width
+  twitch (roughness 1.8x 2.8.2's) and the line's end near the pen wriggle as it settled (the user's
+  "serpent"); 2.9.1 removed it: roughness a quarter of 2.8.2's, the end settling no more than 2.8.2's.
+  A point's width depends on the line within `WIDTH_REACH`; `SMOOTH_SETTLE` covers 3 sigma +
+  `WIDTH_REACH`, so the live line's final part (and the native ink, which draws its widths) is the
+  finished stroke exactly; widths are computed on the whole modelled line, then thinned with it.
+  The last `SMOOTH_SETTLE` of a line stays as modelled, live and finished: smoothing it (with a
+  narrowing window, or a local linear fit) turned curled ends into hooks or made the end swing.
+  Stronger `SMOOTH_SIGMA` costs accuracy for little smoothness. `npm run bench:look`: accuracy,
+  wobble, width range, nervousness (width roughness), the end moving while writing, and live =
+  finished, on the recordings; `npm run bench:hooks` for the ends. Thumbnails carry the look
+  (`thumbCache` `INK_LOOK`): bump it when the ink's look changes.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `npm run bench:hooks` — real recordings: a stroke's end turning back where the pen did not. The points given to the engine (strokeRenderer.ts `enginePoints`) leave out a pressured stroke's trailing samples without force (the Pencil in the air after its lift) and a finger / mouse stroke's lift sample when it turns back (Android reports it ~25 ms late, a few px back along the path): both made a hook at the end of quick strokes

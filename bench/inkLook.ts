@@ -4,6 +4,9 @@
 //   - wobble: how much the line's direction jitters (RMS change of curvature, per px, on the line
 //     resampled every px; lower is smoother, 0 for a perfect circle or line);
 //   - width range: each stroke's widest / narrowest point (1 = uniform);
+//   - nervous: the width's roughness along the finished line;
+//   - end: each frame while writing, the line's last END_PX against the finished stroke at the same
+//     distance along it (how much the end moves before it settles: the "serpent");
 //   - live = finished: the final part of the line drawn while writing (SmoothLiveStroke.line, which
 //     the native live ink draws) against the finished stroke, positions and widths. Any gap there
 //     shows as the ink changing when the pen lifts.
@@ -66,6 +69,25 @@ let wSum = 0, wN = 0, strokes = 0;
 const posGaps: number[] = [], wGaps: number[] = [];
 let liveN = 0;
 let worstW = { gap: 0, where: '' };
+let roughSum = 0, roughN = 0;
+const endPos: number[] = [], endW: number[] = [];
+/** The last stretch of the drawn line compared each frame (page px). */
+const END_PX = 40;
+function arcs(p: XY[]): Float64Array {
+  const a = new Float64Array(p.length);
+  for (let i = 1; i < p.length; i++) a[i] = a[i - 1] + Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
+  return a;
+}
+/** First index with a[i] >= v. */
+function upper(a: Float64Array, v: number): number {
+  let lo = 0, hi = a.length;
+  while (lo < hi) {
+    const m = (lo + hi) >> 1;
+    if (a[m] < v) lo = m + 1;
+    else hi = m;
+  }
+  return lo;
+}
 for (const file of files) {
   const rec = JSON.parse(readFileSync(file, 'utf8')) as PenRecording;
   for (const s of rec.strokes) {
@@ -74,10 +96,22 @@ for (const file of files) {
     const dens = new SampleDensifier();
     const live = new SmoothLiveStroke();
     const real = s.samples.some((q) => q[3] > 0 && q[3] !== 0.5);
+    const liveStyle = { color: '#000', width: strokeWidth({ tool: 'pen', color: '#000', width: s.width, penStyle: 'fountain', lineStyle: 'solid' } as never), variable: real };
+    // What is on screen near the pen each frame (the line's last END_PX), kept to compare with the
+    // finished stroke: everything drawn there that later changes is the end "moving" while writing.
+    const frames: { at: Float64Array; pts: XY[]; w: number[] }[] = [];
     for (const [x, y, t, force] of s.samples) {
       for (const q of dens.push({ x, y, t, pressure: force > 0 ? force : 0 })) {
         pts.push(q);
         live.add(q.x, q.y, q.t ?? t, real ? q.pressure : 0.5);
+      }
+      if (pts.length > 2) {
+        const l = live.line(liveStyle);
+        const all = l.final.concat(l.rest), w = l.finalW.concat(l.restW);
+        const at = arcs(all);
+        let k = all.length - 1;
+        while (k > 0 && at[all.length - 1] - at[k] < END_PX) k--;
+        frames.push({ at: at.slice(k), pts: all.slice(k), w: w.slice(k) });
       }
     }
     if (pts.length < 3) continue;
@@ -93,6 +127,40 @@ for (const file of files) {
     wSum += w.sum;
     wN += w.n;
     if (g.widths) range.push(Math.max(...g.widths) / Math.max(1e-6, Math.min(...g.widths)));
+    if (g.widths) {
+      // Nervousness: the width's RMS second difference along the finished line, per px.
+      const at = arcs(g.pts);
+      for (let i = 1; i < g.pts.length - 1; i++) {
+        const h1 = at[i] - at[i - 1], h2 = at[i + 1] - at[i];
+        if (h1 < 0.05 || h2 < 0.05) continue;
+        const d2 = ((g.widths[i + 1] - g.widths[i]) / h2 - (g.widths[i] - g.widths[i - 1]) / h1) / ((h1 + h2) / 2);
+        roughSum += (d2 / g.width) ** 2;
+        roughN++;
+      }
+      // The end while writing: each frame's drawn end against the finished stroke at the same
+      // distance along the line.
+      const fa = arcs(g.pts);
+      for (const f of frames) {
+        for (let i = 0; i < f.pts.length; i++) {
+          // Near the same distance along the line (lengths differ a little), the nearest point of
+          // the finished line's segments, its width interpolated there.
+          const c = upper(fa, f.at[i]);
+          let lo = c, hi = c;
+          while (lo > 1 && fa[c] - fa[lo - 1] < 15) lo--;
+          while (hi < g.pts.length - 1 && fa[hi] - fa[c] < 15) hi++;
+          let bd = Infinity, ww = g.widths[Math.min(c, g.widths.length - 1)];
+          for (let k = Math.max(1, lo); k <= Math.min(hi, g.pts.length - 1); k++) {
+            const A = g.pts[k - 1], B = g.pts[k], dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
+            const u = l2 ? Math.max(0, Math.min(1, ((f.pts[i].x - A.x) * dx + (f.pts[i].y - A.y) * dy) / l2)) : 0;
+            const d = Math.hypot(f.pts[i].x - A.x - u * dx, f.pts[i].y - A.y - u * dy);
+            if (d < bd) { bd = d; ww = g.widths[k - 1] + (g.widths[k] - g.widths[k - 1]) * u; }
+          }
+          if (bd === Infinity) continue;
+          endPos.push(bd);
+          endW.push(Math.abs(f.w[i] - ww) / ww);
+        }
+      }
+    }
     // Live, just before the pen lifts: its final part must lie on the finished line, same widths.
     const style = { color: '#000', width: strokeWidth({ tool: 'pen', color: '#000', width: s.width, penStyle: 'fountain', lineStyle: 'solid' } as never), variable: !!g.widths };
     const { final, finalW } = live.line(style);
@@ -135,3 +203,6 @@ console.log(`wobble     ${(Math.sqrt(wSum / Math.max(1, wN)) * 1000).toFixed(1)}
 console.log(`width      widest/narrowest per stroke: median ${range.length ? q(range, 0.5).toFixed(2) : '-'}x, p95 ${range.length ? q(range, 0.95).toFixed(2) : '-'}x`);
 console.log(`live       final live line vs finished stroke over ${liveN} points: position p99 ${q(posGaps, 0.99).toFixed(3)} / max ${q(posGaps, 1).toFixed(3)} px, width p99 ${(q(wGaps, 0.99) * 100).toFixed(2)}% / max ${(q(wGaps, 1) * 100).toFixed(2)}%`);
 console.log(`           worst width gap: ${worstW.where}`);
+const rms = (a: number[]) => Math.sqrt(a.reduce((t, v) => t + v * v, 0) / Math.max(1, a.length));
+console.log(`nervous    width roughness ${(Math.sqrt(roughSum / Math.max(1, roughN)) * 1000).toFixed(2)} (RMS 2nd derivative of width / nominal, x1000; lower is calmer)`);
+console.log(`end        the line's last ${END_PX} px while writing vs finished: position RMS ${rms(endPos).toFixed(3)} p99 ${q(endPos, 0.99).toFixed(2)} px, width RMS ${(rms(endW) * 100).toFixed(2)}% p99 ${(q(endW, 0.99) * 100).toFixed(1)}% (lower: the end moves less while writing)`);

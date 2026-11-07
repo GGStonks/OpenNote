@@ -2,7 +2,7 @@ import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../type
 import { itemTime } from '../editor/zorder';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
 import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, nibStroke, thinModeled } from './engine';
-import { inkWidths } from './inkWidth';
+import { WIDTH_REACH, inkWidths } from './inkWidth';
 
 /**
  * Ink renderer.
@@ -268,7 +268,11 @@ export function smoothGeometry(g: InkGeometry): InkGeometry {
 }
 
 /** How far before the end of a line still being written its smooth line can change (page px). */
-export const SMOOTH_SETTLE = 6 * SMOOTH_SIGMA;
+// A point's smoothed place and width depend on the line within 3 sigma of it (and the corner test
+// a px beyond), its width on the line within WIDTH_REACH of those (inkWidth.ts); kept at 6 sigma
+// at least, as before. The last SMOOTH_SETTLE of a line stays as modelled, here and live: smoothing
+// it too (2.9.1 trials) turned curled stroke ends into hooks (bench:hooks) or made the end swing.
+export const SMOOTH_SETTLE = Math.max(6 * SMOOTH_SIGMA, 3 * SMOOTH_SIGMA + Math.max(1, WIDTH_REACH) + 0.5);
 
 /**
  * smoothGeometry for points [from, upTo) only (the rest as they are): a line still being written is

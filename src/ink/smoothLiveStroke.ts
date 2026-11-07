@@ -12,7 +12,7 @@
  * edges twice. The native live ink (nativeInk.ts) draws the same line from line().
  */
 import { NibModeler } from './engine';
-import { SPEED_ARC, inkWidths } from './inkWidth';
+import { WIDTH_REACH, inkWidths } from './inkWidth';
 import type { LiveStyle, ModeledPoint, Rect } from './engine';
 import { SMOOTH_SETTLE, mergedCapsulePath, settledIndex, smoothLine } from './strokeRenderer';
 
@@ -73,7 +73,7 @@ export class SmoothLiveStroke {
       this.finalPts = [];
       this.finalW = [];
     }
-    // Widths depend on the line within SPEED_ARC of each point (inkWidth.ts): computed over runs of
+    // Widths depend on the line within WIDTH_REACH of each point (inkWidth.ts): computed over runs of
     // the line, never point by point.
     const widthsOf = (seq: ModeledPoint[]) => (style.variable ? inkWidths(seq, style.width) : seq.map(() => style.width));
     const raw = this.model.points;
@@ -98,9 +98,9 @@ export class SmoothLiveStroke {
       }
     }
     const rest = raw.slice(this.finalPts.length).concat(this.model.tail());
-    // The rest's widths with the line before it as context (its speed looks SPEED_ARC back).
+    // The rest's widths with the line before it as context (they look WIDTH_REACH back).
     let ctxFrom = this.finalPts.length, back = 0;
-    while (ctxFrom > 0 && back < SPEED_ARC + 1) {
+    while (ctxFrom > 0 && back < WIDTH_REACH + 1) {
       back += Math.hypot(raw[ctxFrom].x - raw[ctxFrom - 1].x, raw[ctxFrom].y - raw[ctxFrom - 1].y);
       ctxFrom--;
     }

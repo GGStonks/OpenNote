@@ -6,6 +6,7 @@
 // along the path: drawn as ink, the line's end bent back to it. strokeRenderer.ts `enginePoints`
 // leaves both out; this counts the line's end turning back (> 120° in its last 15 px) where the
 // pen's own samples did not (< 90°), before and now.
+// HOOK_SHOW=<file.json>#<stroke>,...: also prints those strokes' end turn (hooks or not).
 // npm run bench:hooks [-- files]
 import { readFileSync, readdirSync } from 'node:fs';
 import { SampleDensifier } from '../src/ink/densify';
@@ -61,6 +62,7 @@ for (const file of files) {
     if (pen >= 90) return;
     const old = endReversal(inkGeometry(pts, styleOf(stroke)).pts), cur = endReversal(strokeGeometry(stroke).pts);
     if (old > 120) before++;
+    if (process.env.HOOK_SHOW && process.env.HOOK_SHOW.split(',').includes(`${file.split('/').pop()}#${i}`)) console.log(`  show ${file.split('/').pop()} #${i}: end turns ${cur.toFixed(0)} (pen ${pen.toFixed(0)})`);
     if (cur > 120) {
       now++;
       console.log(`  ${file.split('/').pop()} #${i}: the line's end turns ${cur.toFixed(0)}° (the pen ${pen.toFixed(0)}°)`);
