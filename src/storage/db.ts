@@ -325,6 +325,8 @@ export interface StoredThumb {
   noteId: string;
   /** The note's updatedAt when it was drawn: another means it is out of date. */
   updatedAt: number;
+  /** The ink look it was drawn with (thumbCache INK_LOOK); missing = before 2.9.0. */
+  look?: number;
   url: string;
 }
 

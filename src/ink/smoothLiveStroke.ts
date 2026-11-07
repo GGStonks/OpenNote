@@ -11,7 +11,8 @@
  * region that changed and fills it again with ONE path, so overlapping fills never paint antialiased
  * edges twice. The native live ink (nativeInk.ts) draws the same line from line().
  */
-import { NibModeler, capsulePath, pressureWidth } from './engine';
+import { NibModeler, capsulePath } from './engine';
+import { SPEED_ARC, inkWidths } from './inkWidth';
 import type { LiveStyle, ModeledPoint, Rect } from './engine';
 import { SMOOTH_SETTLE, settledIndex, smoothLine } from './strokeRenderer';
 
@@ -72,7 +73,9 @@ export class SmoothLiveStroke {
       this.finalPts = [];
       this.finalW = [];
     }
-    const widthOf = (q: ModeledPoint) => (style.variable ? pressureWidth(style.width, q.p) : style.width);
+    // Widths depend on the line within SPEED_ARC of each point (inkWidth.ts): computed over runs of
+    // the line, never point by point.
+    const widthsOf = (seq: ModeledPoint[]) => (style.variable ? inkWidths(seq, style.width) : seq.map(() => style.width));
     const raw = this.model.points;
     const done = this.finalPts.length;
     const upTo = Math.max(done, settledIndex(raw));
@@ -87,14 +90,22 @@ export class SmoothLiveStroke {
         from--;
       }
       const seg = raw.slice(from);
-      const g = smoothLine({ pts: seg, widths: seg.map(widthOf), width: style.width }, upTo - from, done - from);
+      const segW = widthsOf(seg);
+      const g = smoothLine({ pts: seg, widths: segW, width: style.width }, upTo - from, done - from);
       for (let i = done; i < upTo; i++) {
         this.finalPts.push(g.pts[i - from]);
-        this.finalW.push(g.widths ? g.widths[i - from] : widthOf(g.pts[i - from]));
+        this.finalW.push(g.widths ? g.widths[i - from] : segW[i - from]);
       }
     }
     const rest = raw.slice(this.finalPts.length).concat(this.model.tail());
-    return { final: this.finalPts, finalW: this.finalW, rest, restW: rest.map(widthOf) };
+    // The rest's widths with the line before it as context (its speed looks SPEED_ARC back).
+    let ctxFrom = this.finalPts.length, back = 0;
+    while (ctxFrom > 0 && back < SPEED_ARC + 1) {
+      back += Math.hypot(raw[ctxFrom].x - raw[ctxFrom - 1].x, raw[ctxFrom].y - raw[ctxFrom - 1].y);
+      ctxFrom--;
+    }
+    const restW = widthsOf(raw.slice(ctxFrom, this.finalPts.length).concat(rest)).slice(this.finalPts.length - ctxFrom);
+    return { final: this.finalPts, finalW: this.finalW, rest, restW };
   }
 
   /** Paints what changed since the last call. */

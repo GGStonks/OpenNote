@@ -1,7 +1,7 @@
 {
   "name": "opennote",
   "private": true,
-  "version": "2.8.2",
+  "version": "2.9.0",
   "type": "module",
   "scripts": {
     "copy-tikzjax": "node scripts/copy-tikzjax.mjs && node scripts/copy-pdfjs.mjs",
@@ -17,7 +17,8 @@
     "bench:live": "esbuild bench/liveLine.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/live-line.mjs && node node_modules/.cache/live-line.mjs",
     "test:storage": "esbuild bench/storageRoundtrip.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/storage-roundtrip.mjs && node node_modules/.cache/storage-roundtrip.mjs",
     "bench:ui": "vite build --minify false && node bench/ui.mjs",
-    "bench:hooks": "esbuild bench/endHooks.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/end-hooks.mjs && node node_modules/.cache/end-hooks.mjs"
+    "bench:hooks": "esbuild bench/endHooks.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/end-hooks.mjs && node node_modules/.cache/end-hooks.mjs",
+    "bench:look": "esbuild bench/inkLook.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/ink-look.mjs && node node_modules/.cache/ink-look.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^8.5.3",

@@ -345,6 +345,16 @@ show the iPad's compositing cost).
   Zoomed in over empty paper there are no tiles and the page canvases are hidden: SharpInk must
   still paint a new stroke there (it once returned early without tiles: the stroke stayed invisible
   after the shell's line cleared; `--native --blank --only liftshots`).
+- Fountain-pen width (`src/ink/inkWidth.ts`, outside the engine; since 2.9.0): pressure 0.61x-1.55x
+  and speed (+-10%, log scale, measured along the line over `SPEED_ARC` px), calibrated on the
+  owner's recordings so everyday writing keeps its old weight (the engine's `pressureWidth` is only
+  its own frozen painter's). Widths are computed on the whole modelled line, then thinned with it,
+  in the finished stroke and the live one alike: `SPEED_ARC` + 3 sigma must stay inside
+  `SMOOTH_SETTLE`, so the live line's final part (and the native ink, which draws its widths) is
+  the finished stroke exactly. `npm run bench:look`: accuracy, wobble, width range and live =
+  finished on the recordings. Stronger `SMOOTH_SIGMA` was measured worse (each stroke's unsmoothed
+  last 6 sigma grows); smoothing the whole finished line would move ends 0.2-0.4 px at lift.
+  Thumbnails carry the look (`thumbCache` `INK_LOOK`): bump it when the ink's look changes.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `npm run bench:hooks` — real recordings: a stroke's end turning back where the pen did not. The points given to the engine (strokeRenderer.ts `enginePoints`) leave out a pressured stroke's trailing samples without force (the Pencil in the air after its lift) and a finger / mouse stroke's lift sample when it turns back (Android reports it ~25 ms late, a few px back along the path): both made a hook at the end of quick strokes

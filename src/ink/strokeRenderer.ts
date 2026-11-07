@@ -1,7 +1,8 @@
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
 import { itemTime } from '../editor/zorder';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
-import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, pressureWidth, thinModeled } from './engine';
+import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, thinModeled } from './engine';
+import { inkWidths } from './inkWidth';
 
 /**
  * Ink renderer.
@@ -104,12 +105,34 @@ export function modeledLine(points: Point[], modeled?: InkStyle['modeled']): Mod
 
 /** Modelled centre line and per-point widths of a handwritten stroke (canvas, SVG and TikZ). */
 export function inkGeometry(points: Point[], style: InkStyle): { pts: ModeledPoint[]; widths: number[] | null; width: number } {
-  const pts = thinModeled(modeledLine(points, style.modeled));
+  const line = modeledLine(points, style.modeled);
+  const pts = thinModeled(line);
   const width = style.tool === 'highlighter' ? style.width * 5.5 : strokeWidth(style);
   const pressured = style.modeled ? style.modeled !== 'uniform' : hasRealPressure(points);
   const share = style.modeled === 'proportional';
-  const widths = isVariableWidth(style) && pressured ? pts.map((p) => (share ? width * Math.max(0.02, p.p) : pressureWidth(width, p.p))) : null;
+  let widths: number[] | null = null;
+  if (isVariableWidth(style) && pressured) {
+    if (share) widths = pts.map((p) => width * Math.max(0.02, p.p)); // imported widths, kept exactly
+    else {
+      // The fountain pen's follow its pressure and speed (inkWidth.ts), measured on the whole
+      // modelled line, as the live stroke does (smoothLiveStroke), then thinned with it: the
+      // speed of a thinned line differs, and the ink changed width when the pen lifted.
+      const all = inkWidths(line, width);
+      widths = pts === line ? all : thinnedWidths(line, pts, all);
+    }
+  }
   return { pts, widths, width };
+}
+
+/** The widths of the points thinModeled kept (`kept` is in `line`'s order, a subsequence of it). */
+function thinnedWidths(line: readonly ModeledPoint[], kept: readonly ModeledPoint[], widths: readonly number[]): number[] {
+  const out: number[] = [];
+  let j = 0;
+  for (const q of kept) {
+    while (j < line.length && line[j] !== q) j++;
+    out.push(widths[Math.min(j, widths.length - 1)]);
+  }
+  return out;
 }
 
 type InkGeometry = ReturnType<typeof inkGeometry>;

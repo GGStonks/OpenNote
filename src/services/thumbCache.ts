@@ -12,6 +12,12 @@ import { frameRate } from './frameRate';
  * meanwhile.
  */
 
+/**
+ * The ink's look (widths, smoothing): a thumbnail drawn with another look is out of date even if
+ * its note is not, so a change of look (2.9.0: inkWidth.ts) redraws them in the background.
+ */
+export const INK_LOOK = 2;
+
 /** Width (px) a thumbnail's page is drawn at: sharp on the widest cards at 2x. */
 export const THUMB_PAGE_PX = 640;
 
@@ -109,7 +115,7 @@ export function requestThumb(
     run: async () => {
       const url = await drawSliced(strokes, width, height, offset, job);
       if (!url || job.cancelled) return;
-      const t = { id, noteId, updatedAt, url };
+      const t = { id, noteId, updatedAt, look: INK_LOOK, url };
       thumbs?.set(id, t);
       shown(url);
       await putThumb(t).catch(() => undefined);
@@ -119,7 +125,7 @@ export function requestThumb(
     if (cancelled) return;
     const have = map.get(id);
     if (have) shown(have.url);
-    if (have?.updatedAt === updatedAt) return;
+    if (have?.updatedAt === updatedAt && have.look === INK_LOOK) return;
     queue.push(job);
     void pump();
   });
