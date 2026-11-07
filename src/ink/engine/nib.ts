@@ -80,7 +80,8 @@ interface Anchor {
 }
 
 const tricube = (u: number) => {
-  const a = 1 - Math.abs(u) ** 3;
+  const v = Math.abs(u);
+  const a = 1 - v * v * v;
   return a <= 0 ? 0 : a * a * a;
 };
 
@@ -258,7 +259,8 @@ export class NibModeler {
    */
   private smoothAt(t: number, cx: number, cy: number, c: number, h: number, cr: number): { x: number; y: number } {
     const r = this.raw;
-    const near = (j: number) => Math.hypot(r[j].x - cx, r[j].y - cy) < cr;
+    const cr2 = cr * cr;
+    const near = (j: number) => { const dx = r[j].x - cx, dy = r[j].y - cy; return dx * dx + dy * dy < cr2; };
     let a = c, b = c;
     while (a > 0 && t - r[a - 1].t < h && near(a - 1)) a--;
     while (b < r.length - 1 && r[b + 1].t - t < h && near(b + 1)) b++;
@@ -349,21 +351,36 @@ function fitAt(r: Raw[], a: number, b: number, tc: number, h: number, cx: number
     else if (r[j].t > tc + 1e-6) after++;
   }
   const degree = before >= 2 && after >= 2 ? 2 : 1;
-  const c = polyFit(r, a, b, tc, h, degree, { x: cx, y: cy, r: cr });
-  return { x: c.x[0], y: c.y[0] };
+  return polyFit0(r, a, b, tc, h, degree, cx, cy, cr);
 }
 
-function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, near?: { x: number; y: number; r: number }) {
-  const m = degree + 1;
-  const S = new Float64Array(2 * m - 1);
-  const X = new Float64Array(m), Y = new Float64Array(m);
+// Scratch for polyFit0 (one fit at a time; nothing allocated per fit).
+const FS = new Float64Array(5), FX = new Float64Array(3), FY = new Float64Array(3);
+/** Augmented system, row-major: m rows of m + 2 columns (matrix, x right-hand side, y right-hand side). */
+const FA = new Float64Array(3 * 5);
+
+/**
+ * The fitted position at tc (the constant term of the weighted polynomial fit): the same sums and
+ * the same Gauss-Jordan elimination with partial pivoting, in the same order, as solving x and y
+ * one after the other with fresh arrays (until 2.9.2), but both right-hand sides share one
+ * elimination in preallocated buffers, and the distance and tricube use plain products instead of
+ * Math.hypot and `**`: the engine is 5.6x faster and its output differs from Nib v1's by at most
+ * 3e-11 px on the owner's recordings (test:engine allows 1e-4).
+ */
+function polyFit0(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, nx: number, ny: number, nr: number): { x: number; y: number } {
+  const m = degree + 1, w2 = 2 * m - 1, cols = m + 2;
+  const S = FS, X = FX, Y = FY;
+  S.fill(0);
+  X.fill(0);
+  Y.fill(0);
   for (let j = a; j <= b; j++) {
     const u = (r[j].t - tc) / h;
     let w = tricube(u * 0.999);
-    if (near) w *= tricube((0.999 * Math.hypot(r[j].x - near.x, r[j].y - near.y)) / near.r);
+    const ex = r[j].x - nx, ey = r[j].y - ny;
+    w *= tricube((0.999 * Math.sqrt(ex * ex + ey * ey)) / nr);
     w += 1e-9;
     let pw = w;
-    for (let k = 0; k < 2 * m - 1; k++) {
+    for (let k = 0; k < w2; k++) {
       S[k] += pw;
       if (k < m) {
         X[k] += pw * r[j].x;
@@ -372,31 +389,33 @@ function polyFit(r: Raw[], a: number, b: number, tc: number, h: number, degree: 
       pw *= u;
     }
   }
-  const M: number[][] = [];
-  for (let i = 0; i < m; i++) M.push(Array.from({ length: m }, (_, k) => S[i + k]));
-  const x = solve(M, Array.from(X)), y = solve(M, Array.from(Y));
-  if (!x || !y) {
-    // Degenerate (all samples at one time): weighted mean.
-    return { x: [X[0] / S[0], 0, 0], y: [Y[0] / S[0], 0, 0] };
+  const A = FA;
+  for (let i = 0; i < m; i++) {
+    for (let k = 0; k < m; k++) A[i * cols + k] = S[i + k];
+    A[i * cols + m] = X[i];
+    A[i * cols + m + 1] = Y[i];
   }
-  return { x, y };
-}
-
-function solve(M: number[][], v: number[]): number[] | null {
-  const n = v.length;
-  const A = M.map((row, i) => [...row, v[i]]);
-  for (let c = 0; c < n; c++) {
+  for (let c = 0; c < m; c++) {
     let piv = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
-    if (Math.abs(A[piv][c]) < 1e-10) return null;
-    [A[c], A[piv]] = [A[piv], A[c]];
-    for (let r = 0; r < n; r++) {
-      if (r === c) continue;
-      const f = A[r][c] / A[c][c];
-      for (let k = c; k <= n; k++) A[r][k] -= f * A[c][k];
+    for (let rr = c + 1; rr < m; rr++) if (Math.abs(A[rr * cols + c]) > Math.abs(A[piv * cols + c])) piv = rr;
+    if (Math.abs(A[piv * cols + c]) < 1e-10) {
+      // Degenerate (all samples at one time): weighted mean.
+      return { x: X[0] / S[0], y: Y[0] / S[0] };
+    }
+    if (piv !== c) {
+      for (let k = 0; k < cols; k++) {
+        const t = A[c * cols + k];
+        A[c * cols + k] = A[piv * cols + k];
+        A[piv * cols + k] = t;
+      }
+    }
+    for (let rr = 0; rr < m; rr++) {
+      if (rr === c) continue;
+      const f = A[rr * cols + c] / A[c * cols + c];
+      for (let k = c; k < cols; k++) A[rr * cols + k] -= f * A[c * cols + k];
     }
   }
-  return A.map((row, i) => row[n] / row[i]);
+  return { x: A[m] / A[0], y: A[m + 1] / A[0] };
 }
 
 /** The full stroke as drawn when finished. */

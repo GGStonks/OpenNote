@@ -1396,6 +1396,10 @@ if (ONLY.has('glwarm')) {
   const t0 = Date.now();
   await page.waitForFunction(() => (window.__opennoteGlInk?.shared()?.pieces ?? 0) > 0, null, { timeout: 120000, polling: 100 }).catch(() => null);
   console.log(`glwarm   ready ${((Date.now() - t0) / 1000 + 2.5).toFixed(1)} s after opening (${CPU}x slower CPU), ${await page.evaluate(() => window.__opennoteGlInk?.shared()?.pieces ?? 'none')} pieces`);
+  // The app's own time from opening to the GPU ink being ready (crash log gl-ready: preparation
+  // starts PREPARE_AFTER_MS after the note is still; the line above has a 2.5 s floor of its own).
+  const ready = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs.filter((c) => c.kind === 'gl-ready').slice(-1)[0]);
+  console.log(`glwarm   app: gl-ready ${ready ? `${ready.ms} ms after the note opened, ${ready.strokes} strokes` : 'not logged'}`);
 }
 // Not in the default run: --only glcompare, every kind of stroke drawn by the GPU renderer of a
 // pinch (glInk.ts) and by the canvas, at three scales: how far apart they are (mean difference of

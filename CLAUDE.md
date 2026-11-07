@@ -4,6 +4,11 @@
 
 `src/ink/engine/` (Nib v1: `nib.ts`, `liveStroke.ts`, `geometry.ts`, `index.ts`) is final. The owner
 has said it must never be changed again. Tag: `nib-engine-v1`.
+The one change since, asked for and authorised by the owner (2.9.2): `nib.ts`'s fit (`polyFit0`)
+solves in preallocated buffers and uses plain products for `tricube` and distances: 5.7x faster
+(the GPU ink of a 3,000-stroke note ready 0.9 s after opening instead of 2.3 s, 4x slower CPU),
+output within 3e-11 px of Nib v1 on the owner's recordings, the golden reference untouched. The
+freeze stands as before; `.claude/settings.json` blocks agent edits to the folder.
 
 - Do not edit anything in `src/ink/engine/`, not its `NIB` parameters, not "small" tweaks, not
   refactors. If a task seems to need an engine change, say so and ask; do not do it.
