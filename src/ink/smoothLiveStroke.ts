@@ -11,10 +11,10 @@
  * region that changed and fills it again with ONE path, so overlapping fills never paint antialiased
  * edges twice. The native live ink (nativeInk.ts) draws the same line from line().
  */
-import { NibModeler, capsulePath } from './engine';
+import { NibModeler } from './engine';
 import { SPEED_ARC, inkWidths } from './inkWidth';
 import type { LiveStyle, ModeledPoint, Rect } from './engine';
-import { SMOOTH_SETTLE, settledIndex, smoothLine } from './strokeRenderer';
+import { SMOOTH_SETTLE, mergedCapsulePath, settledIndex, smoothLine } from './strokeRenderer';
 
 const CHUNK = 64;
 /** Line before the new points that their smoothing can depend on (page px, with a margin). */
@@ -128,7 +128,8 @@ export class SmoothLiveStroke {
     /** Appends seq to a path; from = 1: its first point is already on the path. */
     const append = (path: Path2D, seq: ModeledPoint[], widths: number[], from: number) => {
       if (!seq.length) return;
-      if (style.variable) capsulePath(seq, widths, from, path);
+      // Merged capsules (strokeRenderer.mergedCapsulePath): the tail is rebuilt every frame.
+      if (style.variable) mergedCapsulePath(seq, widths, path);
       else {
         if (from === 0) path.moveTo(seq[0].x, seq[0].y);
         if (seq.length === 1) path.lineTo(seq[0].x + 0.01, seq[0].y);

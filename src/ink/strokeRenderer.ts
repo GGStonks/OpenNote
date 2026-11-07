@@ -1,7 +1,7 @@
 import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../types';
 import { itemTime } from '../editor/zorder';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
-import { ModeledPoint, capsulePath, capsuleSvg, hasRealPressure, nibStroke, thinModeled } from './engine';
+import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, nibStroke, thinModeled } from './engine';
 import { inkWidths } from './inkWidth';
 
 /**
@@ -403,7 +403,7 @@ function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke,
     // Handwriting: modelled stroke (inkEngine.ts).
     const g = stroke ? (smooth ? strokeGeometrySmooth(stroke) : strokeGeometry(stroke)) : inkGeometry(points, style);
     if (g.widths) {
-      path = capsulePath(g.pts, g.widths, 0, newPath());
+      path = mergedCapsulePath(g.pts, g.widths, newPath());
       filled = true;
     } else path = polylinePath(g.pts);
     if (fillable) area = polylinePath(g.pts, true);
@@ -718,6 +718,46 @@ function chainCaps(out: number[], pts: XY[], radii: number[]) {
     out.push(pts[0].x, pts[0].y, radii[0], pts[0].x, pts[0].y, radii[0]);
     return;
   }
+  const keep = capKeep(pts, radii);
+  let prev = 0;
+  for (let k = 1; k < n; k++) {
+    if (!keep[k]) continue;
+    out.push(pts[prev].x, pts[prev].y, radii[prev], pts[k].x, pts[k].y, radii[k]);
+    prev = k;
+  }
+}
+
+/**
+ * Which points of a capsule chain stay (1) once every point a straight capsule between two kept
+ * neighbours passes within GL_TOLERANCE of (place and radius) is dropped: the union looks the same
+ * (a sixth of a screen px at 500% and 2x pixel ratio) with a fraction of the pieces. The GPU ink
+ * (chainCaps) and the SVG ink (svgParts) both draw from it: the SVG had a capsule every 0.5 px of
+ * line, 114 000 on 292 strokes of handwriting (12 MB), all parsed and rasterised by WebKit.
+ */
+/**
+ * Variable-width ink on a canvas path: the capsules between the points capKeep keeps (the same
+ * union as one capsule per point, within GL_TOLERANCE), as the GPU and SVG ink draw it.
+ */
+export function mergedCapsulePath<P extends Path2D | CanvasRenderingContext2D>(pts: XY[], widths: number[], path: P): P {
+  const n = pts.length;
+  if (!n) return path;
+  const r = widths.map((w) => w / 2);
+  if (n === 1) {
+    addCapsule(path, pts[0], r[0], pts[0], r[0]);
+    return path;
+  }
+  const keep = capKeep(pts, r);
+  let prev = 0;
+  for (let k = 1; k < n; k++) {
+    if (!keep[k]) continue;
+    addCapsule(path, pts[prev], r[prev], pts[k], r[k]);
+    prev = k;
+  }
+  return path;
+}
+
+function capKeep(pts: XY[], radii: number[]): Uint8Array {
+  const n = pts.length;
   const keep = new Uint8Array(n);
   keep[0] = keep[n - 1] = 1;
   const stack: [number, number][] = [[0, n - 1]];
@@ -738,12 +778,7 @@ function chainCaps(out: number[], pts: XY[], radii: number[]) {
       stack.push([i, at], [at, j]);
     }
   }
-  let prev = 0;
-  for (let k = 1; k < n; k++) {
-    if (!keep[k]) continue;
-    out.push(pts[prev].x, pts[prev].y, radii[prev], pts[k].x, pts[k].y, radii[k]);
-    prev = k;
-  }
+  return keep;
 }
 
 /** A line `width` wide through pts, round-capped and round-joined, dashed as paintInk dashes it. */
@@ -876,10 +911,20 @@ function svgParts(s: Stroke, dy: number, paper: string): { fill: string; ink: st
   if (s.fillOnly) return { fill, ink: '' };
 
   if (ink?.widths && style.tool === 'pen') {
-    let d = '';
-    const w = ink.widths;
-    for (let i = 1; i < ink.pts.length; i++) d += capsuleSvg(ink.pts[i - 1], w[i - 1] / 2, ink.pts[i], w[i] / 2, f2);
-    if (ink.pts.length === 1) d = capsuleSvg(ink.pts[0], w[0] / 2, ink.pts[0], w[0] / 2, f2);
+    // Capsules between the points capKeep keeps (the GPU ink's pieces), not one every 0.5 px.
+    const P = ink.pts, r = ink.widths.map((w) => w / 2);
+    const parts: string[] = [];
+    if (P.length === 1) parts.push(capsuleSvg(P[0], r[0], P[0], r[0], f2));
+    else {
+      const keep = capKeep(P, r);
+      let prev = 0;
+      for (let k = 1; k < P.length; k++) {
+        if (!keep[k]) continue;
+        parts.push(capsuleSvg(P[prev], r[prev], P[k], r[k], f2));
+        prev = k;
+      }
+    }
+    const d = parts.join('');
     out += `<path d="${d}" fill="${s.color}" fill-opacity="${opacity}" fill-rule="nonzero"/>`;
   } else if (style.tool === 'highlighter') {
     const dash = highlighterDash(style);

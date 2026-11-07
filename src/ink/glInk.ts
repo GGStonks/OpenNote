@@ -558,15 +558,25 @@ export class GlInk {
     return [x0, h - y1, x1 - x0, y1 - y0];
   }
 
+  /** Uniform locations by program and name, looked up once (they were looked up for every layer drawn, every frame). */
+  private locs = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
+  private loc(prog: WebGLProgram, name: string): WebGLUniformLocation | null {
+    let m = this.locs.get(prog);
+    if (!m) this.locs.set(prog, (m = new Map()));
+    let l = m.get(name);
+    if (l === undefined) m.set(name, (l = this.gl.getUniformLocation(prog, name)));
+    return l;
+  }
+
   private uniforms(prog: WebGLProgram, tf: GlTransform, glow = 0) {
     const gl = this.gl;
     gl.useProgram(prog);
-    gl.uniformMatrix2fv(gl.getUniformLocation(prog, 'u_m'), false, linear(tf));
-    gl.uniform2f(gl.getUniformLocation(prog, 'u_t'), tf.ox, tf.oy);
-    gl.uniform1f(gl.getUniformLocation(prog, 'u_px'), tf.scale);
-    gl.uniform1f(gl.getUniformLocation(prog, 'u_glow'), glow);
-    gl.uniform1f(gl.getUniformLocation(prog, 'u_glowPad'), glow * 2 * tf.scale);
-    gl.uniform2f(gl.getUniformLocation(prog, 'u_size'), this.canvas.width, this.canvas.height);
+    gl.uniformMatrix2fv(this.loc(prog, 'u_m'), false, linear(tf));
+    gl.uniform2f(this.loc(prog, 'u_t'), tf.ox, tf.oy);
+    gl.uniform1f(this.loc(prog, 'u_px'), tf.scale);
+    gl.uniform1f(this.loc(prog, 'u_glow'), glow);
+    gl.uniform1f(this.loc(prog, 'u_glowPad'), glow * 2 * tf.scale);
+    gl.uniform2f(this.loc(prog, 'u_size'), this.canvas.width, this.canvas.height);
   }
 
   /**
@@ -606,7 +616,7 @@ export class GlInk {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.blendEquation(gl.MAX);
     this.uniforms(this.caps, tf, glow);
-    gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 1);
+    gl.uniform1i(this.loc(this.caps, 'u_cov'), 1);
     gl.bindVertexArray(this.capVao);
     this.pointCaps(first);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
@@ -615,9 +625,9 @@ export class GlInk {
     gl.useProgram(this.compose);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
-    gl.uniform1i(gl.getUniformLocation(this.compose, 'u_tex'), 0);
+    gl.uniform1i(this.loc(this.compose, 'u_tex'), 0);
     const [r, g, b, a] = rgba;
-    gl.uniform4f(gl.getUniformLocation(this.compose, 'u_col'), r * a, g * a, b * a, a);
+    gl.uniform4f(this.loc(this.compose, 'u_col'), r * a, g * a, b * a, a);
     gl.bindVertexArray(this.fullVao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.disable(gl.SCISSOR_TEST);
@@ -660,7 +670,7 @@ export class GlInk {
         gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
         if (op.mode === 'hatch') {
           this.uniforms(this.caps, tf);
-          gl.uniform1i(gl.getUniformLocation(this.caps, 'u_cov'), 0);
+          gl.uniform1i(this.loc(this.caps, 'u_cov'), 0);
           gl.bindVertexArray(this.capVao);
           this.pointCaps(op.hatchFirst);
           gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, op.hatchCount);
@@ -671,8 +681,8 @@ export class GlInk {
           const [r, g, bl, a] = op.rgba;
           if (op.mode === 'hole') {
             gl.blendFunc(gl.ZERO, gl.ONE_MINUS_SRC_ALPHA);
-            gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), 0, 0, 0, 1);
-          } else gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), r * a, g * a, bl * a, a);
+            gl.uniform4f(this.loc(this.flatProg, 'u_col'), 0, 0, 0, 1);
+          } else gl.uniform4f(this.loc(this.flatProg, 'u_col'), r * a, g * a, bl * a, a);
           gl.drawArrays(gl.TRIANGLE_STRIP, 0, BOX_VERTICES);
           gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         }
@@ -682,7 +692,7 @@ export class GlInk {
       } else {
         this.uniforms(this.flatProg, tf);
         const [r, g, b, a] = op.rgba;
-        gl.uniform4f(gl.getUniformLocation(this.flatProg, 'u_col'), r * a, g * a, b * a, a);
+        gl.uniform4f(this.loc(this.flatProg, 'u_col'), r * a, g * a, b * a, a);
         gl.bindVertexArray(this.flatVao);
         gl.drawArrays(gl.TRIANGLES, op.first, op.count);
       }
