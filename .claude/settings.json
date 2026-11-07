@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run test:*)",
+      "Bash(npm run bench:*)"
+    ],
+    "deny": [
+      "Edit(src/ink/engine/**)",
+      "Edit(bench/engine-golden.json)",
+      "Bash(npm run test:engine -- --update*)",
+      "Bash(node node_modules/.cache/engine-golden.mjs --update*)"
+    ]
+  }
+}
