@@ -39,7 +39,7 @@ export function rotationStyle(deg?: number): React.CSSProperties {
 const BLOCK_MAX_SIDE = 32_000;
 
 /** The zoom a block of `w` x `h` page px is laid out at: the page's zoom, within BLOCK_MAX_SIDE. */
-function layoutZoom(zoom: number, w: number, h: number): number {
+export function layoutZoom(zoom: number, w: number, h: number): number {
   const z = zoom > 0 ? zoom : 1;
   const dpr = Math.min(window.devicePixelRatio || 1, 3);
   return Math.min(z, BLOCK_MAX_SIDE / Math.max(1, w, h) / dpr);

@@ -1970,8 +1970,18 @@ if (ONLY.has('liftshots')) {
         return `${(r.width * dpr / c.width).toFixed(4)}x off ${frac(r.left)},${frac(r.top)}`;
       });
     });
+    // The vector ink on screen: screen px per laid-out px of each page's SVG. Must be 1.0000 at every
+    // zoom: WebKit (the iPad) rasterises a layer inside the CSS-scaled page at its laid-out size and
+    // stretches it, so an SVG laid out at page size was pixelated zoomed in (VectorInk in CanvasPage).
+    // Headless Chromium re-rasterises, so only this number shows the iPad's case here.
+    const vectorScale = await page.evaluate(() => [...document.querySelectorAll('[data-ink-layer] svg')].filter((v) => {
+      const r = v.getBoundingClientRect();
+      return r.bottom > 0 && r.top < innerHeight;
+    }).map((v) => (v.getBoundingClientRect().width / v.width.baseVal.value).toFixed(4)));
     // --native: the page draws no live ink, so the pen-down frame lacks the new stroke (not comparable).
     console.log(`liftshots zoom ${z}%  canvases on screen: ${grid.join(' | ') || 'none'}`);
+    const badVector = vectorScale.filter((s) => Math.abs(Number(s) - 1) > 0.001);
+    console.log(`liftshots zoom ${z}%  vector ink on screen: ${vectorScale.length ? vectorScale.join(' ') : 'none'}${badVector.length ? '  ** scaled: WebKit would stretch a bitmap **' : ''}`);
     console.log(`liftshots zoom ${z}%  content shift ${shift}  pen down: ink ${down.ink} soft ${down.soft.toFixed(3)}${process.argv.includes('--native') ? ' (native: without the new stroke)' : ''}`);
     for (const r of rows) console.log(`liftshots   ${r}`);
     if (process.argv.includes('--blank')) {

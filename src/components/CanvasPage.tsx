@@ -30,7 +30,7 @@ import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
 } from '../editor/selection';
-import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox } from './Blocks';
+import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox, layoutZoom } from './Blocks';
 import { checkboxAt, compactParas, paragraphsOf, parasOf } from '../editor/richText';
 import { SheetBox, SurfaceLayout, sheetIndexAt } from '../editor/sheets';
 import { ZLayer, zLayers } from '../editor/zorder';
@@ -287,12 +287,18 @@ function logInkGrid(zoom: number) {
     const r = c.getBoundingClientRect();
     return { kind: kind(c), scale: Math.round(((r.width * dpr) / c.width) * 10000) / 10000, off: [frac(r.left), frac(r.top)] };
   });
-  // Pages drawn as vectors (vectorInk.ts) on screen: not resampled by construction.
-  const vectors = [...document.querySelectorAll('[data-ink-layer] svg')].filter((v) => {
+  // Pages drawn as vectors (vectorInk.ts) on screen, and how much each is scaled on the way there:
+  // 1 means its layer is laid out at its size on screen and drawn at the screen's resolution;
+  // more means WebKit may stretch a bitmap of it (the 2.4.11-2.8.1 ink, pixelated zoomed in).
+  const shownVectors = [...document.querySelectorAll<SVGSVGElement>('[data-ink-layer] svg')].filter((v) => {
     const r = v.getBoundingClientRect();
     return r.bottom > 0 && r.top < window.innerHeight;
-  }).length;
-  crashLog.event('ink-grid', { zoom: Math.round(zoom * 10000) / 10000, dpr, shown: shown.length, canvases, vectors });
+  });
+  const vectorScale = shownVectors.slice(0, 4).map((v) => {
+    const laidOut = v.width.baseVal.value;
+    return laidOut > 0 ? Math.round((v.getBoundingClientRect().width / laidOut) * 10000) / 10000 : 0;
+  });
+  crashLog.event('ink-grid', { zoom: Math.round(zoom * 10000) / 10000, dpr, shown: shown.length, canvases, vectors: shownVectors.length, vectorScale });
 }
 
 /** Committed ink as SVG markup (cached per stroke): high zoom and printing. `paperOf`: for "hole" fills. */
@@ -864,26 +870,38 @@ const StrokeSvg = React.memo(function StrokeSvg({ s, part }: { s: Stroke; part: 
 
 /**
  * A page's finished ink as vectors (vectorInk.ts), in drawStrokes' order: highlighters, then the
- * fills, then the ink. WebKit draws it at the screen's resolution at every zoom (the content is
- * scaled by a CSS transform, painted at its real scale): nothing is resampled. Each stroke is an
- * element of its own, so a new stroke adds one and only its area is painted.
+ * fills, then the ink. Each stroke is an element of its own, so a new stroke adds one and only its
+ * area is painted.
+ *
+ * The SVG is laid out at its size on screen (`zoom` times the page) and scaled back by 1/zoom, as a
+ * compositing layer of its own (Blocks.tsx `ScreenScaled`, the same for formulas). The page's zoom
+ * is a CSS scale, and WebKit rasterises a composited layer inside it at the scale it first had and
+ * stretches that bitmap: laid out at page size (2.4.11-2.8.1), the iPad's ink was a 1x bitmap
+ * magnified by the zoom, pixelated zoomed in (headless Chromium re-rasterises, so the bench never
+ * showed it). This layer's scale on screen is always 1: WebKit draws the vectors at exactly the
+ * screen's resolution at any zoom, laid out again when the zoom changes. A layer over about 2000
+ * px a side is tiled by the browser, so zoomed far in only the tiles near the screen hold pixels.
+ * `ink-grid` in the crash log records each page's scale on screen (`vectorScale`, 1 = native).
  */
 const VectorInk = React.memo(
-  React.forwardRef<SVGSVGElement, { strokes: Stroke[]; top: number; width: number; height: number }>(function VectorInk({ strokes, top, width, height }, ref) {
+  React.forwardRef<SVGSVGElement, { strokes: Stroke[]; top: number; width: number; height: number; zoom: number }>(function VectorInk({ strokes, top, width, height, zoom }, ref) {
     const hl = strokes.filter((st) => st.tool === 'highlighter');
     const ink = strokes.filter((st) => st.tool !== 'highlighter');
+    const lz = layoutZoom(zoom, width, height);
     return (
-      <svg ref={ref} width={width} height={height} viewBox={`0 ${top} ${width} ${height}`} style={{ display: 'block' }}>
-        <g>{hl.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
-        <g>{ink.filter((st) => st.fill && st.fill !== 'none').map((st) => <StrokeSvg key={st.id} s={st} part="fill" />)}</g>
-        <g>{ink.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
-      </svg>
+      <div style={{ width: width * lz, height: height * lz, transform: `scale(${1 / lz})`, transformOrigin: '0 0', willChange: 'transform' }}>
+        <svg ref={ref} width={width * lz} height={height * lz} viewBox={`0 ${top} ${width} ${height}`} style={{ display: 'block' }}>
+          <g>{hl.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
+          <g>{ink.filter((st) => st.fill && st.fill !== 'none').map((st) => <StrokeSvg key={st.id} s={st} part="fill" />)}</g>
+          <g>{ink.map((st) => <StrokeSvg key={st.id} s={st} part="ink" />)}</g>
+        </svg>
+      </div>
     );
   })
 );
 
-const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; smooth: boolean; scrollRoot: HTMLElement | null; inkKey: string; vector: boolean }) {
-  const { eager, top, width: W, height: H, strokes, ratio, smooth, scrollRoot, inkKey, vector } = props;
+const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number; width: number; height: number; strokes: Stroke[]; ratio: number; smooth: boolean; scrollRoot: HTMLElement | null; inkKey: string; vector: boolean; zoom: number }) {
+  const { eager, top, width: W, height: H, strokes, ratio, smooth, scrollRoot, inkKey, vector, zoom } = props;
   const mine = useMemo(() => strokes.filter((s) => {
     const r = strokeYRange(s);
     return r.maxY >= top && r.minY <= top + H;
@@ -925,7 +943,8 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
     c.style.transform = `translate(${n.x}px, ${n.y}px)`;
   };
   const applyShown = () => {
-    const c = canvasRef.current ?? svgRef.current;
+    // Vectors: their screen-sized layer (VectorInk's wrapper), not just the SVG in it.
+    const c = canvasRef.current ?? svgRef.current?.parentElement;
     if (c) c.style.display = shown.current ? '' : 'none';
     if (shown.current) align();
   };
@@ -1095,7 +1114,7 @@ const InkTile = React.memo(function InkTile(props: { eager: boolean; top: number
   }, [mine, ratio, smooth, alive, top, W, H]);
   return (
     <div ref={holderRef} data-ink-key={inkKey} data-ink-layer className="absolute left-0 pointer-events-none" style={{ top, width: W, height: H }}>
-      {alive && mine.length > 0 && (vector ? <VectorInk ref={svgRef} strokes={mine} top={top} width={W} height={H} /> : <canvas ref={canvasRef} style={{ width: W, height: H }} />)}
+      {alive && mine.length > 0 && (vector ? <VectorInk ref={svgRef} strokes={mine} top={top} width={W} height={H} zoom={zoom} /> : <canvas ref={canvasRef} style={{ width: W, height: H }} />)}
     </div>
   );
 });
@@ -2813,6 +2832,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
                     smooth={pageSmooth.current}
                     scrollRoot={scrollRoot}
                     vector={vectorLayers.has(l.key)}
+                    // Only vector tiles are laid out per zoom (VectorInk); canvas tiles keep re-renders out of a zoom.
+                    zoom={vectorLayers.has(l.key) ? zoom : 1}
                   />
                 ))}
                 {sharp && !vectorLayers.has(l.key) && <SharpInk key={`s${l.key}`} layerKey={l.key} strokes={l.strokes} sheets={layout.sheets} width={PAGE_W} height={PAGE_H} zoom={zoom} scrollRoot={scrollRoot} />}

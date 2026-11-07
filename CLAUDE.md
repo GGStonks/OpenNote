@@ -322,6 +322,13 @@ show the iPad's compositing cost).
   at every zoom, so no SharpInk. The bitmaps below (page canvases, SharpInk) are the fallback (setting
   off, `BENCH_VECTOR=off`) and for layers with a "hole" fill. The user saw the bitmap ink go soft at
   lift even when it was 1:1. `--only svgcompare` (SVG against the canvas, every kind of stroke).
+  Each page's SVG is laid out at its size on screen (zoom x page, `layoutZoom`) and scaled back by
+  1/zoom as a layer of its own (Blocks.tsx `ScreenScaled`, as formulas): WebKit rasterises a layer
+  inside the CSS-scaled page at its laid-out size and stretches it, so the 2.4.11-2.8.1 SVG, laid
+  out at page size, was a bitmap magnified by the zoom on the iPad (pixelated zoomed in). Headless
+  Chromium re-rasterises and never shows it: `--only liftshots` prints each page's `vector ink on
+  screen` scale, which must be 1.0000 at every zoom (the old layout measured 3.81 at 381%); the
+  crash log's `ink-grid` carries the same (`vectorScale`) from the device.
 - Visible ink is never resampled: the page canvases are drawn at exactly the zoom fitting the width
   uses (`fitZoom` in CanvasPage = useViewport's `FIT_MARGIN` formula, `canvasRatio(..., exact)`), and
   SharpInk takes over as soon as the zoom is above it. Rounded to a quarter, an 816 px note view
