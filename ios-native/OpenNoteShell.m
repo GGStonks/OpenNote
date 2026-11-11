@@ -38,7 +38,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.2";
+static NSString *const kVersion = @"2.9.3";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -153,6 +153,18 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
 
 @end
 
+#pragma mark - Files opened in OpenNote ("Open in…", the share sheet, Files)
+
+/**
+ * Files other apps hand to OpenNote (Info.plist CFBundleDocumentTypes: PDF, Word, pictures, text,
+ * .opennote, Notability) are copied here, one folder per file, and served to the page at
+ * opennote://app/__inbox/<id>/<name> (ONSchemeHandler); the page fetches and imports them
+ * (src/platform.ts listenForOpenedFiles) and says when it is done ("inboxDone"). Emptied at launch.
+ */
+static NSString *ONInboxDir(void) {
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:@"inbox"];
+}
+
 #pragma mark - Bundled web app over opennote://app/
 
 @interface ONSchemeHandler : NSObject <WKURLSchemeHandler>
@@ -185,8 +197,17 @@ static NSString *ONMimeType(NSString *ext) {
 
     NSData *data = nil;
     BOOL isDir = NO;
-    // Never serve anything outside the bundled web root.
-    if ([file hasPrefix:self.root] && [[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&isDir] && !isDir) {
+    if ([path hasPrefix:@"/__inbox/"]) {
+        // A file opened in OpenNote: only from the inbox folder.
+        NSString *inbox = [ONInboxDir() stringByStandardizingPath];
+        NSString *opened = [[inbox stringByAppendingPathComponent:[path substringFromIndex:9]] stringByStandardizingPath];
+        if ([opened hasPrefix:[inbox stringByAppendingString:@"/"]] && [[NSFileManager defaultManager] fileExistsAtPath:opened isDirectory:&isDir] && !isDir) {
+            data = [NSData dataWithContentsOfFile:opened options:NSDataReadingMappedIfSafe error:nil];
+        }
+        file = opened;
+    }
+    // Never serve anything outside the bundled web root (or the inbox).
+    else if ([file hasPrefix:self.root] && [[NSFileManager defaultManager] fileExistsAtPath:file isDirectory:&isDir] && !isDir) {
         data = [NSData dataWithContentsOfFile:file];
     }
     NSInteger status = data ? 200 : 404;
@@ -950,6 +971,9 @@ static const double kInkHoldSeconds = 0.06;
 @property (nonatomic, copy) void (^saveReply)(id, NSString *);
 /** In-flight bridge HTTP requests by the page's request id (main thread only), for httpCancel. */
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSURLSessionTask *> *httpTasks;
+/** Files opened in OpenNote that the page has not taken yet ("pendingFiles"). */
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *pendingFiles;
+- (BOOL)receiveFile:(NSURL *)url;
 @end
 
 @implementation ONViewController
@@ -1037,6 +1061,44 @@ static const double kInkHoldSeconds = 0.06;
     return UIRectEdgeAll;
 }
 
+#pragma mark Opened files
+
+/**
+ * A file another app gave OpenNote: copied into the inbox (from a security-scoped URL when it is
+ * opened in place), offered to the page. Returns NO when it could not be read.
+ */
+- (BOOL)receiveFile:(NSURL *)url {
+    if (!url.isFileURL) return NO;
+    BOOL scoped = [url startAccessingSecurityScopedResource];
+    NSString *fid = [[NSUUID UUID] UUIDString];
+    NSString *name = url.lastPathComponent.length ? url.lastPathComponent : @"Imported";
+    NSString *dir = [ONInboxDir() stringByAppendingPathComponent:fid];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *dest = [dir stringByAppendingPathComponent:name];
+    NSError *err = nil;
+    // A coordinated read: the file may live in iCloud Drive or another app's provider.
+    __block BOOL copied = NO;
+    NSFileCoordinator *coord = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+    [coord coordinateReadingItemAtURL:url options:NSFileCoordinatorReadingWithoutChanges error:&err byAccessor:^(NSURL *readURL) {
+        copied = [fm copyItemAtURL:readURL toURL:[NSURL fileURLWithPath:dest] error:nil];
+    }];
+    if (scoped) [url stopAccessingSecurityScopedResource];
+    // A copy iOS made for us in Documents/Inbox is ours to remove.
+    if ([url.path rangeOfString:@"/Documents/Inbox/"].location != NSNotFound) [fm removeItemAtURL:url error:nil];
+    if (!copied) {
+        [fm removeItemAtPath:dir error:nil];
+        return NO;
+    }
+    NSString *path = [NSString stringWithFormat:@"/__inbox/%@/%@", fid,
+                                                [name stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]]];
+    if (!self.pendingFiles) self.pendingFiles = [NSMutableArray array];
+    [self.pendingFiles addObject:@{ @"id": fid, @"name": name, @"url": [NSString stringWithFormat:@"%@://%@%@", kScheme, kHost, path] }];
+    // A page already running takes it now; one still starting asks at start.
+    [self.webView evaluateJavaScript:@"window.dispatchEvent(new Event('opennote:openFiles'))" completionHandler:nil];
+    return YES;
+}
+
 #pragma mark Bridge
 
 - (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -1066,6 +1128,16 @@ static const double kInkHoldSeconds = 0.06;
         // Closing the connection makes llama-server stop generating (the reply was streamed).
         NSString *rid = [msg[@"id"] description];
         if (rid) [self.httpTasks[rid] cancel];
+        replyHandler(@{}, nil);
+    } else if ([cmd isEqualToString:@"pendingFiles"]) {
+        // The files opened in OpenNote since the page last asked (at start, and on opennote:openFiles).
+        NSArray *files = [self.pendingFiles copy] ?: @[];
+        [self.pendingFiles removeAllObjects];
+        replyHandler(@{ @"files": files }, nil);
+    } else if ([cmd isEqualToString:@"inboxDone"]) {
+        NSString *fid = [msg[@"id"] description];
+        if (fid.length && [fid rangeOfString:@"/"].location == NSNotFound && ![fid hasPrefix:@"."])
+            [[NSFileManager defaultManager] removeItemAtPath:[ONInboxDir() stringByAppendingPathComponent:fid] error:nil];
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"share"]) {
         [self handleShare:msg reply:replyHandler];
@@ -1450,14 +1522,18 @@ static void ONRemoveScribble(UIView *view) {
 
 @interface ONAppDelegate : UIResponder <UIApplicationDelegate>
 @property (nonatomic, strong) UIWindow *window;
+@property (nonatomic, strong) ONViewController *controller;
 @end
 
 @implementation ONAppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
+    // Files opened before and not imported (the app ended first) go: iOS gives them again if asked.
+    [[NSFileManager defaultManager] removeItemAtPath:ONInboxDir() error:nil];
     ONWindow *window = [[ONWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
     window.backgroundColor = ONLaunchColor();
     ONViewController *vc = [[ONViewController alloc] init];
+    self.controller = vc;
     window.rootViewController = vc;
     window.webView = vc.webView ?: (WKWebView *)vc.view;
     window.booster = [[ONFrameRateBooster alloc] init];
@@ -1465,6 +1541,11 @@ static void ONRemoveScribble(UIView *view) {
     self.window = window;
     [self.window makeKeyAndVisible];
     return YES;
+}
+
+/** A file given to OpenNote ("Open in…", the share sheet, Files; Info.plist CFBundleDocumentTypes). */
+- (BOOL)application:(UIApplication *)app openURL:(NSURL *)url options:(NSDictionary<UIApplicationOpenURLOptionsKey, id> *)options {
+    return [self.controller receiveFile:url];
 }
 
 @end

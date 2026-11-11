@@ -6,10 +6,10 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry, strokeSvgParts,
+  strokeWidth, handDash, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry, strokeSvgParts,
 } from '../ink/strokeRenderer';
 import { vectorInkEnabled } from '../ink/vectorInk';
-import { SmoothLiveStroke, pixelAligned } from '../ink/smoothLiveStroke';
+import { SmoothLiveStroke, SmoothLiveStyle, pixelAligned } from '../ink/smoothLiveStroke';
 import { crashLog } from '../services/crashLog';
 import { SampleDensifier } from '../ink/densify';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
@@ -47,6 +47,8 @@ export interface ToolSettings {
   /** Width of the Draw tool (smart pen), independent of the pen's. */
   shapeWidth: number;
   penStyle: PenStyle;
+  /** The pen's line: solid, dashed, dotted… (handwriting keeps its fountain-pen width in the dashes). */
+  penLineStyle: LineStyle;
   highlighterColor: string;
   highlighterWidth: number;
   /** How opaque highlighter ink is (0-1). */
@@ -1503,7 +1505,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const t = toolsRef.current;
     return tool === 'highlighter'
       ? { tool: 'highlighter', color: t.highlighterColor, width: t.highlighterWidth, penStyle: 'ballpoint', highlightAlpha: t.highlighterOpacity }
-      : { tool: 'pen', color: t.penColor, width: t.penWidth, penStyle: t.penStyle };
+      : { tool: 'pen', color: t.penColor, width: t.penWidth, penStyle: t.penStyle, lineStyle: t.penLineStyle ?? 'solid' };
   };
 
   const smartOptions = (): SmartPenOptions => {
@@ -1532,7 +1534,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const k = 1 / Math.max(0.3, zoomRef.current);
     const edit = handleDrag.current;
     if (edit) {
-      next = unionRect(next, drawLiveStroke(ctx, edit.last.points, styleOf(edit.last)));
+      // Handwriting is drawn as its stored stroke is (its smoothed line, its pen end); shapes from points.
+      if (!edit.last.isShape) {
+        drawStroke(ctx, edit.last);
+        next = unionRect(next, strokePaintBounds(edit.last));
+      } else next = unionRect(next, drawLiveStroke(ctx, edit.last.points, styleOf(edit.last)));
       if (edit.snapDot) next = unionRect(next, drawSnapDot(ctx, edit.snapDot, false, k));
     }
     // In the apps the shell's native layer draws the stroke or shape being made (d.ink, above the
@@ -1548,7 +1554,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const hl = d.tool === 'highlighter';
       const style = liveStyle(hl ? 'highlighter' : 'pen');
       // The highlighter opaque: the canvas takes its transparency (liveLook).
-      if (!d.ink) d.model.paint(ctx, { color: style.color, width: hl ? style.width * 5.5 : strokeWidth({ ...style, isShape: false }), variable: !hl && isVariableWidth(style) && d.realPressure });
+      if (!d.ink) d.model.paint(ctx, livePenStyle(style, hl, d.realPressure));
     } else if (d && (d.tool === 'pen' || d.tool === 'highlighter')) {
       if (d.snapped) {
         next = d.ink ? null : paintSnapped(ctx, d);
@@ -2140,6 +2146,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
   }
 
+  /**
+   * The live painter's style for handwriting (SmoothLiveStroke): its drawn width, whether it follows
+   * the pressure, and a pen's dashes.
+   */
+  function livePenStyle(style: InkStyle, hl: boolean, realPressure: boolean): SmoothLiveStyle {
+    return {
+      color: style.color,
+      width: hl ? style.width * 5.5 : strokeWidth({ ...style, isShape: false }),
+      variable: !hl && isVariableWidth(style) && realPressure,
+      dash: hl ? null : handDash(style.lineStyle, style.width),
+    };
+  }
+
   /** Sends the live stroke or shape to the shell's native ink layer (iOS / Android app). */
   function syncInk(d: NonNullable<typeof drawing.current>) {
     if (!d.ink) return;
@@ -2152,11 +2171,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     }
     if (!d.model) return;
     const style = liveStyle('pen');
-    d.ink.update(
-      d.model,
-      { color: style.color, width: strokeWidth({ ...style, isShape: false }), variable: isVariableWidth(style) && d.realPressure },
-      d.inkTf
-    );
+    const live = livePenStyle(style, false, d.realPressure);
+    if (live.dash) {
+      // Dashes and dots: the shell draws the whole line as a drawing (the pattern runs from its start).
+      const model = d.model;
+      d.ink.drawing(record(d.inkTf, (ctx) => model.drawDashes(ctx, live)), d.inkTf);
+      return;
+    }
+    d.ink.update(d.model, { color: live.color, width: live.width, variable: live.variable }, d.inkTf);
   }
 
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});
@@ -2319,7 +2341,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         width: d.snapped?.width ?? style.width,
         opacity: 1,
         penStyle: style.penStyle,
-        lineStyle: 'solid',
+        // The pen's dashes and dots (a highlighter is always drawn solid here).
+        lineStyle: d.tool === 'pen' ? style.lineStyle ?? 'solid' : 'solid',
         // Pen strokes keep their lift-off samples: Nib leaves them out of the ink (nib.ts, 4b), the
         // same way live and when the stroke is drawn later.
         points: d.snapped ? d.snapped.points : end ? [...d.points, end] : d.points,
@@ -3052,12 +3075,13 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         </div>
       )}
 
-      {/* Shape handles (single smart shape selected) */}
+      {/* Shape handles (a single smart shape selected), or a handwritten stroke's two ends */}
       {handles && selection &&
         (editHandles ?? handles).map((h, i) => (
           <div
             key={i}
             data-no-pan
+            data-shape-handle={h.role}
             className="absolute z-30 flex items-center justify-center"
             style={{ left: h.x - 15, top: h.y - 15, width: 30, height: 30, transform: `scale(${1 / zoom})`, touchAction: 'none', cursor: 'grab' }}
             onPointerDown={(e) => startHandle(e, handles[i] ?? h)}

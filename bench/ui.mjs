@@ -1078,6 +1078,33 @@ if (ONLY.has('pdfsize')) {
   const images = (txt.match(/\/Subtype\s*\/Image/g) ?? []).length;
   console.log(`pdfsize  ${process.argv.includes('--hl') ? 'with highlighter' : 'ink only'}: 3 pages ${(pdf.length / 1024).toFixed(0)} KB, ${images} images, ${ms} ms`);
 }
+// --only docximport --docx <file.docx> --shots <dir>: a Word document imported through the + menu's
+// file input: the note's pages, its text boxes (none may overlap another: heights measured as drawn),
+// pictures and table rules, and screenshots of the first two pages.
+if (ONLY.has('docximport') && arg('shots') && arg('docx')) {
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.reload();
+  await sleep(2500);
+  const alerts = [];
+  page.on('dialog', (d) => { alerts.push(d.message()); void d.accept(); });
+  await page.locator('input[type=file]').first().setInputFiles({ name: 'Bench document.docx', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: readFileSync(arg('docx')) });
+  await page.waitForSelector('.on-text', { timeout: 20000 });
+  await sleep(2000);
+  const info = await page.evaluate(() => {
+    const boxes = [...document.querySelectorAll('.on-text')].map((e) => e.parentElement.getBoundingClientRect());
+    let overlaps = 0;
+    for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.left < b.right - 1 && b.left < a.right - 1 && a.top < b.bottom - 1 && b.top < a.bottom - 1) overlaps++;
+    }
+    return { sheets: document.querySelectorAll('[data-sheet]').length, texts: boxes.length, images: document.querySelectorAll('img').length, overlaps };
+  });
+  console.log(`docximport: ${JSON.stringify(info)} alerts: ${JSON.stringify(alerts)}`);
+  await page.screenshot({ path: join(arg('shots'), 'docx-page1.png') });
+  await page.evaluate(() => document.querySelector('[data-sheet="1"]')?.scrollIntoView());
+  await sleep(1200);
+  await page.screenshot({ path: join(arg('shots'), 'docx-page2.png') });
+}
 // --only pdfimport --shots <dir>: a PDF (made here: Letter portrait, A4 landscape, a page turned 90°)
 // imported through the + menu's file input: the note's pages, the PDF drawn on them (fitting the
 // width and zoomed in), and the PDF export's joining (a transparent printed page over the original).
@@ -1410,6 +1437,7 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
   await reopen();
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   await page.waitForFunction(() => window.__opennoteGlInk);
+  if (process.env.BENCH_DUMP) await page.evaluate((c) => { window.__dumpCase = c; }, process.env.BENCH_DUMP);
   const out = await page.evaluate(async (mode) => {
     const { GlInk, drawStrokes, strokeSvgParts } = window.__opennoteGlInk;
     const pts = (f, n = 60) => Array.from({ length: n }, (_, i) => { const t = i / (n - 1); const [x, y, p] = f(t); return { x, y, pressure: p ?? 0.5, t: i * 8 }; });
@@ -1425,6 +1453,9 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
       translucent: [S({ penStyle: 'ballpoint', width: 4, opacity: 0.5, points: pts((t) => [40 + 120 * Math.cos(t * 6.28 * 1.5), 40 + 25 * Math.sin(t * 6.28 * 1.5)], 80) })],
       dashed: [S({ isShape: true, lineStyle: 'dashed', points: pts((t) => [20 + t * 160, 20 + t * 40], 2) })],
       dotted: [S({ isShape: true, lineStyle: 'dotted', points: pts((t) => [20 + t * 160, 60 - t * 40], 2) })],
+      penDashed: [S({ lineStyle: 'dashed', points: pts(wave(40)) })],
+      penDotted: [S({ lineStyle: 'dotted', points: pts(wave(40)) })],
+      penDashDot: [S({ lineStyle: 'dashdot', penStyle: 'ballpoint', points: pts(wave(40)) })],
       arrow: [S({ isShape: true, arrow: true, width: 3, points: pts((t) => [20 + t * 150, 40], 2) })],
       solidFill: [S({ isShape: true, closed: true, fill: 'solid', color: '#2563eb', points: rect(30, 10, 120, 60) })],
       hatch: [S({ isShape: true, closed: true, fill: 'crosshatch', color: '#dc2626', points: rect(30, 10, 120, 60) })],
@@ -1456,6 +1487,7 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
           await img.decode();
           x3.drawImage(img, 0, 0);
         }
+        if (window.__dumpCase === name && k === 10) window.__dump = [c2.toDataURL(), c3.toDataURL()];
         const a = ctx.getImageData(0, 0, W, H).data, b = x3.getImageData(0, 0, W, H).data;
         let sum = 0, big = 0, inked = 0;
         for (let i = 0; i < a.length; i += 4) {
@@ -1473,6 +1505,10 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
     return res;
   }, mode);
   for (const [k, v] of Object.entries(out)) console.log(`${mode} ${k.padEnd(12)} ${Array.isArray(v) ? v.join('   ') : v}`);
+  if (process.env.BENCH_DUMP && arg('shots')) {
+    const urls = await page.evaluate(() => window.__dump);
+    if (urls) urls.forEach((u, i) => writeFileSync(join(arg('shots'), `${mode}-${process.env.BENCH_DUMP}-${i ? 'other' : 'canvas'}.png`), Buffer.from(u.split(',')[1], 'base64')));
+  }
 }
 // Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
 if (ONLY.has('probe')) {
@@ -2304,6 +2340,40 @@ if (ONLY.has('penhold')) {
     console.log(`penhold held ${hold} ms: ${st?.isShape ? `snapped (${st.kind}), width ${st.width.toFixed(2)} = ${(st.width / penWidth).toFixed(2)} x the pen's` : 'handwriting'}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }
+// --only endhandles: a handwritten stroke tapped with the lasso shows a handle at each end; dragging
+// the last one moves that end (the stored stroke's drawn end lands where the handle was dropped)
+// while the first end stays.
+if (ONLY.has('endhandles')) {
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  // A fresh stroke with the pen, then the lasso's tap on it.
+  await page.locator('button[title^="Pen"]').first().click();
+  await sleep(300);
+  if (await page.getByText('Pen type').first().isVisible().catch(() => false)) { await page.locator('button[title^="Pen"]').first().click(); await sleep(300); }
+  await mouse('mousePressed', 250, 560, 0.5);
+  for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 250 + i * 5, 560 + Math.sin(i / 5) * 6, 0.5); await sleep(8); }
+  await mouse('mouseReleased', 400, 560 + Math.sin(6) * 6, 0);
+  await sleep(800);
+  await page.locator('button[title^="Lasso"]').first().click();
+  await sleep(300);
+  await mouse('mousePressed', 325, 560 + Math.sin(15 / 5) * 6, 0.5);
+  await mouse('mouseReleased', 325, 560 + Math.sin(15 / 5) * 6, 0);
+  await sleep(600);
+  const ends = await page.evaluate(() => [...document.querySelectorAll('[data-shape-handle="end"]')].map((e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }));
+  console.log(`endhandles shown: ${ends.length} at ${JSON.stringify(ends.map((p) => p.map(Math.round)))}`);
+  if (ends.length === 2) {
+    const [, b] = ends;
+    const to = [b[0] + 40, b[1] + 60];
+    await page.mouse.move(b[0], b[1]);
+    await page.mouse.down();
+    for (let i = 1; i <= 10; i++) { await page.mouse.move(b[0] + (to[0] - b[0]) * i / 10, b[1] + (to[1] - b[1]) * i / 10); await sleep(16); }
+    await page.mouse.up();
+    await sleep(800);
+    const after = await page.evaluate(() => [...document.querySelectorAll('[data-shape-handle="end"]')].map((e) => { const r = e.getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; }));
+    const d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]).toFixed(2);
+    console.log(`endhandles after the drag: first end moved ${after[0] ? d(after[0], ends[0]) : '?'} px, last end ${after[1] ? d(after[1], to) : '?'} px from where it was dropped`);
+  }
+}
 // --only toolhold [--shots <dir>]: draw & hold with each tool. A rough square with the pen and a
 // rough equilateral triangle with the highlighter, held still 1.2 s, must become the regular shape
 // (sides equal); the eraser held still erases along the clean line; the lasso selects with its
@@ -2342,7 +2412,15 @@ if (ONLY.has('toolhold')) {
     const sides = v.map((p, i) => Math.hypot(v[(i + 1) % v.length][0] - p[0], v[(i + 1) % v.length][1] - p[1]));
     return ((Math.max(...sides) - Math.min(...sides)) / Math.max(...sides) * 100).toFixed(2) + '%';
   };
-  const tool = async (title) => { await page.locator(`button[title^="${title}"]`).first().click(); await sleep(300); };
+  const tool = async (title) => {
+    await page.locator(`button[title^="${title}"]`).first().click();
+    await sleep(300);
+    // Already the tool: the click opened its options (they would take the drawing): closed again.
+    if (await page.getByText('Pen type').or(page.getByText('Highlighter colour')).first().isVisible().catch(() => false)) {
+      await page.locator(`button[title^="${title}"]`).first().click();
+      await sleep(300);
+    }
+  };
   // Pen: a rough square.
   await tool('Pen');
   await drawHeld([[230, 520], [345, 524], [342, 640], [228, 636]], 1300);

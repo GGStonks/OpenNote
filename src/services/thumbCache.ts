@@ -14,9 +14,9 @@ import { frameRate } from './frameRate';
 
 /**
  * The ink's look (widths, smoothing): a thumbnail drawn with another look is out of date even if
- * its note is not, so a change of look (2.9.0: inkWidth.ts) redraws them in the background.
+ * its note is not, so a change of look (2.9.0, 2.9.3: inkWidth.ts) redraws them in the background.
  */
-export const INK_LOOK = 3;
+export const INK_LOOK = 4;
 
 /** Width (px) a thumbnail's page is drawn at: sharp on the widest cards at 2x. */
 export const THUMB_PAGE_PX = 640;

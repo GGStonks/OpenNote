@@ -12,13 +12,18 @@
  * edges twice. The native live ink (nativeInk.ts) draws the same line from line().
  */
 import { NibModeler } from './engine';
-import { WIDTH_REACH, inkWidths } from './inkWidth';
+import { WIDTH_BEHIND, inkWidths } from './inkWidth';
 import type { LiveStyle, ModeledPoint, Rect } from './engine';
-import { SMOOTH_SETTLE, mergedCapsulePath, settledIndex, smoothLine } from './strokeRenderer';
+import { SMOOTH_SETTLE, dashRuns, mergedCapsulePath, settledIndex, smoothLine } from './strokeRenderer';
+
+/** The live style, with a pen's line style (strokeRenderer handDash: dashes along the whole line). */
+export interface SmoothLiveStyle extends LiveStyle {
+  dash?: { pattern: number[]; dotScale: number } | null;
+}
 
 const CHUNK = 64;
-/** Line before the new points that their smoothing can depend on (page px, with a margin). */
-const WINDOW = SMOOTH_SETTLE + 3;
+/** Line before the new points that their smoothing and widths can depend on (page px, with a margin). */
+const WINDOW = Math.max(SMOOTH_SETTLE, WIDTH_BEHIND) + 3;
 
 /**
  * `r` grown to whole device pixels of `ctx`'s canvas. Clearing and clipping a rectangle that ends
@@ -73,8 +78,8 @@ export class SmoothLiveStroke {
       this.finalPts = [];
       this.finalW = [];
     }
-    // Widths depend on the line within WIDTH_REACH of each point (inkWidth.ts): computed over runs of
-    // the line, never point by point.
+    // Widths depend on the line WIDTH_BEHIND before and WIDTH_AHEAD after each point (inkWidth.ts):
+    // computed over runs of the line, never point by point.
     const widthsOf = (seq: ModeledPoint[]) => (style.variable ? inkWidths(seq, style.width) : seq.map(() => style.width));
     const raw = this.model.points;
     const done = this.finalPts.length;
@@ -94,13 +99,13 @@ export class SmoothLiveStroke {
       const g = smoothLine({ pts: seg, widths: segW, width: style.width }, upTo - from, done - from);
       for (let i = done; i < upTo; i++) {
         this.finalPts.push(g.pts[i - from]);
-        this.finalW.push(g.widths ? g.widths[i - from] : segW[i - from]);
+        this.finalW.push(segW[i - from]);
       }
     }
     const rest = raw.slice(this.finalPts.length).concat(this.model.tail());
-    // The rest's widths with the line before it as context (they look WIDTH_REACH back).
+    // The rest's widths with the line before it as context (they look WIDTH_BEHIND back).
     let ctxFrom = this.finalPts.length, back = 0;
-    while (ctxFrom > 0 && back < WIDTH_REACH + 1) {
+    while (ctxFrom > 0 && back < WIDTH_BEHIND + 1) {
       back += Math.hypot(raw[ctxFrom].x - raw[ctxFrom - 1].x, raw[ctxFrom].y - raw[ctxFrom - 1].y);
       ctxFrom--;
     }
@@ -108,8 +113,33 @@ export class SmoothLiveStroke {
     return { final: this.finalPts, finalW: this.finalW, rest, restW };
   }
 
+  /**
+   * A dashed or dotted line's dashes as they are now: the pattern runs along the whole line, so a
+   * dash near the pen can still grow; the whole line is drawn each time (as the finished stroke's
+   * dashRuns from the line's start).
+   */
+  private dashes(style: SmoothLiveStyle) {
+    const { final, finalW, rest, restW } = this.line(style);
+    const pts = final.concat(rest), w = finalW.concat(restW);
+    return { pts, runs: dashRuns(pts, w.map((v) => v / 2), style.dash!.pattern, 0, style.dash!.dotScale) };
+  }
+
+  /** Draws the dashed line on `ctx`'s current path and fills it (the native ink's drawing, inkRecorder). */
+  drawDashes(ctx: CanvasRenderingContext2D, style: SmoothLiveStyle): void {
+    ctx.save();
+    ctx.fillStyle = style.color;
+    ctx.beginPath();
+    for (const r of this.dashes(style).runs) mergedCapsulePath(r.pts, r.radii.map((v) => v * 2), ctx);
+    ctx.fill();
+    ctx.restore();
+  }
+
   /** Paints what changed since the last call. */
-  paint(ctx: CanvasRenderingContext2D, style: LiveStyle): void {
+  paint(ctx: CanvasRenderingContext2D, style: SmoothLiveStyle): void {
+    if (style.dash) {
+      this.paintDashes(ctx, style);
+      return;
+    }
     const key = `${style.variable}|${style.width}|${style.color}`;
     let changed = this.tailRect;
     if (key !== this.builtFor) {
@@ -181,6 +211,33 @@ export class SmoothLiveStroke {
       ctx.lineJoin = 'round';
       ctx.stroke(all);
     }
+    ctx.restore();
+  }
+
+  /** paint() for a dashed line: everything again (the region it covered and covers now). */
+  private paintDashes(ctx: CanvasRenderingContext2D, style: SmoothLiveStyle): void {
+    const { pts, runs } = this.dashes(style);
+    const pad = style.width * 1.7 + 2;
+    let rect: Rect | null = null;
+    for (const q of pts) rect = union(rect, { minX: q.x - pad, minY: q.y - pad, maxX: q.x + pad, maxY: q.y + pad });
+    let changed = union(union(this.tailRect, this.settledRect), rect);
+    this.settledRect = null;
+    this.chunks = [];
+    this.drawn = 0;
+    this.builtFor = null;
+    this.tailRect = rect;
+    if (!changed) return;
+    changed = pixelAligned(ctx, changed);
+    const path = new Path2D();
+    for (const r of runs) mergedCapsulePath(r.pts, r.radii.map((v) => v * 2), path);
+    const w = changed.maxX - changed.minX, h = changed.maxY - changed.minY;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(changed.minX, changed.minY, w, h);
+    ctx.clip();
+    ctx.clearRect(changed.minX, changed.minY, w, h);
+    ctx.fillStyle = style.color;
+    ctx.fill(path);
     ctx.restore();
   }
 }

@@ -38,7 +38,8 @@ export interface Point {
   az?: number;
 }
 
-export type LineStyle = 'solid' | 'dashed' | 'dotted';
+/** A line's pattern (strokeRenderer.ts `dashPattern`): solid, dashes, dots, dash-dot, long dashes. */
+export type LineStyle = 'solid' | 'dashed' | 'dotted' | 'dashdot' | 'longdash';
 
 export interface Stroke {
   id: string;

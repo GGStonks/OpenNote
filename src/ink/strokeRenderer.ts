@@ -2,7 +2,7 @@ import { FillType, Point, Stroke, PenStyle, LineStyle, ShapeKind } from '../type
 import { itemTime } from '../editor/zorder';
 import { Bezier, catmullRomBeziers, endTangent, flattenBeziers, XY } from './spline';
 import { ModeledPoint, addCapsule, capsuleSvg, hasRealPressure, nibStroke, thinModeled } from './engine';
-import { WIDTH_REACH, inkWidths } from './inkWidth';
+import { WIDTH_AHEAD, inkWidths } from './inkWidth';
 
 /**
  * Ink renderer.
@@ -257,8 +257,8 @@ const CORNER_DEG = 55;
  * The modelled line made smooth for zoomed-in display. The ink engine's line is nearly straight
  * between two Pencil samples (a few page px apart) and bends where they are; at 100% that is
  * invisible, but zoomed to 300-500% the ink showed as straight pieces joined at angles. Each point
- * is replaced by a Gaussian average (SMOOTH_SIGMA) of its neighbours along the line, its widths and
- * pressure likewise; the window narrows towards the ends so they stay where they are, and the line
+ * is replaced by a Gaussian average (SMOOTH_SIGMA) of its neighbours along the line, its pressure
+ * likewise (its width stays as inkWidth.ts made it, already smooth along the line); the window narrows towards the ends so they stay where they are, and the line
  * is smoothed in pieces between sharp corners, so a cusp stays a cusp. Used for vector ink (zoomed
  * in, print, export) and the pinch overlay; the page canvases at ordinary zoom keep the engine's
  * line, as drawn live.
@@ -268,11 +268,12 @@ export function smoothGeometry(g: InkGeometry): InkGeometry {
 }
 
 /** How far before the end of a line still being written its smooth line can change (page px). */
-// A point's smoothed place and width depend on the line within 3 sigma of it (and the corner test
-// a px beyond), its width on the line within WIDTH_REACH of those (inkWidth.ts); kept at 6 sigma
-// at least, as before. The last SMOOTH_SETTLE of a line stays as modelled, here and live: smoothing
+// A point's smoothed place depends on the line within 3 sigma of it (and the corner test a px
+// beyond), its width on the line WIDTH_AHEAD after it (inkWidth.ts; until 2.9.2 the widths were
+// smoothed here too, so the reach was 3 sigma + WIDTH_AHEAD: kept, the lines' shapes unchanged); at
+// least 6 sigma, as before. The last SMOOTH_SETTLE of a line stays as modelled, here and live: smoothing
 // it too (2.9.1 trials) turned curled stroke ends into hooks (bench:hooks) or made the end swing.
-export const SMOOTH_SETTLE = Math.max(6 * SMOOTH_SIGMA, 3 * SMOOTH_SIGMA + Math.max(1, WIDTH_REACH) + 0.5);
+export const SMOOTH_SETTLE = Math.max(6 * SMOOTH_SIGMA, 3 * SMOOTH_SIGMA + Math.max(1, WIDTH_AHEAD) + 0.5);
 
 /**
  * smoothGeometry for points [from, upTo) only (the rest as they are): a line still being written is
@@ -299,7 +300,6 @@ export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry 
   }
   cuts.push(n - 1);
   const pts: ModeledPoint[] = P.map((q) => ({ ...q }));
-  const widths = g.widths ? g.widths.slice() : null;
   const sig = SMOOTH_SIGMA, inv = 1 / (2 * sig * sig);
   for (let c = 0; c < cuts.length - 1; c++) {
     const lo = cuts[c], hi = cuts[c + 1];
@@ -308,22 +308,19 @@ export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry 
       // Symmetric window, no wider than the distance to either end of the piece.
       const half = Math.min(3 * sig, at[i] - at[lo], at[hi] - at[i]);
       if (half <= 0) continue;
-      let sx = 0, sy = 0, sp = 0, sw = 0, ws = 0;
+      let sx = 0, sy = 0, sp = 0, ws = 0;
       for (let j = i; j >= lo && at[i] - at[j] <= half; j--) {
         const w = Math.exp(-((at[i] - at[j]) ** 2) * inv);
         sx += P[j].x * w; sy += P[j].y * w; sp += P[j].p * w; ws += w;
-        if (widths) sw += g.widths![j] * w;
       }
       for (let j = i + 1; j <= hi && at[j] - at[i] <= half; j++) {
         const w = Math.exp(-((at[j] - at[i]) ** 2) * inv);
         sx += P[j].x * w; sy += P[j].y * w; sp += P[j].p * w; ws += w;
-        if (widths) sw += g.widths![j] * w;
       }
       pts[i] = { x: sx / ws, y: sy / ws, p: sp / ws, t: P[i].t };
-      if (widths) widths[i] = sw / ws;
     }
   }
-  return { pts, widths, width: g.width };
+  return { pts, widths: g.widths, width: g.width };
 }
 
 /** smoothGeometry of a committed stroke, cached (a moved copy reuses its original's, moved). */
@@ -343,7 +340,110 @@ function polylinePath(pts: XY[], closed = false): Path2D {
 }
 
 export function isVariableWidth(style: InkStyle): boolean {
-  return style.tool === 'pen' && style.penStyle === 'fountain' && !style.isShape && (style.lineStyle ?? 'solid') === 'solid';
+  // Dashed and dotted handwriting keeps the fountain pen's width in its dashes (2.9.3; before, any
+  // line style made the pen's ink a uniform stroked line).
+  return style.tool === 'pen' && style.penStyle === 'fountain' && !style.isShape;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Line styles: one pattern for the canvas, the SVG, the GPU and the live ink.
+
+/** An "on" this short is a dot: a round end only. */
+const DOT = 0.1;
+/** Dots of handwriting: this many times the ink's radius there (a dot as wide as the line looked thin). */
+const HAND_DOT = 1.25;
+
+/**
+ * A line style's pattern for a line of nominal width `w` (Stroke.width): lengths along the line, on,
+ * off, on, off… (page px); an "on" of DOT is a dot. The dashes' round ends reach `radius` past them,
+ * so the gaps look shorter than drawn here.
+ */
+export function dashPattern(ls: LineStyle | undefined, w: number): number[] | null {
+  switch (ls) {
+    case 'dashed':
+      return [w * 4, w * 3];
+    case 'dotted':
+      return [DOT, w * 3];
+    case 'dashdot':
+      return [w * 4, w * 2.4, DOT, w * 2.4];
+    case 'longdash':
+      return [w * 9, w * 3.5];
+    default:
+      return null;
+  }
+}
+
+/**
+ * The pieces of a line drawn with `pattern` (shifted by `offset` along it: Stroke.dashOffset): each
+ * dash as a run of the line's points with their radii, cut exactly at the pattern's ends; each dot as
+ * a run of one point, `dotScale` x the radius there (with a dotScale of 1, a dash DOT long).
+ */
+export function dashRuns(pts: readonly XY[], radii: readonly number[], pattern: readonly number[], offset: number, dotScale: number): { pts: XY[]; radii: number[] }[] {
+  const runs: { pts: XY[]; radii: number[] }[] = [];
+  const n = pts.length, m = pattern.length;
+  const period = pattern.reduce((a, b) => a + b, 0);
+  if (!n || !(period > 0)) return runs;
+  let phase = ((offset % period) + period) % period;
+  let k = 0;
+  while (phase >= pattern[k]) {
+    phase -= pattern[k];
+    k = (k + 1) % m;
+  }
+  /** What is left of pattern element k. */
+  let left = pattern[k] - phase;
+  const on = () => k % 2 === 0;
+  // Dots grown past the line (handwriting) are a point; otherwise a dash DOT long, as the canvas's
+  // round-capped dash, so stroked lines on the GPU match the canvas to the pixel.
+  const dot = () => dotScale !== 1 && pattern[k] <= DOT;
+  let cur: { pts: XY[]; radii: number[] } | null = null;
+  if (on()) {
+    if (dot()) runs.push({ pts: [pts[0]], radii: [radii[0] * dotScale] });
+    else cur = { pts: [pts[0]], radii: [radii[0]] };
+  }
+  for (let i = 1; i < n; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    let d = 0;
+    while (len - d > left) {
+      d += left;
+      const t = d / len;
+      const p = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      const r = radii[i - 1] + (radii[i] - radii[i - 1]) * t;
+      if (cur) {
+        cur.pts.push(p);
+        cur.radii.push(r);
+        runs.push(cur);
+        cur = null;
+      }
+      k = (k + 1) % m;
+      left = pattern[k];
+      if (on()) {
+        if (dot()) runs.push({ pts: [p], radii: [r * dotScale] });
+        else cur = { pts: [p], radii: [r] };
+      }
+    }
+    left -= len - d;
+    if (cur) {
+      cur.pts.push(b);
+      cur.radii.push(radii[i]);
+    }
+  }
+  if (cur) runs.push(cur);
+  return runs;
+}
+
+/** A pen's line style for handwriting being written (SmoothLiveStroke), or null when it is solid. */
+export function handDash(ls: LineStyle | undefined, width: number): { pattern: number[]; dotScale: number } | null {
+  const pattern = dashPattern(ls, width);
+  return pattern ? { pattern, dotScale: HAND_DOT } : null;
+}
+
+/** Handwriting's dashes and dots (pen strokes with a line style), or null when it is solid. */
+function inkRuns(g: InkGeometry, style: InkStyle): { pts: XY[]; radii: number[] }[] | null {
+  const pattern = style.tool === 'pen' && !style.isShape ? dashPattern(style.lineStyle, style.width) : null;
+  if (!pattern) return null;
+  const radii = g.widths ? g.widths.map((w) => w / 2) : g.pts.map(() => g.width / 2);
+  return dashRuns(g.pts, radii, pattern, style.dashOffset ?? 0, HAND_DOT);
 }
 
 /** Spline segments of a smart-pen curve (exactly what is drawn and exported). */
@@ -406,7 +506,12 @@ function build(points: Point[], style: InkStyle, last: boolean, stroke?: Stroke,
   } else if (!style.isShape) {
     // Handwriting: modelled stroke (inkEngine.ts).
     const g = stroke ? (smooth ? strokeGeometrySmooth(stroke) : strokeGeometry(stroke)) : inkGeometry(points, style);
-    if (g.widths) {
+    const runs = inkRuns(g, style);
+    if (runs) {
+      path = newPath();
+      for (const r of runs) mergedCapsulePath(r.pts, r.radii.map((v) => v * 2), path);
+      filled = true;
+    } else if (g.widths) {
       path = mergedCapsulePath(g.pts, g.widths, newPath());
       filled = true;
     } else path = polylinePath(g.pts);
@@ -483,11 +588,19 @@ function paintFill(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opt
  * A highlighter's dashes (imported: Notability dashes highlighters too), in its drawn width W
  * (5.5 x width): dashes W long, round ends, a gap of 0.6 W; dots W across, 1.6 W apart.
  */
-export function highlighterDash(style: InkStyle): { on: number; off: number } | null {
+export function highlighterDash(style: InkStyle): number[] | null {
   const ls = style.lineStyle ?? 'solid';
   if (style.tool !== 'highlighter' || ls === 'solid') return null;
   const w = style.width * 5.5;
-  return ls === 'dashed' ? { on: w, off: w * 1.6 } : { on: 0.1, off: w * 1.6 };
+  if (ls === 'dotted') return [DOT, w * 1.6];
+  if (ls === 'dashdot') return [w, w * 1.2, DOT, w * 1.2];
+  if (ls === 'longdash') return [w * 2.4, w * 1.6];
+  return [w, w * 1.6];
+}
+
+/** A stroked line's dash pattern (shapes, highlighters; the canvas's and the SVG's), or null. */
+function strokedDash(style: InkStyle): number[] | null {
+  return style.tool === 'highlighter' ? highlighterDash(style) : dashPattern(style.lineStyle, style.width);
 }
 
 function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opacity: number) {
@@ -500,7 +613,10 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     const dash = highlighterDash(style);
-    if (dash) ctx.setLineDash([dash.on, dash.off]);
+    if (dash) {
+      ctx.setLineDash(dash);
+      if (style.dashOffset) ctx.lineDashOffset = style.dashOffset;
+    }
     ctx.stroke(b.path);
     ctx.restore();
     return;
@@ -514,13 +630,12 @@ function paintInk(ctx: CanvasRenderingContext2D, b: Built, style: InkStyle, opac
     ctx.lineWidth = strokeWidth(style);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    const ls = style.lineStyle ?? 'solid';
-    if (ls === 'dashed') ctx.setLineDash([style.width * 4, style.width * 3]);
-    else if (ls === 'dotted') {
-      ctx.setLineDash([0.1, style.width * 3]);
-      ctx.lineWidth = style.width * 1.8;
+    const dash = strokedDash(style);
+    if (dash) {
+      ctx.setLineDash(dash);
+      if (style.lineStyle === 'dotted') ctx.lineWidth = style.width * 1.8;
+      if (style.dashOffset) ctx.lineDashOffset = style.dashOffset;
     }
-    if (ls !== 'solid' && style.dashOffset) ctx.lineDashOffset = style.dashOffset;
     ctx.stroke(b.path);
   }
   if (b.arrow) {
@@ -691,7 +806,9 @@ export function strokeGlGeometry(s: Stroke): { caps: number[]; area: XY[] | null
     if (fillable) area = line;
   } else if (!style.isShape) {
     const g = strokeGeometry(s);
-    if (g.widths && !highlighter) chainCaps(caps, g.pts, g.widths.map((w) => w / 2));
+    const runs = highlighter ? null : inkRuns(g, style);
+    if (runs) for (const r of runs) chainCaps(caps, r.pts, r.radii);
+    else if (g.widths && !highlighter) chainCaps(caps, g.pts, g.widths.map((w) => w / 2));
     else stroked(g.pts);
     if (fillable) area = g.pts;
   } else {
@@ -797,28 +914,17 @@ function strokeCaps(out: number[], pts: XY[], width: number, ls: LineStyle, styl
     chainCaps(out, pts, pts.map(() => r));
     return;
   }
-  // Dashes: the canvas's pattern ([on, off], shifted by dashOffset) walked along the line.
-  const hl = highlighterDash(style);
-  const on = hl ? hl.on : ls === 'dashed' ? style.width * 4 : 0.1;
-  const off = hl ? hl.off : style.width * 3;
-  if (ls === 'dotted' && !hl) r = (style.width * 1.8) / 2;
-  const period = on + off;
-  let at = (((style.dashOffset ?? 0) % period) + period) % period;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1], b = pts[i];
-    const len = Math.hypot(b.x - a.x, b.y - a.y);
-    let d = 0;
-    while (d < len) {
-      const inOn = at < on;
-      const step = Math.min(len - d, (inOn ? on : period) - at);
-      if (inOn) {
-        const t0 = d / len, t1 = (d + step) / len;
-        out.push(a.x + (b.x - a.x) * t0, a.y + (b.y - a.y) * t0, r, a.x + (b.x - a.x) * t1, a.y + (b.y - a.y) * t1, r);
-      }
-      d += step;
-      at = (at + step) % period;
-      if (step <= 0) break;
-    }
+  // Dashes: the canvas's pattern (shifted by dashOffset) walked along the line, round-ended pieces
+  // as the canvas's round caps; dots as wide as the canvas draws them.
+  const dash = strokedDash(style);
+  if (!dash) {
+    chainCaps(out, pts, pts.map(() => r));
+    return;
+  }
+  if (ls === 'dotted' && style.tool !== 'highlighter') r = (style.width * 1.8) / 2;
+  for (const run of dashRuns(pts, pts.map(() => r), dash, style.dashOffset ?? 0, 1)) {
+    if (run.pts.length === 1) out.push(run.pts[0].x, run.pts[0].y, r, run.pts[0].x, run.pts[0].y, r);
+    else chainCaps(out, run.pts, run.radii);
   }
 }
 
@@ -914,12 +1020,17 @@ function svgParts(s: Stroke, dy: number, paper: string): { fill: string; ink: st
   const fill = closed ? svgFill(style, areaD, pts, paper) : '';
   if (s.fillOnly) return { fill, ink: '' };
 
-  if (ink?.widths && style.tool === 'pen') {
-    // Capsules between the points capKeep keeps (the GPU ink's pieces), not one every 0.5 px.
-    const P = ink.pts, r = ink.widths.map((w) => w / 2);
+  const runs = ink && style.tool === 'pen' ? inkRuns(ink, style) : null;
+  if (runs || (ink?.widths && style.tool === 'pen')) {
+    // Capsules between the points capKeep keeps (the GPU ink's pieces), not one every 0.5 px; a
+    // dashed line's dashes and dots each so.
     const parts: string[] = [];
-    if (P.length === 1) parts.push(capsuleSvg(P[0], r[0], P[0], r[0], f2));
-    else {
+    for (const run of runs ?? [{ pts: ink!.pts, radii: ink!.widths!.map((w) => w / 2) }]) {
+      const P = run.pts, r = run.radii;
+      if (P.length === 1) {
+        parts.push(capsuleSvg(P[0], r[0], P[0], r[0], f2));
+        continue;
+      }
       const keep = capKeep(P, r);
       let prev = 0;
       for (let k = 1; k < P.length; k++) {
@@ -930,16 +1041,15 @@ function svgParts(s: Stroke, dy: number, paper: string): { fill: string; ink: st
     }
     const d = parts.join('');
     out += `<path d="${d}" fill="${s.color}" fill-opacity="${opacity}" fill-rule="nonzero"/>`;
-  } else if (style.tool === 'highlighter') {
-    const dash = highlighterDash(style);
-    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${s.highlightAlpha ?? 0.35}" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"${dash ? ` stroke-dasharray="${f2(dash.on)},${f2(dash.off)}"` : ''}/>`;
   } else {
-    const ls = style.lineStyle ?? 'solid';
-    const dash =
-      ls === 'dashed' ? ` stroke-dasharray="${s.width * 4},${s.width * 3}"` : ls === 'dotted' ? ` stroke-dasharray="0.1,${s.width * 3}"` : '';
-    const w = ls === 'dotted' ? s.width * 1.8 : strokeWidth(style);
-    const offset = dash && s.dashOffset ? ` stroke-dashoffset="${f2(s.dashOffset)}"` : '';
-    out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${f2(w)}" stroke-linecap="round" stroke-linejoin="round"${dash}${offset}/>`;
+    const dash = strokedDash(style);
+    const dashAttr = dash ? ` stroke-dasharray="${dash.map(f2).join(',')}"${s.dashOffset ? ` stroke-dashoffset="${f2(s.dashOffset)}"` : ''}` : '';
+    if (style.tool === 'highlighter') {
+      out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${s.highlightAlpha ?? 0.35}" stroke-width="${s.width * 5.5}" stroke-linecap="round" stroke-linejoin="round"${dashAttr}/>`;
+    } else {
+      const w = style.lineStyle === 'dotted' ? s.width * 1.8 : strokeWidth(style);
+      out += `<path d="${lineD}" fill="none" stroke="${s.color}" stroke-opacity="${opacity}" stroke-width="${f2(w)}" stroke-linecap="round" stroke-linejoin="round"${dashAttr}/>`;
+    }
   }
   if (s.arrow && !closed) {
     const h = arrowHead(pts, style);
@@ -1187,12 +1297,17 @@ export function eraseStrokesPartial(
     }
     changed = true;
     const lastIndex = pts.length - 1;
+    // A dashed line's pieces keep their dashes where they were: each starts the pattern at its
+    // distance along the line (Stroke.dashOffset, as the shapes' pieces do).
+    const dashed = (s.lineStyle ?? 'solid') !== 'solid';
     let run: Point[] = [];
     let runEnd = -1;
+    let runFrom = 0;
+    let along = 0;
     const flush = () => {
       if (run.length >= 2) {
         const keepsEnd = runEnd === lastIndex && !closed;
-        out.push({
+        const piece: Stroke = {
           ...s,
           id: makeId(),
           createdAt: itemTime(s),
@@ -1202,22 +1317,31 @@ export function eraseStrokesPartial(
           arrow: keepsEnd ? s.arrow : undefined,
           modeled,
           penEnd: undefined,
-        });
+        };
+        if (dashed) piece.dashOffset = (s.dashOffset ?? 0) + runFrom;
+        else delete piece.dashOffset;
+        out.push(piece);
       }
       run = [];
     };
     pts.forEach((p, i) => {
       const prev = i > 0 ? pts[i - 1] : null;
+      const step = prev ? Math.hypot(p.x - prev.x, p.y - prev.y) : 0;
       if (inside(p)) {
         // Leaving the kept line: end it exactly on the eraser's edge.
         if (prev && !inside(prev) && run.length) run.push(circleCrossing(prev, p, x, y, r));
         flush();
       } else {
         // Coming out from under the eraser: start exactly on its edge.
-        if (prev && inside(prev)) run.push(circleCrossing(p, prev, x, y, r));
+        if (prev && inside(prev)) {
+          const c = circleCrossing(p, prev, x, y, r);
+          run.push(c);
+          runFrom = along + step - Math.hypot(p.x - c.x, p.y - c.y);
+        } else if (!run.length) runFrom = along + step;
         run.push(p);
         runEnd = i;
       }
+      along += step;
     });
     flush();
   }

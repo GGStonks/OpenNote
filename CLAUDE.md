@@ -80,8 +80,24 @@ metered, or about the server's internals. Every request the app sends to the ser
 ## PDF and Notability import
 
 "Import file…" (hold the library's + button; the file input has no `accept` list: Android and iOS
-pickers greyed out .note / .opennote files) imports PDFs, Notability notes, .opennote, pictures and
-text (App.tsx `importExternal`).
+pickers greyed out .note / .opennote files) imports PDFs, Word documents, Notability notes,
+.opennote, pictures and text (App.tsx `importExternal`).
+
+- iOS: OpenNote is offered for these files by other apps ("Open in…", the share sheet's apps,
+  Files): Info.plist `CFBundleDocumentTypes` (PDF, Word, pictures, text, Notability as an imported
+  type `com.opennote.notability-note`, .opennote as OpenNote's own `com.opennote.note`). The shell
+  (`application:openURL:options:` → `receiveFile`) copies the file (security-scoped, coordinated)
+  into tmp/inbox/<id>/ and serves it at opennote://app/__inbox/…; the page asks for them at start
+  and on `opennote:openFiles` (platform.ts `listenForOpenedFiles`, bridge `pendingFiles` /
+  `inboxDone`) and imports them as notes. Not on Android yet.
+- Word (`src/import/docx.ts`, .docx; .doc / .rtf / .odt / .pages are refused with how to convert):
+  a rich text box per paragraph on pages of the document's size and margins, laid out from the top
+  margin down as Word does (spacing before / after, line spacing, page breaks), styles resolved
+  through docDefaults, paragraph and character styles (headings), lists from numbering.xml,
+  pictures in the flow, tables as a box per cell with ruled lines. Heights are measured as drawn
+  (`import/measureText.ts`, off screen): no box overlaps another. Headers, footers, footnotes,
+  comments, text boxes, charts and equations are named as left out.
+  `npm run bench:ui -- --only docximport --docx <file> --shots <dir>` (pages, boxes, overlaps).
 
 - PDFs (`src/import/pdf.ts`): the file is kept once in IndexedDB `files` (db.ts `putFile`, with a
   protected PDF's password), and each page becomes a page of its own size (PageSheet `width` /
@@ -356,15 +372,37 @@ show the iPad's compositing cost).
   2.9.0 also narrowed fast strokes (speed over a few px): the Pencil's timing jitter made the width
   twitch (roughness 1.8x 2.8.2's) and the line's end near the pen wriggle as it settled (the user's
   "serpent"); 2.9.1 removed it: roughness a quarter of 2.8.2's, the end settling no more than 2.8.2's.
-  A point's width depends on the line within `WIDTH_REACH`; `SMOOTH_SETTLE` covers 3 sigma +
-  `WIDTH_REACH`, so the live line's final part (and the native ink, which draws its widths) is the
-  finished stroke exactly; widths are computed on the whole modelled line, then thinned with it.
+  2.9.3 adds the nib (the owner found the ink "rigid", a felt tip): an elliptical nib (`NIB_RATIO`
+  1.9, edge `NIB_ANGLE` 28° as a right hand holds it) makes downstrokes full and joining strokes
+  fine; scaled by the direction mix of real writing (`WRITING_DIRECTIONS`) so the weight stays
+  within 1%. The direction is causal (the line behind the point only): measured on both sides, the
+  end of the line changed width while writing (the serpent again). The widths are drawn as
+  inkWidth.ts makes them: `smoothLine` moves points but no longer averages widths (averaged again,
+  the settled end changed width once more). A point's width depends on `WIDTH_AHEAD` of line after
+  it (`SMOOTH_SETTLE` covers 3 sigma + it, so the live line's final part, and the native ink, which
+  draws its widths, is the finished stroke exactly) and `WIDTH_BEHIND` before it (the context a run
+  of the line needs, smoothLiveStroke); widths are computed on the whole modelled line, then thinned.
   The last `SMOOTH_SETTLE` of a line stays as modelled, live and finished: smoothing it (with a
   narrowing window, or a local linear fit) turned curled ends into hooks or made the end swing.
   Stronger `SMOOTH_SIGMA` costs accuracy for little smoothness. `npm run bench:look`: accuracy,
-  wobble, width range, nervousness (width roughness), the end moving while writing, and live =
-  finished, on the recordings; `npm run bench:hooks` for the ends. Thumbnails carry the look
-  (`thumbCache` `INK_LOOK`): bump it when the ink's look changes.
+  wobble, width range, nervousness (width roughness: counts the nib's thick and thin too), ripple
+  (width jitter within 3 px only), the end moving while writing and live = finished (both point
+  for point: matched by place, a letter crossing itself paired different passes), on the
+  recordings; `npm run bench:hooks` for the ends. Thumbnails carry the look (`thumbCache`
+  `INK_LOOK`): bump it when the ink's look changes.
+- Line styles (`LineStyle`: solid, dashed, long dashes, dotted, dash-dot) for the pen (tool option
+  `penLineStyle`), the Draw tool and the selection bar (`components/LineStyles.tsx`). One pattern
+  (`dashPattern` in strokeRenderer.ts, TikZ too) and one walker (`dashRuns`: the line's runs, cut at
+  the pattern's ends) for canvas, SVG, GPU and live ink: dashed handwriting keeps the fountain pen's
+  width in its dashes, its dots 1.25x the ink there; stroked lines (shapes, highlighters) keep the
+  canvas's dashes (dots a 0.1 px dash, so the GPU matches the canvas). Dashed pen strokes are drawn
+  live whole each frame (SmoothLiveStroke `paintDashes`; the shells get them as a drawing, `d`
+  messages: no lead). Precision-eraser pieces carry their place in the pattern (`dashOffset`).
+  `--only svgcompare` / `glcompare` include pen dashes and dots.
+- Selected alone, a handwritten stroke (pen, highlighter, open) has a handle at each end of its
+  drawn line (shapeEdit.ts role 'end'): dragging one moves that end, the stroke turned and scaled
+  about the other end (its width kept), snapping to other shapes as shape handles do. `--only
+  endhandles`.
 - `npm run bench:pen` — synthetic pen benchmark; `npm run bench:replay -- bench/recordings/<file>.json` — real recordings (Settings → Diagnostics → Record pen strokes → Send to PC)
 - `npm run bench:overshoot` — real recordings through the whole pen pipeline (densify, engine, smoothing): how far the ink strays from the pen's path, and corners after the pen rests
 - `npm run bench:hooks` — real recordings: a stroke's end turning back where the pen did not. The points given to the engine (strokeRenderer.ts `enginePoints`) leave out a pressured stroke's trailing samples without force (the Pencil in the air after its lift) and a finger / mouse stroke's lift sample when it turns back (Android reports it ~25 ms late, a few px back along the path): both made a hook at the end of quick strokes

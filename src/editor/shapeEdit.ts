@@ -1,5 +1,6 @@
 import { Point, Stroke } from '../types';
 import { XY } from '../ink/spline';
+import { strokeGeometry } from '../ink/strokeRenderer';
 
 /**
  * Editing of shapes after they are drawn (PDEDraw's control-point editing): a lasso selection of a
@@ -12,10 +13,12 @@ import { XY } from '../ink/spline';
  *    circle: centre and radius.
  *  - curve: at most ~12 handles spread along the spline; dragging one bends the neighbouring
  *    control points with a smooth falloff, so dense PDEDraw curves reshape without kinks.
- * Freehand ink has no handles.
+ *  - handwriting (pen, highlighter; open strokes): its two ends. Dragging one moves that end while
+ *    the other stays: the whole stroke turns and stretches about the other end (as a line is moved
+ *    by its endpoints), the ink's width and look unchanged.
  */
 
-export type HandleRole = 'vertex' | 'center' | 'axisA' | 'axisB' | 'curve';
+export type HandleRole = 'vertex' | 'center' | 'axisA' | 'axisB' | 'curve' | 'end';
 
 export interface ShapeHandle {
   x: number;
@@ -23,7 +26,12 @@ export interface ShapeHandle {
   role: HandleRole;
   /** Index of the stroke point this handle stands for. */
   index: number;
+  /** 'end': the stroke's other end, which stays where it is. */
+  anchor?: XY;
 }
+
+/** Handwriting shorter than this from end to end (page px: a dot, a tick) has no end handles. */
+const MIN_END_SPAN = 4;
 
 const MAX_CURVE_HANDLES = 12;
 
@@ -46,6 +54,16 @@ function curveHandleIndices(n: number, closed: boolean): number[] {
 }
 
 export function shapeHandles(s: Stroke): ShapeHandle[] | null {
+  if (!s.isShape && (s.tool === 'pen' || s.tool === 'highlighter') && !s.closed && s.points.length > 1) {
+    // Where the ink visibly begins and ends (the drawn line, not the first and last samples).
+    const line = strokeGeometry(s).pts;
+    const a = line[0], b = line[line.length - 1];
+    if (!a || dist(a, b) < MIN_END_SPAN) return null;
+    return [
+      { x: a.x, y: a.y, role: 'end', index: 0, anchor: { x: b.x, y: b.y } },
+      { x: b.x, y: b.y, role: 'end', index: s.points.length - 1, anchor: { x: a.x, y: a.y } },
+    ];
+  }
   if (!s.isShape || s.tool !== 'pen' || !s.points.length) return null;
   const pts = s.points;
   const h = (p: XY, role: HandleRole, index: number): ShapeHandle => ({ x: p.x, y: p.y, role, index });
@@ -92,6 +110,7 @@ export function ellipsePoints(c: XY, a: XY, rb: number, n: number): Point[] {
  * Always computed from the original so that a drag never accumulates rounding.
  */
 export function dragHandle(orig: Stroke, handle: ShapeHandle, to: XY): Stroke {
+  if (handle.role === 'end' && handle.anchor) return swingAbout(orig, handle.anchor, handle, to);
   const pts = orig.points;
   const kind = orig.shapeKind;
   const dx = to.x - handle.x, dy = to.y - handle.y;
@@ -271,4 +290,25 @@ export function adjustSnappedShape(a: SnapAdjust, pen: XY): Point[] {
       return pts.map((q) => P({ x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn, y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs }, q));
     }
   }
+}
+
+/**
+ * `orig` turned and scaled about `anchor` so that `from` lands on `to` (a similarity: the stroke's
+ * shape kept, its pen width too). Handwriting's end handles.
+ */
+function swingAbout(orig: Stroke, anchor: XY, from: XY, to: XY): Stroke {
+  const fx = from.x - anchor.x, fy = from.y - anchor.y;
+  const f2 = fx * fx + fy * fy;
+  if (f2 < 1e-9) return orig;
+  const tx = to.x - anchor.x, ty = to.y - anchor.y;
+  // (to - anchor) / (from - anchor) as complex numbers: scale and turn.
+  const c = (tx * fx + ty * fy) / f2, sn = (ty * fx - tx * fy) / f2;
+  const points = orig.points.map((p) => {
+    const x = p.x - anchor.x, y = p.y - anchor.y;
+    return { ...p, x: anchor.x + c * x - sn * y, y: anchor.y + sn * x + c * y };
+  });
+  // Stroke.rotation counts clockwise degrees on the page (y down: a positive turn is clockwise).
+  const turned = (Math.atan2(sn, c) * 180) / Math.PI;
+  const rotation = (((orig.rotation ?? 0) + turned) % 360 + 360) % 360;
+  return { ...orig, points, ...(Math.abs(turned) > 1e-6 || orig.rotation ? { rotation } : {}) };
 }

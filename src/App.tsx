@@ -10,7 +10,7 @@ import {
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
-import { ExportMode, exportFile, setLaunchTheme } from './platform';
+import { ExportMode, exportFile, listenForOpenedFiles, setLaunchTheme } from './platform';
 import { THEMES, applyTheme } from './theme';
 import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
@@ -18,6 +18,8 @@ import { importNotability } from './import/notability';
 import { importNtb } from './import/ntb';
 import { importPdf, storePdf } from './import/pdf';
 import { loadPicture, solidImage } from './import/images';
+import { importDocx } from './import/docx';
+import { measureTextBlock } from './import/measureText';
 import { crashLog } from './services/crashLog';
 import { startCutoutClearance } from './services/cutout';
 import { startFrameRate } from './services/frameRate';
@@ -200,7 +202,7 @@ export const App: React.FC = () => {
     for (const n of notesRef.current ?? []) if (n.tagIds?.includes(id)) await updateNoteMeta(n.id, (cur) => ({ tagIds: (cur.tagIds ?? []).filter((t) => t !== id) }), false);
   };
 
-  /** Imports files from outside: .opennote notes / backups, PDFs, Notability notes, images and text files (each a new note). */
+  /** Imports files from outside: .opennote notes / backups, PDFs, Word documents, Notability notes, images and text files (each a new note). */
   const importExternal = async (files: File[]) => {
     let made = 0;
     const failed: string[] = [];
@@ -245,6 +247,23 @@ export const App: React.FC = () => {
           }
           made++;
           if (nb.skipped.length) partial.push(`${file.name}: ${nb.skipped.join(', ')}`);
+        } else if (/\.(docx|docm|dotx)$/i.test(file.name) || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+          // Word: a text box per paragraph on pages of the document's size (src/import/docx.ts).
+          const docx = await importDocx(new Uint8Array(await file.arrayBuffer()), {
+            readImage: (blob) => loadPicture(blob, { maxSide: 2048 }),
+            measure: measureTextBlock,
+          });
+          last = {
+            ...blankNote(name, { textBlocks: docx.textBlocks, imageBlocks: docx.imageBlocks, strokes: docx.strokes }),
+            paperStyle: 'blank',
+            sheets: docx.sheets,
+          };
+          upsertLocal(await saveNote(last, false));
+          crashLog.event('import', { kind: 'docx', pages: docx.pages, texts: docx.textBlocks.length, images: docx.imageBlocks.length, skipped: docx.skipped.length, kb: Math.round(file.size / 1024) });
+          made++;
+          if (docx.skipped.length) partial.push(`${file.name}: ${docx.skipped.join(', ')}`);
+        } else if (/\.(doc|dot|rtf|pages|odt)$/i.test(file.name)) {
+          failed.push(`${file.name} (open it in Word or Pages and save it as .docx or PDF, then import that)`);
         } else if (/\.(opennote|json)$/i.test(file.name) || file.type === 'application/json') {
           made += await importBackup(JSON.parse(await file.text()));
         } else if (file.type.startsWith('image/')) {
@@ -268,11 +287,16 @@ export const App: React.FC = () => {
     }
     await reload();
     const notImported = partial.length ? `\nLeft out:\n${partial.join('\n')}` : '';
-    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Notability .note / .ntb, .opennote, images, .txt / .md / .tex.${notImported}`);
+    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Word .docx, Notability .note / .ntb, .opennote, images, .txt / .md / .tex.${notImported}`);
     else if (partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`);
     if (!failed.length && files.length === 1 && last) setOpenNoteId(last.id);
     else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
   };
+
+  // Files given to OpenNote by other apps (iOS: "Open in…", the share sheet): imported as new notes.
+  const importRef = useRef(importExternal);
+  importRef.current = importExternal;
+  useEffect(() => listenForOpenedFiles((files) => importRef.current(files)), []);
 
   const backup = async (mode?: ExportMode) => {
     try {

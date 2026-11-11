@@ -451,3 +451,58 @@ export function haptic(style: 'snap' | 'light' | 'success' = 'snap'): void {
     /* haptics are best effort */
   }
 }
+
+const OPENED_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  dotx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.template',
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', heic: 'image/heic', webp: 'image/webp',
+  txt: 'text/plain', md: 'text/markdown', tex: 'text/plain', opennote: 'application/json', json: 'application/json',
+};
+
+/**
+ * Files another app gave OpenNote (iOS: "Open in…", the share sheet, Files; Info.plist document
+ * types, the shell's inbox): `handler` gets them as Files, once each, those given before the page
+ * started first. Returns the unsubscribe.
+ */
+export function listenForOpenedFiles(handler: (files: File[]) => void | Promise<void>): () => void {
+  if (platformKind() !== 'ios') return () => undefined;
+  const bridge = window.webkit!.messageHandlers!.opennote!;
+  let busy = false, again = false;
+  const take = async () => {
+    if (busy) {
+      again = true;
+      return;
+    }
+    busy = true;
+    try {
+      do {
+        again = false;
+        const res = (await bridge.postMessage({ cmd: 'pendingFiles' })) as { files?: { id: string; name: string; url: string }[] } | null;
+        const list = res?.files ?? [];
+        if (!list.length) continue;
+        const files: File[] = [];
+        for (const f of list) {
+          try {
+            const blob = await (await fetch(f.url)).blob();
+            const ext = (f.name.split('.').pop() ?? '').toLowerCase();
+            files.push(new File([blob], f.name, { type: OPENED_TYPES[ext] ?? blob.type ?? '' }));
+          } catch {
+            /* unreadable: the import says which */
+          }
+        }
+        try {
+          if (files.length) await handler(files);
+        } finally {
+          for (const f of list) void bridge.postMessage({ cmd: 'inboxDone', id: f.id }).catch(() => undefined);
+        }
+      } while (again);
+    } finally {
+      busy = false;
+    }
+  };
+  const onEvent = () => void take();
+  window.addEventListener('opennote:openFiles', onEvent);
+  void take();
+  return () => window.removeEventListener('opennote:openFiles', onEvent);
+}

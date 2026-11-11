@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
 import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
+import { LINE_STYLES, LineStyleIcon } from './LineStyles';
 import { markMoved, strokeHitTest } from '../ink/strokeRenderer';
 import { setColourPicker } from '../services/eyedropper';
 import { useNoteEditor } from '../state/useNoteEditor';
@@ -128,6 +129,7 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
     shapeFill: 'none',
     shapeArrow: false,
     shapeLineStyle: 'solid',
+    penLineStyle: 'solid',
     shapeSnap: true,
     shapeGridSnap: true,
   };
@@ -1465,9 +1467,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                   <button key={c} onClick={() => recolorSelection(c)} className="w-8 h-8 rounded-full ring-2 ring-white/30 flex-shrink-0 active:scale-90 transition" style={{ backgroundColor: c }} title="Recolour" />
                 ))}
                 <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
-                {(['solid', 'dashed', 'dotted'] as LineStyle[]).map((ls) => (
-                  <button key={ls} onClick={() => restyleSelection(ls)} className={ICON_BTN} title={ls[0].toUpperCase() + ls.slice(1)}>
-                    <svg width="22" height="22" viewBox="0 0 22 22"><line x1="3" y1="11" x2="19" y2="11" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeDasharray={ls === 'dashed' ? '5 4' : ls === 'dotted' ? '0.1 4.5' : undefined} /></svg>
+                {LINE_STYLES.map((ls) => (
+                  <button key={ls.id} onClick={() => restyleSelection(ls.id)} className={ICON_BTN} title={ls.label} aria-label={ls.label}>
+                    <LineStyleIcon style={ls.id} width={22} />
                   </button>
                 ))}
                 <button onClick={() => setFillMenu((v) => !v)} className={`${ICON_BTN} ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">

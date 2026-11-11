@@ -4,18 +4,25 @@
 //   - wobble: how much the line's direction jitters (RMS change of curvature, per px, on the line
 //     resampled every px; lower is smoother, 0 for a perfect circle or line);
 //   - width range: each stroke's widest / narrowest point (1 = uniform);
-//   - nervous: the width's roughness along the finished line;
-//   - end: each frame while writing, the line's last END_PX against the finished stroke at the same
-//     distance along it (how much the end moves before it settles: the "serpent");
+//   - nervous: the width's roughness along the finished line (its 2nd derivative: the nib's
+//     intended thick and thin around a loop counts too);
+//   - ripple: the width's fine jitter only (the part varying within RIPPLE_PX of line, against the
+//     width averaged over that), what showed as a nervous, twitching line;
+//   - end: each frame while writing, the line's last END_PX (its modelled points) against the same
+//     points of the finished line (how much the end moves before it settles: the "serpent");
 //   - live = finished: the final part of the line drawn while writing (SmoothLiveStroke.line, which
-//     the native live ink draws) against the finished stroke, positions and widths. Any gap there
-//     shows as the ink changing when the pen lifts.
+//     the native live ink draws) against the finished line of the same samples, point for point,
+//     and against the stored stroke (matched along the line: approximate where a letter crosses
+//     itself; the stored stroke also leaves out the samples after the lift). Any gap there shows as
+//     the ink changing when the pen lifts.
 // WOBBLE_SMOOTHED=1: wobble of the smoothed part only (without each stroke's last SMOOTH_SETTLE,
 // which stays as modelled so the live line equals the finished one).
 // npm run bench:look [-- files]
 import { readFileSync, readdirSync } from 'node:fs';
 import { SampleDensifier } from '../src/ink/densify';
-import { settledIndex, strokeGeometry, strokeWidth } from '../src/ink/strokeRenderer';
+import { settledIndex, settledSmooth, strokeGeometry, strokeWidth } from '../src/ink/strokeRenderer';
+import { nibStroke } from '../src/ink/engine';
+import { inkWidths } from '../src/ink/inkWidth';
 import { SmoothLiveStroke } from '../src/ink/smoothLiveStroke';
 import type { PenRecording } from '../src/ink/penRecorder';
 import type { Point, Stroke } from '../src/types';
@@ -71,22 +78,16 @@ let liveN = 0;
 let worstW = { gap: 0, where: '' };
 let roughSum = 0, roughN = 0;
 const endPos: number[] = [], endW: number[] = [];
+const exactPos: number[] = [], exactW: number[] = [];
+let rippleSum = 0, rippleN = 0;
+/** Width variations within this much line are jitter (ripple), not the nib's thick and thin. */
+const RIPPLE_PX = 3;
 /** The last stretch of the drawn line compared each frame (page px). */
 const END_PX = 40;
 function arcs(p: XY[]): Float64Array {
   const a = new Float64Array(p.length);
   for (let i = 1; i < p.length; i++) a[i] = a[i - 1] + Math.hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y);
   return a;
-}
-/** First index with a[i] >= v. */
-function upper(a: Float64Array, v: number): number {
-  let lo = 0, hi = a.length;
-  while (lo < hi) {
-    const m = (lo + hi) >> 1;
-    if (a[m] < v) lo = m + 1;
-    else hi = m;
-  }
-  return lo;
 }
 for (const file of files) {
   const rec = JSON.parse(readFileSync(file, 'utf8')) as PenRecording;
@@ -99,7 +100,7 @@ for (const file of files) {
     const liveStyle = { color: '#000', width: strokeWidth({ tool: 'pen', color: '#000', width: s.width, penStyle: 'fountain', lineStyle: 'solid' } as never), variable: real };
     // What is on screen near the pen each frame (the line's last END_PX), kept to compare with the
     // finished stroke: everything drawn there that later changes is the end "moving" while writing.
-    const frames: { at: Float64Array; pts: XY[]; w: number[] }[] = [];
+    const frames: { from: number; pts: XY[]; w: number[] }[] = [];
     for (const [x, y, t, force] of s.samples) {
       for (const q of dens.push({ x, y, t, pressure: force > 0 ? force : 0 })) {
         pts.push(q);
@@ -107,11 +108,13 @@ for (const file of files) {
       }
       if (pts.length > 2) {
         const l = live.line(liveStyle);
-        const all = l.final.concat(l.rest), w = l.finalW.concat(l.restW);
+        // The modelled points only (the engine's provisional tail has no counterpart to compare).
+        const n = live.model.points.length;
+        const all = l.final.concat(l.rest).slice(0, n), w = l.finalW.concat(l.restW).slice(0, n);
         const at = arcs(all);
         let k = all.length - 1;
         while (k > 0 && at[all.length - 1] - at[k] < END_PX) k--;
-        frames.push({ at: at.slice(k), pts: all.slice(k), w: w.slice(k) });
+        frames.push({ from: k, pts: all.slice(k), w: w.slice(k) });
       }
     }
     if (pts.length < 3) continue;
@@ -137,33 +140,38 @@ for (const file of files) {
         roughSum += (d2 / g.width) ** 2;
         roughN++;
       }
-      // The end while writing: each frame's drawn end against the finished stroke at the same
-      // distance along the line.
-      const fa = arcs(g.pts);
+      // Ripple: each width against the widths averaged over RIPPLE_PX either side.
+      for (let i = 0; i < g.pts.length; i++) {
+        let sw = 0, ww = 0;
+        for (let j = i; j >= 0 && at[i] - at[j] <= 2 * RIPPLE_PX; j--) { const e = Math.exp(-((at[i] - at[j]) ** 2) / (2 * RIPPLE_PX ** 2)); sw += g.widths[j] * e; ww += e; }
+        for (let j = i + 1; j < g.pts.length && at[j] - at[i] <= 2 * RIPPLE_PX; j++) { const e = Math.exp(-((at[j] - at[i]) ** 2) / (2 * RIPPLE_PX ** 2)); sw += g.widths[j] * e; ww += e; }
+        if (at[i] < 2 * RIPPLE_PX || at[g.pts.length - 1] - at[i] < 2 * RIPPLE_PX) continue;
+        rippleSum += ((g.widths[i] - sw / ww) / g.width) ** 2;
+        rippleN++;
+      }
+    }
+    // The finished line of the very samples the live line had (strokeGeometry also leaves out the
+    // samples after the lift): point for point, the live line's points are its points.
+    let same: { pts: XY[]; widths: number[] | null } | null = null;
+    if (real) {
+      const line = nibStroke(pts);
+      same = settledSmooth({ pts: line, widths: inkWidths(line, liveStyle.width), width: liveStyle.width });
+      // The end while writing: each frame's drawn end against the same points finished.
       for (const f of frames) {
-        for (let i = 0; i < f.pts.length; i++) {
-          // Near the same distance along the line (lengths differ a little), the nearest point of
-          // the finished line's segments, its width interpolated there.
-          const c = upper(fa, f.at[i]);
-          let lo = c, hi = c;
-          while (lo > 1 && fa[c] - fa[lo - 1] < 15) lo--;
-          while (hi < g.pts.length - 1 && fa[hi] - fa[c] < 15) hi++;
-          let bd = Infinity, ww = g.widths[Math.min(c, g.widths.length - 1)];
-          for (let k = Math.max(1, lo); k <= Math.min(hi, g.pts.length - 1); k++) {
-            const A = g.pts[k - 1], B = g.pts[k], dx = B.x - A.x, dy = B.y - A.y, l2 = dx * dx + dy * dy;
-            const u = l2 ? Math.max(0, Math.min(1, ((f.pts[i].x - A.x) * dx + (f.pts[i].y - A.y) * dy) / l2)) : 0;
-            const d = Math.hypot(f.pts[i].x - A.x - u * dx, f.pts[i].y - A.y - u * dy);
-            if (d < bd) { bd = d; ww = g.widths[k - 1] + (g.widths[k] - g.widths[k - 1]) * u; }
-          }
-          if (bd === Infinity) continue;
-          endPos.push(bd);
-          endW.push(Math.abs(f.w[i] - ww) / ww);
+        for (let i = 0; i < f.pts.length && f.from + i < same.pts.length; i++) {
+          const q = same.pts[f.from + i];
+          endPos.push(Math.hypot(f.pts[i].x - q.x, f.pts[i].y - q.y));
+          endW.push(Math.abs(f.w[i] - same.widths![f.from + i]) / same.widths![f.from + i]);
         }
       }
     }
     // Live, just before the pen lifts: its final part must lie on the finished line, same widths.
     const style = { color: '#000', width: strokeWidth({ tool: 'pen', color: '#000', width: s.width, penStyle: 'fountain', lineStyle: 'solid' } as never), variable: !!g.widths };
     const { final, finalW } = live.line(style);
+    if (same) for (let i = 0; i < final.length && i < same.pts.length; i++) {
+      exactPos.push(Math.hypot(final[i].x - same.pts[i].x, final[i].y - same.pts[i].y));
+      exactW.push(Math.abs(finalW[i] - same.widths![i]) / same.widths![i]);
+    }
     // Matched in order along the line (a letter crossing itself must not match another part of it).
     let j = 0;
     for (let i = 0; i < final.length; i++) {
@@ -203,6 +211,8 @@ console.log(`wobble     ${(Math.sqrt(wSum / Math.max(1, wN)) * 1000).toFixed(1)}
 console.log(`width      widest/narrowest per stroke: median ${range.length ? q(range, 0.5).toFixed(2) : '-'}x, p95 ${range.length ? q(range, 0.95).toFixed(2) : '-'}x`);
 console.log(`live       final live line vs finished stroke over ${liveN} points: position p99 ${q(posGaps, 0.99).toFixed(3)} / max ${q(posGaps, 1).toFixed(3)} px, width p99 ${(q(wGaps, 0.99) * 100).toFixed(2)}% / max ${(q(wGaps, 1) * 100).toFixed(2)}%`);
 console.log(`           worst width gap: ${worstW.where}`);
+console.log(`           point for point (the same samples finished): position max ${q(exactPos, 1).toFixed(4)} px, width max ${(q(exactW, 1) * 100).toFixed(3)}%`);
 const rms = (a: number[]) => Math.sqrt(a.reduce((t, v) => t + v * v, 0) / Math.max(1, a.length));
 console.log(`nervous    width roughness ${(Math.sqrt(roughSum / Math.max(1, roughN)) * 1000).toFixed(2)} (RMS 2nd derivative of width / nominal, x1000; lower is calmer)`);
+console.log(`ripple     width jitter within ${RIPPLE_PX} px of line: RMS ${(Math.sqrt(rippleSum / Math.max(1, rippleN)) * 100).toFixed(2)}% of the nominal width`);
 console.log(`end        the line's last ${END_PX} px while writing vs finished: position RMS ${rms(endPos).toFixed(3)} p99 ${q(endPos, 0.99).toFixed(2)} px, width RMS ${(rms(endW) * 100).toFixed(2)}% p99 ${(q(endW, 0.99) * 100).toFixed(1)}% (lower: the end moves less while writing)`);

@@ -1,6 +1,6 @@
 import { FillType, Point, Stroke, ShapeKind } from '../types';
 import { Bezier, catmullRomBeziers, fitBeziers, XY } from '../ink/spline';
-import { arrowSize, strokeLine } from '../ink/strokeRenderer';
+import { arrowSize, dashPattern, strokeLine } from '../ink/strokeRenderer';
 import { latexForDocument } from './latexRender';
 
 /**
@@ -596,8 +596,12 @@ export function convertStrokesToTikz(strokes: Stroke[], labels: TikzLabel[] = []
     const lw = (ls === 'dotted' ? s.width * 1.8 : s.width * 1.4) * PT_PER_PX;
     // A shape's fill without its outline (left by the precision eraser): draw=none.
     const opts = s.fillOnly ? ['draw=none'] : [`draw=${color}`, `line width=${lw.toFixed(2)}pt`];
-    if (!s.fillOnly && ls === 'dashed') opts.push(`dash pattern=on ${(s.width * 4 * PT_PER_PX).toFixed(2)}pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
-    if (!s.fillOnly && ls === 'dotted') opts.push(`dash pattern=on 0pt off ${(s.width * 3 * PT_PER_PX).toFixed(2)}pt`);
+    // The canvas's pattern (strokeRenderer dashPattern), dots as zero-length dashes.
+    const dash = s.fillOnly ? null : dashPattern(ls, s.width);
+    if (dash) {
+      const pt = (v: number) => `${(v < 0.5 ? 0 : v * PT_PER_PX).toFixed(2)}pt`;
+      opts.push(`dash pattern=${dash.map((v, i) => `${i % 2 ? 'off' : 'on'} ${pt(v)}`).join(' ')}`);
+    }
     if (!s.fillOnly && ls !== 'solid' && s.dashOffset) opts.push(`dash phase=${(s.dashOffset * PT_PER_PX).toFixed(2)}pt`);
     let hatch: FillType | null = null;
     if (closed && s.fill && s.fill !== 'none') {

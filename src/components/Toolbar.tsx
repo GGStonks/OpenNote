@@ -4,7 +4,8 @@ import {
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
   Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText, Bookmark,
 } from 'lucide-react';
-import { EraserMode, FillType, LineStyle, PenStyle, ShapeMode, ToolType } from '../types';
+import { EraserMode, FillType, PenStyle, ShapeMode, ToolType } from '../types';
+import { LineStylePicker } from './LineStyles';
 import { SetupPatch } from '../editor/pageSetup';
 import { PaperPicker, PaperValues } from './PaperPicker';
 import { ToolSettings } from './CanvasPage';
@@ -242,6 +243,8 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                 </button>
               ))}
             </div>
+            <Label>Line</Label>
+            <LineStylePicker value={tools.penLineStyle} onChange={(ls) => setTools({ penLineStyle: ls })} />
             <Label>Width</Label>
             <LevelControl label="Pen width" value={tools.penWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ penWidth: v })} />
             <Label>Colour</Label>
@@ -274,13 +277,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               ))}
             </div>
             <Label>Line</Label>
-            <div className="flex gap-1 mb-2">
-              {(['solid', 'dashed', 'dotted'] as LineStyle[]).map((ls) => (
-                <button key={ls} onClick={() => setTools({ shapeLineStyle: ls })} className={`flex-1 text-sm py-2 rounded-xl border capitalize ${tools.shapeLineStyle === ls ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600'}`}>
-                  {ls}
-                </button>
-              ))}
-            </div>
+            <LineStylePicker value={tools.shapeLineStyle} onChange={(ls) => setTools({ shapeLineStyle: ls })} />
             <Label>Width</Label>
             <LevelControl label="Draw width" value={tools.shapeWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ shapeWidth: v })} />
             <Label>Colour</Label>
