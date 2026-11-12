@@ -46,7 +46,8 @@ window). Settings > Diagnostics: "Rust ink preparation" (off: TypeScript, localS
 `opennote_rust`) and "Rust check" (the largest note both ways: same lines, times; `rust-check` in
 the crash report, each preparation `rust-geometry`). `npm run bench:ui -- --only rustcore` (alone:
 a stand-in iOS shell answering with the real library), `crates/native/tests/jni/run.sh` (the JNI
-entry point from a JVM). Headless Android emulators crash when the app starts (qemu, exit 139).
+entry point from a JVM). On 2026-11-12 the headless emulator (`on20x9`, swiftshader or guest GPU)
+crashed as this build started (qemu itself, exit 139): the Android side is checked from the JVM.
 
 ## Native live ink
 
