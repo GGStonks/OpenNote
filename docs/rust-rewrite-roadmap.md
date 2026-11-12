@@ -1,6 +1,8 @@
 # OpenNote in Rust: feasibility and roadmap
 
-Status: proposal, 2026-11-12. Nothing has been started.
+Status: in progress since 2026-11-12, on the `opennote-rs` branch of `GGStonks/OpenNote`. In the
+roadmap below, `[x]` is done and checked as stated; `[ ]` is not started, or written but not yet
+verified as the item asks (the note says which). docs/rust-status.md has the crate-by-crate detail.
 
 ## Is it possible?
 
@@ -86,58 +88,94 @@ TypeScript app stays the shipping app until Phase 6.
 
 ### Phase 0: decisions and spikes (go / no-go)
 
-- **Repository:** a new repo (e.g. `GGStonks/OpenNote-rs`) pushed from a clone of this one, so it
-  keeps the history, the recordings, the golden file and the benches. A Cargo workspace goes in at
-  the root next to `src/`, and the TypeScript app stays runnable there as the reference until
-  Phase 7. Same app ids (`com.opennote.app`), so the Rust app installs as an update.
-- **Toolchains:** `aarch64-apple-ios` built on Linux with the existing iPhoneOS SDK and
-  `ld64.lld` (as `scripts/build-ios.sh` does for the ObjC shell), and `aarch64-linux-android` and
-  `armv7-linux-androideabi` with `cargo-ndk`. Only `x86_64-unknown-linux-gnu` is installed now.
-- Spikes, each a small throwaway program on the real devices:
-  - **A. Ink:** a Rust `UIView` with 240 Hz Pencil samples, drawn by `wgpu` at 120 Hz on the iPad
-    Pro and on the Android tablet. Measure pen-to-pixel latency against 2.9.3.
-  - **B. Text box:** rich text editing with `parley`, the keyboard, IME, dictation and Scribble on
+- [x] **Repository:** the `opennote-rs` branch of this repository, so it keeps the history, the
+  recordings, the golden file and the benches. (The port started in a separate repository,
+  `GGStonks/OpenNote-rs`; on 2026-11-12 everything in it was brought onto this branch and that
+  repository was retired. Its AGENTS.md is docs/rust-agents.md.) The Cargo workspace is at the
+  root next to `src/` (`crates/`, `spikes/`), and the TypeScript app stays runnable there as the
+  reference until Phase 7. Same app ids (`com.opennote.app`), so the Rust app installs as an
+  update. Crates that build and pass also go to `main`'s `crates/`.
+- [x] **Toolchains:** `aarch64-apple-ios`, `aarch64-linux-android` and `armv7-linux-androideabi`
+  are installed, with `cargo-ndk`. iOS links on Linux with the iPhoneOS 16.5 SDK and `ld64.lld`
+  through `scripts/ios-linker.sh` (`.cargo/config.toml`). Verified 2026-11-12: `spike_a_ink`
+  builds for `aarch64-apple-ios`, and with `ANDROID_NDK_HOME` set (cargo-ndk does not read
+  `.cargo/config.toml`'s `[env]`) as `.so` for arm64-v8a and armeabi-v7a.
+- [ ] **Rust inside the current app** (added 2026-11-12): before the Rust app exists, test builds
+  of this branch (`X.Y.Z-rs`, GitHub prereleases) carry the crates into the TypeScript app, so
+  Rust runs on the devices from now on. The ink engine stays TypeScript there: porting it into
+  the app waits until the rest runs well.
+- Spikes, each a small throwaway program on the real devices. `spikes/` has a program for each,
+  but all of them run on the PC only, and A, B and F print fixed text (expected latencies, a risk
+  list, a toolkit score table) rather than measuring anything:
+  - [ ] **A. Ink:** a Rust `UIView` with 240 Hz Pencil samples, drawn by `wgpu` at 120 Hz on the iPad
+    Pro and on the Android tablet. Measure pen-to-pixel latency against 2.9.3. Written so far: a
+    sample ring buffer and its throughput on the PC; no view, no `wgpu`, no device.
+  - [ ] **B. Text box:** rich text editing with `parley`, the keyboard, IME, dictation and Scribble on
     iOS (`UITextInput` through `objc2`), the keyboard and IME on Android. This is the riskiest
-    spike.
-  - **C. Formulas:** lay out the LaTeX of every formula in the owner's notes with Typst's math
-    (through `mitex`). Count failures and compare against KaTeX images.
-  - **D. PDF:** render the sample PDFs with `hayro` and with PDFium. Compare fidelity, speed and
-    app size.
-  - **E. TikZ:** run TikZJax's `tex.wasm` in `wasmi` on the iPad and time a typical picture.
-    Falling back to the conversion server is acceptable.
-  - **F. UI toolkit:** the editor's top bar, a popover and the library grid, on iOS, Android and
+    spike. Written so far: one `parley` layout on the PC; no editing, no text input.
+  - [ ] **C. Formulas:** lay out the LaTeX of every formula in the owner's notes with Typst's math
+    (through `mitex`). Count failures and compare against KaTeX images. Written so far: LaTeX to
+    Typst conversion with a pass count; no layout, no comparison with KaTeX.
+  - [ ] **D. PDF:** render the sample PDFs with `hayro` and with PDFium. Compare fidelity, speed and
+    app size. Written so far: `hayro` parses and renders a PDF on the PC, with timings; PDFium
+    not tried, nothing compared.
+  - [ ] **E. TikZ:** run TikZJax's `tex.wasm` in `wasmi` on the iPad and time a typical picture.
+    Falling back to the conversion server is acceptable. Written so far: `tex.wasm` loads and
+    validates in `wasmi` on the PC; no picture is typeset.
+  - [ ] **F. UI toolkit:** the editor's top bar, a popover and the library grid, on iOS, Android and
     desktop, with a `wgpu` canvas embedded. Candidates: Slint, Dioxus Native (Blitz), Makepad.
     Criteria: iOS and Android support, IME, accessibility, embedding our own GPU canvas, and
-    licence.
-- **Gate:** spikes A, B and F work on the devices; C, D and E have
+    licence. Written so far: a scored table of toolkits; no UI built.
+- [ ] **Gate:** spikes A, B and F work on the devices; C, D and E have
   a chosen route. If B or F fails, stop here: that is the cheap point to decide against.
+  Not met: no spike has run on a device.
 
 ### Phase 1: the core, no UI
 
-Crates (names illustrative): `nib`, `ink` (densify, width, smoothing, spline, dashes, geometry,
-eraser), `model` (the types in `types.ts`, sheets, migrations, packed points, the `.opennote`
-codec), `store` (SQLite), `shapes` (recognition, smart pen, shape edit, selection, z-order),
-`import` (Notability, `.ntb`, `.docx`, pictures, text), `svg` (export).
+Crates, in `crates/` (`cargo test --workspace` passes):
 
-- **Differential testing:** a Node script in the repo runs the TypeScript code on a corpus (the
+- [x] `nib`: the ink engine, exact (see the gate).
+- [x] `ink`: densify, width, smoothing, spline, dashes, geometry, live stroke, precision eraser.
+  Not yet: 2.9.4's smoothing width that follows the sample spacing (`smoothSigma`).
+- [x] `model`: the types in `types.ts`, sheets, migrations, packed points, the `.opennote` codec.
+- [x] `store`: SQLite (notes, folders, tags, files, thumbnails, audio, backup).
+- [ ] `shapes`: recognition (lines, arrows, polygons and regular polygons, ellipses, circles,
+  parabolas), shape edit, selection and z-order are written. Not yet: the smart pen.
+- [ ] `import`: text, LaTeX, Word (`.docx`), Notability `.note` (zip and plist) and `.ntb`
+  (FlatBuffers) are written. Tests use made-up inputs only (text, LaTeX, a made-up `.docx`, the
+  FlatBuffers reader); `.note` has no test, and none runs on the sample notes and documents.
+  Not yet: pictures.
+- [x] `svg`: export of strokes, fills, dashes, text and image blocks, pages.
+
+- [ ] **Differential testing:** a Node script in the repo runs the TypeScript code on a corpus (the
   recordings, the sample notes, the `.docx` and `.note` files) and writes its outputs as JSON;
-  `cargo test` compares the Rust results with them.
+  `cargo test` compares the Rust results with them. Done for the ink pipeline on the
+  recordings (`npm run bench:rustref`); the Rust test reading it (`crates/ink/tests/reference.rs`)
+  is not written, and no other module has a reference yet.
 - **Gate:**
-  - `engine-golden.json` matches to 1e-4 px.
-  - `bench:look`, `bench:hooks`, `bench:overshoot` and `bench:leadend` give the same numbers on
-    the recordings.
-  - The storage round-trip test passes.
-  - A backup written by 2.9.x reads back identically, and the other way round.
+  - [x] `engine-golden.json` matches to 1e-4 px (`crates/nib/tests/golden.rs`: finished line,
+    `nibStroke`, and the live line hash for hash, all asserted).
+  - [ ] `bench:look`, `bench:hooks`, `bench:overshoot` and `bench:leadend` give the same numbers on
+    the recordings. The Rust figures match 2.9.3's on the four October recordings
+    (`crates/ink/tests/benches.rs`); 2.9.4's smoothing is not ported yet.
+  - [ ] The storage round-trip test passes. Rust's own round trip passes (the recordings, packed
+    and unpacked, exactly); not yet run on data written by the TypeScript app.
+  - [ ] A backup written by 2.9.x reads back identically, and the other way round.
 
 ### Phase 2: one renderer
 
-- Paper patterns and colours, every stroke kind (fountain, ballpoint, highlighter multiplied
-  under the ink, dashes, fills and holes, arrows), z-order, pictures, the selection glow.
-  Thumbnails come from the same renderer, offscreen.
-- **Gate:** pixel comparisons against the TypeScript app's screenshots (from `bench:ui`) for every
-  stroke kind and zoom, within the tolerance `glcompare` uses now.
+- [x] Paper patterns and colours, every stroke kind (fountain, ballpoint, highlighter multiplied
+  under the ink, dashes, fills and holes, arrows), z-order, the selection glow. Thumbnails come
+  from the same renderer, offscreen. (`crates/renderer`: an SDF capsule rasterizer on the CPU
+  into an image; no GPU, no `wgpu` yet.)
+- [ ] Pictures.
+- [ ] **Gate:** pixel comparisons against the TypeScript app's screenshots (from `bench:ui`) for every
+  stroke kind and zoom, within the tolerance `glcompare` uses now. Not met: the tests check that
+  every `glcompare` stroke kind draws ink, not what it looks like next to the TypeScript app.
 
 ### Phase 3: writing on the devices
+
+Not started.
 
 - iOS app in Rust (`objc2`): 240 Hz coalesced Pencil samples, lift handling, palm rejection,
   double tap, haptics.
@@ -150,6 +188,8 @@ codec), `store` (SQLite), `shapes` (recognition, smart pen, shape edit, selectio
 
 ### Phase 4: blocks
 
+Not started.
+
 - Text boxes on the Phase 0 B design: lists, checkboxes, styles, padding, background.
 - Formulas, including `colorByInk` on the new layout.
 - TikZ, pictures, PDF pages (lazy, sharp at any zoom), Insert PDF.
@@ -157,6 +197,8 @@ codec), `store` (SQLite), `shapes` (recognition, smart pen, shape edit, selectio
 - **Gate:** the owner's notes open and look right, page by page, against 2.9.x's PDF exports.
 
 ### Phase 5: the rest of the app
+
+Not started.
 
 - Library: folders, tags, search, sort and filter, thumbnails.
 - Page manager, bookmarks, paper picker, settings, themes, recordings.
@@ -168,6 +210,8 @@ codec), `store` (SQLite), `shapes` (recognition, smart pen, shape edit, selectio
 
 ### Phase 6: migration and beta
 
+Not started.
+
 - On first start, the Rust app reads the old app's IndexedDB once, through a hidden web view at
   the old origin (`opennote://app` on iOS, Capacitor's origin on Android), and copies everything
   into SQLite.
@@ -178,6 +222,8 @@ codec), `store` (SQLite), `shapes` (recognition, smart pen, shape edit, selectio
   recordings, folders, tags).
 
 ### Phase 7: retire the TypeScript app
+
+Not started.
 
 - Remove `src/`, the Capacitor projects and the web benches. Keep the golden file and the
   recordings.
