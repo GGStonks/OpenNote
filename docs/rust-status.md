@@ -17,6 +17,7 @@ is the TypeScript app in `src/`.
 | `store` | SQLite storage (notes, folders, tags, files, thumbnails, audio, backup) | full CRUD, file/thumb storage, backup round-trip, transactions | reading the app's IndexedDB data (roadmap Phase 6) |
 | `svg` | SVG export (`svgExport.ts`) | stroke paths, fills, dashed lines, text blocks, image blocks, multi-page document export | — |
 | `renderer` | One renderer (Phase 2): SDF capsule rasterizer, paper patterns & colors, thumbnails | all 16 `glcompare` benchmark stroke kinds at x1.5 and x4 zoom, paper styles (ruled, lines, grid, graph, dots, blank) on light and dark paper, selection glow | device surface integration (Phase 3) |
+| `native` | the app's entry point on the devices (iOS static library, Android JNI): `geometry` (the drawn lines of strokes) | the page's own lines through it: `bench:ui --only rustcore` (Rust check, 3,031 strokes, 0 differ), `crates/native/tests/geometry.rs` (every reference kind through the framing), `tests/jni/run.sh` | a run on the devices |
 
 Spikes present in `spikes/`:
 - Spike A (`spike_a_ink`): 240 Hz coalesced touch ingestion buffer and 120 Hz render pipeline.

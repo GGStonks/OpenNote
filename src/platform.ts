@@ -172,7 +172,7 @@ export async function httpRequest(opts: {
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -224,7 +224,7 @@ export function printNeedsCalibration(): boolean {
   return platformKind() === 'ios' || !!bench().__opennoteBenchCalibrate;
 }
 
-const fromBase64 = (base64: string) => {
+export const fromBase64 = (base64: string) => {
   const bin = atob(base64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);

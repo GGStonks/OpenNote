@@ -1,0 +1,23 @@
+[package]
+name = "opennote_native"
+version = "0.1.0"
+edition = "2021"
+
+# The Rust code the TypeScript app calls on the devices (iOS shell: static library; Android:
+# libopennote_native.so loaded by OpenNoteRustPlugin). See src/lib.rs.
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+ink = { path = "../ink" }
+model = { path = "../model" }
+nib = { path = "../nib" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# The JNI entry point (Android). Its own feature so it can be tested from a JVM on the PC
+# (crates/native/tests/jni/run.sh); scripts/build-rust.sh turns it on for Android.
+jni = { version = "0.21.1", optional = true }
+
+[features]
+jni = ["dep:jni"]

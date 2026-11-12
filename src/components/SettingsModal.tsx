@@ -12,6 +12,7 @@ import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
 import { ExportMode, PageRate, exportOffersBoth, platformKind, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 import { useBack } from '../services/backStack';
+import { rustCheckLargestNote, rustEnabled, setRustEnabled } from '../services/rustCore';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -35,6 +36,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [pageRate, setPageRateState] = useState<PageRate>(window.OpenNoteNative?.pageRate ?? 'auto');
   const [vectorInk, setVectorInkState] = useState(vectorInkEnabled);
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [rustOn, setRustOn] = useState(rustEnabled);
+  const [rustMsg, setRustMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
 
@@ -291,6 +294,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               {crash && <button onClick={() => crashLog.clear()} className="text-red-500">Clear</button>}
             </div>
             {crashMsg && <p className={`text-xs mt-2 break-all ${crashMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{crashMsg.msg}</p>}
+            <Toggle
+              checked={rustOn}
+              onChange={(v) => {
+                setRustEnabled(v);
+                setRustOn(v);
+              }}
+              title="Rust ink preparation"
+              sub="The app's Rust library computes the ink's lines for pinching and thumbnails, off the main thread (this test build). Off: TypeScript, as in the regular app."
+            />
+            <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
+              <button
+                onClick={async () => {
+                  setRustMsg({ ok: true, msg: 'Checking…' });
+                  try {
+                    const r = await rustCheckLargestNote();
+                    const same = r.differing === 0 ? 'same lines' : `${r.differing} lines differ`;
+                    setRustMsg({
+                      ok: r.differing === 0,
+                      msg: `"${r.title}": ${r.strokes} strokes, ${r.points} points. TypeScript ${r.tsMs.toFixed(0)} ms (main thread); Rust ${r.rustTotalMs.toFixed(0)} ms in all: ${r.pageMs.toFixed(0)} ms on the main thread, ${r.rustMs.toFixed(0)} ms Rust's own (off it). ${same} (largest difference ${Number.isFinite(r.maxDiff) ? r.maxDiff.toExponential(1) : '—'} px). In the crash report as rust-check.`,
+                    });
+                  } catch (err) {
+                    setRustMsg({ ok: false, msg: err instanceof Error ? err.message : String(err) });
+                  }
+                }}
+              >
+                Rust check
+              </button>
+            </div>
+            {rustMsg && <p className={`text-xs mt-2 break-all ${rustMsg.ok ? 'text-gray-500' : 'text-red-600'}`}>{rustMsg.msg}</p>}
             <div className="mt-3 flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm text-gray-800 dark:text-gray-200">Page frame rate</div>

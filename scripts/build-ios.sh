@@ -27,11 +27,15 @@ echo "--> Compiling native shell (arm64, iOS $MIN_IOS+, SDK $SDK_VERSION)"
 clang -target "arm64-apple-ios$MIN_IOS" -isysroot "$IOS_SDK" -fobjc-arc -fmodules -O2 \
   -Wall -Wno-unguarded-availability-new -c "$ROOT/ios-native/OpenNoteShell.m" -o "$WORK/OpenNoteShell.o"
 
+echo "--> Building the Rust library (crates/native)"
+"$ROOT/scripts/build-rust.sh" ios
+RUST_LIB="$ROOT/target/aarch64-apple-ios/release/libopennote_native.a"
+
 echo "--> Linking Mach-O executable"
 ld64.lld -arch arm64 -platform_version ios "$MIN_IOS" "$SDK_VERSION" -syslibroot "$IOS_SDK" \
-  -dead_strip -lSystem -lobjc \
+  -dead_strip -lSystem -lobjc -liconv \
   -framework Foundation -framework UIKit -framework WebKit -framework QuartzCore \
-  "$WORK/OpenNoteShell.o" -o "$APP/OpenNote"
+  "$WORK/OpenNoteShell.o" "$RUST_LIB" -o "$APP/OpenNote"
 
 echo "--> Assembling bundle"
 sed -e "s/__VERSION__/$VERSION/" -e "s/__BUILD__/$BUILD/" \

@@ -13,6 +13,8 @@
 //      print  prints the web view (print layout) -> "Save to Files" gives a PDF.
 //      pdfPage the print layout as a PDF without the dialog (PDF export); printPdf prints a PDF.
 //      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
+//      rust   runs a method of the app's Rust library (crates/native, linked statically) on a
+//             framed request, off the main thread; src/services/rustCore.ts is the page's side.
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
 //  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
 //    getCoalescedEvents, so the window (ONWindow sendEvent:, ahead of all gesture recognizers and
@@ -1117,6 +1119,37 @@ static const double kInkHoldSeconds = 0.06;
     });
 }
 
+// The app's Rust library (crates/native/src/lib.rs: methods and framing).
+extern uint8_t *opennote_rs_call(const char *method, const uint8_t *input, size_t len, size_t *out_len);
+extern void opennote_rs_free(uint8_t *ptr, size_t len);
+
+// One Rust call at a time, in order, never on the main thread.
+static dispatch_queue_t ONRustQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("opennote.rust", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    });
+    return q;
+}
+
+- (void)handleRust:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
+    NSString *method = [msg[@"method"] description] ?: @"";
+    NSString *b64 = [msg[@"data"] isKindOfClass:[NSString class]] ? msg[@"data"] : @"";
+    dispatch_async(ONRustQueue(), ^{
+        NSData *request = [[NSData alloc] initWithBase64EncodedString:b64 options:0];
+        if (!request) {
+            dispatch_async(dispatch_get_main_queue(), ^{ reply(@{@"error": @"Request is not base64"}, nil); });
+            return;
+        }
+        size_t outLen = 0;
+        uint8_t *out = opennote_rs_call(method.UTF8String, request.bytes, request.length, &outLen);
+        NSString *data = [[NSData dataWithBytesNoCopy:out length:outLen freeWhenDone:NO] base64EncodedStringWithOptions:0];
+        opennote_rs_free(out, outLen);
+        dispatch_async(dispatch_get_main_queue(), ^{ reply(@{@"data": data ?: @""}, nil); });
+    });
+}
+
 - (void)userContentController:(WKUserContentController *)ucc
       didReceiveScriptMessage:(WKScriptMessage *)message
                  replyHandler:(void (^)(id _Nullable, NSString *_Nullable))replyHandler {
@@ -1185,6 +1218,8 @@ static const double kInkHoldSeconds = 0.06;
             [g impactOccurred];
         }
         replyHandler(@{}, nil);
+    } else if ([cmd isEqualToString:@"rust"]) {
+        [self handleRust:msg reply:replyHandler];
     } else {
         replyHandler(@{@"error": [NSString stringWithFormat:@"Unknown command %@", cmd]}, nil);
     }

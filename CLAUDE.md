@@ -29,6 +29,25 @@ faster, output within 3e-11 px of Nib v1).
   Android (Chromium coalesced pointer events): platform differences are handled in the input layer
   (`src/components/CanvasPage.tsx`), never inside the engine.
 
+## Rust in the app (opennote-rs branch)
+
+The branch's builds (`X.Y.Z-rs`, GitHub prereleases only) carry the Rust library `crates/native`
+into the app: the iOS shell links it statically (`scripts/build-ios.sh`, `rust` command of the
+`opennote` handler), Android loads `libopennote_native.so` (`OpenNoteRustPlugin`, built into the
+git-ignored jniLibs by `scripts/build-rust.sh`: run it before an Android build, or the plugin
+reports the library missing and the page stays on TypeScript). One framed call for both
+(crates/native/src/lib.rs), `src/services/rustCore.ts` the page's side. Rust computes every stroke's
+drawn line (`strokeGeometry`'s cache, `prepareGeometry`) before the GPU ink is prepared
+(usePinchInk) and before a thumbnail is drawn (thumbCache), off the main thread; the live line
+while writing stays TypeScript. That line must be TypeScript's point for point:
+`crates/ink/tests/reference.rs` against `npm run bench:rustref -- bench/rust-ref/ink.json` (every
+kind of stroke), and Rust ports `Math.hypot` as `js_hypot` (libm's last bit flipped a smoothing
+window). Settings > Diagnostics: "Rust ink preparation" (off: TypeScript, localStorage
+`opennote_rust`) and "Rust check" (the largest note both ways: same lines, times; `rust-check` in
+the crash report, each preparation `rust-geometry`). `npm run bench:ui -- --only rustcore` (alone:
+a stand-in iOS shell answering with the real library), `crates/native/tests/jni/run.sh` (the JNI
+entry point from a JVM). Headless Android emulators crash when the app starts (qemu, exit 139).
+
 ## Native live ink
 
 In the apps, the stroke being written is also drawn natively above the web view (lower pen latency):

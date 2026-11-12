@@ -5,6 +5,7 @@ import { drawStrokes, strokeSvgParts } from '../ink/strokeRenderer';
 import { tileWork } from './tileWork';
 import { frameRate } from '../services/frameRate';
 import { crashLog } from '../services/crashLog';
+import { prepareGeometry } from '../services/rustCore';
 
 /**
  * The ink while two fingers zoom, drawn by the GPU from its vectors on every frame (glInk.ts), as
@@ -65,7 +66,16 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
   // Ahead of the next pinch.
   useEffect(() => {
     if (!enabled || !strokes.length) return;
-    let timer: ReturnType<typeof setTimeout> | null = setTimeout(function slice() {
+    let cancelled = false;
+    // The strokes' drawn lines first (by the Rust library off the main thread where there is one:
+    // services/rustCore.ts), then the GPU's own geometry a slice per frame.
+    let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      timer = null;
+      void prepareGeometry(strokes).then(() => {
+        if (!cancelled) slice();
+      });
+    }, PREPARE_AFTER_MS);
+    function slice() {
       timer = null;
       if (tileWork.paused) return;
       if (!prepareGlGeometry(strokes, PREPARE_SLICE_MS())) {
@@ -81,8 +91,9 @@ export function usePinchInk(container: RefObject<HTMLElement | null>, scrollRoot
         g.warm();
         crashLog.event('gl-ready', { ms: Math.round(performance.now() - mountedAt.current), pieces: g.pieces, strokes: strokes.length });
       }
-    }, PREPARE_AFTER_MS);
+    }
     return () => {
+      cancelled = true;
       if (timer) clearTimeout(timer);
     };
   }, [strokes, layers, enabled]);

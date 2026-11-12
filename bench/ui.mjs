@@ -19,7 +19,7 @@
  * Run: npm run build && node bench/ui.mjs [--cpu 4] [--pages 8] [--headed]
  * Needs playwright-core (/home/ds/AI/camofox-browser/node_modules) and Playwright's Chromium.
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -1510,6 +1510,51 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
     if (urls) urls.forEach((u, i) => writeFileSync(join(arg('shots'), `${mode}-${process.env.BENCH_DUMP}-${i ? 'other' : 'canvas'}.png`), Buffer.from(u.split(',')[1], 'base64')));
   }
 }
+// Not in the default run (run it alone: it installs a stand-in iOS shell): --only rustcore, the app's
+// Rust library (crates/native) as the page uses it on the devices. The stand-in answers the shell's
+// `rust` command with the real library (opennote_native_cli, built here for the PC). Opening the
+// note must have Rust compute every stroke's drawn line before the GPU ink is prepared
+// (`rust-geometry` in the crash log, then `gl-ready`), and Settings > Diagnostics' Rust check must
+// find Rust's lines equal to TypeScript's (to 1e-4 px).
+if (ONLY.has('rustcore')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  const cli = join(root, 'target/release/opennote_native_cli');
+  await page.exposeFunction('__benchRust', (method, b64) =>
+    execFileSync(cli, [method], { input: Buffer.from(b64, 'base64'), maxBuffer: 1 << 30 }).toString('base64'));
+  await page.addInitScript(() => {
+    window.OpenNoteNative = { platform: 'ios', version: 'bench' };
+    window.webkit = {
+      messageHandlers: {
+        opennote: {
+          postMessage: async (m) => (m.cmd === 'rust' ? { data: await window.__benchRust(m.method, m.data) } : m.cmd === 'pendingFiles' ? { files: [] } : {}),
+        },
+      },
+    };
+  });
+  await reopen();
+  await page.waitForFunction(() => window.__opennoteRust);
+  const events = async () => {
+    const st = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}'));
+    return (st.current?.crumbs ?? []).filter((c) => /^rust-|^gl-ready/.test(c.kind));
+  };
+  let ev = [];
+  for (let i = 0; i < 60 && !ev.some((e) => e.kind === 'gl-ready'); i++) {
+    await sleep(500);
+    ev = await events();
+  }
+  for (const e of ev) console.log(`rustcore ${e.kind} ${JSON.stringify({ ...e, t: undefined, kind: undefined })}`);
+  const geo = ev.findIndex((e) => e.kind === 'rust-geometry'), ready = ev.findIndex((e) => e.kind === 'gl-ready');
+  if (geo < 0 || ready < geo || ev.some((e) => e.kind === 'rust-failed')) {
+    console.log('rustcore FAIL: Rust did not prepare the lines before the GPU ink');
+    process.exitCode = 1;
+  }
+  const r = await page.evaluate(() => window.__opennoteRust.check());
+  console.log(`rustcore check "${r.title}": ${r.strokes} strokes, ${r.points} points; TypeScript ${r.tsMs.toFixed(0)} ms, Rust ${r.rustTotalMs.toFixed(0)} ms (page ${r.pageMs.toFixed(0)}, its own ${r.rustMs.toFixed(0)}); ${r.differing} lines differ, largest ${r.maxDiff.toExponential(1)} px (${CPU}x slower CPU)`);
+  if (r.worst) console.log(`rustcore worst ${JSON.stringify(r.worst)}`);
+  if (r.differing) process.exitCode = 1;
+}
+
 // Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
 if (ONLY.has('probe')) {
   await reopen();

@@ -100,10 +100,14 @@ TypeScript app stays the shipping app until Phase 6.
   through `scripts/ios-linker.sh` (`.cargo/config.toml`). Verified 2026-11-12: `spike_a_ink`
   builds for `aarch64-apple-ios`, and with `ANDROID_NDK_HOME` set (cargo-ndk does not read
   `.cargo/config.toml`'s `[env]`) as `.so` for arm64-v8a and armeabi-v7a.
-- [ ] **Rust inside the current app** (added 2026-11-12): before the Rust app exists, test builds
+- [x] **Rust inside the current app** (added 2026-11-12): before the Rust app exists, test builds
   of this branch (`X.Y.Z-rs`, GitHub prereleases) carry the crates into the TypeScript app, so
-  Rust runs on the devices from now on. The ink engine stays TypeScript there: porting it into
-  the app waits until the rest runs well.
+  Rust runs on the devices from now on (`crates/native`; CLAUDE.md "Rust in the app"). Rust
+  computes the strokes' drawn lines for the GPU ink and the thumbnails, off the main thread;
+  writing (the live line) stays on the TypeScript engine. Checked on the PC: the page through a
+  stand-in iOS shell (`bench:ui --only rustcore`: 3,031 strokes, the same lines to 3e-12 px), the
+  JNI entry point from a JVM, the iOS shell linked. Not yet run on a device: Settings >
+  Diagnostics > Rust check reports it.
 - Spikes, each a small throwaway program on the real devices. `spikes/` has a program for each,
   but all of them run on the PC only, and A, B and F print fixed text (expected latencies, a risk
   list, a toolkit score table) rather than measuring anything:

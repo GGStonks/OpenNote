@@ -135,8 +135,21 @@ function thinnedWidths(line: readonly ModeledPoint[], kept: readonly ModeledPoin
   return out;
 }
 
-type InkGeometry = ReturnType<typeof inkGeometry>;
+export type InkGeometry = ReturnType<typeof inkGeometry>;
 const geometryCache = new WeakMap<Stroke, InkGeometry>();
+
+/** Whether strokeGeometry has the stroke's drawn line already. */
+export function hasStrokeGeometry(s: Stroke): boolean {
+  return geometryCache.has(s);
+}
+
+/**
+ * Gives strokeGeometry a stroke's drawn line computed elsewhere: by the app's Rust library
+ * (services/rustCore.ts), which computes this very line point for point (crates/ink/tests/reference.rs).
+ */
+export function setStrokeGeometry(s: Stroke, g: InkGeometry): void {
+  geometryCache.set(s, g);
+}
 
 /** The point a stroke's line continues to after the ink engine's end (Stroke.penEnd), or null. */
 export function penEnd(s: Stroke): Point | null {
@@ -220,14 +233,19 @@ export function strokeGeometry(s: Stroke): InkGeometry {
     const o = strokeGeometry(m.src);
     g = { ...o, pts: o.pts.map((q) => ({ ...q, x: q.x + m.dx, y: q.y + m.dy })) };
   } else {
-    const style = styleOf(s);
-    g = inkGeometry(enginePoints(s), style);
-    if (!style.modeled && !s.isShape) g = settledSmooth(g);
-    // After the smoothing, which is then the very line drawn live (the pen end is not smoothed in).
-    g = toPenEnd(g, penEnd(s));
+    g = computeStrokeGeometry(s);
   }
   geometryCache.set(s, g);
   return g;
+}
+
+/** strokeGeometry's line computed here and now, without its cache (Diagnostics' Rust check). */
+export function computeStrokeGeometry(s: Stroke): InkGeometry {
+  const style = styleOf(s);
+  let g = inkGeometry(enginePoints(s), style);
+  if (!style.modeled && !s.isShape) g = settledSmooth(g);
+  // After the smoothing, which is then the very line drawn live (the pen end is not smoothed in).
+  return toPenEnd(g, penEnd(s));
 }
 
 /**

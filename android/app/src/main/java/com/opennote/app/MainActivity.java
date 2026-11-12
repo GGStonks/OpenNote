@@ -36,6 +36,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(OpenNoteUpdatePlugin.class);
         registerPlugin(OpenNoteSavePlugin.class);
         registerPlugin(OpenNoteLaunchPlugin.class);
+        registerPlugin(OpenNoteRustPlugin.class);
         super.onCreate(savedInstanceState);
         launchColors();
         // Capacitor's SystemBars paints the window with the static theme's colour just after start

@@ -2,6 +2,7 @@ import { Stroke } from '../types';
 import { paintStrokeFill, paintStrokeInk } from '../ink/strokeRenderer';
 import { StoredThumb, getAllThumbs, putThumb } from '../storage/db';
 import { frameRate } from './frameRate';
+import { prepareGeometry } from './rustCore';
 
 /**
  * Library thumbnails as images. Drawing each card's first page from its strokes when the library
@@ -64,6 +65,9 @@ const nextSlice = () => new Promise<void>((r) => setTimeout(r, 0));
  * time, in drawStrokes' order (highlighters, fills, ink); null if cancelled.
  */
 async function drawSliced(strokes: Stroke[], width: number, height: number, offset: { x: number; y: number }, job: Job): Promise<string | null> {
+  // The drawn lines by the Rust library where there is one (services/rustCore.ts).
+  await prepareGeometry(strokes);
+  if (job.cancelled) return null;
   const k = THUMB_PAGE_PX / width;
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(width * k));

@@ -56,3 +56,5 @@ bench/out/
 
 # Reference outputs of the TypeScript code for the Rust tests (npm run bench:rustref)
 bench/rust-ref/
+# The Rust library built by scripts/build-rust.sh
+android/app/src/main/jniLibs/
