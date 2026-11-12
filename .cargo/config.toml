@@ -1,0 +1,6 @@
+[target.aarch64-apple-ios]
+linker = "scripts/ios-linker.sh"
+
+[env]
+ANDROID_NDK_HOME = "/home/ds/android-tools/sdk/ndk/27.2.12479018"
+SDKROOT = "/home/ds/android-tools/ios-sdk/iPhoneOS16.5.sdk"

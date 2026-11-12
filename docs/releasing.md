@@ -2,7 +2,9 @@
 
 For any agent (Claude, Gemini) or person who makes a release. A release publishes to everyone
 who installs OpenNote: make one only when the owner asks for it, from this repository
-(`/home/ds/AI/OpenNote`, GitHub `GGStonks/OpenNote`), never from OpenNote-rs.
+(`/home/ds/AI/OpenNote`, GitHub `GGStonks/OpenNote`), from `main`. A build of the `opennote-rs`
+branch (`X.Y.Z-rs`) is released only as a GitHub prerelease, never marked latest: the app's
+updater reads the latest release and skips prereleases, so it reaches nobody by itself.
 
 ## Steps
 

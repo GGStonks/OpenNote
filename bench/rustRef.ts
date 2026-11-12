@@ -1,4 +1,4 @@
-// Reference outputs of the TypeScript ink pipeline for the Rust port (GGStonks/OpenNote-rs), on
+// Reference outputs of the TypeScript ink pipeline for the Rust port (branch opennote-rs), on
 // real pen recordings: every stage the Rust crates must reproduce, stroke by stroke, so a port is
 // checked against what the app really draws and not against itself.
 //
