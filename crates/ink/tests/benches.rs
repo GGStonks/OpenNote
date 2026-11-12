@@ -183,11 +183,12 @@ fn test_bench_overshoot() {
     );
 
     assert_eq!(total, 292, "Should have 292 pen strokes");
-    assert_eq!(n05, 86, "n05 should match TS bench");
+    // OpenNote 2.9.4's figures (npm run bench:overshoot on the same recordings).
+    assert_eq!(n05, 45, "n05 should match TS bench");
     assert_eq!(n1, 10, "n1 should match TS bench");
     assert_eq!(n2, 3, "n2 should match TS bench");
-    assert!((median - 0.40).abs() <= 0.01, "Median should be 0.40 px");
-    assert!((p95 - 0.75).abs() <= 0.02, "p95 should be ~0.75 px");
+    assert!((median - 0.26).abs() <= 0.01, "Median should be 0.26 px");
+    assert!((p95 - 0.71).abs() <= 0.02, "p95 should be ~0.71 px");
     assert!((worst - 3.55).abs() <= 0.05, "worst should be ~3.55 px");
 }
 
@@ -464,7 +465,7 @@ fn test_bench_hooks() {
         total, now_hooks
     );
     assert_eq!(total, 275);
-    assert_eq!(now_hooks, 4, "Should exactly match TS bench of 4 hooks");
+    assert_eq!(now_hooks, 6, "Should exactly match TS bench (2.9.4) of 6 hooks");
 }
 
 #[test]
@@ -630,14 +631,15 @@ fn test_bench_look() {
     println!("nervous    width roughness {:.2}", nervous_val);
     println!("ripple     width jitter {:.2}%", ripple_pct);
 
+    // OpenNote 2.9.4's figures (npm run bench:look on the same recordings).
     assert_eq!(strokes_count, 292);
-    assert!((dev_median - 0.40).abs() <= 0.01);
-    assert!((dev_p95 - 0.75).abs() <= 0.02);
-    assert!((wobble_val - 34.2).abs() <= 0.5, "Wobble should be ~34.2");
+    assert!((dev_median - 0.26).abs() <= 0.01);
+    assert!((dev_p95 - 0.71).abs() <= 0.02);
+    assert!((wobble_val - 37.7).abs() <= 0.5, "Wobble should be ~37.7");
     assert!((range_median - 1.65).abs() <= 0.03);
     assert!((range_p95 - 2.34).abs() <= 0.05);
-    assert!((nervous_val - 41.45).abs() <= 0.5);
-    assert!((ripple_pct - 2.06).abs() <= 0.05);
+    assert!((nervous_val - 32.78).abs() <= 0.5);
+    assert!((ripple_pct - 1.99).abs() <= 0.05);
 }
 
 #[test]

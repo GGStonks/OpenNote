@@ -53,3 +53,6 @@ bench/out/
 
 # Rust (crates/)
 /target/
+
+# Reference outputs of the TypeScript code for the Rust tests (npm run bench:rustref)
+bench/rust-ref/

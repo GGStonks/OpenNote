@@ -136,7 +136,7 @@ Crates, in `crates/` (`cargo test --workspace` passes):
 
 - [x] `nib`: the ink engine, exact (see the gate).
 - [x] `ink`: densify, width, smoothing, spline, dashes, geometry, live stroke, precision eraser.
-  Not yet: 2.9.4's smoothing width that follows the sample spacing (`smoothSigma`).
+  The drawn line equals the TypeScript app's point for point (see differential testing).
 - [x] `model`: the types in `types.ts`, sheets, migrations, packed points, the `.opennote` codec.
 - [x] `store`: SQLite (notes, folders, tags, files, thumbnails, audio, backup).
 - [ ] `shapes`: recognition (lines, arrows, polygons and regular polygons, ellipses, circles,
@@ -150,14 +150,14 @@ Crates, in `crates/` (`cargo test --workspace` passes):
 - [ ] **Differential testing:** a Node script in the repo runs the TypeScript code on a corpus (the
   recordings, the sample notes, the `.docx` and `.note` files) and writes its outputs as JSON;
   `cargo test` compares the Rust results with them. Done for the ink pipeline on the
-  recordings (`npm run bench:rustref`); the Rust test reading it (`crates/ink/tests/reference.rs`)
-  is not written, and no other module has a reference yet.
+  recordings (`npm run bench:rustref`), read by `crates/ink/tests/reference.rs`: engine points,
+  modelled line, widths and drawn line match to 1e-4 px (the live line, dash runs and eraser
+  pieces are in the file but not compared yet). No other module has a reference yet.
 - **Gate:**
   - [x] `engine-golden.json` matches to 1e-4 px (`crates/nib/tests/golden.rs`: finished line,
     `nibStroke`, and the live line hash for hash, all asserted).
-  - [ ] `bench:look`, `bench:hooks`, `bench:overshoot` and `bench:leadend` give the same numbers on
-    the recordings. The Rust figures match 2.9.3's on the four October recordings
-    (`crates/ink/tests/benches.rs`); 2.9.4's smoothing is not ported yet.
+  - [x] `bench:look`, `bench:hooks`, `bench:overshoot` and `bench:leadend` give the same numbers on
+    the recordings: 2.9.4's, on the October recordings (`crates/ink/tests/benches.rs`).
   - [ ] The storage round-trip test passes. Rust's own round trip passes (the recordings, packed
     and unpacked, exactly); not yet run on data written by the TypeScript app.
   - [ ] A backup written by 2.9.x reads back identically, and the other way round.

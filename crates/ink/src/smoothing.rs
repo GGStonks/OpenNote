@@ -5,6 +5,33 @@ use std::f64::consts::PI;
 pub const SMOOTH_SIGMA: f64 = 1.6;
 pub const CORNER_DEG: f64 = 55.0;
 
+// The smoothing is as wide as the pen's samples are apart there (SIGMA_PER_GAP times the gap, from
+// SMOOTH_SIGMA_MIN up to SMOOTH_SIGMA): it rounds off the engine's corners at the samples and
+// leaves the hand's own line alone (OpenNote 2.9.4, `smoothSigma` in src/ink/strokeRenderer.ts).
+// The gap is the line's speed (over SPEED_PX either side, from the modelled points' times) times
+// the Pencil's sample interval.
+const SIGMA_PER_GAP: f64 = 1.25;
+const SMOOTH_SIGMA_MIN: f64 = 0.25;
+const SAMPLE_MS: f64 = 1000.0 / 240.0;
+const SPEED_PX: f64 = 2.0;
+
+/// The smoothing width at point i of p (`at`: arc length).
+fn smooth_sigma(p: &[ModeledPoint], at: &[f64], i: usize) -> f64 {
+    let (mut a, mut b) = (i, i);
+    while a > 0 && at[i] - at[a] < SPEED_PX {
+        a -= 1;
+    }
+    while b < p.len() - 1 && at[b] - at[i] < SPEED_PX {
+        b += 1;
+    }
+    let dt = p[b].t - p[a].t;
+    if !(dt > 0.0) {
+        return SMOOTH_SIGMA;
+    }
+    let gap = ((at[b] - at[a]) / dt) * SAMPLE_MS;
+    SMOOTH_SIGMA_MIN.max(SMOOTH_SIGMA.min(SIGMA_PER_GAP * gap))
+}
+
 pub fn smooth_settle() -> f64 {
     (6.0 * SMOOTH_SIGMA).max(3.0 * SMOOTH_SIGMA + 1.0f64.max(WIDTH_AHEAD) + 0.5)
 }
@@ -57,8 +84,6 @@ pub fn smooth_line(p: &[ModeledPoint], up_to: usize, from: usize) -> Vec<Modeled
     cuts.push(n - 1);
 
     let mut pts = p.to_vec();
-    let sig = SMOOTH_SIGMA;
-    let inv = 1.0 / (2.0 * sig * sig);
 
     for c in 0..cuts.len() - 1 {
         let lo = cuts[c];
@@ -69,6 +94,8 @@ pub fn smooth_line(p: &[ModeledPoint], up_to: usize, from: usize) -> Vec<Modeled
         let start = (lo + 1).max(from);
         let end = hi.min(up_to);
         for i in start..end {
+            let sig = smooth_sigma(p, &at, i);
+            let inv = 1.0 / (2.0 * sig * sig);
             let half = (3.0 * sig).min((at[i] - at[lo]).min(at[hi] - at[i]));
             if half <= 0.0 {
                 continue;
