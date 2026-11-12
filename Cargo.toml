@@ -1,0 +1,12 @@
+# The Rust port of OpenNote (docs/rust-rewrite-roadmap.md; state: docs/rust-status.md). Not used
+# by the app yet: the TypeScript app in src/ is what ships.
+[workspace]
+members = [
+    "crates/nib",
+    "crates/model",
+    "crates/ink",
+    "crates/shapes",
+    "crates/import",
+    "crates/store",
+]
+resolver = "2"

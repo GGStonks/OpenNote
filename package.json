@@ -18,6 +18,7 @@
     "test:storage": "esbuild bench/storageRoundtrip.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/storage-roundtrip.mjs && node node_modules/.cache/storage-roundtrip.mjs",
     "bench:ui": "vite build --minify false && node bench/ui.mjs",
     "bench:hooks": "esbuild bench/endHooks.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/end-hooks.mjs && node node_modules/.cache/end-hooks.mjs",
+    "test:rust": "cargo test --workspace",
     "bench:rustref": "esbuild bench/rustRef.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/rust-ref.mjs && node node_modules/.cache/rust-ref.mjs",
     "bench:look": "esbuild bench/inkLook.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/ink-look.mjs && node node_modules/.cache/ink-look.mjs"
   },

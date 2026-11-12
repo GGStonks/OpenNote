@@ -50,3 +50,6 @@ ios/App/App/public/
 # Raw pen recordings (your handwriting), see bench/pen.ts
 bench/recordings/
 bench/out/
+
+# Rust (crates/)
+/target/
