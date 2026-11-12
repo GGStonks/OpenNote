@@ -151,7 +151,7 @@ export function penEnd(s: Stroke): Point | null {
  * hooking back on itself (5.8 px on a recorded flick). Strokes without real pressure (mouse,
  * finger) keep them: their zero-force last sample is ink.
  */
-function enginePoints(s: Stroke): Point[] {
+export function enginePoints(s: Stroke): Point[] {
   const pts = penEnd(s) ? s.points.slice(0, -1) : s.points;
   if (s.modeled || s.isShape) return pts;
   if (!hasRealPressure(pts)) return withoutBackwardLift(pts);
@@ -465,7 +465,7 @@ export function handDash(ls: LineStyle | undefined, width: number): { pattern: n
 }
 
 /** Handwriting's dashes and dots (pen strokes with a line style), or null when it is solid. */
-function inkRuns(g: InkGeometry, style: InkStyle): { pts: XY[]; radii: number[] }[] | null {
+export function inkRuns(g: InkGeometry, style: InkStyle): { pts: XY[]; radii: number[] }[] | null {
   const pattern = style.tool === 'pen' && !style.isShape ? dashPattern(style.lineStyle, style.width) : null;
   if (!pattern) return null;
   const radii = g.widths ? g.widths.map((w) => w / 2) : g.pts.map(() => g.width / 2);
