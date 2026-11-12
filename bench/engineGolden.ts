@@ -1,10 +1,11 @@
 /**
- * Golden test of the ink engine (src/ink/engine, Nib v1, frozen at OpenNote 1.8.5).
+ * Golden test of the ink engine (src/ink/engine, Nib; tag nib-engine-v1 is the original).
  *
  * Runs a fixed set of synthetic strokes through the engine exactly as the app drives it (samples
  * streamed one by one, the live tail read after each, then the finished stroke) and compares
  * every output point with the recorded reference in bench/engine-golden.json, to 1e-4 px.
- * Any change of the engine's behaviour fails this test; `npm run build` runs it first.
+ * Any change of the engine's behaviour fails this test; `npm run build` runs it first, so no change
+ * reaches a build by accident. A deliberate change is measured first (CLAUDE.md, "The ink engine").
  *
  *   npm run test:engine            check
  *   npm run test:engine -- --update   rewrite the reference (only for a deliberate engine change)
@@ -90,8 +91,9 @@ for (const [name, got] of Object.entries(result.cases)) {
   if (frame >= 0 || got.live.length !== want.live.length) problems.push(`${name}: live ink differs from sample ${frame}`);
 }
 if (problems.length) {
-  console.error('INK ENGINE CHANGED — src/ink/engine is frozen (Nib v1, OpenNote 1.8.5):');
+  console.error('INK ENGINE CHANGED — its output differs from bench/engine-golden.json:');
   for (const p of problems) console.error('  ' + p);
+  console.error('A deliberate change: measure it on the recordings (CLAUDE.md, "The ink engine"), then npm run test:engine -- --update.');
   process.exit(1);
 }
 console.log(`ink engine OK: ${Object.keys(result.cases).length} strokes identical to the reference (live, finished, nibStroke)`);

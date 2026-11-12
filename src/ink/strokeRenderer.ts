@@ -248,8 +248,34 @@ export function settledSmooth(g: InkGeometry): InkGeometry {
   return smoothLine(g, settledIndex(g.pts));
 }
 
-/** Smoothing of the zoomed-in line: Gaussian width along the line (page px). */
+/** Smoothing of the zoomed-in line: the widest Gaussian along the line (page px). */
 const SMOOTH_SIGMA = 1.6;
+/**
+ * The smoothing is as wide as the pen's samples are apart there (SIGMA_PER_GAP times the gap,
+ * from SMOOTH_SIGMA_MIN up to SMOOTH_SIGMA): it rounds off the corners the engine's line has at
+ * the samples and leaves the hand's own line alone. At one width for all, ink written zoomed in
+ * (samples 0.3 page px apart at 500%) lost real detail to a 16 device px blur, and since a point is
+ * smoothed only once the line has gone SMOOTH_SETTLE past it, the line near the pen visibly jumped
+ * to its smoothed place while writing (the "serpent": 5 device px over the last 1.5 cm at 500%).
+ * The gap is the line's speed (over SPEED_PX either side, from the modelled points' times) times
+ * the Pencil's sample interval: the same on the live line and the finished stroke, and within
+ * SMOOTH_SETTLE.
+ */
+const SIGMA_PER_GAP = 1.25;
+const SMOOTH_SIGMA_MIN = 0.25;
+const SAMPLE_MS = 1000 / 240;
+const SPEED_PX = 2;
+
+/** The smoothing width at point i of P (`at`: arc length). */
+function smoothSigma(P: readonly ModeledPoint[], at: Float64Array, i: number): number {
+  let a = i, b = i;
+  while (a > 0 && at[i] - at[a] < SPEED_PX) a--;
+  while (b < P.length - 1 && at[b] - at[i] < SPEED_PX) b++;
+  const dt = P[b].t - P[a].t;
+  if (!(dt > 0)) return SMOOTH_SIGMA;
+  const gap = ((at[b] - at[a]) / dt) * SAMPLE_MS;
+  return Math.max(SMOOTH_SIGMA_MIN, Math.min(SMOOTH_SIGMA, SIGMA_PER_GAP * gap));
+}
 /** A turn sharper than this (degrees, over about a px either side) is a corner: the line is smoothed on either side of it. */
 const CORNER_DEG = 55;
 
@@ -300,11 +326,11 @@ export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry 
   }
   cuts.push(n - 1);
   const pts: ModeledPoint[] = P.map((q) => ({ ...q }));
-  const sig = SMOOTH_SIGMA, inv = 1 / (2 * sig * sig);
   for (let c = 0; c < cuts.length - 1; c++) {
     const lo = cuts[c], hi = cuts[c + 1];
     if (hi <= from) continue;
     for (let i = Math.max(lo + 1, from); i < hi && i < upTo; i++) {
+      const sig = smoothSigma(P, at, i), inv = 1 / (2 * sig * sig);
       // Symmetric window, no wider than the distance to either end of the piece.
       const half = Math.min(3 * sig, at[i] - at[lo], at[hi] - at[i]);
       if (half <= 0) continue;

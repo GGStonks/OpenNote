@@ -2,7 +2,7 @@
  * The stroke being written, drawn live as the line the finished stroke will be
  * (strokeRenderer.strokeGeometry): the ink engine's line, smoothed except its last SMOOTH_SETTLE.
  *
- * The engine's own painter (engine/liveStroke.ts, frozen) draws its line as modelled, which is
+ * The engine's own painter (engine/liveStroke.ts) draws its line as modelled, which is
  * nearly straight between two pen samples: fast strokes looked segmented (on Android especially,
  * with fewer samples), and smoothing only the finished stroke made the ink shift when the pen
  * lifted. Here the part of the line later samples can no longer change (settledIndex) is smoothed

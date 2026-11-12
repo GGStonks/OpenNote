@@ -1,6 +1,6 @@
 /**
  * Fills wide gaps between pen samples, in space and in time, before they reach the ink engine
- * (input layer; the engine itself is frozen).
+ * (input layer: the engine models the samples it is given).
  *
  * The engine fits each sample with its neighbours, but only with those within NIB.CHORD (6 px):
  * in a very fast stroke, or with a digitiser that samples slowly (older Android tablets, 60-120 Hz),

@@ -10,7 +10,7 @@
  * sample is modelled, and also continue the line to the newest raw pen position the moment the
  * touch arrives, without waiting for the page.
  *
- * The engine (src/ink/engine) is untouched: this reads LiveStroke's model (its settled points and
+ * This reads LiveStroke's model (its settled points and
  * provisional tail) and sends them, converted to the shell's view units. The page keeps drawing the
  * stroke too (the fallback, and the hand-off when the pen lifts: the shell clears its layer only
  * once the finished stroke has been painted by the page).

@@ -1,22 +1,30 @@
 # OpenNote — notes for Claude
 
-## The ink engine is frozen
+## The ink engine
 
-`src/ink/engine/` (Nib v1: `nib.ts`, `liveStroke.ts`, `geometry.ts`, `index.ts`) is final. The owner
-has said it must never be changed again. Tag: `nib-engine-v1`.
-The one change since, asked for and authorised by the owner (2.9.2): `nib.ts`'s fit (`polyFit0`)
-solves in preallocated buffers and uses plain products for `tricube` and distances: 5.7x faster
-(the GPU ink of a 3,000-stroke note ready 0.9 s after opening instead of 2.3 s, 4x slower CPU),
-output within 3e-11 px of Nib v1 on the owner's recordings, the golden reference untouched. The
-freeze stands as before; `.claude/settings.json` blocks agent edits to the folder.
+`src/ink/engine/` (Nib: `nib.ts`, `liveStroke.ts`, `geometry.ts`, `index.ts`) is the handwriting
+model. The owner wants it as good as possible: it is changed whenever a change makes the ink
+measurably better. Tag `nib-engine-v1` is the original (OpenNote 1.8.5), the baseline to compare
+with. Changes so far: 2.9.2 `polyFit0` solves in preallocated buffers with plain products (5.7x
+faster, output within 3e-11 px of Nib v1).
 
-- Do not edit anything in `src/ink/engine/`, not its `NIB` parameters, not "small" tweaks, not
-  refactors. If a task seems to need an engine change, say so and ask; do not do it.
-- New features that need ink (shape tools, retracing, Android, …) use the engine through
-  `src/ink/engine/index.ts` (`NibModeler`, `nibStroke`, `LiveStroke`, geometry helpers), outside the folder.
+- An engine change shows its gain on the owner's recordings and loses nothing elsewhere: run
+  `bench:look` (accuracy, wobble, end while writing, live = finished point for point), `bench:hooks`,
+  `bench:overshoot`, `bench:leadend` and `bench:pen` (synthetic strokes with ground truth) before and
+  after, and put the numbers in the commit message. A trade (better here, worse there) is the owner's
+  call: show it and ask.
 - `npm run test:engine` compares the engine's output (live, finished, nibStroke) on fixed strokes with
-  `bench/engine-golden.json` to 1e-4 px. `npm run build` runs it first, so a changed engine cannot be
-  built or released. Never regenerate the reference (`--update`) to make a change pass.
+  `bench/engine-golden.json` to 1e-4 px, and `npm run build` runs it first: no engine change reaches a
+  build by accident. After a deliberate change that passed the benches, regenerate the reference
+  (`npm run test:engine -- --update`) in the same commit as the change; never to make a difference
+  nobody can explain go away.
+- `.claude/settings.json` allows agent edits to `src/ink/engine/**` and the reference; to let
+  Claude work on the engine the owner moves those entries from `deny` to `ask` (each edit then waits
+  for the owner's confirmation).
+- The live stroke must stay the finished stroke (`bench:look` live = finished), and the engine
+  self-contained (nothing in it imports the app). Features that need ink (shape tools, retracing,
+  Android, …) use it through `src/ink/engine/index.ts` (`NibModeler`, `nibStroke`, `LiveStroke`,
+  geometry helpers).
 - The engine must behave the same on iPad (iOS shell 240 Hz samples, `src/ink/nativePencil.ts`) and
   Android (Chromium coalesced pointer events): platform differences are handled in the input layer
   (`src/components/CanvasPage.tsx`), never inside the engine.
@@ -368,7 +376,7 @@ show the iPad's compositing cost).
   after the shell's line cleared; `--native --blank --only liftshots`).
 - Fountain-pen width (`src/ink/inkWidth.ts`, outside the engine): pressure 0.61x-1.55x, calibrated
   on the owner's recordings so everyday writing keeps its weight (the engine's `pressureWidth` is
-  only its own frozen painter's), from the force averaged along the line (`PRESSURE_SIGMA`, 2 px).
+  only its own painter's), from the force averaged along the line (`PRESSURE_SIGMA`, 2 px).
   2.9.0 also narrowed fast strokes (speed over a few px): the Pencil's timing jitter made the width
   twitch (roughness 1.8x 2.8.2's) and the line's end near the pen wriggle as it settled (the user's
   "serpent"); 2.9.1 removed it: roughness a quarter of 2.8.2's, the end settling no more than 2.8.2's.
@@ -384,7 +392,12 @@ show the iPad's compositing cost).
   of the line needs, smoothLiveStroke); widths are computed on the whole modelled line, then thinned.
   The last `SMOOTH_SETTLE` of a line stays as modelled, live and finished: smoothing it (with a
   narrowing window, or a local linear fit) turned curled ends into hooks or made the end swing.
-  Stronger `SMOOTH_SIGMA` costs accuracy for little smoothness. `npm run bench:look`: accuracy,
+  Stronger `SMOOTH_SIGMA` costs accuracy for little smoothness. The smoothing is as wide as the
+  samples are apart there (`smoothSigma`: the line's speed x the Pencil's 4.17 ms, 1.25x, between
+  0.25 and `SMOOTH_SIGMA` page px): it only rounds the engine's corners at the samples. At one
+  width for all, ink written zoomed in lost the hand's detail, and the line jumped to its smoothed
+  place as each point settled: the user's "serpent" in the last 1-2.5 cm at 350-500% (5 device px,
+  now 1.3; measure with a recording's own zoom, its samples carry it). `npm run bench:look`: accuracy,
   wobble, width range, nervousness (width roughness: counts the nib's thick and thin too), ripple
   (width jitter within 3 px only), the end moving while writing and live = finished (both point
   for point: matched by place, a letter crossing itself paired different passes), on the
