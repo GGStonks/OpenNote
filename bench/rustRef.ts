@@ -12,6 +12,9 @@
 // pen end), the live line at the middle sample and at the last one (SmoothLiveStroke.line), the
 // dash runs of every line style (inkRuns), and the pieces the precision eraser leaves when it
 // touches the drawn line in its middle (solid, and dashed: the pieces keep their place in the pattern).
+// `kinds`: the drawn line of the same stroke as other kinds of stroke (ballpoint, highlighter, a
+// shape, and stored modelled lines as eraser pieces and Notability imports keep them), each with
+// the stroke as given (tool, penStyle, isShape, modeled, penEnd, points).
 //
 // npm run bench:rustref -- <out.json> [--per N] [files…]   (default: N strokes from each recording)
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -76,6 +79,26 @@ for (const file of files) {
     const eng = enginePoints(stroke);
     const modeled = nibStroke(eng);
     const g = strokeGeometry(stroke);
+    const geo = (q: Stroke) => {
+      const k = strokeGeometry(q);
+      return { pts: k.pts.map(pt4), widths: k.widths ? k.widths.map(n) : null, width: n(k.width) };
+    };
+    const asModeled = modeled.map((q) => ({ x: q.x, y: q.y, t: q.t, pressure: q.p }));
+    const variants: Record<string, Stroke> = {
+      ballpoint: { ...stroke, penStyle: 'ballpoint' },
+      highlighter: { ...stroke, tool: 'highlighter' },
+      shape: { ...stroke, isShape: true, penEnd: undefined },
+      variable: { ...base, points: asModeled, modeled: 'variable' } as Stroke,
+      uniform: { ...base, points: asModeled, modeled: 'uniform' } as Stroke,
+      proportional: { ...base, points: asModeled, modeled: 'proportional' } as Stroke,
+    };
+    const kinds: Record<string, unknown> = {};
+    for (const [name, q] of Object.entries(variants)) {
+      kinds[name] = {
+        stroke: { tool: q.tool, penStyle: q.penStyle ?? null, isShape: !!q.isShape, modeled: q.modeled ?? null, penEnd: !!q.penEnd, points: q.points === stroke.points ? null : q.points.map(pt4) },
+        geometry: geo(q),
+      };
+    }
     const dashes: Record<string, unknown> = {};
     for (const ls of STYLES) {
       const runs = inkRuns(g, { ...styleOf(stroke), lineStyle: ls });
@@ -101,6 +124,7 @@ for (const file of files) {
       widths: real && isVariableWidth(styleOf(stroke)) ? inkWidths(modeled, strokeWidth(styleOf(stroke))).map(n) : null,
       geometry: { pts: g.pts.map(pt4), widths: g.widths ? g.widths.map(n) : null, width: n(g.width) },
       live: liveAt,
+      kinds,
       dashes,
       eraser: {
         x: n(at.x), y: n(at.y), radius: 4, changed: erased.changed,

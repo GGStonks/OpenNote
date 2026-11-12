@@ -3,6 +3,8 @@
 //! The reference is written by the TypeScript code (`npm run bench:rustref -- bench/rust-ref/ink.json`,
 //! see the header of `bench/rustRef.ts`): real recorded pen strokes, and for each the points given
 //! to the engine, the modelled line, the widths and the drawn line (`strokeGeometry`). Every stage
+//! must match to 1e-4 page px, and so must the drawn line of the same stroke as other kinds of
+//! stroke (`kinds`: ballpoint, highlighter, shape, stored modelled lines). Every stage
 //! must match to 1e-4 page px (the file keeps 9 significant digits); a stroke that differs is
 //! reported by stage and stroke id and the test fails.
 //!
@@ -67,6 +69,38 @@ fn diff_nums(name: &str, got: &[f64], want: &[f64]) -> Option<String> {
         .map(|i| format!("{name}: value {i} is {}, want {}", got[i], want[i]))
 }
 
+fn geometry_diff(name: &str, g: &ink::InkGeometry, want: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let g4: Vec<[f64; 4]> = g.pts.iter().map(|p| [p.x, p.y, p.t, p.p]).collect();
+    out.extend(diff_rows(&format!("{name}.pts"), &g4, &rows(&want["pts"])));
+    match (&g.widths, want["widths"].is_null()) {
+        (Some(w), false) => out.extend(diff_nums(&format!("{name}.widths"), w, &nums(&want["widths"]))),
+        (None, true) => {}
+        (got, _) => out.push(format!("{name}.widths: present {}, want {}", got.is_some(), !want["widths"].is_null())),
+    }
+    out.extend(diff_nums(&format!("{name}.width"), &[g.width], &[want["width"].as_f64().unwrap()]));
+    out
+}
+
+/// A reference stroke as another kind (`kinds.<name>.stroke`), its own points or the stroke's.
+fn kind_of(base: &Value, k: &Value) -> Stroke {
+    let src = if k["points"].is_null() { &base["points"] } else { &k["points"] };
+    let points: Vec<Value> = rows(src).iter().map(|p| json!({ "x": p[0], "y": p[1], "t": p[2], "pressure": p[3] })).collect();
+    let mut s = json!({ "id": "ref", "tool": k["tool"], "color": "#000", "width": base["width"], "opacity": 1, "lineStyle": "solid", "points": points });
+    for (key, v) in [("penStyle", &k["penStyle"]), ("modeled", &k["modeled"])] {
+        if !v.is_null() {
+            s[key] = v.clone();
+        }
+    }
+    if k["isShape"].as_bool() == Some(true) {
+        s["isShape"] = json!(true);
+    }
+    if k["penEnd"].as_bool() == Some(true) {
+        s["penEnd"] = json!(true);
+    }
+    serde_json::from_value(s).expect("a stroke")
+}
+
 fn stroke_of(r: &Value) -> Stroke {
     let points: Vec<Value> = rows(&r["points"])
         .iter()
@@ -110,15 +144,14 @@ fn ink_pipeline_matches_typescript() {
             fail(diff_nums("widths", &ink_widths(&modeled, stroke_width(&s)), &nums(&r["widths"])));
         }
 
-        let g = stroke_geometry(&s);
-        let g4: Vec<[f64; 4]> = g.pts.iter().map(|p| [p.x, p.y, p.t, p.p]).collect();
-        fail(diff_rows("geometry.pts", &g4, &rows(&r["geometry"]["pts"])));
-        match (&g.widths, r["geometry"]["widths"].is_null()) {
-            (Some(w), false) => fail(diff_nums("geometry.widths", w, &nums(&r["geometry"]["widths"]))),
-            (None, true) => {}
-            (got, _) => fail(Some(format!("geometry.widths: {} widths, want {}", got.is_some(), !r["geometry"]["widths"].is_null()))),
+        for m in geometry_diff("geometry", &stroke_geometry(&s), &r["geometry"]) {
+            fail(Some(m));
         }
-        fail(diff_nums("geometry.width", &[g.width], &[r["geometry"]["width"].as_f64().unwrap()]));
+        for (name, k) in r["kinds"].as_object().expect("kinds") {
+            for m in geometry_diff(&format!("kinds.{name}"), &stroke_geometry(&kind_of(r, &k["stroke"])), &k["geometry"]) {
+                fail(Some(m));
+            }
+        }
     }
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
 }
