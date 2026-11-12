@@ -6,7 +6,7 @@ import {
 } from '../types';
 import {
   drawLiveStroke, drawStroke, drawStrokes, eraseStrokesPartial, isVariableWidth, paintStrokeFill, paintStrokeInk, strokeHitTest, strokePaintBounds,
-  strokeWidth, handDash, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry, strokeSvgParts,
+  strokeWidth, handDash, InkStyle, strokeToSvg, styleOf, prepareStroke, strokeBuilt, inkGeometry, strokeSvgParts, strokeGeometry,
 } from '../ink/strokeRenderer';
 import { vectorInkEnabled } from '../ink/vectorInk';
 import { SmoothLiveStroke, SmoothLiveStyle, pixelAligned } from '../ink/smoothLiveStroke';
@@ -2341,7 +2341,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // the engine's end a page px or two short was several screen px). Only with the shell's
       // samples to the end: its lead is where they put it.
       const end = d.ink && d.nativeEnded && !d.snapped && d.tool === 'pen' ? d.lead : null;
-      if (d.ink && !d.snapped) d.ink.lift(end, d.inkTf ?? inkTransform());
       const stroke: Stroke = {
         id: newId('stroke'),
         createdAt: Date.now(),
@@ -2359,6 +2358,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
         ...(d.tool === 'highlighter' ? { highlightAlpha: style.highlightAlpha } : {}),
       };
+      // The shell shows this very stroke from now (its live line ended on the engine's provisional
+      // tail): when the page's copy takes over, nothing moves (zoomed in, the end used to jump).
+      if (d.ink && !d.snapped) d.ink.finish(strokeGeometry(stroke), d.inkTf ?? inkTransform());
       editor.commitPage(page.id, (p) => ({ ...p, strokes: [...p.strokes, stroke] }));
     } else if (d.tool === 'eraser') {
       editor.endGesture();

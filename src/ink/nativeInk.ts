@@ -28,7 +28,12 @@
  *                                                 rh) and page size (w, h), nativePencil's clock
  *                                                 offset, the stroke's first sample's time, the
  *                                                 view transform, drawn width, variable width at all
- *   l,id,x,y                                      the pen lifted: stroke id's line runs on to x, y
+ *   f,id,x,y,r,...                                the pen lifted: stroke id's line is now exactly
+ *                                                 these points (the stroke the page saves and draws
+ *                                                 next: strokeGeometry, with its pen end): the
+ *                                                 shell replaces its live line and drops its lead,
+ *                                                 so nothing moves when the page's copy takes over
+ *   l,id,x,y                                      (older pages) the pen lifted: stroke id's line runs on to x, y
  *                                                 at its end's radius (Stroke.penEnd: the lead,
  *                                                 kept); "l,id" alone: no lead (the shells keep it
  *                                                 from the lift until this message)
@@ -187,12 +192,16 @@ export class NativeInk {
   }
 
   /**
-   * The pen lifted: the finished stroke runs on from the line's end to `end` (page px; its
-   * Stroke.penEnd), which the shell's lead reached, or ends where the line ends (null).
+   * The pen lifted: the shell shows the finished stroke `g` (strokeGeometry of the stroke the page
+   * saves, its pen end included) in place of its live line, until the page's copy is on screen.
    */
-  lift(end: { x: number; y: number } | null, tf: InkTransform): void {
+  finish(g: { pts: readonly { x: number; y: number }[]; widths: readonly number[] | null; width: number }, tf: InkTransform): void {
     if (this.done || this.scene || !this.model || !NativeInk.available) return;
-    send!(end ? `l,${this.id},${f(tf.ox + end.x * tf.k)},${f(tf.oy + end.y * tf.k)}` : `l,${this.id}`);
+    // The live line ended on the engine's provisional tail; the saved stroke's end is the engine's
+    // final one (and its pen end). Shown from now, it is what the page draws when it takes over.
+    const out = ['f', String(this.id)];
+    g.pts.forEach((q, i) => out.push(f(tf.ox + q.x * tf.k), f(tf.oy + q.y * tf.k), f(((g.widths ? g.widths[i] : g.width) / 2) * tf.k)));
+    send!(out.join(','));
   }
 
   /** Shows a whole drawing (commands from inkRecorder's record), replacing the stroke or the last drawing. */

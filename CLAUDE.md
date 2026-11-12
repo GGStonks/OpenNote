@@ -67,10 +67,17 @@ While the pen is down the shells also draw a lead, from the modelled line's end 
 newest sample while it presses (> 2% force; dropped on a move without force). The engine's
 finished line ends short of it (median 1.4, p90 6 page px on real recordings, `npm run
 bench:leadend`), so dropping the lead at lift pulled the ink's end back, several screen px zoomed
-in. Now the shells keep it until the page's `l,id[,x,y]`: the page tracks the same lead
+in. Now the shells keep it until the page's `f,id,…`: the page tracks the same lead
 (`nativePencil.lead`) and the finished stroke runs straight on to it (`Stroke.penEnd`: its last
 point is that sample, not modelled; `penEnd()` / `strokeGeometry` in strokeRenderer.ts, after the
-smoothing). `--native --only leadend` checks the message and the stored stroke.
+smoothing). Never drop the pen end or the lead at the lift to stop an "overshoot": the stroke then
+stops short of the pen (`npm run bench:leadend`: median 1.3, p90 5.5, max 21 page px), as a
+2.9.4-rs commit did. At the lift the page sends the stroke it saves (`f,id,x,y,r,…`:
+`strokeGeometry`, pen end included) and the shells show exactly that in place of their live line,
+whose end was the engine's provisional tail: the end used to jump, zoomed in, when the page's copy
+took over a few frames later (`l,id[,x,y]` is still understood, from older pages).
+`--native --only leadend` checks the message and the stored stroke; `--native --only inkplace` that
+the shell and the page put the same page point at the same screen point at every zoom.
 On the opennote-rs branch the shells compute the pen's line themselves, in Rust, from their own
 samples (`r` instead of `b` + `u`: crates/native/src/live.rs, `ONInkView` / `InkOverlay`): the line
 reaches the pen on every touch event (iOS 240 Hz) instead of a page frame later, behind a shorter

@@ -41,7 +41,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.4";
+static NSString *const kVersion = @"2.9.4-rs.5";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -982,6 +982,18 @@ static const double kInkHoldSeconds = 0.06;
         _hasRaw = NO;
         _lead.path = NULL;
         [self endLive];
+    } else if ([kind isEqualToString:@"f"] && _active && f.count >= 2 && f[1].integerValue == _currentId) {
+        // The pen lifted: the stroke the page saves (its finished line, pen end included) replaces
+        // the live line, which ended on the engine's provisional tail; the page's copy, drawn from
+        // the same points, then takes over without anything moving.
+        [self endLive];
+        NSUInteger total = (f.count - 2) / 3;
+        NSMutableData *pts = [NSMutableData dataWithLength:total * sizeof(ONInkPt)];
+        ONInkPt *q = pts.mutableBytes;
+        for (NSUInteger i = 0; i < total; i++) q[i] = (ONInkPt){ f[2 + i * 3].doubleValue, f[3 + i * 3].doubleValue, f[4 + i * 3].doubleValue };
+        [self clear];
+        _active = YES;
+        if (total) [self applyFresh:total points:q count:total];
     } else if ([kind isEqualToString:@"d"] && f.count >= 5) {
         [self endLive];
         // A whole drawing: replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.

@@ -355,6 +355,20 @@ public class OpenNoteInkPlugin extends Plugin {
                     endLive();
                     break;
                 }
+                case "f": {
+                    // The pen lifted: the stroke the page saves (its finished line, pen end
+                    // included) replaces the live line, which ended on the engine's provisional
+                    // tail; the page's copy, drawn from the same points, takes over without a move.
+                    if (!active || f.length < 2 || Integer.parseInt(f[1]) != currentId) return;
+                    endLive();
+                    int total = (f.length - 2) / 3;
+                    float[] pts = new float[total * 3];
+                    for (int i = 0; i < total * 3; i++) pts[i] = Float.parseFloat(f[2 + i]);
+                    clear();
+                    active = true;
+                    if (total > 0) applyFresh(total, pts, total);
+                    break;
+                }
                 case "d": {
                     if (f.length < 5) return;
                     // Replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.

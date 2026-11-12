@@ -116,7 +116,7 @@ const LANDSCAPE = process.argv.includes('--landscape');
 const ctx = await browser.newContext({ viewport: LANDSCAPE ? { width: Number(arg('width', 1180)), height: 820 } : { width: Number(arg('width', 820)), height: 1180 }, deviceScaleFactor: Number(arg('dpr', 2)), hasTouch: true });
 // --native: as in the apps, a native ink bridge is present (a stand-in that only takes the messages),
 // so the page leaves the live stroke to it (nativeInk.ts).
-if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'l') (window.__inkLs ??= []).push(m); if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
+if (process.argv.includes('--native')) await ctx.addInitScript(() => { window.__inkMsgs = []; window.OpenNoteInk = { post(m) { if (m[0] === 'd') { (window.__inkDs ??= []).push(m); } if (m[0] === 'd') { window.__inkD = (window.__inkD ?? 0) + 1; window.__inkDLen = Math.max(window.__inkDLen ?? 0, m.length); } if (m[0] === 'l' || m[0] === 'f') (window.__inkLs ??= []).push(m); if (m[0] === 'b' || m[0] === 'e' || m[0] === 'c') window.__inkMsgs.push(m.split(',')[0] + (m[0] === 'b' ? ':' + m.split(',')[10] : m[0] === 'e' ? ':' + (m.split(',')[1] ?? '') : '')); } }; });
 const page = await ctx.newPage();
 page.on('pageerror', (e) => console.error('page error:', e.message));
 if (process.env.BENCH_CONSOLE) page.on('console', (m) => console.log('console:', m.text()));
@@ -2091,6 +2091,59 @@ if (ONLY.has('liftshots')) {
     console.log(`liftshots   crash log: ${JSON.stringify(ig)}`);
   }
 }
+// --native --only inkplace [--zsteps a,b,...]: where the shell's native ink lands against where the
+// page paints the same stroke once finished (its vector ink: the SVG's screen CTM of page px). The
+// shell draws a sample where the pen touched (tf from `r`); the page paints that page point at
+// CTM(x, y). Any difference moves the stroke when the shell hands over to the page.
+if (ONLY.has('inkplace') && process.argv.includes('--native')) {
+  for (const zoomSteps of arg('zsteps', '0,3,6,8').split(',').map(Number)) {
+    await reopen();
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    for (let i = 0; i < zoomSteps; i++) { await page.keyboard.press('Control+Equal'); await sleep(150); }
+    await sleep(1500);
+    const z = await page.evaluate(() => document.body.innerText.match(/(\d+)%/)?.[1]);
+    await page.evaluate(() => {
+      window.OpenNoteInk.rustInk = true;
+      window.__allInk = [];
+      if (!window.__wrapped) { const post = window.OpenNoteInk.post.bind(window.OpenNoteInk); window.OpenNoteInk.post = (m) => { window.__allInk.push(m); post(m); }; window.__wrapped = true; }
+    });
+    const t0 = await page.evaluate(() => performance.now());
+    const at = (ms) => [300 + 200 * (ms / 200), 620 + 40 * Math.sin(ms / 40)];
+    const sample = (ms) => { const [x, y] = at(ms); return [+x.toFixed(3), +y.toFixed(3), 0.4, +((t0 + ms) / 1000).toFixed(5), 1.2, 0.5]; };
+    await page.evaluate(([d, now]) => window.__opennotePencil(0, now, d, []), [sample(0), t0 / 1000]);
+    await mouse('mousePressed', ...at(0), 0.4);
+    for (let ms = 16, last = 0; ms <= 200; last = ms, ms += 16) {
+      await sleep(16);
+      const batch = [];
+      for (let m = last + 4; m <= ms; m += 4) batch.push(...sample(m));
+      await page.evaluate(([d, now]) => window.__opennotePencil(1, now, d, []), [batch, (t0 + ms) / 1000]);
+      await mouse('mouseMoved', ...at(ms), 0.4);
+    }
+    const [lx, ly] = at(200);
+    await page.evaluate(([d, now]) => window.__opennotePencil(2, now, d, []), [[lx, ly, 0, (t0 + 204) / 1000, 1.2, 0.5], (t0 + 204) / 1000]);
+    await mouse('mouseReleased', lx, ly, 0);
+    await sleep(900);
+    const r = (await page.evaluate(() => window.__allInk)).filter((m) => m.startsWith('r,')).pop();
+    if (!r) { console.log(`inkplace ${z}%: no r message`); process.exitCode = 1; continue; }
+    const v = r.split(',').slice(11).map(Number); // left, top, w, rw, h, rh, offset, start, ox, oy, k, width, variable
+    const [cx, cy] = at(100);
+    const px = ((cx - v[0]) * v[2]) / v[3], py = ((cy - v[1]) * v[4]) / v[5];
+    const dpr = await page.evaluate(() => devicePixelRatio);
+    const shell = [(v[8] + px * v[10]) / dpr, (v[9] + py * v[10]) / dpr];
+    const painted = await page.evaluate(([x, y, cx, cy]) => {
+      const svgs = [...document.querySelectorAll('[data-ink-key] svg')].filter((s) => { const b = s.getBoundingClientRect(); return cx >= b.left && cx <= b.right && cy >= b.top && cy <= b.bottom; });
+      if (!svgs.length) return null;
+      const m = svgs[0].getScreenCTM();
+      return [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f];
+    }, [px, py, cx, cy]);
+    if (!painted) { console.log(`inkplace ${z}%: no vector ink layer under the stroke`); continue; }
+    const dx = painted[0] - shell[0], dy = painted[1] - shell[1];
+    const bad = Math.hypot(dx, dy) * dpr > 0.5;
+    if (bad) process.exitCode = 1;
+    console.log(`inkplace ${z}%: shell draws at ${shell.map((q) => q.toFixed(2)).join(',')}, page paints at ${painted.map((q) => q.toFixed(2)).join(',')}: off by ${dx.toFixed(2)}, ${dy.toFixed(2)} CSS px (${(Math.hypot(dx, dy) * dpr).toFixed(2)} device px)${bad ? '  JUMP' : ''}`);
+  }
+}
+
 // --native --only rustlive: native live ink computed by the shell in Rust (`r`, crates/native
 // live.rs). The same pen stroke from the shell's samples twice: with the shell's `rustInk` off, the
 // page sends the line (`b`, `u`); with it on, the page sends `r` (no `u`) and the shell must draw the
@@ -2175,8 +2228,9 @@ if (ONLY.has('rustlive') && process.argv.includes('--native')) {
 }
 // --native --only leadend: pen strokes from the shell's samples (window.__opennotePencil), the last
 // move pressing (then the shell's lead reaches its newest sample) or not (no lead). When the pen
-// lifts, the shell must be told to keep its lead ("l,id,x,y" at that sample) or drop it ("l,id"), and
-// the stored stroke must end there (Stroke.penEnd), so the ink does not pull back at the lift.
+// lifts, the shell gets the stroke the page saves ("f,id,…": its line, which then ends at the lead,
+// or at the line's own end without one), and the stored stroke must end there (Stroke.penEnd), so
+// the ink neither pulls back nor moves when the page's copy takes over.
 if (ONLY.has('leadend') && process.argv.includes('--native')) {
   await reopen();
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
@@ -2204,7 +2258,9 @@ if (ONLY.has('leadend') && process.argv.includes('--native')) {
     await sleep(1200);
     const ls = await page.evaluate(() => window.__inkLs);
     const l = (ls[0] ?? '').split(',');
-    const told = l.length >= 4 ? Math.hypot(+l[2] / unit - lx, +l[3] / unit - ly).toFixed(2) + ' px from the lead' : l.length === 2 ? 'no lead' : 'nothing';
+    // The shell's final line ("f"): where it ends against the lead.
+    const endGap = l[0] === 'f' && l.length >= 5 ? Math.hypot(+l[l.length - 3] / unit - lx, +l[l.length - 2] / unit - ly) : NaN;
+    const told = l[0] === 'f' ? `its line, ending ${endGap.toFixed(2)} px from the lead` : 'nothing';
     // The stored stroke (the newest): it runs on to the lead (penEnd) exactly when the shell keeps it.
     const penEnd = await page.evaluate(async () => {
       const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
@@ -2214,8 +2270,10 @@ if (ONLY.has('leadend') && process.argv.includes('--native')) {
       for (const n of notes) for (const pg of n.pages ?? []) for (const s of pg.strokes ?? []) if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
       return !!best?.penEnd;
     });
-    const ok = ls.length === 1 && penEnd === pressing && (l.length >= 4) === pressing;
-    console.log(`leadend stroke ${k + 1} (last move ${pressing ? 'pressing' : 'lifting'}): shell told ${ls.length} "l" (${told}), stored stroke penEnd ${penEnd}: ${ok ? 'ok' : 'WRONG'}`);
+    // Pressing: the line ends at the lead (the "f" points are rounded to 0.01 view units).
+    const ok = ls.length === 1 && l[0] === 'f' && penEnd === pressing && (!pressing || endGap < 0.02);
+    if (!ok) process.exitCode = 1;
+    console.log(`leadend stroke ${k + 1} (last move ${pressing ? 'pressing' : 'lifting'}): shell got ${ls.length} message(s) (${told}), stored stroke penEnd ${penEnd}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }
 // --only popups: every menu and popover (the elements kept on the screen, `data-on-screen` in
