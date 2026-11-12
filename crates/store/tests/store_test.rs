@@ -181,3 +181,4 @@ fn test_store_backup_roundtrip() {
     let f2 = store2.get_file("f_bk").expect("get file").expect("exists");
     assert_eq!(f2.bytes, b"Hello Backup");
 }
+

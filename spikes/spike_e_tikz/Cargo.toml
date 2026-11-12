@@ -1,0 +1,8 @@
+[package]
+name = "spike_e_tikz"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wasmi = "2.0.0"
+flate2 = "1.0"

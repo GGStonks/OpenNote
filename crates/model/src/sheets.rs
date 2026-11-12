@@ -490,3 +490,42 @@ pub fn trailing_sheet_for(before: &NotePage, d: &NoteDocument) -> NoteDocument {
     }
     d.clone()
 }
+
+#[derive(Clone, Debug)]
+pub struct SplitPage {
+    pub page: NotePage,
+    pub box_: SheetBox,
+}
+
+pub fn split_into_pages(doc: &NoteDocument) -> Vec<SplitPage> {
+    if doc.pages.is_empty() {
+        return Vec::new();
+    }
+    let l = surface_layout(doc);
+    let own = ownership(&doc.pages[0], &l);
+    let mut n = own.len();
+    while n > 1 && own[n - 1].is_empty() {
+        n -= 1;
+    }
+    l.sheets[..n]
+        .iter()
+        .zip(own.into_iter().take(n))
+        .enumerate()
+        .map(|(i, (b, item))| {
+            let c = item.translate(-b.left, -b.top);
+            let page = NotePage {
+                id: format!("{}_p{}", doc.pages[0].id, i),
+                page_number: i + 1,
+                strokes: c.strokes,
+                latex_blocks: c.latex_blocks,
+                text_blocks: if c.text_blocks.is_empty() { None } else { Some(c.text_blocks) },
+                image_blocks: if c.image_blocks.is_empty() { None } else { Some(c.image_blocks) },
+            };
+            SplitPage {
+                page,
+                box_: b.clone(),
+            }
+        })
+        .collect()
+}
+

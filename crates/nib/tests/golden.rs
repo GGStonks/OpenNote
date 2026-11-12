@@ -147,12 +147,14 @@ fn test_golden_reference() {
             if got_h != want_h {
                 live_mismatches += 1;
                 if live_mismatches <= 3 {
-                    println!("WARN {}: live[{}] hash mismatch (got {}, want {})", name, i, got_h, want_h);
+                    println!("FAIL {}: live[{}] hash mismatch (got {}, want {})", name, i, got_h, want_h);
                 }
+                all_ok = false;
             }
         }
+        assert_eq!(live_mismatches, 0, "{}: live hash mismatches", name);
 
-        println!("[OK] case '{}': final & nibStroke points match golden reference!", name);
+        println!("[OK] case '{}': live hashes, final & nibStroke points match golden reference!", name);
     }
 
     assert!(all_ok, "Some points differed from golden reference beyond 1e-4 px!");

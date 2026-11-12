@@ -67,6 +67,46 @@ pub enum PaperColor {
     Hex(String),
 }
 
+impl PaperColor {
+    pub fn hex(&self) -> &str {
+        match self {
+            PaperColor::Hex(h) => h.as_str(),
+            PaperColor::Name(n) => match n.as_str() {
+                "white" => "#FFFFFF",
+                "cream" => "#FBF7EE",
+                "yellow" => "#FEF9C3",
+                "ochre" => "#F1DFAE",
+                "blue" => "#E6F0FB",
+                "green" => "#E8F4E5",
+                "pink" => "#FBE7EE",
+                "gray" => "#EDEDED",
+                "dark" => "#1C1C1F",
+                _ => "#FFFFFF",
+            },
+        }
+    }
+
+    pub fn is_dark(&self) -> bool {
+        match self {
+            PaperColor::Name(n) if n == "dark" => true,
+            _ => {
+                let h = self.hex();
+                if h.starts_with('#') && h.len() >= 7 {
+                    if let (Ok(r), Ok(g), Ok(b)) = (
+                        u8::from_str_radix(&h[1..3], 16),
+                        u8::from_str_radix(&h[3..5], 16),
+                        u8::from_str_radix(&h[5..7], 16),
+                    ) {
+                        return (0.2126 * (r as f64) + 0.7152 * (g as f64) + 0.0722 * (b as f64))
+                            < 110.0;
+                    }
+                }
+                false
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PageSize {

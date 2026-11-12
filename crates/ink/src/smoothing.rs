@@ -126,3 +126,4 @@ pub fn settled_smooth(pts: &[ModeledPoint]) -> Vec<ModeledPoint> {
     let idx = settled_index(&xy);
     smooth_line(pts, idx, 0)
 }
+

@@ -139,3 +139,4 @@ pub fn import_latex_file(content: &str, title: &str) -> NoteDocument {
         schema_version: Some(SCHEMA_VERSION),
     }
 }
+

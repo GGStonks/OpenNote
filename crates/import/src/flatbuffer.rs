@@ -202,3 +202,4 @@ pub fn half(bits: u16) -> f64 {
     }
     sign * (1.0 + f / 1024.0) * 2.0f64.powi(e - 15)
 }
+

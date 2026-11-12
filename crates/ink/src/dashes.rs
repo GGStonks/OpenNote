@@ -116,3 +116,4 @@ pub fn dash_runs(
 pub fn hand_dash(ls: Option<LineStyle>, width: f64) -> Option<(Vec<f64>, f64)> {
     dash_pattern(ls, width).map(|p| (p, HAND_DOT))
 }
+

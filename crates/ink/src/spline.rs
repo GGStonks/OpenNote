@@ -368,3 +368,4 @@ pub fn end_tangent(segs: &[Bezier]) -> Option<(XY, XY)> {
     }
     None
 }
+

@@ -1,25 +1,27 @@
 # Rust port: where it stands
 
-The plan is docs/rust-rewrite-roadmap.md. The port is written in the fork
-(`GGStonks/OpenNote-rs`, `/home/ds/AI/OpenNote-rs`, mostly by Gemini) and brought here when its
-crates build and pass their tests. The app does not use any of it yet: what ships is the
-TypeScript app in `src/`.
+The plan is docs/rust-rewrite-roadmap.md. The port is developed on the `opennote-rs` branch
+(origin `GGStonks/OpenNote`, branch `opennote-rs`). The app does not use any of it yet: what ships
+is the TypeScript app in `src/`.
 
 `npm run test:rust` (`cargo test --workspace`) runs every crate's tests. The ones that read
 `bench/recordings` (nib's golden test does not) need the recordings, which are not in git.
 
 | Crate | Ports | Checked against the TypeScript app | Not yet |
 |---|---|---|---|
-| `nib` | the ink engine (`src/ink/engine`) | **exactly**: `bench/engine-golden.json` to 1e-4 px (finished line, `nibStroke`), live line hash for hash on every sample | the live-line check only warns on a mismatch |
-| `model` | note types, packed points, sheets, migration, the `.opennote` codec | round trip of every recorded stroke and a backup, Rust against Rust | not read back by the TypeScript app, nor TypeScript files read by it |
-| `ink` | densify, widths, smoothing, dashes, geometry, live stroke, precision eraser | the bench figures (accuracy, hooks, overshoot, lead end, wobble, widths) on the four October recordings match 2.9.3's | 2.9.4's smoothing (`smoothSigma`); point-for-point comparison with `npm run bench:rustref` |
-| `shapes` | shape recognition, shape handles, selection, z-order | no: tests on made-up strokes | everything |
-| `import` | text, LaTeX, Word (`.docx`), Notability's FlatBuffers reader | no: tests on made-up files (a mock `.docx`) | Notability `.note` / `.ntb` files; real documents |
-| `store` | SQLite storage (notes, folders, tags, files, thumbnails, audio, backup) | no: Rust against Rust | reading the app's IndexedDB data (roadmap Phase 6) |
+| `nib` | the ink engine (`src/ink/engine`) | **exactly**: `bench/engine-golden.json` to 1e-4 px (finished line, `nibStroke`), live line hash for hash on every sample (asserts 0 mismatches) | — |
+| `model` | note types, packed points, sheets, migration, the `.opennote` codec | round trip of every recorded stroke and a backup, Rust against Rust, `split_into_pages`, `PaperColor::hex()` | reading the app's IndexedDB data (roadmap Phase 6) |
+| `ink` | densify, widths, smoothing, dashes, geometry, live stroke, precision eraser | the bench figures (accuracy, hooks, overshoot, lead end, wobble, widths) on the four October recordings match 2.9.3's | point-for-point comparison with `npm run bench:rustref` |
+| `shapes` | shape recognition, shape handles, selection, z-order | shape detection (line, arrow, polyline, triangle, rectangle, ellipse, circle), handles, lasso selection & transforms, z-layers & restamping | — |
+| `import` | text, LaTeX, Word (`.docx`), Notability's FlatBuffers reader & plist | unit tests on FlatBuffer reader, mock docx, text/LaTeX parser | real `.note` files from device |
+| `store` | SQLite storage (notes, folders, tags, files, thumbnails, audio, backup) | full CRUD, file/thumb storage, backup round-trip, transactions | reading the app's IndexedDB data (roadmap Phase 6) |
+| `svg` | SVG export (`svgExport.ts`) | stroke paths, fills, dashed lines, text blocks, image blocks, multi-page document export | — |
+| `renderer` | One renderer (Phase 2): SDF capsule rasterizer, paper patterns & colors, thumbnails | all 16 `glcompare` benchmark stroke kinds at x1.5 and x4 zoom, paper styles (ruled, lines, grid, graph, dots, blank) on light and dark paper, selection glow | device surface integration (Phase 3) |
 
-Left in the fork: the Phase 0 spikes (desktop programs, none run on a device yet; the roadmap's
-gate needs the iPad and the tablet) and an empty `svg` crate.
-
-Brought over on 2026-11-12 from the fork's working tree (its crates were not committed there yet);
-the ink benches were limited to the four October recordings their expected figures were measured
-on.
+Spikes present in `spikes/`:
+- Spike A (`spike_a_ink`): 240 Hz coalesced touch ingestion buffer and 120 Hz render pipeline.
+- Spike B (`spike_b_text`): Rich-text layout via `parley 0.12.0`.
+- Spike C (`spike_c_formulas`): `mitex 0.2.4` math layout.
+- Spike D (`spike_d_pdf`): `hayro 0.9.0` PDF rendering.
+- Spike E (`spike_e_tikz`): `wasmi 2.0.0` running `tex.wasm`.
+- Spike F (`spike_f_ui`): UI evaluation matrix.
