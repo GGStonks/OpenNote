@@ -425,3 +425,5 @@ show the iPad's compositing cost).
   tests compare with these, not with themselves. Exported helpers it reads (`enginePoints`, `inkRuns`)
   stay exported.
 - `/home/ds/AI/OpenNote_release.sh` — builds APK + IPA, tags and publishes the GitHub release
+  (procedure for every agent: docs/releasing.md; `node scripts/release.mjs bump|verify X.Y.Z` writes the
+  version everywhere and checks the published release)
