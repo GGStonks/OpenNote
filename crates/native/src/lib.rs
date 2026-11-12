@@ -18,6 +18,8 @@
 //! A failure (bad request, panic) comes back as meta `{ error }` and no data: the page then does
 //! the work in TypeScript.
 
+pub mod live;
+
 use ink::stroke_geometry;
 use model::{ModeledKind, PenStyle, Point, Stroke};
 use serde::Deserialize;
@@ -77,10 +79,38 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
+        "liveReplay" => live_replay(meta),
         _ => Err(format!("unknown method {method}")),
     }
+}
+
+/// `liveReplay` (tests: bench:ui --native --only rustlive): a whole stroke through a live session,
+/// as the shells run it. Meta `{ params: [13 numbers as for opennote_live_new], samples: [[x, y,
+/// force, t], ...] }`; reply `{ settled, line: [[x, y, radius], ...] }` (the settled points first).
+fn live_replay(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        params: Vec<f64>,
+        samples: Vec<[f64; 4]>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("liveReplay request: {e}"))?;
+    if r.params.len() < 13 {
+        return Err("liveReplay needs 13 params".into());
+    }
+    let v = &r.params;
+    let mut l = live::Live::new(live::LiveParams {
+        left: v[0], top: v[1], w: v[2], rw: v[3], h: v[4], rh: v[5], offset: v[6], start: v[7],
+        ox: v[8], oy: v[9], k: v[10], width: v[11], variable: v[12] != 0.0,
+    });
+    for s in &r.samples {
+        l.add(s[0], s[1], s[2], s[3]);
+    }
+    let mut out = Vec::new();
+    let settled = l.update(&mut out);
+    let line: Vec<[f64; 3]> = out.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
+    Ok((json!({ "settled": settled, "line": line }).to_string(), Vec::new()))
 }
 
 #[derive(Deserialize)]
@@ -190,13 +220,121 @@ pub extern "C" fn opennote_rs_alloc(len: usize) -> *mut u8 {
 }
 
 // ------------------------------------------------------------------------------------------------
+// Native live ink (live.rs): one session per stroke, driven by the shell's own pen samples.
+
+/// The session behind a shell's handle: the line's state and the last update's points.
+pub struct LiveHandle {
+    live: live::Live,
+    out: Vec<f64>,
+}
+
+/// A session for the stroke `r` announced. `params` (13): left, top, w, rw, h, rh, offset, start,
+/// ox, oy, k, width, variable (0 / 1). Null on a bad call.
+///
+/// # Safety
+/// `params` must be valid for `n` f64.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_live_new(params: *const f64, n: usize) -> *mut LiveHandle {
+    if params.is_null() || n < 13 {
+        return std::ptr::null_mut();
+    }
+    let v = std::slice::from_raw_parts(params, n);
+    let p = live::LiveParams {
+        left: v[0], top: v[1], w: v[2], rw: v[3], h: v[4], rh: v[5], offset: v[6], start: v[7],
+        ox: v[8], oy: v[9], k: v[10], width: v[11], variable: v[12] != 0.0,
+    };
+    Box::into_raw(Box::new(LiveHandle { live: live::Live::new(p), out: Vec::new() }))
+}
+
+/// One pen sample (view position, force as sent, shell time in s). False if the session broke.
+///
+/// # Safety
+/// `h` must come from `opennote_live_new` and not be freed.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_live_add(h: *mut LiveHandle, x: f64, y: f64, force: f64, t: f64) -> bool {
+    let Some(h) = h.as_mut() else { return false };
+    catch_unwind(AssertUnwindSafe(|| h.live.add(x, y, force, t))).is_ok()
+}
+
+/// The line now: `*n` points (x, y, radius in view units), the first `*fresh` of them settled since
+/// the last call, then the rest. The points stay valid until the next call; null if it broke.
+///
+/// # Safety
+/// `h` must come from `opennote_live_new`; `fresh` and `n` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_live_update(h: *mut LiveHandle, fresh: *mut usize, n: *mut usize) -> *const f64 {
+    let Some(h) = h.as_mut() else { return std::ptr::null() };
+    let LiveHandle { live, out } = h;
+    match catch_unwind(AssertUnwindSafe(|| live.update(out))) {
+        Ok(f) => {
+            *fresh = f;
+            *n = out.len() / 3;
+            out.as_ptr()
+        }
+        Err(_) => std::ptr::null(),
+    }
+}
+
+/// Ends a session.
+///
+/// # Safety
+/// `h` must come from `opennote_live_new`, not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_live_free(h: *mut LiveHandle) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
 // JNI entry point (Android: com.opennote.app.OpenNoteRustPlugin.nativeCall).
 
 #[cfg(feature = "jni")]
 mod android {
-    use jni::objects::{JByteArray, JClass, JString};
-    use jni::sys::jbyteArray;
+    use jni::objects::{JByteArray, JClass, JDoubleArray, JString};
+    use jni::sys::{jboolean, jbyteArray, jdouble, jdoubleArray, jlong, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
+
+    // Native live ink (live.rs) for InkOverlay: a session's handle is its pointer as a long.
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_liveNew<'l>(env: JNIEnv<'l>, _class: JClass<'l>, params: JDoubleArray<'l>) -> jlong {
+        let n = env.get_array_length(&params).unwrap_or(0) as usize;
+        let mut v = vec![0.0; n];
+        if n < 13 || env.get_double_array_region(&params, 0, &mut v).is_err() {
+            return 0;
+        }
+        unsafe { super::opennote_live_new(v.as_ptr(), n) as jlong }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_liveAdd<'l>(_env: JNIEnv<'l>, _class: JClass<'l>, h: jlong, x: jdouble, y: jdouble, force: jdouble, t: jdouble) -> jboolean {
+        if unsafe { super::opennote_live_add(h as *mut super::LiveHandle, x, y, force, t) } { JNI_TRUE } else { JNI_FALSE }
+    }
+
+    /// [fresh, x, y, radius, ...] (view units), or null if the session broke.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_liveUpdate<'l>(env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) -> jdoubleArray {
+        let (mut fresh, mut n) = (0usize, 0usize);
+        let p = unsafe { super::opennote_live_update(h as *mut super::LiveHandle, &mut fresh, &mut n) };
+        if p.is_null() {
+            return std::ptr::null_mut();
+        }
+        let pts = unsafe { std::slice::from_raw_parts(p, n * 3) };
+        let mut out = Vec::with_capacity(1 + pts.len());
+        out.push(fresh as f64);
+        out.extend_from_slice(pts);
+        let Ok(arr) = env.new_double_array(out.len() as i32) else { return std::ptr::null_mut() };
+        if env.set_double_array_region(&arr, 0, &out).is_err() {
+            return std::ptr::null_mut();
+        }
+        arr.into_raw()
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_liveFree<'l>(_env: JNIEnv<'l>, _class: JClass<'l>, h: jlong) {
+        unsafe { super::opennote_live_free(h as *mut super::LiveHandle) }
+    }
 
     #[no_mangle]
     pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_nativeCall<'l>(

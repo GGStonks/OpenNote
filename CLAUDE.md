@@ -71,6 +71,17 @@ in. Now the shells keep it until the page's `l,id[,x,y]`: the page tracks the sa
 (`nativePencil.lead`) and the finished stroke runs straight on to it (`Stroke.penEnd`: its last
 point is that sample, not modelled; `penEnd()` / `strokeGeometry` in strokeRenderer.ts, after the
 smoothing). `--native --only leadend` checks the message and the stored stroke.
+On the opennote-rs branch the shells compute the pen's line themselves, in Rust, from their own
+samples (`r` instead of `b` + `u`: crates/native/src/live.rs, `ONInkView` / `InkOverlay`): the line
+reaches the pen on every touch event (iOS 240 Hz) instead of a page frame later, behind a shorter
+lead. The page sends `r` once per stroke made of shell samples (`d.nativeSeen`) when the shell has
+`rustInk` (iOS `OpenNoteNative.rustInk`, Android `OpenNoteInk.rustInk()`): the canvas's rect, page
+size, nativePencil's clock offset and the stroke's first sample's time, as exact numbers; the shell
+feeds Rust the very numbers it sends the page (formatted, parsed back) and repeats the page's
+arithmetic (`toPoint`, `ingestSamples`), so its line is the page's (`--native --only rustlive`: the
+`u` line and the Rust line on the same samples, 1,011 points, equal to u's 0.01 rounding). Finger
+strokes, dashes and shapes keep `b` / `u` / `d`. `crates/native/tests/live.rs` (the session against
+the reference's live lines), `tests/jni/run.sh` (the Android entry points).
 Shapes being drawn (Draw tool, snapped strokes) are sent whole on every event (`d` messages,
 `src/ink/inkRecorder.ts`); `npm run bench:ui -- --native --only shapepen` measures the page's side.
 The Draw tool's free curve is densified like the pen, and when the pen lifts the shell is sent the

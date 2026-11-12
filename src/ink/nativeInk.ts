@@ -20,6 +20,14 @@
  *                                                 until its own e,id (the next stroke often
  *                                                 begins before the page has drawn the last)
  *   u,n,x,y,r,...                                 n new settled points, then the tail (x, y, radius)
+ *   r,<b's fields>,left,top,w,rw,h,rh,offset,start,ox,oy,k,width,variable
+ *                                                 begin, and the shell computes the line itself, in
+ *                                                 Rust, from its own pen samples (crates/native
+ *                                                 live.rs: the page's arithmetic, numbers exact):
+ *                                                 no "u" follows; the canvas's rect (left, top, rw,
+ *                                                 rh) and page size (w, h), nativePencil's clock
+ *                                                 offset, the stroke's first sample's time, the
+ *                                                 view transform, drawn width, variable width at all
  *   l,id,x,y                                      the pen lifted: stroke id's line runs on to x, y
  *                                                 at its end's radius (Stroke.penEnd: the lead,
  *                                                 kept); "l,id" alone: no lead (the shells keep it
@@ -63,6 +71,32 @@ export interface InkStyle {
   variable: boolean;
 }
 
+/**
+ * For a stroke made of the shell's own samples, where the shell computes the line itself (`r`):
+ * how the page turns those samples into page px and times (CanvasPage toPoint), and whether the
+ * pen can draw variable width (the shell follows the pressure once a sample had real force).
+ */
+export interface ShellLine {
+  left: number;
+  top: number;
+  w: number;
+  rw: number;
+  h: number;
+  rh: number;
+  offset: number;
+  start: number;
+  variable: boolean;
+}
+
+/** The shell computes the live line from its own samples (iOS: OpenNoteShell.m; Android: OpenNoteInkPlugin). */
+/** Asked once per stroke (cheap: a property on iOS, a method call on Android). */
+function shellComputesLine(): boolean {
+  const w = window as unknown as { OpenNoteNative?: { rustInk?: boolean }; OpenNoteInk?: { rustInk?: boolean | (() => boolean) } };
+  const android = w.OpenNoteInk?.rustInk;
+  // Android's is a method of the plugin's JavaScript interface (it has the Rust library loaded).
+  return !!(w.OpenNoteNative?.rustInk || (typeof android === 'function' ? android.call(w.OpenNoteInk) : android));
+}
+
 let send: Sender | null | undefined;
 let rgbaCtx: CanvasRenderingContext2D | null = null;
 
@@ -104,6 +138,8 @@ export class NativeInk {
   private done = false;
   /** Something was sent (end / cancel must clear it). */
   private shown = false;
+  /** The shell computes this stroke's line itself (`r`). */
+  private own = false;
 
   static get available(): boolean {
     if (send === undefined) send = sender();
@@ -115,19 +151,30 @@ export class NativeInk {
    * the same line the page draws (SmoothLiveStroke.line): its smoothed, final points once each, and
    * the rest (still changing) every time.
    */
-  update(stroke: SmoothLiveStroke, style: InkStyle, tf: InkTransform): void {
+  update(stroke: SmoothLiveStroke, style: InkStyle, tf: InkTransform, shell?: ShellLine): void {
     if (this.done || !NativeInk.available) return;
-    const key = `${style.color}|${style.width}|${style.variable}|${tf.ox}|${tf.oy}|${tf.k}`;
+    const own = !!shell && shellComputesLine();
+    // The shell's own line does not depend on the pressure seen so far (it decides that itself).
+    const key = `${style.color}|${style.width}|${own ? 'shell' : style.variable}|${tf.ox}|${tf.oy}|${tf.k}`;
     if (stroke !== this.model || key !== this.key) {
       this.model = stroke;
       this.key = key;
       this.sent = 0;
       const [r, g, b, a] = rgba(style.color);
-      send!(['b', r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h), this.id].join(','));
+      const head = [r, g, b, a, style.variable ? 1 : 0, f(tf.clip.x), f(tf.clip.y), f(tf.clip.w), f(tf.clip.h), this.id];
+      if (own) {
+        const s = shell!;
+        // Exact numbers (String: the shortest form that reads back as the same double).
+        const exact = [s.left, s.top, s.w, s.rw, s.h, s.rh, s.offset, s.start, tf.ox, tf.oy, tf.k, style.width, s.variable ? 1 : 0].map(String);
+        send!(['r', ...head, ...exact].join(','));
+      } else send!(['b', ...head].join(','));
       this.shown = true;
       this.scene = false;
+      this.own = own;
       NativeInk.showing = this;
     }
+    // The shell draws its own line from its samples.
+    if (this.own) return;
     const { final, finalW, rest, restW } = stroke.line(style);
     const out: string[] = ['u', String(Math.max(0, final.length - this.sent))];
     const push = (q: { x: number; y: number }, w: number) => {

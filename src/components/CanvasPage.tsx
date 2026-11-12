@@ -14,7 +14,7 @@ import { crashLog } from '../services/crashLog';
 import { SampleDensifier } from '../ink/densify';
 import { RecordedSample, penRecorder } from '../ink/penRecorder';
 import { PencilListener, PencilSample, nativePencil } from '../ink/nativePencil';
-import { InkTransform, NativeInk, nativeInkUnit } from '../ink/nativeInk';
+import { InkTransform, NativeInk, ShellLine, nativeInkUnit } from '../ink/nativeInk';
 import { record } from '../ink/inkRecorder';
 import { tileWork } from '../editor/tileWork';
 import { CONTENT_PLACED, FIT_MARGIN } from '../editor/useViewport';
@@ -2178,7 +2178,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.ink.drawing(record(d.inkTf, (ctx) => model.drawDashes(ctx, live)), d.inkTf);
       return;
     }
-    d.ink.update(d.model, { color: live.color, width: live.width, variable: live.variable }, d.inkTf);
+    // A stroke of the shell's own samples: the shell computes the line itself (`r`, Rust).
+    let shell: ShellLine | undefined;
+    if (d.nativeSeen) {
+      const rect = canvasRect();
+      shell = {
+        left: rect.left, top: rect.top, w: sizeRef.current.w, rw: rect.width, h: sizeRef.current.h, rh: rect.height,
+        offset: nativePencil.clockOffset, start: d.start, variable: isVariableWidth(style),
+      };
+    }
+    d.ink.update(d.model, { color: live.color, width: live.width, variable: live.variable }, d.inkTf, shell);
   }
 
   const nativeInputRef = useRef<(d: NonNullable<typeof drawing.current>, samples: PencilSample[], predicted: PencilSample[], ended: boolean) => void>(() => {});

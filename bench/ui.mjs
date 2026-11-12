@@ -2091,6 +2091,88 @@ if (ONLY.has('liftshots')) {
     console.log(`liftshots   crash log: ${JSON.stringify(ig)}`);
   }
 }
+// --native --only rustlive: native live ink computed by the shell in Rust (`r`, crates/native
+// live.rs). The same pen stroke from the shell's samples twice: with the shell's `rustInk` off, the
+// page sends the line (`b`, `u`); with it on, the page sends `r` (no `u`) and the shell must draw the
+// same line: the real Rust session (opennote_native_cli liveReplay) run on the samples the shell
+// had, with r's numbers, against the line the `u` messages carried (rounded to 0.01 there).
+if (ONLY.has('rustlive') && process.argv.includes('--native')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  const cli = join(root, 'target/release/opennote_native_cli');
+  const rust = (method, meta) => {
+    const m = Buffer.from(JSON.stringify(meta)), head = Buffer.alloc(4);
+    head.writeUInt32LE(m.length);
+    const reply = execFileSync(cli, [method], { input: Buffer.concat([head, m]), maxBuffer: 1 << 30 });
+    return JSON.parse(reply.subarray(4, 4 + reply.readUInt32LE(0)).toString());
+  };
+  await reopen();
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  await page.evaluate(() => {
+    window.__allInk = [];
+    const post = window.OpenNoteInk.post.bind(window.OpenNoteInk);
+    window.OpenNoteInk.post = (m) => { window.__allInk.push(m); post(m); };
+  });
+  const T = 320;
+  const at = (ms) => [240 + 320 * (ms / T), 600 + 60 * Math.sin(ms / 45)];
+  const force = (ms) => 0.25 + 0.2 * Math.sin(ms / 30) ** 2;
+  const write = async (rustInk) => {
+    await page.evaluate((on) => { window.OpenNoteInk.rustInk = on; window.__allInk = []; }, rustInk);
+    const t0 = await page.evaluate(() => performance.now());
+    const sample = (ms) => { const [x, y] = at(ms); return [+x.toFixed(3), +y.toFixed(3), +force(ms).toFixed(4), +((t0 + ms) / 1000).toFixed(5), 1.2, 0.5]; };
+    const sent = [sample(0)];
+    await page.evaluate(([d, now]) => window.__opennotePencil(0, now, d, []), [sample(0), t0 / 1000]);
+    await mouse('mousePressed', ...at(0), 0.4);
+    let last = 0;
+    for (let ms = 16; ms <= T; ms += 16) {
+      await sleep(16);
+      const batch = [];
+      for (let m = last + 4; m <= ms; m += 4) { batch.push(...sample(m)); sent.push(sample(m)); }
+      await page.evaluate(([d, now]) => window.__opennotePencil(1, now, d, []), [batch, (t0 + ms) / 1000]);
+      last = ms;
+      await mouse('mouseMoved', ...at(ms), 0.4);
+    }
+    await sleep(50);
+    const msgs = await page.evaluate(() => window.__allInk);
+    const [lx, ly] = at(T);
+    await page.evaluate(([d, now]) => window.__opennotePencil(2, now, d, []), [[lx, ly, 0, (t0 + T + 4) / 1000, 1.2, 0.5], (t0 + T + 4) / 1000]);
+    await mouse('mouseReleased', lx, ly, 0);
+    await sleep(800);
+    return { msgs, sent };
+  };
+  // The page's line: the last b's stroke, its u messages (settled points kept, the rest replaced).
+  const fromU = (msgs) => {
+    let settled = [], rest = [];
+    for (const m of msgs) {
+      const f = m.split(',');
+      if (f[0] === 'b') { settled = []; rest = []; }
+      if (f[0] !== 'u') continue;
+      const n = +f[1], pts = [];
+      for (let i = 2; i + 2 < f.length; i += 3) pts.push([+f[i], +f[i + 1], +f[i + 2]]);
+      settled.push(...pts.slice(0, n));
+      rest = pts.slice(n);
+    }
+    return [...settled, ...rest];
+  };
+  const a = await write(false);
+  const b = await write(true);
+  const pageLine = fromU(a.msgs);
+  const r = b.msgs.filter((m) => m.startsWith('r,')).pop();
+  const uAfterR = b.msgs.slice(b.msgs.lastIndexOf(r)).filter((m) => m.startsWith('u,')).length;
+  let verdict = 'FAIL: no r message';
+  if (r) {
+    const params = r.split(',').slice(11).map(Number);
+    const reply = rust('liveReplay', { params, samples: b.sent.map((q) => [q[0], q[1], q[2], q[3]]) });
+    if (reply.error) throw new Error(`liveReplay: ${reply.error}`);
+    const rustLine = reply.line;
+    let worst = rustLine.length === pageLine.length ? 0 : Infinity;
+    for (let i = 0; i < pageLine.length && worst < Infinity; i++) worst = Math.max(worst, ...[0, 1, 2].map((j) => Math.abs(rustLine[i][j] - pageLine[i][j])));
+    const ok = worst <= 0.0051 && uAfterR === 0;
+    verdict = `${ok ? 'ok' : 'FAIL'}: page ${pageLine.length} points, Rust ${rustLine.length}; largest difference ${worst.toFixed(4)} view units (u rounds to 0.01); u messages after r: ${uAfterR}`;
+    if (!ok) process.exitCode = 1;
+  } else process.exitCode = 1;
+  console.log(`rustlive ${verdict}`);
+}
 // --native --only leadend: pen strokes from the shell's samples (window.__opennotePencil), the last
 // move pressing (then the shell's lead reaches its newest sample) or not (no lead). When the pen
 // lifts, the shell must be told to keep its lead ("l,id,x,y" at that sample) or drop it ("l,id"), and

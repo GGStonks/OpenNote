@@ -42,7 +42,7 @@ import java.util.concurrent.Executors;
  */
 @CapacitorPlugin(name = "OpenNoteRust")
 public class OpenNoteRustPlugin extends Plugin {
-    private static final boolean LOADED;
+    static final boolean LOADED;
     private static final String LOAD_ERROR;
 
     static {
@@ -59,6 +59,15 @@ public class OpenNoteRustPlugin extends Plugin {
     }
 
     private static native byte[] nativeCall(String method, byte[] request);
+
+    // Native live ink (crates/native/src/live.rs), for OpenNoteInkPlugin's overlay (UI thread).
+    /** A session for the stroke "r" announced (13 numbers, see live.rs); 0 on a bad call. */
+    static native long liveNew(double[] params);
+    /** One pen sample (CSS px as the page reads it, force as sent, time in s); false if broken. */
+    static native boolean liveAdd(long h, double x, double y, double force, double t);
+    /** The line now: [fresh, x, y, radius, ...] (view units); null if broken. */
+    static native double[] liveUpdate(long h);
+    static native void liveFree(long h);
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor((r) -> new Thread(() -> {
         Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND);

@@ -55,6 +55,12 @@ public class OpenNoteInkPlugin extends Plugin {
             public void post(String msg) {
                 view.post(() -> view.handle(msg));
             }
+
+            /** The overlay computes the line itself from the stylus samples ("r", Rust). */
+            @JavascriptInterface
+            public boolean rustInk() {
+                return OpenNoteRustPlugin.LOADED;
+            }
         }, "OpenNoteInk");
         webView.post(() -> {
             ViewGroup parent = (ViewGroup) webView.getParent();
@@ -196,12 +202,125 @@ public class OpenNoteInkPlugin extends Plugin {
             scene = null;
         }
 
+        /**
+         * The line's update ("u", or the overlay's own Rust line): `fresh` newly settled points, then
+         * the rest (still changing); pts holds x, y, radius per point (view units).
+         */
+        void applyFresh(int fresh, float[] pts, int total) {
+            fresh = Math.max(0, Math.min(total, fresh));
+            int drawn = settledCount;
+            if ((settledCount + fresh) * 3 > settled.length) {
+                float[] grown = new float[Math.max(settled.length * 2, (settledCount + fresh) * 3)];
+                System.arraycopy(settled, 0, grown, 0, settledCount * 3);
+                settled = grown;
+            }
+            for (int i = 0; i < fresh; i++) {
+                for (int k = 0; k < 3; k++) settled[(settledCount + i) * 3 + k] = pts[i * 3 + k];
+            }
+            settledCount += fresh;
+            // The tail continues from the last settled point.
+            int nt = total - fresh;
+            int lead = settledCount > 0 ? 1 : 0;
+            tail = new float[(nt + lead) * 3];
+            if (lead == 1) System.arraycopy(settled, (settledCount - 1) * 3, tail, 0, 3);
+            for (int i = 0; i < nt; i++) {
+                for (int k = 0; k < 3; k++) tail[(lead + i) * 3 + k] = pts[(fresh + i) * 3 + k];
+            }
+            if (fresh > 0) {
+                // The open chunk runs from its first point to the end; once it holds CHUNK points
+                // it is left as it is and the next starts at its last point.
+                if (chunks.isEmpty()) {
+                    chunkStart = 0;
+                    chunks.add(null);
+                    chunkWidths.add(0f);
+                } else if (drawn - chunkStart >= CHUNK) {
+                    chunkStart = drawn - 1;
+                    chunks.add(null);
+                    chunkWidths.add(0f);
+                }
+                chunks.set(chunks.size() - 1, build(settled, chunkStart, settledCount));
+                chunkWidths.set(chunkWidths.size() - 1, settled[(settledCount - 1) * 3 + 2] * 2);
+            }
+            tailPath = build(tail, 0, tail.length / 3);
+            tailWidth = tail.length > 0 ? tail[tail.length - 1] * 2 : 0;
+        }
+
+        /** The current stylus touch's samples as the page read them: x, y, force, time per sample. */
+        private double[] touch = new double[1024];
+        private int touchCount = 0;
+        /** The stroke's line computed here ("r", Rust: crates/native/src/live.rs); 0: the page sends it. */
+        private long live = 0;
+
+        void endLive() {
+            if (live != 0) OpenNoteRustPlugin.liveFree(live);
+            live = 0;
+        }
+
+        void pencilBegan() {
+            touchCount = 0;
+        }
+
+        void pencilSample(double x, double y, double force, double t) {
+            if ((touchCount + 1) * 4 > touch.length) touch = java.util.Arrays.copyOf(touch, touch.length * 2);
+            touch[touchCount * 4] = x;
+            touch[touchCount * 4 + 1] = y;
+            touch[touchCount * 4 + 2] = force;
+            touch[touchCount * 4 + 3] = t;
+            touchCount++;
+            if (live != 0 && !OpenNoteRustPlugin.liveAdd(live, x, y, force, t)) endLive();
+        }
+
+        void pencilBatchDone() {
+            if (live != 0 && active) {
+                liveApply();
+                invalidate();
+            }
+        }
+
+        /**
+         * "r": the page's numbers for this stroke (left, top, w, rw, h, rh, offset, start, ox, oy, k,
+         * width, variable; exact: Double.parseDouble of JavaScript's shortest form), then this touch's
+         * samples from the stroke's first one (whose page time is `start`).
+         */
+        private void beginLive(String[] f) {
+            if (!OpenNoteRustPlugin.LOADED) return;
+            double[] p = new double[13];
+            for (int i = 0; i < 13; i++) p[i] = Double.parseDouble(f[11 + i]);
+            int from = -1;
+            for (int i = 0; i < touchCount; i++) {
+                if (touch[i * 4 + 3] * 1000 + p[6] == p[7]) {
+                    from = i;
+                    break;
+                }
+            }
+            if (from < 0) return; // not this touch's stroke: the page's ink only
+            live = OpenNoteRustPlugin.liveNew(p);
+            for (int i = from; live != 0 && i < touchCount; i++) {
+                if (!OpenNoteRustPlugin.liveAdd(live, touch[i * 4], touch[i * 4 + 1], touch[i * 4 + 2], touch[i * 4 + 3])) endLive();
+            }
+            if (live != 0) liveApply();
+        }
+
+        private void liveApply() {
+            double[] v = OpenNoteRustPlugin.liveUpdate(live);
+            if (v == null) {
+                endLive();
+                return;
+            }
+            int total = (v.length - 1) / 3;
+            float[] pts = new float[total * 3];
+            for (int i = 0; i < total * 3; i++) pts[i] = (float) v[1 + i];
+            applyFresh((int) v[0], pts, total);
+        }
+
         void handle(String msg) {
             String[] f = msg.split(",");
             if (f.length == 0) return;
             switch (f[0]) {
+                case "r":
                 case "b":
-                    if (f.length < 10) return;
+                    if (f.length < 10 || ("r".equals(f[0]) && f.length < 24)) return;
+                    endLive();
                     // The same id again: the stroke restarts (its style or place changed), nothing to keep.
                     int sid = f.length > 10 ? Integer.parseInt(f[10]) : 0;
                     if (sid != currentId) retire();
@@ -213,46 +332,14 @@ public class OpenNoteInkPlugin extends Plugin {
                     variable = !"0".equals(f[5]);
                     clip.set(Float.parseFloat(f[6]), Float.parseFloat(f[7]), Float.parseFloat(f[6]) + Float.parseFloat(f[8]), Float.parseFloat(f[7]) + Float.parseFloat(f[9]));
                     active = true;
+                    if ("r".equals(f[0])) beginLive(f);
                     break;
                 case "u": {
                     if (!active || f.length < 2) return;
                     int total = (f.length - 2) / 3;
-                    int fresh = Math.max(0, Math.min(total, Integer.parseInt(f[1])));
-                    int drawn = settledCount;
-                    if ((settledCount + fresh) * 3 > settled.length) {
-                        float[] grown = new float[Math.max(settled.length * 2, (settledCount + fresh) * 3)];
-                        System.arraycopy(settled, 0, grown, 0, settledCount * 3);
-                        settled = grown;
-                    }
-                    for (int i = 0; i < fresh; i++) {
-                        for (int k = 0; k < 3; k++) settled[(settledCount + i) * 3 + k] = Float.parseFloat(f[2 + i * 3 + k]);
-                    }
-                    settledCount += fresh;
-                    // The tail continues from the last settled point.
-                    int nt = total - fresh;
-                    int lead = settledCount > 0 ? 1 : 0;
-                    tail = new float[(nt + lead) * 3];
-                    if (lead == 1) System.arraycopy(settled, (settledCount - 1) * 3, tail, 0, 3);
-                    for (int i = 0; i < nt; i++) {
-                        for (int k = 0; k < 3; k++) tail[(lead + i) * 3 + k] = Float.parseFloat(f[2 + (fresh + i) * 3 + k]);
-                    }
-                    if (fresh > 0) {
-                        // The open chunk runs from its first point to the end; once it holds CHUNK points
-                        // it is left as it is and the next starts at its last point.
-                        if (chunks.isEmpty()) {
-                            chunkStart = 0;
-                            chunks.add(null);
-                            chunkWidths.add(0f);
-                        } else if (drawn - chunkStart >= CHUNK) {
-                            chunkStart = drawn - 1;
-                            chunks.add(null);
-                            chunkWidths.add(0f);
-                        }
-                        chunks.set(chunks.size() - 1, build(settled, chunkStart, settledCount));
-                        chunkWidths.set(chunkWidths.size() - 1, settled[(settledCount - 1) * 3 + 2] * 2);
-                    }
-                    tailPath = build(tail, 0, tail.length / 3);
-                    tailWidth = tail.length > 0 ? tail[tail.length - 1] * 2 : 0;
+                    float[] pts = new float[total * 3];
+                    for (int i = 0; i < total * 3; i++) pts[i] = Float.parseFloat(f[2 + i]);
+                    applyFresh(Integer.parseInt(f[1]), pts, total);
                     break;
                 }
                 case "l": {
@@ -262,11 +349,13 @@ public class OpenNoteInkPlugin extends Plugin {
                     if (!active || f.length < 2 || Integer.parseInt(f[1]) != currentId) return;
                     if (f.length >= 4) appendToTail(Float.parseFloat(f[2]), Float.parseFloat(f[3]));
                     hasRaw = false;
+                    endLive();
                     break;
                 }
                 case "d": {
                     if (f.length < 5) return;
                     // Replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
+                    endLive();
                     boolean wasScene = active && scene != null;
                     if (!wasScene) {
                         clear();
@@ -283,11 +372,13 @@ public class OpenNoteInkPlugin extends Plugin {
                         postDelayed(() -> release(id), HOLD_MS);
                         return;
                     }
+                    endLive();
                     generation++;
                     clear();
                     currentId = 0;
                     break;
                 case "c":
+                    endLive();
                     generation++;
                     clear();
                     currentId = 0;
@@ -619,6 +710,8 @@ public class OpenNoteInkPlugin extends Plugin {
         StringBuilder js = new StringBuilder(256);
         js.append("window.__opennotePencil&&window.__opennotePencil(").append(phase).append(',')
                 .append(String.format(Locale.ROOT, "%.5f", SystemClock.uptimeMillis() / 1000.0)).append(",[");
+        InkOverlay ink = overlay;
+        if (phase == 0 && ink != null) ink.pencilBegan();
         int n = ev.getHistorySize();
         for (int h = 0; h <= n; h++) {
             boolean cur = h == n;
@@ -628,10 +721,16 @@ public class OpenNoteInkPlugin extends Plugin {
             long t = cur ? ev.getEventTime() : ev.getHistoricalEventTime(h);
             float tilt = cur ? ev.getAxisValue(MotionEvent.AXIS_TILT, p) : ev.getHistoricalAxisValue(MotionEvent.AXIS_TILT, p, h);
             float orient = cur ? ev.getAxisValue(MotionEvent.AXIS_ORIENTATION, p) : ev.getHistoricalAxisValue(MotionEvent.AXIS_ORIENTATION, p, h);
-            js.append(String.format(Locale.ROOT, "%.3f,%.3f,%.4f,%.5f,%.4f,%.4f,",
-                    (x - loc[0]) / density, (y - loc[1]) / density, Math.max(0f, Math.min(1f, force)), t / 1000.0,
-                    Math.PI / 2 - tilt, orient));
+            String sx = String.format(Locale.ROOT, "%.3f", (x - loc[0]) / density);
+            String sy = String.format(Locale.ROOT, "%.3f", (y - loc[1]) / density);
+            String sf = String.format(Locale.ROOT, "%.4f", Math.max(0f, Math.min(1f, force)));
+            String st = String.format(Locale.ROOT, "%.5f", t / 1000.0);
+            js.append(sx).append(',').append(sy).append(',').append(sf).append(',').append(st).append(',')
+                    .append(String.format(Locale.ROOT, "%.4f,%.4f,", Math.PI / 2 - tilt, orient));
+            // The same numbers as the page reads them, to the overlay's Rust live ink ("r").
+            if (ink != null) ink.pencilSample(Double.parseDouble(sx), Double.parseDouble(sy), Double.parseDouble(sf), Double.parseDouble(st));
         }
+        if (ink != null) ink.pencilBatchDone();
         js.append("],[])");
         if (phase >= 2) stylusId = -1;
         view.evaluateJavascript(js.toString(), null);

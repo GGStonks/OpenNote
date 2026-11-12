@@ -41,7 +41,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.2";
+static NSString *const kVersion = @"2.9.4-rs.3";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -71,6 +71,10 @@ static UIColor *ONLaunchColor(void) {
 - (void)leadTo:(CGPoint)p;
 - (void)dropLead;
 - (void)touchEnded;
+// The Pencil's samples as the page gets them (native live ink in Rust: "r" messages).
+- (void)pencilBegan;
+- (void)pencilSampleX:(double)x y:(double)y force:(double)force time:(double)t;
+- (void)pencilBatchDone;
 @end
 
 #pragma mark - 240 Hz Apple Pencil samples
@@ -88,6 +92,13 @@ static UIColor *ONLaunchColor(void) {
 
 @implementation ONWindow {
     __weak UITouch *_pencil;
+}
+
+// A number as the page reads it: printed as ONAppendTouch prints it, parsed back.
+static double ONAsSent(const char *format, double v) {
+    char buf[64];
+    snprintf(buf, sizeof buf, format, v);
+    return strtod(buf, NULL);
 }
 
 static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
@@ -131,6 +142,16 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         NSArray<UITouch *> *samples = [event coalescedTouchesForTouch:touch];
         if (!samples.count) samples = @[ touch ];
         for (UITouch *t in samples) ONAppendTouch(js, t, view);
+        // The same samples, as the page reads them, to the native live ink (Rust, "r").
+        ONInkView *liveInk = self.inkView;
+        if (phase == 0) [liveInk pencilBegan];
+        for (UITouch *t in samples) {
+            CGPoint p = [t preciseLocationInView:view];
+            CGFloat maxForce = t.maximumPossibleForce > 0 ? t.maximumPossibleForce : 1;
+            [liveInk pencilSampleX:ONAsSent("%.3f", p.x) y:ONAsSent("%.3f", p.y) force:ONAsSent("%.4f", t.force / maxForce)
+                              time:ONAsSent("%.5f", t.timestamp)];
+        }
+        [liveInk pencilBatchDone];
         // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
         [js appendString:@"],[])"];
         [view evaluateJavaScript:js completionHandler:nil];
@@ -173,6 +194,12 @@ static NSString *ONInboxDir(void) {
 // The app's Rust library (crates/native/src/lib.rs: methods and framing).
 extern uint8_t *opennote_rs_call(const char *method, const uint8_t *input, size_t len, size_t *out_len);
 extern void opennote_rs_free(uint8_t *ptr, size_t len);
+// Native live ink (crates/native/src/live.rs).
+typedef struct LiveHandle LiveHandle;
+extern LiveHandle *opennote_live_new(const double *params, size_t n);
+extern bool opennote_live_add(LiveHandle *h, double x, double y, double force, double t);
+extern const double *opennote_live_update(LiveHandle *h, size_t *fresh, size_t *n);
+extern void opennote_live_free(LiveHandle *h);
 
 // One Rust call at a time, in order, never on the main thread.
 static dispatch_queue_t ONRustQueue(void) {
@@ -600,6 +627,10 @@ static void ONArc(CGMutablePathRef p, CGFloat cx, CGFloat cy, CGFloat r, CGFloat
     NSInteger _currentId;
     /** Finished strokes kept on screen while the next is written, until their own "e,id". */
     NSMutableDictionary<NSNumber *, CALayer *> *_retired;
+    /** The current Pencil touch's samples as the page read them: x, y, force, time (double each). */
+    NSMutableData *_touch;
+    /** The stroke's line computed here ("r"), from those samples; NULL: the page sends it ("u"). */
+    LiveHandle *_live;
 }
 
 /**
@@ -629,6 +660,79 @@ static const double kInkHoldSeconds = 0.06;
 
 - (void)dealloc {
     if (_color) CGColorRelease(_color);
+    if (_live) opennote_live_free(_live);
+}
+
+- (void)endLive {
+    if (_live) opennote_live_free(_live);
+    _live = NULL;
+}
+
+- (void)pencilBegan {
+    if (!_touch) _touch = [NSMutableData data];
+    _touch.length = 0;
+}
+
+- (void)pencilSampleX:(double)x y:(double)y force:(double)force time:(double)t {
+    if (!_touch) _touch = [NSMutableData data];
+    double s[4] = { x, y, force, t };
+    [_touch appendBytes:s length:sizeof s];
+    if (_live && !opennote_live_add(_live, x, y, force, t)) [self endLive];
+}
+
+- (void)pencilBatchDone {
+    if (_live && _active) [self liveApply];
+}
+
+/** Draws the Rust line now (as a "u" message would). */
+- (void)liveApply {
+    size_t fresh = 0, n = 0;
+    const double *v = opennote_live_update(_live, &fresh, &n);
+    if (!v) {
+        [self endLive];
+        return;
+    }
+    NSMutableData *pts = [NSMutableData dataWithLength:n * sizeof(ONInkPt)];
+    ONInkPt *q = pts.mutableBytes;
+    for (size_t i = 0; i < n; i++) q[i] = (ONInkPt){ v[i * 3], v[i * 3 + 1], v[i * 3 + 2] };
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    [self applyFresh:fresh points:q count:n];
+    [CATransaction commit];
+}
+
+/**
+ * The line's update: `fresh` newly settled points, then the rest (still changing), drawn after the
+ * line's settled part; then the lead from its end to the pen.
+ */
+- (void)applyFresh:(NSUInteger)fresh points:(const ONInkPt *)pts count:(NSUInteger)total {
+    fresh = MIN(fresh, total);
+    for (NSUInteger i = 0; i < total; i++) {
+        ONInkPt q = pts[i];
+        if (i < fresh) [_settled appendBytes:&q length:sizeof q];
+        else {
+            if (i == fresh) _tailPts.length = 0;
+            [_tailPts appendBytes:&q length:sizeof q];
+        }
+    }
+    if (fresh == total) _tailPts.length = 0;
+    NSUInteger ns = self.settledCount;
+    if (fresh) {
+        // The open chunk runs from its first point to the end. Once it holds kInkChunk points it
+        // is left as it is, and the next one starts at its last point, so the line continues.
+        NSUInteger drawn = ns - fresh;
+        if (!_chunks.count) {
+            _chunkStart = 0;
+            [_chunks addObject:[self newShape]];
+        } else if (drawn - _chunkStart >= kInkChunk) {
+            _chunkStart = drawn - 1;
+            [_chunks addObject:[self newShape]];
+        }
+        [self setShape:_chunks.lastObject points:self.settled + _chunkStart count:ns - _chunkStart];
+    }
+    // The tail continues from the last settled point.
+    [self drawTail];
+    [self drawLead];
 }
 
 - (CAShapeLayer *)newShape {
@@ -815,8 +919,9 @@ static const double kInkHoldSeconds = 0.06;
     NSString *kind = f[0];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    if ([kind isEqualToString:@"b"] && f.count >= 10) {
+    if (([kind isEqualToString:@"b"] && f.count >= 10) || ([kind isEqualToString:@"r"] && f.count >= 24)) {
         // The same id again: the stroke restarts (its style or place changed), nothing to keep.
+        [self endLive];
         NSInteger sid = f.count > 10 ? f[10].integerValue : 0;
         if (sid != _currentId) [self retire];
         [self clear];
@@ -829,36 +934,38 @@ static const double kInkHoldSeconds = 0.06;
         _clip.frame = CGRectMake(f[6].doubleValue, f[7].doubleValue, f[8].doubleValue, f[9].doubleValue);
         _clip.sublayerTransform = CATransform3DMakeTranslation(-_clip.frame.origin.x, -_clip.frame.origin.y, 0);
         _active = YES;
+        if ([kind isEqualToString:@"r"]) {
+            // "r": the line is computed here, in Rust, from this touch's samples (live.rs), with the
+            // page's numbers (exact: strtod of the page's shortest round-trip form): left, top, w,
+            // rw, h, rh, offset, start, ox, oy, k, width, variable.
+            double params[13];
+            for (int i = 0; i < 13; i++) params[i] = strtod(f[11 + i].UTF8String, NULL);
+            _live = opennote_live_new(params, 13);
+            // From the stroke's first sample: the one whose page time is `start`.
+            const double *s = _touch.bytes;
+            NSUInteger n = _touch.length / (4 * sizeof(double)), from = n;
+            for (NSUInteger i = 0; i < n; i++) {
+                if (s[i * 4 + 3] * 1000 + params[6] == params[7]) {
+                    from = i;
+                    break;
+                }
+            }
+            if (from == n) [self endLive]; // not this touch's stroke: the page's ink only
+            for (NSUInteger i = from; _live && i < n; i++) {
+                if (!opennote_live_add(_live, s[i * 4], s[i * 4 + 1], s[i * 4 + 2], s[i * 4 + 3])) [self endLive];
+            }
+            if (_live) {
+                [CATransaction commit];
+                [self liveApply];
+                return;
+            }
+        }
     } else if ([kind isEqualToString:@"u"] && _active && f.count >= 2) {
-        NSUInteger fresh = (NSUInteger)MAX(0, f[1].integerValue);
         NSUInteger total = (f.count - 2) / 3;
-        fresh = MIN(fresh, total);
-        for (NSUInteger i = 0; i < total; i++) {
-            ONInkPt q = { f[2 + i * 3].doubleValue, f[3 + i * 3].doubleValue, f[4 + i * 3].doubleValue };
-            if (i < fresh) [_settled appendBytes:&q length:sizeof q];
-            else {
-                if (i == fresh) _tailPts.length = 0;
-                [_tailPts appendBytes:&q length:sizeof q];
-            }
-        }
-        if (fresh == total) _tailPts.length = 0;
-        NSUInteger ns = self.settledCount;
-        if (fresh) {
-            // The open chunk runs from its first point to the end. Once it holds kInkChunk points it
-            // is left as it is, and the next one starts at its last point, so the line continues.
-            NSUInteger drawn = ns - fresh;
-            if (!_chunks.count) {
-                _chunkStart = 0;
-                [_chunks addObject:[self newShape]];
-            } else if (drawn - _chunkStart >= kInkChunk) {
-                _chunkStart = drawn - 1;
-                [_chunks addObject:[self newShape]];
-            }
-            [self setShape:_chunks.lastObject points:self.settled + _chunkStart count:ns - _chunkStart];
-        }
-        // The tail continues from the last settled point.
-        [self drawTail];
-        [self drawLead];
+        NSMutableData *pts = [NSMutableData dataWithLength:total * sizeof(ONInkPt)];
+        ONInkPt *q = pts.mutableBytes;
+        for (NSUInteger i = 0; i < total; i++) q[i] = (ONInkPt){ f[2 + i * 3].doubleValue, f[3 + i * 3].doubleValue, f[4 + i * 3].doubleValue };
+        [self applyFresh:(NSUInteger)MAX(0, f[1].integerValue) points:q count:total];
     } else if ([kind isEqualToString:@"l"] && _active && f.count >= 2 && f[1].integerValue == _currentId) {
         // The pen lifted and the page's stroke is finished: it runs on to x, y at its end's radius
         // (Stroke.penEnd, where the lead reached), which becomes part of the line; "l,id" alone: it
@@ -871,7 +978,9 @@ static const double kInkHoldSeconds = 0.06;
         }
         _hasRaw = NO;
         _lead.path = NULL;
+        [self endLive];
     } else if ([kind isEqualToString:@"d"] && f.count >= 5) {
+        [self endLive];
         // A whole drawing: replaces the stroke (a pen stroke that snapped to a shape) or the last drawing.
         BOOL wasScene = _active && !_chunks.count && !_tail;
         if (!wasScene) {
@@ -888,6 +997,7 @@ static const double kInkHoldSeconds = 0.06;
             [weakSelf releaseStroke:sid];
         });
     } else if ([kind isEqualToString:@"e"] || [kind isEqualToString:@"c"]) {
+        [self endLive];
         _generation++;
         [self clear];
         _currentId = 0;
@@ -1069,7 +1179,7 @@ static const double kInkHoldSeconds = 0.06;
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, lowPower: %@, thermal: %ld };",
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, lowPower: %@, thermal: %ld };",
                                                      kVersion, fullFrameRate ? @"true" : @"false", pageRate, unlockFailed ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
                                                      info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];

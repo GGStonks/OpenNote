@@ -121,6 +121,13 @@ export const nativePencil = {
   get touching(): boolean {
     return touchActive;
   },
+  /**
+   * performance.now() minus the shell's clock (ms) for the current touch: a sample's timeStamp is
+   * its shell time (s) x 1000 plus this (the shells' Rust live ink computes the page's times so).
+   */
+  get clockOffset(): number {
+    return Number.isFinite(touchOffset) ? touchOffset : offset;
+  },
   /** Where the shell's live ink reaches past the modelled line for the current touch (see `lead`). */
   get lead(): PencilSample | null {
     return lead;

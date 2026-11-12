@@ -10,6 +10,10 @@ import java.nio.charset.StandardCharsets;
  */
 public class OpenNoteRustPlugin {
     private static native byte[] nativeCall(String method, byte[] request);
+    static native long liveNew(double[] params);
+    static native boolean liveAdd(long h, double x, double y, double force, double t);
+    static native double[] liveUpdate(long h);
+    static native void liveFree(long h);
 
     static byte[] frame(String meta, double[] data) {
         byte[] m = meta.getBytes(StandardCharsets.UTF_8);
@@ -34,7 +38,15 @@ public class OpenNoteRustPlugin {
         System.out.println("geometry: " + geo + " (" + reply.length + " bytes)");
         String bad = meta(nativeCall("nope", frame("{}", new double[0])));
         System.out.println("unknown method: " + bad);
-        boolean ok = info.contains("\"geometry\"") && geo.contains("\"strokes\"") && !geo.contains("error") && bad.contains("error");
+        // Native live ink: a 40-sample stroke (identity placement, k = 2), the line in view units.
+        long h = liveNew(new double[] { 0, 0, 1, 1, 1, 1, 0, 1000, 0, 0, 2, 2.8, 1 });
+        boolean added = h != 0;
+        for (int i = 0; i < 40; i++) added &= liveAdd(h, 100 + i * 2.5, 200 + 10 * Math.sin(i / 5.0), 0.3 + 0.01 * i, 1 + i * 0.004);
+        double[] line = liveUpdate(h);
+        liveFree(h);
+        boolean liveOk = added && line != null && line.length > 30 && (line.length - 1) % 3 == 0 && line[0] >= 1 && line[1] > 190 && line[1] < 220;
+        System.out.println("live: " + (line == null ? "null" : ((line.length - 1) / 3) + " points, " + (int) line[0] + " settled, first x " + line[1]));
+        boolean ok = liveOk && info.contains("\"geometry\"") && geo.contains("\"strokes\"") && !geo.contains("error") && bad.contains("error");
         System.out.println(ok ? "JNI OK" : "JNI WRONG");
         if (!ok) System.exit(1);
     }

@@ -179,7 +179,9 @@ Crates, in `crates/` (`cargo test --workspace` passes):
 
 ### Phase 3: writing on the devices
 
-Not started.
+Started inside the current app (2026-11-12): the shells compute the line being written in Rust
+from their own pen samples (CLAUDE.md "Native live ink"), the same line as the page's; not yet
+run on a device. The rest below is not started.
 
 - iOS app in Rust (`objc2`): 240 Hz coalesced Pencil samples, lift handling, palm rejection,
   double tap, haptics.
