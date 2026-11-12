@@ -145,13 +145,15 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         // The same samples, as the page reads them, to the native live ink (Rust, "r").
         ONInkView *liveInk = self.inkView;
         if (phase == 0) [liveInk pencilBegan];
-        for (UITouch *t in samples) {
-            CGPoint p = [t preciseLocationInView:view];
-            CGFloat maxForce = t.maximumPossibleForce > 0 ? t.maximumPossibleForce : 1;
-            [liveInk pencilSampleX:ONAsSent("%.3f", p.x) y:ONAsSent("%.3f", p.y) force:ONAsSent("%.4f", t.force / maxForce)
-                              time:ONAsSent("%.5f", t.timestamp)];
+        if (phase < 2) {
+            for (UITouch *t in samples) {
+                CGPoint p = [t preciseLocationInView:view];
+                CGFloat maxForce = t.maximumPossibleForce > 0 ? t.maximumPossibleForce : 1;
+                [liveInk pencilSampleX:ONAsSent("%.3f", p.x) y:ONAsSent("%.3f", p.y) force:ONAsSent("%.4f", t.force / maxForce)
+                                  time:ONAsSent("%.5f", t.timestamp)];
+            }
+            [liveInk pencilBatchDone];
         }
-        [liveInk pencilBatchDone];
         // No predictedTouches: the web app's ink engine (src/ink/nib.ts) predicts the pen itself.
         [js appendString:@"],[])"];
         [view evaluateJavaScript:js completionHandler:nil];
@@ -170,6 +172,7 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         }
         if (phase >= 2) {
             _pencil = nil;
+            [ink dropLead];
             [ink touchEnded];
         }
     }
@@ -879,7 +882,7 @@ static const double kInkHoldSeconds = 0.06;
 }
 
 - (void)dropLead {
-    if (_lifted || !_hasRaw) return;
+    if (!_hasRaw) return;
     _hasRaw = NO;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -898,9 +901,8 @@ static const double kInkHoldSeconds = 0.06;
 }
 
 - (void)touchEnded {
-    // The pen lifted: the lead stays until the page says where its stroke ends ("l"); dropping it
-    // here pulled the ink's end back at every lift (zoomed in, by several px).
     _lifted = YES;
+    [self dropLead];
     // Safety net: the page normally clears the layer ("e"); if it never does, do not leave ink.
     NSUInteger gen = _generation;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -970,15 +972,7 @@ static const double kInkHoldSeconds = 0.06;
         for (NSUInteger i = 0; i < total; i++) q[i] = (ONInkPt){ f[2 + i * 3].doubleValue, f[3 + i * 3].doubleValue, f[4 + i * 3].doubleValue };
         [self applyFresh:(NSUInteger)MAX(0, f[1].integerValue) points:q count:total];
     } else if ([kind isEqualToString:@"l"] && _active && f.count >= 2 && f[1].integerValue == _currentId) {
-        // The pen lifted and the page's stroke is finished: it runs on to x, y at its end's radius
-        // (Stroke.penEnd, where the lead reached), which becomes part of the line; "l,id" alone: it
-        // ends where the line ends.
-        ONInkPt end;
-        if (f.count >= 4 && [self lineEnd:&end]) {
-            ONInkPt q = { f[2].doubleValue, f[3].doubleValue, end.r };
-            [_tailPts appendBytes:&q length:sizeof q];
-            [self drawTail];
-        }
+        // The pen lifted and the page's stroke is finished: it ends where physical contact ceased.
         _hasRaw = NO;
         _lead.path = NULL;
         [self endLive];

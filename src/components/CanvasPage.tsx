@@ -2235,7 +2235,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     d.nativeSeen = true;
     if (ended) d.nativeEnded = true;
     const lead = nativePencil.lead;
-    d.lead = lead ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null;
+    d.lead = ended ? null : (lead ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null);
     ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
     if (ended && d.finishPending) {
       clearTimeout(d.finishPending.timer);
@@ -2336,12 +2336,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           frames: d.recFrames,
         });
       }
-      // The shell's live ink reached past the modelled line, to the Pencil (its lead): the stroke
-      // runs on to there, as it was seen, instead of pulling back when the pen lifts (zoomed in,
-      // the engine's end a page px or two short was several screen px). Only with the shell's
-      // samples to the end: its lead is where they put it.
-      const end = d.ink && d.nativeEnded && !d.snapped && d.tool === 'pen' ? d.lead : null;
-      if (d.ink && !d.snapped) d.ink.lift(end, d.inkTf ?? inkTransform());
+      // If contact ceases, the ink stops: no synthetic overshoot past lift-off.
+      if (d.ink && !d.snapped) d.ink.lift(null, d.inkTf ?? inkTransform());
       const stroke: Stroke = {
         id: newId('stroke'),
         createdAt: Date.now(),
@@ -2354,8 +2350,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         lineStyle: d.tool === 'pen' ? style.lineStyle ?? 'solid' : 'solid',
         // Pen strokes keep their lift-off samples: Nib leaves them out of the ink (nib.ts, 4b), the
         // same way live and when the stroke is drawn later.
-        points: d.snapped ? d.snapped.points : end ? [...d.points, end] : d.points,
-        ...(end ? { penEnd: true } : {}),
+        points: d.snapped ? d.snapped.points : d.points,
         ...(d.snapped ? { isShape: true, closed: d.snapped.closed, shapeKind: d.snapped.kind } : {}),
         ...(d.tool === 'highlighter' ? { highlightAlpha: style.highlightAlpha } : {}),
       };
@@ -2408,7 +2403,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       ingestSamples(d, d.webBuffer, null);
       d.webBuffer = [];
     }
-    if (!cancelled && d.tool !== 'eraser' && d.tool !== 'lasso') {
+    if (!cancelled && d.tool !== 'eraser' && d.tool !== 'lasso' && (e.pointerType !== 'pen' || e.pressure > 0)) {
       // Include the final sample of the stroke.
       const pt = toPoint(e, d.start, stylusAngles(e.nativeEvent));
       const last = d.points[d.points.length - 1];

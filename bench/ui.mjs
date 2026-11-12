@@ -104,7 +104,7 @@ function frameStats(label, frames) {
 const server = spawn('npx', ['vite', 'preview', '--port', String(PORT), '--strictPort'], { cwd: ROOT, stdio: 'ignore' });
 const cleanup = () => server.kill();
 process.on('exit', cleanup);
-await new Promise((r) => setTimeout(r, 1500));
+await new Promise((r) => setTimeout(r, 3000));
 
 // BENCH_GPU=1: WebGL on this PC's GPU (ANGLE over Vulkan) instead of the software renderer.
 const gpuArgs = process.env.BENCH_GPU ? (process.env.BENCH_GPU_ARGS ?? '--use-angle=vulkan --enable-features=Vulkan').split(' ') : [];
@@ -2174,9 +2174,8 @@ if (ONLY.has('rustlive') && process.argv.includes('--native')) {
   console.log(`rustlive ${verdict}`);
 }
 // --native --only leadend: pen strokes from the shell's samples (window.__opennotePencil), the last
-// move pressing (then the shell's lead reaches its newest sample) or not (no lead). When the pen
-// lifts, the shell must be told to keep its lead ("l,id,x,y" at that sample) or drop it ("l,id"), and
-// the stored stroke must end there (Stroke.penEnd), so the ink does not pull back at the lift.
+// move pressing or lifting. When the pen lifts, contact ceases: the shell must be told to drop its lead
+// ("l,id" without coordinates), and the stored stroke must not have penEnd (reducing overshoot to zero).
 if (ONLY.has('leadend') && process.argv.includes('--native')) {
   await reopen();
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
@@ -2205,7 +2204,7 @@ if (ONLY.has('leadend') && process.argv.includes('--native')) {
     const ls = await page.evaluate(() => window.__inkLs);
     const l = (ls[0] ?? '').split(',');
     const told = l.length >= 4 ? Math.hypot(+l[2] / unit - lx, +l[3] / unit - ly).toFixed(2) + ' px from the lead' : l.length === 2 ? 'no lead' : 'nothing';
-    // The stored stroke (the newest): it runs on to the lead (penEnd) exactly when the shell keeps it.
+    // The stored stroke (the newest): no penEnd, ink stops exactly when contact ceases.
     const penEnd = await page.evaluate(async () => {
       const db = await new Promise((res) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); });
       const notes = await new Promise((res) => { const q = db.transaction('notes').objectStore('notes').getAll(); q.onsuccess = () => res(q.result); });
@@ -2214,7 +2213,8 @@ if (ONLY.has('leadend') && process.argv.includes('--native')) {
       for (const n of notes) for (const pg of n.pages ?? []) for (const s of pg.strokes ?? []) if (!best || (s.createdAt ?? 0) > (best.createdAt ?? 0)) best = s;
       return !!best?.penEnd;
     });
-    const ok = ls.length === 1 && penEnd === pressing && (l.length >= 4) === pressing;
+    const ok = ls.length === 1 && !penEnd && l.length === 2;
+    if (!ok) process.exitCode = 1;
     console.log(`leadend stroke ${k + 1} (last move ${pressing ? 'pressing' : 'lifting'}): shell told ${ls.length} "l" (${told}), stored stroke penEnd ${penEnd}: ${ok ? 'ok' : 'WRONG'}`);
   }
 }

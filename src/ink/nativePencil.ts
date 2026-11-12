@@ -98,6 +98,7 @@ function receive(phase: number, nativeNow: number, data: number[], predicted: nu
   if (ended) {
     touchActive = false;
     touchEnded = true;
+    lead = null;
   }
   if (listener) {
     if (ended) listenerEnded = true;

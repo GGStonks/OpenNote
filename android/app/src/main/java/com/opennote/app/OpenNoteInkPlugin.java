@@ -346,11 +346,7 @@ public class OpenNoteInkPlugin extends Plugin {
                     break;
                 }
                 case "l": {
-                    // The stylus lifted and the page's stroke is finished: it runs on to x, y at its
-                    // end's radius (Stroke.penEnd, where the lead reached), which becomes part of the
-                    // line; "l,id" alone: it ends where the line ends.
                     if (!active || f.length < 2 || Integer.parseInt(f[1]) != currentId) return;
-                    if (f.length >= 4) appendToTail(Float.parseFloat(f[2]), Float.parseFloat(f[3]));
                     hasRaw = false;
                     endLive();
                     break;
@@ -461,16 +457,15 @@ public class OpenNoteInkPlugin extends Plugin {
 
         /** A move without pressure: the line runs on past the lead's sample, a lead back to it showed as a chord. */
         void dropLead() {
-            if (lifted || !hasRaw) return;
+            if (!hasRaw) return;
             hasRaw = false;
             invalidate();
         }
 
         /** Safety net: the page normally clears the ink ("e"); if it never does, do not leave it. */
         void touchEnded() {
-            // The stylus lifted: the lead stays until the page says where its stroke ends ("l");
-            // dropping it here pulled the ink's end back at every lift.
             lifted = true;
+            dropLead();
             int gen = generation;
             postDelayed(() -> {
                 if (generation == gen && active) {
@@ -731,9 +726,9 @@ public class OpenNoteInkPlugin extends Plugin {
             js.append(sx).append(',').append(sy).append(',').append(sf).append(',').append(st).append(',')
                     .append(String.format(Locale.ROOT, "%.4f,%.4f,", Math.PI / 2 - tilt, orient));
             // The same numbers as the page reads them, to the overlay's Rust live ink ("r").
-            if (ink != null) ink.pencilSample(Double.parseDouble(sx), Double.parseDouble(sy), Double.parseDouble(sf), Double.parseDouble(st));
+            if (ink != null && phase < 2) ink.pencilSample(Double.parseDouble(sx), Double.parseDouble(sy), Double.parseDouble(sf), Double.parseDouble(st));
         }
-        if (ink != null) ink.pencilBatchDone();
+        if (ink != null && phase < 2) ink.pencilBatchDone();
         js.append("],[])");
         if (phase >= 2) stylusId = -1;
         view.evaluateJavascript(js.toString(), null);
@@ -758,6 +753,7 @@ public class OpenNoteInkPlugin extends Plugin {
             }
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL:
+                view.dropLead();
                 view.touchEnded();
                 break;
             default:
