@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use nib::geometry::XY;
 
 pub type Bezier = [XY; 4];
@@ -28,11 +29,11 @@ fn dot(a: XY, b: XY) -> f64 {
 }
 
 fn len(a: XY) -> f64 {
-    a.x.hypot(a.y)
+    a.x.js_hypot(a.y)
 }
 
 fn dist(a: XY, b: XY) -> f64 {
-    (a.x - b.x).hypot(a.y - b.y)
+    (a.x - b.x).js_hypot(a.y - b.y)
 }
 
 fn norm(a: XY) -> XY {

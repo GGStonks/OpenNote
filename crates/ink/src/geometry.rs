@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use crate::ink_width::ink_widths;
 use crate::smoothing::settled_smooth;
 use model::{ModeledKind, PenStyle, Point, Stroke};
@@ -46,16 +47,16 @@ pub fn without_backward_lift(pts: &[Point]) -> Vec<Point> {
     let mut j = n - 2;
     let mut d = 0.0;
     while j > 0 && d < 6.0 {
-        d += (pts[j].x - pts[j - 1].x).hypot(pts[j].y - pts[j - 1].y);
+        d += (pts[j].x - pts[j - 1].x).js_hypot(pts[j].y - pts[j - 1].y);
         j -= 1;
     }
     let bx = pts[n - 2].x - pts[j].x;
     let by = pts[n - 2].y - pts[j].y;
-    let bl = bx.hypot(by);
+    let bl = bx.js_hypot(by);
 
     let lx = pts[n - 1].x - pts[n - 2].x;
     let ly = pts[n - 1].y - pts[n - 2].y;
-    let ll = lx.hypot(ly);
+    let ll = lx.js_hypot(ly);
 
     if bl < 1.0 || ll < 0.05 {
         return pts.to_vec();
@@ -185,7 +186,7 @@ pub fn ink_geometry(points: &[Point], s: &Stroke) -> InkGeometry {
 pub fn to_pen_end(mut g: InkGeometry, end: Option<Point>) -> InkGeometry {
     let last = g.pts.last().copied();
     if let (Some(e), Some(l)) = (end, last) {
-        if (e.x - l.x).hypot(e.y - l.y) >= 0.05 {
+        if (e.x - l.x).js_hypot(e.y - l.y) >= 0.05 {
             g.pts.push(ModeledPoint {
                 x: e.x,
                 y: e.y,
@@ -213,7 +214,7 @@ pub fn stroke_geometry(s: &Stroke) -> InkGeometry {
 pub fn dist_to_polyline(p: XY, poly: &[XY]) -> (f64, usize) {
     if poly.len() <= 1 {
         let d = if let Some(first) = poly.first() {
-            (p.x - first.x).hypot(p.y - first.y)
+            (p.x - first.x).js_hypot(p.y - first.y)
         } else {
             0.0
         };
@@ -232,7 +233,7 @@ pub fn dist_to_polyline(p: XY, poly: &[XY]) -> (f64, usize) {
         } else {
             0.0
         };
-        let d = (p.x - a.x - u * dx).hypot(p.y - a.y - u * dy);
+        let d = (p.x - a.x - u * dx).js_hypot(p.y - a.y - u * dy);
         if d < best {
             best = d;
             bi = if u < 0.5 { i - 1 } else { i };
@@ -250,7 +251,7 @@ pub fn wobble(pts: &[XY]) -> (f64, usize) {
     for i in 1..pts.len() {
         let a = pts[i - 1];
         let b = pts[i];
-        let l = (b.x - a.x).hypot(b.y - a.y);
+        let l = (b.x - a.x).js_hypot(b.y - a.y);
         let mut s = 1.0 - carry;
         while s <= l {
             r.push(XY {
@@ -291,7 +292,7 @@ pub fn wobble(pts: &[XY]) -> (f64, usize) {
 pub fn arcs(p: &[XY]) -> Vec<f64> {
     let mut a = vec![0.0; p.len()];
     for i in 1..p.len() {
-        a[i] = a[i - 1] + (p[i].x - p[i - 1].x).hypot(p[i].y - p[i - 1].y);
+        a[i] = a[i - 1] + (p[i].x - p[i - 1].x).js_hypot(p[i].y - p[i - 1].y);
     }
     a
 }

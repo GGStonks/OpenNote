@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use ink::spline::{catmull_rom_beziers, flatten_beziers};
 use ink::{dash_pattern, dash_runs, stroke_geometry, stroke_width, DOT};
 use model::{LineStyle, ShapeKind, Stroke};
@@ -180,7 +181,7 @@ pub fn arrow_head(points: &[XY], s: &Stroke) -> Option<[XY; 3]> {
     for i in (0..(points.len() - 1)).rev() {
         let dx = points[i].x - tip_orig.x;
         let dy = points[i].y - tip_orig.y;
-        if dx.hypot(dy) > 2.0 {
+        if dx.js_hypot(dy) > 2.0 {
             from_orig = points[i];
             found = true;
             break;

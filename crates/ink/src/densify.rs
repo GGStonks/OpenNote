@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use model::Point;
 use std::f64::consts::PI;
 
@@ -69,7 +70,7 @@ impl SampleDensifier {
     fn fill(&mut self, a: Point, pt: Point) -> Vec<Point> {
         let cx = pt.x - a.x;
         let cy = pt.y - a.y;
-        let l = cx.hypot(cy);
+        let l = cx.js_hypot(cy);
         if l < 1e-6 {
             return vec![pt];
         }
@@ -100,7 +101,7 @@ impl SampleDensifier {
 
         let start = self.dir.unwrap_or(chord);
         let tp = self.hist.last();
-        if tp.is_none() || (pt.x - tp.unwrap().x).hypot(pt.y - tp.unwrap().y) >= BASE {
+        if tp.is_none() || (pt.x - tp.unwrap().x).js_hypot(pt.y - tp.unwrap().y) >= BASE {
             self.hist.push(V { x: pt.x, y: pt.y });
             if self.hist.len() > 3 {
                 self.hist.remove(0);

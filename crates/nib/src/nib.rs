@@ -1,3 +1,4 @@
+use crate::geometry::JsMath;
 use crate::geometry::{InkPoint, ModeledPoint, XY, has_real_pressure, sample_times};
 
 #[derive(Clone, Copy, Debug)]
@@ -160,7 +161,7 @@ impl NibModeler {
             if self.raw[i].f >= limit {
                 break;
             }
-            len += (self.raw[i].x - self.raw[i - 1].x).hypot(self.raw[i].y - self.raw[i - 1].y);
+            len += (self.raw[i].x - self.raw[i - 1].x).js_hypot(self.raw[i].y - self.raw[i - 1].y);
             if len > self.params.lift_px {
                 break;
             }
@@ -225,7 +226,7 @@ impl NibModeler {
         }
         let dt = r[b].t - r[a].t;
         if dt > 0.0 {
-            (r[b].x - r[a].x).hypot(r[b].y - r[a].y) / dt
+            (r[b].x - r[a].x).js_hypot(r[b].y - r[a].y) / dt
         } else {
             0.0
         }
@@ -407,7 +408,7 @@ impl NibModeler {
         let p1 = &anchors[i - 1];
         let p2 = &anchors[i];
         let r = &self.raw;
-        let len = (p2.x - p1.x).hypot(p2.y - p1.y);
+        let len = (p2.x - p1.x).js_hypot(p2.y - p1.y);
         let n = 1.max((len / self.params.step).ceil() as usize);
 
         for s in 1..n {

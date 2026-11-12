@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use model::{Point, ShapeKind, Stroke};
 use std::f64::consts::PI;
 
@@ -25,7 +26,7 @@ fn pt(x: f64, y: f64, pressure: f64) -> Point {
 pub fn path_length(pts: &[Point]) -> f64 {
     let mut l = 0.0;
     for i in 1..pts.len() {
-        l += (pts[i].x - pts[i - 1].x).hypot(pts[i].y - pts[i - 1].y);
+        l += (pts[i].x - pts[i - 1].x).js_hypot(pts[i].y - pts[i - 1].y);
     }
     l
 }
@@ -42,7 +43,7 @@ pub fn resample(pts: &[Point], n: usize) -> Vec<Point> {
 
     for i in 1..pts.len() {
         let cur = pts[i];
-        let mut d = (cur.x - prev.x).hypot(cur.y - prev.y);
+        let mut d = (cur.x - prev.x).js_hypot(cur.y - prev.y);
         while acc + d >= step && d > 0.0 {
             let t = (step - acc) / d;
             let q = pt(
@@ -52,7 +53,7 @@ pub fn resample(pts: &[Point], n: usize) -> Vec<Point> {
             );
             out.push(q);
             prev = q;
-            d = (cur.x - prev.x).hypot(cur.y - prev.y);
+            d = (cur.x - prev.x).js_hypot(cur.y - prev.y);
             acc = 0.0;
         }
         acc += d;
@@ -74,7 +75,7 @@ fn dist_to_seg(p: Point, a: Point, b: Point) -> f64 {
     } else {
         0.0
     };
-    (p.x - (a.x + t * dx)).hypot(p.y - (a.y + t * dy))
+    (p.x - (a.x + t * dx)).js_hypot(p.y - (a.y + t * dy))
 }
 
 fn rdp(pts: &[Point], eps: f64) -> Vec<Point> {
@@ -130,7 +131,7 @@ fn angle_at(a: Point, b: Point, c: Point) -> f64 {
     let v1y = a.y - b.y;
     let v2x = c.x - b.x;
     let v2y = c.y - b.y;
-    let m = v1x.hypot(v1y) * v2x.hypot(v2y);
+    let m = v1x.js_hypot(v1y) * v2x.js_hypot(v2y);
     if m == 0.0 {
         return PI;
     }
@@ -153,14 +154,14 @@ fn bbox(pts: &[Point]) -> BBox {
         max_y = max_y.max(p.y);
     }
     BBox {
-        diag: (max_x - min_x).hypot(max_y - min_y),
+        diag: (max_x - min_x).js_hypot(max_y - min_y),
     }
 }
 
 fn detect_line(pts: &[Point], len: f64) -> Option<SnappedShape> {
     let a = pts[0];
     let b = pts[pts.len() - 1];
-    let chord = (b.x - a.x).hypot(b.y - a.y);
+    let chord = (b.x - a.x).js_hypot(b.y - a.y);
     if chord < 12.0 {
         return None;
     }
@@ -274,7 +275,7 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
     }
     let a = pts[0];
     let b = pts[pts.len() - 1];
-    let chord = (b.x - a.x).hypot(b.y - a.y);
+    let chord = (b.x - a.x).js_hypot(b.y - a.y);
     let mut sag = 0.0f64;
     for p in pts {
         sag = sag.max(dist_to_seg(*p, a, b));
@@ -360,7 +361,7 @@ fn detect_arrow(pts: &[Point], diag: f64) -> Option<SnappedShape> {
     if v.len() < 4 || v.len() > 6 {
         return None;
     }
-    let shaft_len = (v[1].x - v[0].x).hypot(v[1].y - v[0].y);
+    let shaft_len = (v[1].x - v[0].x).js_hypot(v[1].y - v[0].y);
     let total = path_length(&v);
     if shaft_len < 0.45 * total || shaft_len < 30.0 {
         return None;
@@ -370,7 +371,7 @@ fn detect_arrow(pts: &[Point], diag: f64) -> Option<SnappedShape> {
 
     let mut wings: Vec<(Point, f64)> = Vec::new();
     for w in &v[2..] {
-        let d = (w.x - tip.x).hypot(w.y - tip.y);
+        let d = (w.x - tip.x).js_hypot(w.y - tip.y);
         if d < 0.06 * shaft_len || d > 0.6 * shaft_len {
             continue;
         }
@@ -386,8 +387,8 @@ fn detect_arrow(pts: &[Point], diag: f64) -> Option<SnappedShape> {
         return None;
     }
     let head_len = (shaft_len * 0.3).min(
-        ((left.unwrap().0.x - tip.x).hypot(left.unwrap().0.y - tip.y)
-            + (right.unwrap().0.x - tip.x).hypot(right.unwrap().0.y - tip.y))
+        ((left.unwrap().0.x - tip.x).js_hypot(left.unwrap().0.y - tip.y)
+            + (right.unwrap().0.x - tip.x).js_hypot(right.unwrap().0.y - tip.y))
             / 2.0,
     );
     let spread = (28.0 * PI) / 180.0;
@@ -457,7 +458,7 @@ fn detect_ellipse(pts: &[Point]) -> Option<SnappedShape> {
         let dy = p.y - cy;
         let u = (dx * c + dy * s) / a;
         let w = (-dx * s + dy * c) / b;
-        err += (u.hypot(w) - 1.0).abs();
+        err += (u.js_hypot(w) - 1.0).abs();
     }
     err /= n;
     if err > 0.16 {
@@ -509,7 +510,7 @@ fn clean_vertices(v: &[Point], closed: bool) -> Vec<Point> {
         let start_i = if closed { 0 } else { 1 };
         for i in start_i..n {
             let prev = (i + n - 1) % n;
-            perim += (out[i].x - out[prev].x).hypot(out[i].y - out[prev].y);
+            perim += (out[i].x - out[prev].x).js_hypot(out[i].y - out[prev].y);
         }
 
         let mut worst = None;
@@ -535,7 +536,7 @@ fn clean_vertices(v: &[Point], closed: bool) -> Vec<Point> {
         for i in 0..end_i {
             let a = out[i];
             let b = out[(i + 1) % n];
-            let l = (b.x - a.x).hypot(b.y - a.y);
+            let l = (b.x - a.x).js_hypot(b.y - a.y);
             if l < short_len {
                 short_len = l;
                 short_idx = Some(i);
@@ -563,7 +564,7 @@ fn regular_polygon(v: &[Point], pts: &[Point], diag: f64) -> Option<Vec<Point>> 
         return None;
     }
     let sides: Vec<f64> = (0..n)
-        .map(|i| (v[(i + 1) % n].x - v[i].x).hypot(v[(i + 1) % n].y - v[i].y))
+        .map(|i| (v[(i + 1) % n].x - v[i].x).js_hypot(v[(i + 1) % n].y - v[i].y))
         .collect();
     let min_side = sides.iter().copied().fold(f64::INFINITY, f64::min);
     let max_side = sides.iter().copied().fold(0.0, f64::max);
@@ -584,7 +585,7 @@ fn regular_polygon(v: &[Point], pts: &[Point], diag: f64) -> Option<Vec<Point>> 
         cx += pts[i].x / pts.len() as f64;
         cy += pts[i].y / pts.len() as f64;
         let q = pts[(i + 1) % pts.len()];
-        len += (q.x - pts[i].x).hypot(q.y - pts[i].y);
+        len += (q.x - pts[i].x).js_hypot(q.y - pts[i].y);
     }
 
     let mut area = 0.0;
@@ -686,7 +687,7 @@ fn detect_polygon(pts: &[Point], diag: f64, closed: bool) -> Option<SnappedShape
             for i in 0..4 {
                 let a = v[i];
                 let b = v[(i + 1) % 4];
-                let l = (b.x - a.x).hypot(b.y - a.y);
+                let l = (b.x - a.x).js_hypot(b.y - a.y);
                 if l > best {
                     best = l;
                     ang = (b.y - a.y).atan2(b.x - a.x);
@@ -750,13 +751,13 @@ pub fn detect_shape(points: &[Point]) -> Option<SnappedShape> {
     let mut near = pts.len() - 1;
 
     for i in (pts.len() * 6 / 10)..pts.len() {
-        if (pts[i].x - start.x).hypot(pts[i].y - start.y)
-            < (pts[near].x - start.x).hypot(pts[near].y - start.y)
+        if (pts[i].x - start.x).js_hypot(pts[i].y - start.y)
+            < (pts[near].x - start.x).js_hypot(pts[near].y - start.y)
         {
             near = i;
         }
     }
-    let gap = (start.x - pts[near].x).hypot(start.y - pts[near].y);
+    let gap = (start.x - pts[near].x).js_hypot(start.y - pts[near].y);
     let closed = gap < 24.0f64.max(0.28 * box_bounds.diag) && len > 2.2 * box_bounds.diag * 0.5;
     if closed && near < pts.len() - 1 {
         pts = resample(&pts[0..=near], 96);

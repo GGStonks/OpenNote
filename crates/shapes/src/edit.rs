@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use ink::stroke_geometry;
 use model::{Point, ShapeKind, Stroke};
 use nib::geometry::XY;
@@ -26,7 +27,7 @@ const MIN_END_SPAN: f64 = 4.0;
 const MAX_CURVE_HANDLES: usize = 12;
 
 fn dist(a: XY, b: XY) -> f64 {
-    (a.x - b.x).hypot(a.y - b.y)
+    (a.x - b.x).js_hypot(a.y - b.y)
 }
 
 fn centroid(pts: &[XY]) -> XY {
@@ -160,7 +161,7 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
 }
 
 pub fn ellipse_points(c: XY, a: XY, rb: f64, n: usize) -> Vec<Point> {
-    let ra = (a.x).hypot(a.y);
+    let ra = (a.x).js_hypot(a.y);
     let ux = if ra > 0.0 { a.x / ra } else { 1.0 };
     let uy = if ra > 0.0 { a.y / ra } else { 0.0 };
     let vx = -uy;

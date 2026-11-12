@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use crate::ink_width::WIDTH_AHEAD;
 use nib::geometry::{ModeledPoint, XY};
 use std::f64::consts::PI;
@@ -41,7 +42,7 @@ pub fn settled_index(pts: &[XY]) -> usize {
     let mut i = pts.len().saturating_sub(1);
     let settle = smooth_settle();
     while i > 0 && back < settle {
-        back += (pts[i].x - pts[i - 1].x).hypot(pts[i].y - pts[i - 1].y);
+        back += (pts[i].x - pts[i - 1].x).js_hypot(pts[i].y - pts[i - 1].y);
         i -= 1;
     }
     i
@@ -55,7 +56,7 @@ pub fn smooth_line(p: &[ModeledPoint], up_to: usize, from: usize) -> Vec<Modeled
 
     let mut at = vec![0.0; n];
     for i in 1..n {
-        at[i] = at[i - 1] + (p[i].x - p[i - 1].x).hypot(p[i].y - p[i - 1].y);
+        at[i] = at[i - 1] + (p[i].x - p[i - 1].x).js_hypot(p[i].y - p[i - 1].y);
     }
 
     let mut cuts = vec![0];

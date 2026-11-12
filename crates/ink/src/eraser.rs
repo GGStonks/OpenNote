@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use crate::geometry::stroke_geometry;
 use crate::spline::{catmull_rom_beziers, flatten_beziers};
 use model::{ModeledKind, Point, ShapeKind, Stroke};
@@ -53,7 +54,7 @@ pub fn dist_to_segment(px: f64, py: f64, a: XY, b: XY) -> f64 {
     } else {
         0.0
     };
-    (px - (a.x + t * dx)).hypot(py - (a.y + t * dy))
+    (px - (a.x + t * dx)).js_hypot(py - (a.y + t * dy))
 }
 
 pub fn inside_polygon(x: f64, y: f64, poly: &[XY]) -> bool {
@@ -94,7 +95,7 @@ pub fn stroke_hit_test(s: &Stroke, x: f64, y: f64, radius: f64) -> bool {
         } else {
             0.0
         };
-        return (pts[0].x - x).hypot(pts[0].y - y) <= r + extra;
+        return (pts[0].x - x).js_hypot(pts[0].y - y) <= r + extra;
     }
     for i in 1..pts.len() {
         if dist_to_segment(x, y, xy_pts[i - 1], xy_pts[i]) <= r {
@@ -186,7 +187,7 @@ fn densify_points(points: &[Point], closed: bool, step: f64) -> Vec<Point> {
         if i > 0 {
             let a = src[i - 1];
             let b = src[i];
-            let d = (b.x - a.x).hypot(b.y - a.y);
+            let d = (b.x - a.x).js_hypot(b.y - a.y);
             let n = (d / step).floor() as usize;
             for k in 1..n {
                 let t = k as f64 / n as f64;
@@ -230,7 +231,7 @@ fn erase_shape(
     if src.len() < 2 {
         return None;
     }
-    let inside = |p: XY| (p.x - x).hypot(p.y - y) <= r;
+    let inside = |p: XY| (p.x - x).js_hypot(p.y - y) <= r;
 
     #[derive(Clone)]
     struct Run {
@@ -262,7 +263,7 @@ fn erase_shape(
         let b = src[i];
         let a_xy = XY { x: a.x, y: a.y };
         let b_xy = XY { x: b.x, y: b.y };
-        let len = (b.x - a.x).hypot(b.y - a.y);
+        let len = (b.x - a.x).js_hypot(b.y - a.y);
 
         for t in circle_cuts(a_xy, b_xy, x, y, r) {
             let p = lerp_point(a, b, t);
@@ -340,7 +341,7 @@ fn erase_shape(
         let mut length = 0.0;
         for i in 1..run.points.len() {
             length += (run.points[i].x - run.points[i - 1].x)
-                .hypot(run.points[i].y - run.points[i - 1].y);
+                .js_hypot(run.points[i].y - run.points[i - 1].y);
         }
         if run.points.len() < 2 || length < 0.5 {
             continue;
@@ -427,7 +428,7 @@ pub fn erase_strokes_partial(
             })
             .collect();
         let pts = densify_points(&g_pts, false, 1.0);
-        let inside = |p: &Point| (p.x - x).hypot(p.y - y) <= r;
+        let inside = |p: &Point| (p.x - x).js_hypot(p.y - y) <= r;
 
         if !pts.iter().any(inside) {
             out.push(s.clone());
@@ -470,7 +471,7 @@ pub fn erase_strokes_partial(
         for (i, p) in pts.iter().enumerate() {
             let prev = if i > 0 { Some(pts[i - 1]) } else { None };
             let step = if let Some(pr) = prev {
-                (p.x - pr.x).hypot(p.y - pr.y)
+                (p.x - pr.x).js_hypot(p.y - pr.y)
             } else {
                 0.0
             };
@@ -487,7 +488,7 @@ pub fn erase_strokes_partial(
                     if inside(&pr) {
                         let c = circle_crossing(*p, pr, x, y, r);
                         run.push(c);
-                        run_from = along + step - (p.x - c.x).hypot(p.y - c.y);
+                        run_from = along + step - (p.x - c.x).js_hypot(p.y - c.y);
                     } else if run.is_empty() {
                         run_from = along + step;
                     }

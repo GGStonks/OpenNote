@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use crate::ink_width::{ink_widths, width_behind};
 use crate::smoothing::{smooth_line, smooth_settle};
 use nib::geometry::{ModeledPoint, XY};
@@ -44,7 +45,7 @@ impl SmoothLiveStroke {
         let mut up_to = raw_xy.len().saturating_sub(1);
         while up_to > 0 && back < settle {
             back += (raw_xy[up_to].x - raw_xy[up_to - 1].x)
-                .hypot(raw_xy[up_to].y - raw_xy[up_to - 1].y);
+                .js_hypot(raw_xy[up_to].y - raw_xy[up_to - 1].y);
             up_to -= 1;
         }
         let up_to = done.max(up_to);
@@ -55,7 +56,7 @@ impl SmoothLiveStroke {
             let mut from = done;
             let mut back = 0.0;
             while from > 0 && back < window {
-                back += (raw[from].x - raw[from - 1].x).hypot(raw[from].y - raw[from - 1].y);
+                back += (raw[from].x - raw[from - 1].x).js_hypot(raw[from].y - raw[from - 1].y);
                 from -= 1;
             }
             let seg = &raw[from..];
@@ -76,7 +77,7 @@ impl SmoothLiveStroke {
             let mut from = up_to;
             let mut back = 0.0;
             while from > 0 && back < width_behind() {
-                back += (raw[from].x - raw[from - 1].x).hypot(raw[from].y - raw[from - 1].y);
+                back += (raw[from].x - raw[from - 1].x).js_hypot(raw[from].y - raw[from - 1].y);
                 from -= 1;
             }
             let tail = self.model.tail();

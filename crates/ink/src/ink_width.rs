@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use nib::geometry::ModeledPoint;
 use std::f64::consts::PI;
 
@@ -37,7 +38,7 @@ pub fn nib_norm() -> f64 {
 }
 
 pub fn nib_factor(dx: f64, dy: f64) -> f64 {
-    let l = dx.hypot(dy);
+    let l = dx.js_hypot(dy);
     if l > 1e-6 {
         nib_extent(dx / l, dy / l) * nib_norm()
     } else {
@@ -58,7 +59,7 @@ pub fn ink_widths(pts: &[ModeledPoint], base: f64) -> Vec<f64> {
     }
     let mut at = vec![0.0; n];
     for i in 1..n {
-        at[i] = at[i - 1] + (pts[i].x - pts[i - 1].x).hypot(pts[i].y - pts[i - 1].y);
+        at[i] = at[i - 1] + (pts[i].x - pts[i - 1].x).js_hypot(pts[i].y - pts[i - 1].y);
     }
 
     let mut raw = vec![0.0; n];

@@ -1,3 +1,4 @@
+use nib::geometry::JsMath;
 use model::LineStyle;
 use nib::geometry::XY;
 
@@ -64,7 +65,7 @@ pub fn dash_runs(
     for i in 1..n {
         let a = pts[i - 1];
         let b = pts[i];
-        let len = (b.x - a.x).hypot(b.y - a.y);
+        let len = (b.x - a.x).js_hypot(b.y - a.y);
         let mut d = 0.0;
 
         while len - d > left {

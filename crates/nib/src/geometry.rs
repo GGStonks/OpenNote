@@ -53,7 +53,7 @@ pub fn sample_times(points: &[InkPoint]) -> Vec<f64> {
         } else {
             let prev_t = out[i - 1];
             let prev_p = &points[i - 1];
-            let dist = (p.x - prev_p.x).hypot(p.y - prev_p.y);
+            let dist = (p.x - prev_p.x).js_hypot(p.y - prev_p.y);
             out.push(prev_t + (4.0f64).max(dist / 0.4));
         }
     }
@@ -77,10 +77,45 @@ pub fn thin_modeled(pts: &[ModeledPoint], min: f64) -> Vec<ModeledPoint> {
     out.push(pts[0]);
     for i in 1..pts.len() - 1 {
         let last = out.last().unwrap();
-        if (pts[i].x - last.x).hypot(pts[i].y - last.y) >= min {
+        if (pts[i].x - last.x).js_hypot(pts[i].y - last.y) >= min {
             out.push(pts[i]);
         }
     }
     out.push(*pts.last().unwrap());
     out
+}
+
+/// `Math.hypot` as the JavaScript engines compute it (JavaScriptCore and V8 alike: scaled by the
+/// larger value, Kahan-summed squares), not libm's `f64::hypot`. The two differ in the last bit,
+/// which is enough to flip a comparison of two equal gaps (the smoothing's window, a corner cut)
+/// and move a point of the drawn line by a fraction of a pixel: every port of a TypeScript
+/// `Math.hypot` calls this, so the Rust line is the app's line.
+pub trait JsMath {
+    fn js_hypot(self, y: f64) -> f64;
+}
+
+impl JsMath for f64 {
+    #[inline]
+    fn js_hypot(self, y: f64) -> f64 {
+        let x = self;
+        if x.is_infinite() || y.is_infinite() {
+            return f64::INFINITY;
+        }
+        if x.is_nan() || y.is_nan() {
+            return f64::NAN;
+        }
+        let max = x.abs().max(y.abs());
+        if max == 0.0 {
+            return 0.0;
+        }
+        let (mut sum, mut compensation) = (0.0f64, 0.0f64);
+        for v in [x, y] {
+            let n = v / max;
+            let summand = n * n - compensation;
+            let preliminary = sum + summand;
+            compensation = (preliminary - sum) - summand;
+            sum = preliminary;
+        }
+        sum.sqrt() * max
+    }
 }
