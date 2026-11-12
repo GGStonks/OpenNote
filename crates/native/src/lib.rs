@@ -79,9 +79,10 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
+        "renderThumbnail" => render_thumbnail(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -111,6 +112,62 @@ fn live_replay(meta: &str) -> Result<(String, Vec<u8>), String> {
     let settled = l.update(&mut out);
     let line: Vec<[f64; 3]> = out.chunks(3).map(|c| [c[0], c[1], c[2]]).collect();
     Ok((json!({ "settled": settled, "line": line }).to_string(), Vec::new()))
+}
+
+#[derive(Deserialize)]
+struct RenderThumbReq {
+    width: usize,
+    height: usize,
+    #[serde(rename = "paperStyle")]
+    paper_style: Option<String>,
+    #[serde(rename = "paperColor")]
+    paper_color: Option<String>,
+    strokes: Vec<Stroke>,
+}
+
+fn render_thumbnail(meta: &str) -> Result<(String, Vec<u8>), String> {
+    let t0 = clock_ms();
+    let req: RenderThumbReq = serde_json::from_str(meta).map_err(|e| format!("renderThumbnail request: {e}"))?;
+    if req.width == 0 || req.height == 0 {
+        return Err("invalid dimensions".into());
+    }
+
+    let p_style = match req.paper_style.as_deref() {
+        Some("ruled") => Some(model::PaperStyle::Ruled),
+        Some("lines") => Some(model::PaperStyle::Lines),
+        Some("grid") => Some(model::PaperStyle::Grid),
+        Some("graph") => Some(model::PaperStyle::Graph),
+        Some("dots") => Some(model::PaperStyle::Dots),
+        Some("blank") | None => Some(model::PaperStyle::Blank),
+        _ => Some(model::PaperStyle::Ruled),
+    };
+
+    let p_color = req.paper_color.map(|c| {
+        if c.starts_with('#') {
+            model::PaperColor::Hex(c)
+        } else {
+            model::PaperColor::Name(c)
+        }
+    }).unwrap_or_else(|| model::PaperColor::Name("white".to_string()));
+
+    let mut buf = renderer::PixelBuffer::new(req.width, req.height);
+    let scale = (req.width as f64 / 816.0).min(req.height as f64 / 1056.0);
+    let renderer = renderer::Renderer::new(scale, 0.0, 0.0);
+
+    let mut ops = Vec::new();
+    for s in &req.strokes {
+        ops.extend(renderer::builder::build_stroke_ops(s));
+    }
+
+    renderer.render_scene(&mut buf, &ops, p_style, Some(&p_color));
+
+    let reply_meta = json!({
+        "width": req.width,
+        "height": req.height,
+        "ms": clock_ms() - t0,
+    });
+
+    Ok((reply_meta.to_string(), buf.data))
 }
 
 #[derive(Deserialize)]

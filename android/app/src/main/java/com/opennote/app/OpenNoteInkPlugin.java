@@ -287,12 +287,15 @@ public class OpenNoteInkPlugin extends Plugin {
             double[] p = new double[13];
             for (int i = 0; i < 13; i++) p[i] = Double.parseDouble(f[11 + i]);
             int from = -1;
+            double bestDiff = 2.0; // 2 ms tolerance
             for (int i = 0; i < touchCount; i++) {
-                if (touch[i * 4 + 3] * 1000 + p[6] == p[7]) {
+                double diff = Math.abs((touch[i * 4 + 3] * 1000.0 + p[6]) - p[7]);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
                     from = i;
-                    break;
                 }
             }
+            if (from < 0 && touchCount > 0) from = 0; // fallback to start of current touch
             if (from < 0) return; // not this touch's stroke: the page's ink only
             live = OpenNoteRustPlugin.liveNew(p);
             for (int i = from; live != 0 && i < touchCount; i++) {

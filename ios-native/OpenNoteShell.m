@@ -41,7 +41,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.3";
+static NSString *const kVersion = @"2.9.4-rs.4";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -944,13 +944,16 @@ static const double kInkHoldSeconds = 0.06;
             // From the stroke's first sample: the one whose page time is `start`.
             const double *s = _touch.bytes;
             NSUInteger n = _touch.length / (4 * sizeof(double)), from = n;
+            double bestDiff = 2.0; // 2 ms tolerance (samples are ~4.17 ms apart; absorbs FMA vs separate rounding)
             for (NSUInteger i = 0; i < n; i++) {
-                if (s[i * 4 + 3] * 1000 + params[6] == params[7]) {
+                double diff = fabs((s[i * 4 + 3] * 1000.0 + params[6]) - params[7]);
+                if (diff < bestDiff) {
+                    bestDiff = diff;
                     from = i;
-                    break;
                 }
             }
-            if (from == n) [self endLive]; // not this touch's stroke: the page's ink only
+            if (from == n && n > 0) from = 0; // fallback to start of current touch
+            if (from == n) [self endLive]; // no touch samples available: the page's ink only
             for (NSUInteger i = from; _live && i < n; i++) {
                 if (!opennote_live_add(_live, s[i * 4], s[i * 4 + 1], s[i * 4 + 2], s[i * 4 + 3])) [self endLive];
             }

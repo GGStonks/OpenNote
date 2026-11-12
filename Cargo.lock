@@ -1315,6 +1315,7 @@ dependencies = [
  "jni",
  "model",
  "nib",
+ "renderer",
  "serde",
  "serde_json",
 ]
