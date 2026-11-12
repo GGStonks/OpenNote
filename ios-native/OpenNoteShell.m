@@ -14,7 +14,8 @@
 //      pdfPage the print layout as a PDF without the dialog (PDF export); printPdf prints a PDF.
 //      haptic UIImpactFeedbackGenerator tick (smart-pen snapping).
 //      rust   runs a method of the app's Rust library (crates/native, linked statically) on a
-//             framed request, off the main thread; src/services/rustCore.ts is the page's side.
+//             framed request, off the main thread, base64 (the fallback: the page posts binary to
+//             opennote://app/__rust/<method>, ONSchemeHandler); src/services/rustCore.ts.
 //  - Apple Pencil double-tap is forwarded as the DOM event "opennote:pencilDoubleTap".
 //  - 240 Hz Pencil input: WKWebView delivers pointer events once per display frame and has no
 //    getCoalescedEvents, so the window (ONWindow sendEvent:, ahead of all gesture recognizers and
@@ -40,7 +41,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs";
+static NSString *const kVersion = @"2.9.4-rs.2";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -169,6 +170,51 @@ static NSString *ONInboxDir(void) {
 
 #pragma mark - Bundled web app over opennote://app/
 
+// The app's Rust library (crates/native/src/lib.rs: methods and framing).
+extern uint8_t *opennote_rs_call(const char *method, const uint8_t *input, size_t len, size_t *out_len);
+extern void opennote_rs_free(uint8_t *ptr, size_t len);
+
+// One Rust call at a time, in order, never on the main thread.
+static dispatch_queue_t ONRustQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("opennote.rust", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    });
+    return q;
+}
+
+// Runs a Rust method on a framed request (on ONRustQueue); the framed reply.
+static NSData *ONRustRun(NSString *method, NSData *request) {
+    size_t outLen = 0;
+    uint8_t *out = opennote_rs_call(method.UTF8String, request.bytes, request.length, &outLen);
+    NSData *reply = [NSData dataWithBytes:out length:outLen];
+    opennote_rs_free(out, outLen);
+    return reply;
+}
+
+// A request's body: WebKit gives it as HTTPBody or as a stream.
+static NSData *ONRequestBody(NSURLRequest *req) {
+    if (req.HTTPBody) return req.HTTPBody;
+    NSInputStream *in = req.HTTPBodyStream;
+    if (!in) return nil;
+    NSMutableData *body = [NSMutableData data];
+    uint8_t buf[65536];
+    [in open];
+    NSInteger n;
+    while ((n = [in read:buf maxLength:sizeof buf]) > 0) [body appendBytes:buf length:(NSUInteger)n];
+    [in close];
+    return n < 0 ? nil : body;
+}
+
+// Scheme tasks still running (main thread only): a stopped task must not be answered.
+static NSMutableSet *ONLiveTasks(void) {
+    static NSMutableSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [NSMutableSet set]; });
+    return s;
+}
+
 @interface ONSchemeHandler : NSObject <WKURLSchemeHandler>
 @property (nonatomic, copy) NSString *root;
 @end
@@ -195,6 +241,30 @@ static NSString *ONMimeType(NSString *ext) {
     NSURL *url = task.request.URL;
     NSString *path = url.path.length > 1 ? url.path : @"/index.html";
     path = [path stringByRemovingPercentEncoding] ?: path;
+    if ([path hasPrefix:@"/__rust/"] && [task.request.HTTPMethod isEqualToString:@"POST"]) {
+        // The app's Rust library, binary both ways (src/services/rustCore.ts): no base64, no JSON.
+        NSString *method = [path substringFromIndex:8];
+        NSData *request = ONRequestBody(task.request);
+        [ONLiveTasks() addObject:task];
+        dispatch_async(ONRustQueue(), ^{
+            NSData *reply = request ? ONRustRun(method, request) : nil;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (![ONLiveTasks() containsObject:task]) return;
+                [ONLiveTasks() removeObject:task];
+                NSInteger status = reply ? 200 : 400;
+                NSData *body = reply ?: [NSData data];
+                NSHTTPURLResponse *response = [[NSHTTPURLResponse alloc] initWithURL:url statusCode:status HTTPVersion:@"HTTP/1.1" headerFields:@{
+                    @"Content-Type": @"application/octet-stream",
+                    @"Content-Length": [NSString stringWithFormat:@"%lu", (unsigned long)body.length],
+                    @"Cache-Control": @"no-store",
+                }];
+                [task didReceiveResponse:response];
+                [task didReceiveData:body];
+                [task didFinish];
+            });
+        });
+        return;
+    }
     NSString *file = [[self.root stringByAppendingPathComponent:path] stringByStandardizingPath];
 
     NSData *data = nil;
@@ -227,6 +297,7 @@ static NSString *ONMimeType(NSString *ext) {
 }
 
 - (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)task {
+    [ONLiveTasks() removeObject:task];
 }
 
 @end
@@ -1119,20 +1190,8 @@ static const double kInkHoldSeconds = 0.06;
     });
 }
 
-// The app's Rust library (crates/native/src/lib.rs: methods and framing).
-extern uint8_t *opennote_rs_call(const char *method, const uint8_t *input, size_t len, size_t *out_len);
-extern void opennote_rs_free(uint8_t *ptr, size_t len);
-
-// One Rust call at a time, in order, never on the main thread.
-static dispatch_queue_t ONRustQueue(void) {
-    static dispatch_queue_t q;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        q = dispatch_queue_create("opennote.rust", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
-    });
-    return q;
-}
-
+// The `rust` command: base64 over the message handler. The page uses it only where the binary
+// route (POST opennote://app/__rust/<method>, ONSchemeHandler) failed.
 - (void)handleRust:(NSDictionary *)msg reply:(void (^)(id, NSString *))reply {
     NSString *method = [msg[@"method"] description] ?: @"";
     NSString *b64 = [msg[@"data"] isKindOfClass:[NSString class]] ? msg[@"data"] : @"";
@@ -1142,10 +1201,7 @@ static dispatch_queue_t ONRustQueue(void) {
             dispatch_async(dispatch_get_main_queue(), ^{ reply(@{@"error": @"Request is not base64"}, nil); });
             return;
         }
-        size_t outLen = 0;
-        uint8_t *out = opennote_rs_call(method.UTF8String, request.bytes, request.length, &outLen);
-        NSString *data = [[NSData dataWithBytesNoCopy:out length:outLen freeWhenDone:NO] base64EncodedStringWithOptions:0];
-        opennote_rs_free(out, outLen);
+        NSString *data = [ONRustRun(method, request) base64EncodedStringWithOptions:0];
         dispatch_async(dispatch_get_main_queue(), ^{ reply(@{@"data": data ?: @""}, nil); });
     });
 }

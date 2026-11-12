@@ -312,7 +312,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
                     const same = r.differing === 0 ? 'same lines' : `${r.differing} lines differ`;
                     setRustMsg({
                       ok: r.differing === 0,
-                      msg: `"${r.title}": ${r.strokes} strokes, ${r.points} points. TypeScript ${r.tsMs.toFixed(0)} ms (main thread); Rust ${r.rustTotalMs.toFixed(0)} ms in all: ${r.pageMs.toFixed(0)} ms on the main thread, ${r.rustMs.toFixed(0)} ms Rust's own (off it). ${same} (largest difference ${Number.isFinite(r.maxDiff) ? r.maxDiff.toExponential(1) : '—'} px). In the crash report as rust-check.`,
+                      msg: `"${r.title}": ${r.strokes} strokes, ${r.points} points. TypeScript ${r.tsMs.toFixed(0)} ms (main thread); Rust ${r.rustTotalMs.toFixed(0)} ms in all: ${r.pageMs.toFixed(0)} ms on the main thread, ${r.rustMs.toFixed(0)} ms Rust's own (off it), ${r.via}. ${same} (largest difference ${Number.isFinite(r.maxDiff) ? r.maxDiff.toExponential(1) : '—'} px). In the crash report as rust-check.`,
                     });
                   } catch (err) {
                     setRustMsg({ ok: false, msg: err instanceof Error ? err.message : String(err) });

@@ -77,31 +77,99 @@ export interface RustReply {
   data: Uint8Array;
   /** Time the page waited for the reply (bridge and Rust, off the main thread). */
   waitMs: number;
+  /** How the request and reply crossed the bridge. */
+  via: 'binary' | 'base64';
 }
 
-/** One call: `meta` as JSON and `data` framed, the reply unframed. Throws when the bridge fails. */
+/** Android's binary route: the object OpenNoteRustPlugin injects (addWebMessageListener). */
+interface RustPort {
+  postMessage(data: ArrayBuffer): void;
+  onmessage: ((e: { data: ArrayBuffer }) => void) | null;
+}
+const port = (): RustPort | undefined => (window as unknown as { OpenNoteRustPort?: RustPort }).OpenNoteRustPort;
+const waiting = new Map<number, (reply: Uint8Array) => void>();
+let nextId = 1;
+
+function viaPort(p: RustPort, method: string, req: Uint8Array): Promise<Uint8Array> {
+  if (!p.onmessage) {
+    p.onmessage = (e) => {
+      const bytes = new Uint8Array(e.data);
+      const id = new DataView(e.data).getUint32(0, true);
+      waiting.get(id)?.(bytes.subarray(4));
+      waiting.delete(id);
+    };
+  }
+  const id = nextId++;
+  const name = new TextEncoder().encode(method);
+  const msg = new Uint8Array(5 + name.length + req.length);
+  new DataView(msg.buffer).setUint32(0, id, true);
+  msg[4] = name.length;
+  msg.set(name, 5);
+  msg.set(req, 5 + name.length);
+  return new Promise((resolve) => {
+    waiting.set(id, resolve);
+    p.postMessage(msg.buffer);
+  });
+}
+
+/** iOS: binary unless the shell's scheme route failed once (then base64 for the session). */
+let iosBinary = true;
+
+/**
+ * One call: `meta` as JSON and `data` framed, the reply unframed. Binary both ways where the
+ * shell can (iOS: POST opennote://app/__rust/<method>; Android: OpenNoteRustPort), else base64
+ * through the message bridge (on a Galaxy Tab A8 ~1.5 s for a 54,000-point request, more than
+ * Rust's own work). Throws when the bridge fails.
+ */
 export async function rustCall(method: string, meta: unknown, data: Uint8Array = new Uint8Array(0)): Promise<RustReply> {
   const m = new TextEncoder().encode(JSON.stringify(meta));
   const req = new Uint8Array(4 + m.length + data.length);
   new DataView(req.buffer).setUint32(0, m.length, true);
   req.set(m, 4);
   req.set(data, 4 + m.length);
-  const b64 = bytesToBase64(req);
-  const sent = performance.now();
-  let reply: string;
+  // Only the waiting counts as off the main thread (base64 is the page's own work).
+  let waitMs = 0;
+  const wait = async <T>(p: Promise<T>): Promise<T> => {
+    const t = performance.now();
+    try {
+      return await p;
+    } finally {
+      waitMs += performance.now() - t;
+    }
+  };
+  let bytes: Uint8Array | null = null;
+  let via: RustReply['via'] = 'binary';
   if (platformKind() === 'ios') {
-    const res = await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'rust', method, data: b64 });
-    if (res?.error) throw new Error(String(res.error));
-    reply = res?.data ?? '';
+    if (iosBinary) {
+      try {
+        const res = await wait(fetch(`/__rust/${method}`, { method: 'POST', body: req, cache: 'no-store' }));
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        bytes = new Uint8Array(await wait(res.arrayBuffer()));
+      } catch (err) {
+        iosBinary = false;
+        crashLog.event('rust-binary-failed', { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    if (!bytes) {
+      via = 'base64';
+      const b64 = bytesToBase64(req);
+      const res = await wait(window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'rust', method, data: b64 }));
+      if (res?.error) throw new Error(String(res.error));
+      bytes = fromBase64(res?.data ?? '');
+    }
   } else {
-    if (!plugin) throw new Error('no Rust library');
-    reply = (await plugin.call({ method, data: b64 })).data;
+    const p = port();
+    if (p) bytes = await wait(viaPort(p, method, req));
+    else {
+      if (!plugin) throw new Error('no Rust library');
+      via = 'base64';
+      const b64 = bytesToBase64(req);
+      bytes = fromBase64((await wait(plugin.call({ method, data: b64 }))).data);
+    }
   }
-  const waitMs = performance.now() - sent;
-  const bytes = fromBase64(reply);
   if (bytes.length < 4) throw new Error('short reply');
   const n = new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true);
-  return { meta: JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + n))), data: bytes.subarray(4 + n), waitMs };
+  return { meta: JSON.parse(new TextDecoder().decode(bytes.subarray(4, 4 + n))), data: bytes.subarray(4 + n), waitMs, via };
 }
 
 /** A stroke's points as x, y, pressure, t (NaN: none), from its packed array while it has one. */
@@ -147,6 +215,7 @@ export interface GeometryRun {
   pageMs: number;
   /** Rust's own share. */
   rustMs: number;
+  via: RustReply['via'];
   lines: InkGeometry[];
 }
 
@@ -164,7 +233,7 @@ export async function rustGeometry(strokes: Stroke[]): Promise<GeometryRun> {
   const heads = strokes.map((s, i) => ({
     tool: s.tool, penStyle: s.penStyle ?? null, isShape: !!s.isShape, modeled: s.modeled ?? null, penEnd: !!s.penEnd, width: s.width, n: parts[i].n,
   }));
-  const { meta, data, waitMs } = await rustCall('geometry', { strokes: heads }, new Uint8Array(vals.buffer));
+  const { meta, data, waitMs, via } = await rustCall('geometry', { strokes: heads }, new Uint8Array(vals.buffer));
   if (meta.error) throw new Error(String(meta.error));
   const out = new Float64Array(data.slice().buffer);
   const lines: InkGeometry[] = [];
@@ -181,7 +250,7 @@ export async function rustGeometry(strokes: Stroke[]): Promise<GeometryRun> {
   }
   if (lines.length !== strokes.length || o !== out.length) throw new Error('geometry reply does not fit the request');
   const ms = performance.now() - t0;
-  return { strokes: strokes.length, points: total, ms, pageMs: ms - waitMs, rustMs: Number(meta.ms) || 0, lines };
+  return { strokes: strokes.length, points: total, ms, pageMs: ms - waitMs, rustMs: Number(meta.ms) || 0, via, lines };
 }
 
 const inFlight = new WeakMap<Stroke[], Promise<void>>();
@@ -204,7 +273,7 @@ export function prepareGeometry(strokes: Stroke[]): Promise<void> {
       todo.forEach((s, i) => {
         if (!hasStrokeGeometry(s)) setStrokeGeometry(s, run.lines[i]);
       });
-      crashLog.event('rust-geometry', { strokes: run.strokes, points: run.points, ms: Math.round(run.ms), pageMs: Math.round(run.pageMs), rustMs: Math.round(run.rustMs) });
+      crashLog.event('rust-geometry', { strokes: run.strokes, points: run.points, ms: Math.round(run.ms), pageMs: Math.round(run.pageMs), rustMs: Math.round(run.rustMs), via: run.via });
     } catch (err) {
       crashLog.event('rust-failed', { method: 'geometry', error: err instanceof Error ? err.message : String(err) });
     }
@@ -222,6 +291,7 @@ export interface RustCheck {
   rustTotalMs: number;
   pageMs: number;
   rustMs: number;
+  via: RustReply['via'];
   /** Largest difference between the two, in page px (positions and widths). */
   maxDiff: number;
   /** Lines differing by more than 1e-4 px. */
@@ -258,9 +328,9 @@ export async function rustCheck(strokes: Stroke[]): Promise<RustCheck> {
     // Short enough to reproduce on the PC from the report.
     pts: w.points.length <= 200 ? w.points.map((p) => [p.x, p.y, p.pressure, p.t ?? NaN]) : undefined,
   };
-  const result: RustCheck = { strokes: ink.length, points: run.points, tsMs, rustTotalMs: run.ms, pageMs: run.pageMs, rustMs: run.rustMs, maxDiff, differing, worst };
+  const result: RustCheck = { strokes: ink.length, points: run.points, tsMs, rustTotalMs: run.ms, pageMs: run.pageMs, rustMs: run.rustMs, via: run.via, maxDiff, differing, worst };
   crashLog.event('rust-check', {
-    strokes: result.strokes, points: result.points, tsMs: Math.round(tsMs), rustTotalMs: Math.round(run.ms), pageMs: Math.round(run.pageMs), rustMs: Math.round(run.rustMs),
+    strokes: result.strokes, points: result.points, tsMs: Math.round(tsMs), rustTotalMs: Math.round(run.ms), pageMs: Math.round(run.pageMs), rustMs: Math.round(run.rustMs), via: run.via,
     maxDiff: Number.isFinite(maxDiff) ? Number(maxDiff.toExponential(2)) : 'length', differing, worst,
   });
   return result;

@@ -23,7 +23,20 @@ use model::{ModeledKind, PenStyle, Point, Stroke};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::time::Instant;
+
+/// Milliseconds on a monotonic clock where there is one (WebAssembly has none here: the page
+/// times the call itself, and `ms` is 0).
+#[cfg(not(target_arch = "wasm32"))]
+fn clock_ms() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static T0: OnceLock<Instant> = OnceLock::new();
+    T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+#[cfg(target_arch = "wasm32")]
+fn clock_ms() -> f64 {
+    0.0
+}
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -97,7 +110,7 @@ fn f64s(data: &[u8]) -> Result<Vec<f64>, String> {
 }
 
 fn geometry(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
-    let start = Instant::now();
+    let start = clock_ms();
     let req: GeometryRequest = serde_json::from_str(meta).map_err(|e| format!("geometry request: {e}"))?;
     let vals = f64s(data)?;
     let total: usize = req.strokes.iter().map(|s| s.n).sum();
@@ -137,7 +150,7 @@ fn geometry(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
         }
         out_meta.push(json!({ "n": g.pts.len(), "widths": g.widths.is_some(), "width": g.width }));
     }
-    let ms = start.elapsed().as_secs_f64() * 1000.0;
+    let ms = clock_ms() - start;
     Ok((json!({ "strokes": out_meta, "ms": ms }).to_string(), out))
 }
 
@@ -167,6 +180,13 @@ pub unsafe extern "C" fn opennote_rs_free(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
         drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(ptr, len)));
     }
+}
+
+/// Memory for a request (WebAssembly: the page writes the method name and the request here, then
+/// calls `opennote_rs_call`, and gives both back to `opennote_rs_free`).
+#[no_mangle]
+pub extern "C" fn opennote_rs_alloc(len: usize) -> *mut u8 {
+    Box::into_raw(vec![0u8; len].into_boxed_slice()) as *mut u8
 }
 
 // ------------------------------------------------------------------------------------------------

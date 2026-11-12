@@ -36,7 +36,13 @@ into the app: the iOS shell links it statically (`scripts/build-ios.sh`, `rust` 
 `opennote` handler), Android loads `libopennote_native.so` (`OpenNoteRustPlugin`, built into the
 git-ignored jniLibs by `scripts/build-rust.sh`: run it before an Android build, or the plugin
 reports the library missing and the page stays on TypeScript). One framed call for both
-(crates/native/src/lib.rs), `src/services/rustCore.ts` the page's side. Rust computes every stroke's
+(crates/native/src/lib.rs), `src/services/rustCore.ts` the page's side, binary both ways: iOS
+POSTs to `opennote://app/__rust/<method>` (ONSchemeHandler), Android posts array buffers to
+`OpenNoteRustPort` (addWebMessageListener). Base64 through the message bridge is only the fallback
+(old WebViews, a failed POST): on a Galaxy Tab A8 it spent ~1.5 s moving a 54,000-point request,
+more than Rust's own work (1.7 s, against TypeScript's 3.1 s on the main thread). Rust compiled to
+WebAssembly was measured too: barely faster than TypeScript in V8 (2.2 against 2.4 µs per point;
+native 1.1), its `exp`/`atan2` are software there. The logs say which route (`via`). Rust computes every stroke's
 drawn line (`strokeGeometry`'s cache, `prepareGeometry`) before the GPU ink is prepared
 (usePinchInk) and before a thumbnail is drawn (thumbCache), off the main thread; the live line
 while writing stays TypeScript. That line must be TypeScript's point for point:
@@ -45,7 +51,7 @@ kind of stroke), and Rust ports `Math.hypot` as `js_hypot` (libm's last bit flip
 window). Settings > Diagnostics: "Rust ink preparation" (off: TypeScript, localStorage
 `opennote_rust`) and "Rust check" (the largest note both ways: same lines, times; `rust-check` in
 the crash report, each preparation `rust-geometry`). `npm run bench:ui -- --only rustcore` (alone:
-a stand-in iOS shell answering with the real library), `crates/native/tests/jni/run.sh` (the JNI
+a stand-in iOS shell answering with the real library, binary; `BENCH_RUST_VIA=base64` the fallback), `crates/native/tests/jni/run.sh` (the JNI
 entry point from a JVM). On 2026-11-12 the headless emulator (`on20x9`, swiftshader or guest GPU)
 crashed as this build started (qemu itself, exit 139): the Android side is checked from the JVM.
 

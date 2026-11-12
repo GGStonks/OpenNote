@@ -1522,6 +1522,15 @@ if (ONLY.has('rustcore')) {
   const cli = join(root, 'target/release/opennote_native_cli');
   await page.exposeFunction('__benchRust', (method, b64) =>
     execFileSync(cli, [method], { input: Buffer.from(b64, 'base64'), maxBuffer: 1 << 30 }).toString('base64'));
+  // The shell's binary route (POST opennote://app/__rust/<method>); BENCH_RUST_VIA=base64 leaves it
+  // out, so the page must fall back to the message handler.
+  const viaBase64 = process.env.BENCH_RUST_VIA === 'base64';
+  if (!viaBase64) {
+    await page.route('**/__rust/*', (route) => route.fulfill({
+      status: 200, contentType: 'application/octet-stream',
+      body: execFileSync(cli, [route.request().url().split('/__rust/')[1]], { input: route.request().postDataBuffer(), maxBuffer: 1 << 30 }),
+    }));
+  }
   await page.addInitScript(() => {
     window.OpenNoteNative = { platform: 'ios', version: 'bench' };
     window.webkit = {
@@ -1545,12 +1554,13 @@ if (ONLY.has('rustcore')) {
   }
   for (const e of ev) console.log(`rustcore ${e.kind} ${JSON.stringify({ ...e, t: undefined, kind: undefined })}`);
   const geo = ev.findIndex((e) => e.kind === 'rust-geometry'), ready = ev.findIndex((e) => e.kind === 'gl-ready');
-  if (geo < 0 || ready < geo || ev.some((e) => e.kind === 'rust-failed')) {
+  const wrongRoute = ev.some((e) => e.kind === 'rust-geometry' && e.via !== (viaBase64 ? 'base64' : 'binary'));
+  if (geo < 0 || ready < geo || wrongRoute || ev.some((e) => e.kind === 'rust-failed')) {
     console.log('rustcore FAIL: Rust did not prepare the lines before the GPU ink');
     process.exitCode = 1;
   }
   const r = await page.evaluate(() => window.__opennoteRust.check());
-  console.log(`rustcore check "${r.title}": ${r.strokes} strokes, ${r.points} points; TypeScript ${r.tsMs.toFixed(0)} ms, Rust ${r.rustTotalMs.toFixed(0)} ms (page ${r.pageMs.toFixed(0)}, its own ${r.rustMs.toFixed(0)}); ${r.differing} lines differ, largest ${r.maxDiff.toExponential(1)} px (${CPU}x slower CPU)`);
+  console.log(`rustcore check "${r.title}": ${r.strokes} strokes, ${r.points} points; TypeScript ${r.tsMs.toFixed(0)} ms, Rust ${r.rustTotalMs.toFixed(0)} ms (page ${r.pageMs.toFixed(0)}, its own ${r.rustMs.toFixed(0)}, ${r.via}); ${r.differing} lines differ, largest ${r.maxDiff.toExponential(1)} px (${CPU}x slower CPU)`);
   if (r.worst) console.log(`rustcore worst ${JSON.stringify(r.worst)}`);
   if (r.differing) process.exitCode = 1;
 }
