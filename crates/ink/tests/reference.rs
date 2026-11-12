@@ -155,3 +155,51 @@ fn ink_pipeline_matches_typescript() {
     }
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// The densifier and the live line (SmoothLiveStroke, what the shells draw while the pen is down),
+/// replayed from the recorded samples as bench/rustRef.ts does: the densified points, and the live
+/// line at the stroke's middle sample and its last, to 1e-4 px.
+#[test]
+fn densify_and_live_line_match_typescript() {
+    use ink::{SampleDensifier, SmoothLiveStroke};
+    use model::Point;
+    let refs = reference();
+    let mut failures = Vec::new();
+    let mut compared = 0;
+    for r in refs["strokes"].as_array().unwrap() {
+        let id = r["id"].as_str().unwrap_or("?");
+        let real = r["realPressure"].as_bool().unwrap();
+        let width = stroke_width(&stroke_of(r));
+        let lives: Vec<&Value> = r["live"].as_array().unwrap().iter().collect();
+        let mut dens = SampleDensifier::new();
+        let mut live = SmoothLiveStroke::new();
+        let mut points: Vec<[f64; 4]> = Vec::new();
+        for (k, s) in r["samples"].as_array().unwrap().iter().enumerate() {
+            let s = nums(s); // x, y, t, force
+            let pt = Point { x: s[0], y: s[1], pressure: if s[3] > 0.0 { s[3] } else { 0.0 }, t: Some(s[2]), ..Default::default() };
+            for q in dens.push(pt) {
+                points.push([q.x, q.y, q.t.unwrap_or(s[2]), q.pressure]);
+                live.add(q.x, q.y, q.t.unwrap_or(s[2]), if real { q.pressure } else { 0.5 });
+            }
+            for l in lives.iter().filter(|l| l["sample"].as_u64() == Some(k as u64)) {
+                let line = live.line(width, l["variable"].as_bool().unwrap());
+                let xy = |v: &[nib::geometry::ModeledPoint]| -> Vec<[f64; 4]> { v.iter().map(|p| [p.x, p.y, 0.0, 0.0]).collect() };
+                let want_xy = |v: &Value| -> Vec<[f64; 4]> { v.as_array().unwrap().iter().map(|p| { let p = nums(p); [p[0], p[1], 0.0, 0.0] }).collect() };
+                let tag = format!("live@{k}");
+                failures.extend(diff_rows(&format!("{tag}.final"), &xy(&line.final_pts), &want_xy(&l["final"])).map(|m| format!("{id}: {m}")));
+                failures.extend(diff_nums(&format!("{tag}.finalW"), &line.final_w, &nums(&l["finalW"])).map(|m| format!("{id}: {m}")));
+                failures.extend(diff_rows(&format!("{tag}.rest"), &xy(&line.rest_pts), &want_xy(&l["rest"])).map(|m| format!("{id}: {m}")));
+                failures.extend(diff_nums(&format!("{tag}.restW"), &line.rest_w, &nums(&l["restW"])).map(|m| format!("{id}: {m}")));
+                compared += 1;
+            }
+        }
+        // The reference's points end with the pen end (Stroke.penEnd) when the stroke has one.
+        let mut want = rows(&r["points"]);
+        if r["penEndFlag"].as_bool() == Some(true) {
+            want.pop();
+        }
+        failures.extend(diff_rows("densified", &points, &want).map(|m| format!("{id}: {m}")));
+    }
+    assert!(compared >= 60, "only {compared} live lines compared");
+    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+}
