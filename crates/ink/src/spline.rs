@@ -122,36 +122,47 @@ pub fn catmull_rom_beziers(input: &[XY], closed: bool) -> Vec<Bezier> {
         let dx2 = p2.x - p1.x;
         let dy2 = p2.y - p1.y;
 
-        // When closed is false, endpoints clamp tangents directly to the terminal points
-        // (zero-tangent overshoot, quadratic Bézier termination directly at P_n).
-        let (m1x, m1y) = if !closed && i == 0 {
-            (-dx2 / t2, -dy2 / t2)
+        let (m1x, m1y) = (
+            (p1.x - p0.x) / t1 - (p2.x - p0.x) / t12,
+            (p1.y - p0.y) / t1 - (p2.y - p0.y) / t12,
+        );
+
+        let (m2x, m2y) = (
+            (p3.x - p2.x) / t3 - (p3.x - p1.x) / t23,
+            (p3.y - p2.y) / t3 - (p3.y - p1.y) / t23,
+        );
+
+        // For open curves, terminate endpoints via quadratic Bézier degree elevation
+        // (starts/ends with natural curvature directly at terminal points with zero tangent overshoot,
+        // without flattening into an artificial straight piece).
+        let (c1x, c1y) = if !closed && i == 0 {
+            (
+                p1.x + (dx2 - t2 * m2x) / 3.0,
+                p1.y + (dy2 - t2 * m2y) / 3.0,
+            )
         } else {
             (
-                (p1.x - p0.x) / t1 - (p2.x - p0.x) / t12,
-                (p1.y - p0.y) / t1 - (p2.y - p0.y) / t12,
+                p1.x + (dx2 + t2 * m1x) / 3.0,
+                p1.y + (dy2 + t2 * m1y) / 3.0,
             )
         };
 
-        let (m2x, m2y) = if !closed && i >= n - 2 {
-            (-dx2 / t2, -dy2 / t2)
+        let (c2x, c2y) = if !closed && i >= n - 2 {
+            (
+                p2.x - (dx2 - t2 * m1x) / 3.0,
+                p2.y - (dy2 - t2 * m1y) / 3.0,
+            )
         } else {
             (
-                (p3.x - p2.x) / t3 - (p3.x - p1.x) / t23,
-                (p3.y - p2.y) / t3 - (p3.y - p1.y) / t23,
+                p2.x - (dx2 + t2 * m2x) / 3.0,
+                p2.y - (dy2 + t2 * m2y) / 3.0,
             )
         };
 
         out.push([
             p1,
-            XY {
-                x: p1.x + (dx2 + t2 * m1x) / 3.0,
-                y: p1.y + (dy2 + t2 * m1y) / 3.0,
-            },
-            XY {
-                x: p2.x - (dx2 + t2 * m2x) / 3.0,
-                y: p2.y - (dy2 + t2 * m2y) / 3.0,
-            },
+            XY { x: c1x, y: c1y },
+            XY { x: c2x, y: c2y },
             p2,
         ]);
     }

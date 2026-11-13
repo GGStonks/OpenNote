@@ -84,10 +84,12 @@ fn test_mechanism_3_spline_clamped_phantom_control_points() {
     assert_eq!(p_start, XY { x: 10.0, y: 10.0 });
     assert_eq!(p_end, XY { x: 50.0, y: 60.0 });
 
-    // With clamped phantom points (P_{n+1} = P_n), C2 == P_end:
-    // This gives tangent B'(1) = 3*(P_end - C2) = (0, 0), terminating with zero tangent overshoot!
-    assert!((c2.x - p_end.x).abs() < 1e-4, "C2 x should equal P_end x");
-    assert!((c2.y - p_end.y).abs() < 1e-4, "C2 y should equal P_end y");
+    // Quadratic Bézier termination directly at P_end:
+    // C2 is naturally curved, strictly within bounds without zero-tangent straight flattening or overshoot
+    assert!(c2.x >= 10.0 && c2.x <= 50.0);
+    assert!(c2.y >= 10.0 && c2.y <= 60.0);
+    // Tangent at end does not point beyond P_end:
+    assert!(p_end.x >= c2.x && p_end.y >= c2.y);
 
     // Verify curve stays within the coordinate bounds of P1 and P2 without whipping past:
     assert!(c1.x >= 10.0 && c1.x <= 50.0);
