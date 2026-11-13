@@ -89,3 +89,60 @@ fn gpu_canvas_matches_cpu_renderer() {
     }
     assert!(failures.is_empty(), "GPU canvas differs from the CPU renderer:\n{}", failures.join("\n"));
 }
+
+#[test]
+fn canvas_host_renders_paper_and_strokes() {
+    use canvas::host::{CanvasHost, FrameSpec, PagePlacement};
+    use canvas::Paper;
+
+    let (mut host, name) = CanvasHost::offscreen(816, 1056).expect("offscreen host");
+    println!("Host GPU: {name}");
+    let strokes = reference_page();
+    let caps = host.set_scene("p1", &strokes);
+    assert!(caps > 1000, "expected >1000 capsules, got {caps}");
+
+    let paper = Paper {
+        width: 816.0,
+        height: 1056.0,
+        style: Paper::style_code("ruled"),
+        base: [1.0, 1.0, 1.0, 1.0],
+        dark: false,
+        pattern: None,
+        origin: [0.0, 0.0],
+    };
+
+    host.set_frame(FrameSpec {
+        clear: Some(Rgba::new(230.0 / 255.0, 230.0 / 255.0, 230.0 / 255.0, 1.0)),
+        pages: vec![PagePlacement {
+            page: "p1".to_string(),
+            tf: Transform::scale(1.0, 0.0, 0.0),
+            paper: Some(paper),
+        }],
+    });
+
+    assert!(host.dirty, "host should be dirty before draw");
+    let drew = host.draw().expect("draw succeeds");
+    assert!(drew, "host should have drawn");
+    assert!(!host.dirty, "host should not be dirty after draw");
+
+    let drew_again = host.draw().expect("second draw succeeds");
+    assert!(!drew_again, "second draw when clean should be false");
+
+    let stats = host.stats();
+    assert_eq!(stats.frames, 1);
+    assert_eq!(stats.scenes, 1);
+    assert_eq!(stats.capsules, caps);
+
+    let pixels = host.pixels();
+    assert_eq!(pixels.len(), 816 * 1056 * 4);
+
+    // Verify non-empty, contains ink and paper pixels
+    let mut dark_count = 0;
+    for chunk in pixels.chunks_exact(4) {
+        if luma(chunk) < 240.0 {
+            dark_count += 1;
+        }
+    }
+    assert!(dark_count > 10000, "expected dark pixels for paper and ink, got {dark_count}");
+}
+

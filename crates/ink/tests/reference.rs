@@ -2,17 +2,16 @@
 //!
 //! The reference is written by the TypeScript code (`npm run bench:rustref -- bench/rust-ref/ink.json`,
 //! see the header of `bench/rustRef.ts`): real recorded pen strokes, and for each the points given
-//! to the engine, the modelled line, the widths and the drawn line (`strokeGeometry`). Every stage
-//! must match to 1e-4 page px, and so must the drawn line of the same stroke as other kinds of
-//! stroke (`kinds`: ballpoint, highlighter, shape, stored modelled lines). Every stage
-//! must match to 1e-4 page px (the file keeps 9 significant digits); a stroke that differs is
-//! reported by stage and stroke id and the test fails.
-//!
-//! Not compared yet: the live line, the dash runs and the precision eraser (also in the file).
+//! to the engine, the modelled line, the widths, the drawn line (`strokeGeometry`), the live line,
+//! the dash runs of all four line styles, and the precision eraser pieces (solid and dashed).
+//! Every stage must match to 1e-4 page px (the file keeps 9 significant digits); a stroke that differs
+//! is reported by stage and stroke id and the test fails.
 
-use ink::{engine_points, ink_widths, stroke_geometry, stroke_width};
-use model::Stroke;
-use nib::geometry::InkPoint;
+use ink::{
+    engine_points, erase_strokes_partial, ink_runs, ink_widths, stroke_geometry, stroke_width,
+};
+use model::{LineStyle, Stroke};
+use nib::geometry::{InkPoint, XY};
 use nib::nib::nib_stroke;
 use serde_json::{json, Value};
 
@@ -203,3 +202,166 @@ fn densify_and_live_line_match_typescript() {
     assert!(compared >= 60, "only {compared} live lines compared");
     assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
 }
+
+fn diff_xy(name: &str, got: &[XY], want: &Value) -> Option<String> {
+    let want_arr = want.as_array()?;
+    if got.len() != want_arr.len() {
+        return Some(format!("{name}: {} points, want {}", got.len(), want_arr.len()));
+    }
+    for (i, (g, w)) in got.iter().zip(want_arr).enumerate() {
+        let p = nums(w);
+        if (g.x - p[0]).abs() > TOL || (g.y - p[1]).abs() > TOL {
+            return Some(format!("{name}: pt {i} ({}, {}), want ({}, {})", g.x, g.y, p[0], p[1]));
+        }
+    }
+    None
+}
+
+#[test]
+fn dash_runs_match_typescript() {
+    let refs = reference();
+    let mut failures = Vec::new();
+    let styles = [
+        ("dashed", LineStyle::Dashed),
+        ("longdash", LineStyle::Longdash),
+        ("dotted", LineStyle::Dotted),
+        ("dashdot", LineStyle::Dashdot),
+    ];
+    for r in refs["strokes"].as_array().unwrap() {
+        let id = r["id"].as_str().unwrap_or("?");
+        let s = stroke_of(r);
+        let g = stroke_geometry(&s);
+        let dashes = &r["dashes"];
+        for (name, ls) in styles {
+            let want = &dashes[name];
+            let got = ink_runs(&g, Some(ls), s.width, s.dash_offset.unwrap_or(0.0));
+            match (got, want.is_null()) {
+                (None, true) => {}
+                (Some(runs), false) => {
+                    let want_runs = want.as_array().unwrap();
+                    if runs.len() != want_runs.len() {
+                        failures.push(format!("{id}.{name}: {} runs, want {}", runs.len(), want_runs.len()));
+                        continue;
+                    }
+                    for (k, (run, wrun)) in runs.iter().zip(want_runs).enumerate() {
+                        if let Some(m) = diff_xy(&format!("{name}[{k}].pts"), &run.pts, &wrun["pts"]) {
+                            failures.push(format!("{id}: {m}"));
+                        }
+                        if let Some(m) = diff_nums(&format!("{name}[{k}].radii"), &run.radii, &nums(&wrun["radii"])) {
+                            failures.push(format!("{id}: {m}"));
+                        }
+                    }
+                }
+                (got, _) => {
+                    failures.push(format!("{id}.{name}: got is_some={}, want null={}", got.is_some(), want.is_null()));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} dash differences:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+fn eraser_matches_typescript() {
+    let refs = reference();
+    let mut failures = Vec::new();
+    for r in refs["strokes"].as_array().unwrap() {
+        let id = r["id"].as_str().unwrap_or("?");
+        let s = stroke_of(r);
+        let g = stroke_geometry(&s);
+        let at = &g.pts[g.pts.len() / 2];
+
+        // 1. Solid stroke erased at middle
+        let mut id_counter = 0;
+        let mut s_solid = s.clone();
+        s_solid.id = "ref".to_string();
+        let (pieces_solid, changed_solid) = erase_strokes_partial(
+            &[s_solid],
+            at.x,
+            at.y,
+            4.0,
+            || {
+                id_counter += 1;
+                format!("piece{id_counter}")
+            },
+            None,
+        );
+
+        let want_solid = &r["eraser"];
+        if changed_solid != want_solid["changed"].as_bool().unwrap() {
+            failures.push(format!("{id}.eraser: changed={}, want {}", changed_solid, want_solid["changed"]));
+        }
+        let want_solid_pieces = want_solid["pieces"].as_array().unwrap();
+        if pieces_solid.len() != want_solid_pieces.len() {
+            failures.push(format!("{id}.eraser: {} pieces, want {}", pieces_solid.len(), want_solid_pieces.len()));
+        } else {
+            for (k, (p, wp)) in pieces_solid.iter().zip(want_solid_pieces).enumerate() {
+                let pts: Vec<[f64; 4]> = p.points.iter().map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure]).collect();
+                if let Some(m) = diff_rows(&format!("eraser[{k}].points"), &pts, &rows(&wp["points"])) {
+                    failures.push(format!("{id}: {m}"));
+                }
+                let got_modeled = p.modeled.map(|m| serde_json::to_string(&m).unwrap().trim_matches('"').to_string());
+                let want_modeled = wp["modeled"].as_str().map(|s| s.to_string());
+                if got_modeled != want_modeled {
+                    failures.push(format!("{id}.eraser[{k}].modeled: got {:?}, want {:?}", got_modeled, want_modeled));
+                }
+                let got_offset = p.dash_offset;
+                let want_offset = wp["dashOffset"].as_f64();
+                if got_offset != want_offset {
+                    failures.push(format!("{id}.eraser[{k}].dashOffset: got {:?}, want {:?}", got_offset, want_offset));
+                }
+            }
+        }
+
+        // 2. Dashed stroke erased at middle
+        let mut s_dashed = s.clone();
+        s_dashed.id = "ref".to_string();
+        s_dashed.line_style = Some(LineStyle::Dashed);
+        let (pieces_dashed, changed_dashed) = erase_strokes_partial(
+            &[s_dashed],
+            at.x,
+            at.y,
+            4.0,
+            || {
+                id_counter += 1;
+                format!("piece{id_counter}")
+            },
+            None,
+        );
+
+        let want_dashed = &r["eraserDashed"];
+        if changed_dashed != want_dashed["changed"].as_bool().unwrap() {
+            failures.push(format!("{id}.eraserDashed: changed={}, want {}", changed_dashed, want_dashed["changed"]));
+        }
+        let want_dashed_pieces = want_dashed["pieces"].as_array().unwrap();
+        if pieces_dashed.len() != want_dashed_pieces.len() {
+            failures.push(format!("{id}.eraserDashed: {} pieces, want {}", pieces_dashed.len(), want_dashed_pieces.len()));
+        } else {
+            for (k, (p, wp)) in pieces_dashed.iter().zip(want_dashed_pieces).enumerate() {
+                let pts: Vec<[f64; 4]> = p.points.iter().map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure]).collect();
+                if let Some(m) = diff_rows(&format!("eraserDashed[{k}].points"), &pts, &rows(&wp["points"])) {
+                    failures.push(format!("{id}: {m}"));
+                }
+                let got_modeled = p.modeled.map(|m| serde_json::to_string(&m).unwrap().trim_matches('"').to_string());
+                let want_modeled = wp["modeled"].as_str().map(|s| s.to_string());
+                if got_modeled != want_modeled {
+                    failures.push(format!("{id}.eraserDashed[{k}].modeled: got {:?}, want {:?}", got_modeled, want_modeled));
+                }
+                let got_offset = p.dash_offset;
+                let want_offset = wp["dashOffset"].as_f64();
+                match (got_offset, want_offset) {
+                    (Some(go), Some(wo)) if (go - wo).abs() > TOL => {
+                        failures.push(format!("{id}.eraserDashed[{k}].dashOffset: got {go}, want {wo}"));
+                    }
+                    (None, None) => {}
+                    (Some(_), None) | (None, Some(_)) => {
+                        failures.push(format!("{id}.eraserDashed[{k}].dashOffset: got {:?}, want {:?}", got_offset, want_offset));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{} eraser differences:\n{}", failures.len(), failures.join("\n"));
+}
+

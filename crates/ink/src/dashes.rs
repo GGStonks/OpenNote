@@ -118,3 +118,18 @@ pub fn hand_dash(ls: Option<LineStyle>, width: f64) -> Option<(Vec<f64>, f64)> {
     dash_pattern(ls, width).map(|p| (p, HAND_DOT))
 }
 
+pub fn ink_runs(
+    g: &crate::geometry::InkGeometry,
+    ls: Option<LineStyle>,
+    width: f64,
+    offset: f64,
+) -> Option<Vec<DashRun>> {
+    let pattern = dash_pattern(ls, width)?;
+    let pts: Vec<XY> = g.pts.iter().map(|p| XY { x: p.x, y: p.y }).collect();
+    let radii: Vec<f64> = match &g.widths {
+        Some(w) => w.iter().map(|&x| x / 2.0).collect(),
+        None => vec![g.width / 2.0; g.pts.len()],
+    };
+    Some(dash_runs(&pts, &radii, &pattern, offset, HAND_DOT))
+}
+

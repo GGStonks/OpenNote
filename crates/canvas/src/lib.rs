@@ -8,6 +8,8 @@
 //! `GpuCanvas::draw` renders a scene through a `Transform` onto any target texture: the passes of
 //! glInk's `draw` and `layOn` on wgpu. `render_offscreen` is the PC path (tests, the CLI).
 
+pub mod host;
+
 use bytemuck::{Pod, Zeroable};
 use model::Stroke;
 use renderer::builder::{build_stroke_ops, FillMode, RenderOpKind};
@@ -201,6 +203,71 @@ struct Uniforms {
     glow_pad: f32,
     cov: u32,
     col: [f32; 4],
+    p_style: u32,
+    p_lw: f32,
+    p_origin: [f32; 2],
+    p_size: [f32; 2],
+    p_pad: [f32; 2],
+    p_base: [f32; 4],
+    p_line: [f32; 4],
+    p_margin: [f32; 4],
+    p_grid: [f32; 4],
+    p_major: [f32; 4],
+    p_minor: [f32; 4],
+    p_dot: [f32; 4],
+}
+
+/// A page's paper, as the app's `paperBackground` (CanvasPage.tsx) draws it: the colours and the
+/// lattice origin are decided here from what the page knows (its hex colour, whether it is dark,
+/// a chosen pattern colour), the pattern itself in `fs_paper`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Paper {
+    pub width: f32,
+    pub height: f32,
+    /// 0 blank, 1 ruled, 2 narrow, 3 lines, 4 narrowLines, 5 grid, 6 graph, 7 dots.
+    pub style: u32,
+    pub base: [f32; 4],
+    pub dark: bool,
+    /// A chosen pattern colour (rgb 0..1), else the defaults.
+    pub pattern: Option<[f32; 3]>,
+    /// Where the page sits on the surface (page px): grids and dots line up across pages.
+    pub origin: [f32; 2],
+}
+
+impl Paper {
+    pub fn style_code(name: &str) -> u32 {
+        match name { "ruled" => 1, "narrow" => 2, "lines" => 3, "narrowLines" => 4, "grid" => 5, "graph" => 6, "dots" => 7, _ => 0 }
+    }
+
+    fn uniforms(&self, base: &Uniforms) -> Uniforms {
+        let c = |r: f32, g: f32, b: f32, a: f32| [r / 255.0, g / 255.0, b / 255.0, a];
+        let dark = self.dark;
+        // paperBackground's `ink`: a chosen colour at three times the alpha (capped), else the defaults.
+        let ink = |a: f32, light: [f32; 4], on_dark: [f32; 4]| match self.pattern {
+            Some(pc) => [pc[0], pc[1], pc[2], (a * 3.0).min(1.0)],
+            None => if dark { on_dark } else { light },
+        };
+        let line = match self.pattern { Some(_) => ink(0.22, [0.0; 4], [0.0; 4]), None => if dark { c(255.0, 255.0, 255.0, 0.13) } else { c(59.0, 130.0, 246.0, 0.22) } };
+        let grid = ink(if dark { 0.09 } else { 0.08 }, c(0.0, 0.0, 0.0, 0.08), c(255.0, 255.0, 255.0, 0.09));
+        let margin = if dark { c(239.0, 68.0, 68.0, 0.35) } else { c(239.0, 68.0, 68.0, 0.4) };
+        let major = ink(if dark { 0.16 } else { 0.13 }, c(0.0, 0.0, 0.0, 0.13), c(255.0, 255.0, 255.0, 0.16));
+        let minor = match self.pattern { Some(pc) => [pc[0], pc[1], pc[2], 0.15], None => if dark { c(255.0, 255.0, 255.0, 0.06) } else { c(0.0, 0.0, 0.0, 0.05) } };
+        let dot = match self.pattern { Some(pc) => [pc[0], pc[1], pc[2], 0.7], None => if dark { c(255.0, 255.0, 255.0, 0.28) } else { c(0.0, 0.0, 0.0, 0.22) } };
+        Uniforms { p_style: self.style, p_lw: 1.0, p_origin: self.origin, p_size: [self.width, self.height], p_pad: [1.3, 0.0], p_base: self.base, p_line: line, p_margin: margin, p_grid: grid, p_major: major, p_minor: minor, p_dot: dot, ..*base }
+    }
+}
+
+/// One page of a frame: its scene through its transform, over its paper.
+pub struct PageDraw<'a> {
+    pub scene: &'a GpuScene,
+    pub tf: Transform,
+    pub paper: Option<Paper>,
+}
+
+/// What one frame shows: the desk colour (None: see-through) and the pages on it.
+pub struct Frame<'a> {
+    pub clear: Option<Rgba>,
+    pub pages: Vec<PageDraw<'a>>,
 }
 
 const UNIFORM_STRIDE: u64 = 256;
@@ -228,6 +295,10 @@ pub struct GpuCanvas {
     flat_hole: wgpu::RenderPipeline,
     caps_hatch: wgpu::RenderPipeline,
     flat_plain: wgpu::RenderPipeline,
+    paper: wgpu::RenderPipeline,
+    /// The pages' rectangles of the frame being drawn (6 vertices each).
+    rects: wgpu::Buffer,
+    rects_capacity: usize,
     uniforms: wgpu::Buffer,
     uniform_bg: wgpu::BindGroup,
     uniform_capacity: u64,
@@ -316,10 +387,13 @@ impl GpuCanvas {
         let flat_hole = make(&layout, "flat-hole", "vs_flat", "fs_flat", std::slice::from_ref(&flat_layout), T::TriangleList, format, Some(ERASE), W::ALL, Some(stencil_state(C::NotEqual, S::Keep)));
         let caps_hatch = make(&layout, "caps-hatch", "vs_caps", "fs_caps", std::slice::from_ref(&cap_layout), T::TriangleStrip, format, Some(OVER), W::ALL, Some(stencil_state(C::NotEqual, S::Keep)));
         let flat_plain = make(&layout, "flat-plain", "vs_flat", "fs_flat", std::slice::from_ref(&flat_layout), T::TriangleList, format, Some(OVER), W::ALL, keep());
+        let paper = make(&layout, "paper", "vs_page", "fs_paper", std::slice::from_ref(&flat_layout), T::TriangleList, format, Some(OVER), W::ALL, keep());
+        let rects_capacity = 16;
+        let rects = device.create_buffer(&wgpu::BufferDescriptor { label: Some("rects"), size: (rects_capacity * 6 * 8) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         let uniform_capacity = 64;
         let (uniforms, uniform_bg) = Self::uniform_buffer(&device, &uniform_bgl, uniform_capacity);
         GpuCanvas {
-            device, queue, format, uniform_bgl, tex_bgl, caps_cov, zero_cov, compose, fill_stencil, flat_box, flat_hole, caps_hatch, flat_plain,
+            device, queue, format, uniform_bgl, tex_bgl, caps_cov, zero_cov, compose, fill_stencil, flat_box, flat_hole, caps_hatch, flat_plain, paper, rects, rects_capacity,
             uniforms, uniform_bg, uniform_capacity, size: (0, 0), cov_tex: None, stencil: None,
         }
     }
@@ -372,33 +446,59 @@ impl GpuCanvas {
     /// Draws `scene` onto `target` (`w` x `h` device px) through `tf`, over `paper` (None: a
     /// see-through target). One command buffer; submitted here.
     pub fn draw(&mut self, target: &wgpu::TextureView, w: u32, h: u32, scene: &GpuScene, tf: &Transform, paper: Option<Rgba>) {
+        self.draw_frame(target, w, h, &Frame { clear: paper, pages: vec![PageDraw { scene, tf: *tf, paper: None }] });
+    }
+
+    /// Draws a frame: the desk (or nothing), then each page's paper and scene through its
+    /// transform. One command buffer; submitted here.
+    pub fn draw_frame(&mut self, target: &wgpu::TextureView, w: u32, h: u32, frame: &Frame) {
         self.ensure_size(w, h);
-        let px = tf.px();
-        let base = Uniforms { m: [tf.a, tf.b, tf.c, tf.d], t: [tf.ox, tf.oy], size: [w as f32, h as f32], px, glow: 0.0, glow_pad: 0.0, cov: 0, col: [0.0; 4] };
-        // Every op's uniforms first (the colour; `cov` for the coverage pass), one slot each.
-        let mut slots: Vec<Uniforms> = Vec::with_capacity(scene.ops.len() * 2 + 1);
-        let mut slot_of: Vec<(usize, usize)> = Vec::with_capacity(scene.ops.len());
+        if frame.pages.len() > self.rects_capacity {
+            self.rects_capacity = frame.pages.len().next_power_of_two();
+            self.rects = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("rects"), size: (self.rects_capacity * 6 * 8) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        }
         let premul = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
-        for op in &scene.ops {
-            match op {
-                Op::See { col, .. } => {
-                    slots.push(Uniforms { cov: 1, ..base });
-                    slots.push(Uniforms { col: premul(*col), ..base });
-                    slot_of.push((slots.len() - 2, slots.len() - 1));
+        // Every op's uniforms first (the colour; `cov` for the coverage pass), one slot each; the
+        // pages' paper slots and rectangles too.
+        let mut slots: Vec<Uniforms> = Vec::new();
+        let mut rects: Vec<[f32; 2]> = Vec::with_capacity(frame.pages.len() * 6);
+        let mut plan: Vec<(usize, Option<usize>, Vec<(usize, usize)>)> = Vec::with_capacity(frame.pages.len());
+        for (pi, page) in frame.pages.iter().enumerate() {
+            let tf = &page.tf;
+            let base = Uniforms { m: [tf.a, tf.b, tf.c, tf.d], t: [tf.ox, tf.oy], size: [w as f32, h as f32], px: tf.px(), ..Uniforms::zeroed() };
+            let paper_slot = page.paper.map(|p| {
+                slots.push(p.uniforms(&base));
+                for (x, y) in [(0.0, 0.0), (p.width, 0.0), (0.0, p.height), (p.width, 0.0), (p.width, p.height), (0.0, p.height)] {
+                    rects.push([x, y]);
                 }
-                Op::Fill { mode, col, .. } => {
-                    slots.push(base);
-                    slots.push(Uniforms { col: if *mode == FillMode::Hole { [0.0, 0.0, 0.0, 1.0] } else { premul(*col) }, ..base });
-                    slot_of.push((slots.len() - 2, slots.len() - 1));
-                }
-                Op::Flat { col, .. } => {
-                    slots.push(Uniforms { col: premul(*col), ..base });
-                    slot_of.push((slots.len() - 1, slots.len() - 1));
+                slots.len() - 1
+            });
+            if paper_slot.is_none() {
+                rects.extend([[0.0f32; 2]; 6]);
+            }
+            let mut slot_of: Vec<(usize, usize)> = Vec::with_capacity(page.scene.ops.len());
+            for op in &page.scene.ops {
+                match op {
+                    Op::See { col, .. } => {
+                        slots.push(Uniforms { cov: 1, ..base });
+                        slots.push(Uniforms { col: premul(*col), ..base });
+                        slot_of.push((slots.len() - 2, slots.len() - 1));
+                    }
+                    Op::Fill { mode, col, .. } => {
+                        slots.push(base);
+                        slots.push(Uniforms { col: if *mode == FillMode::Hole { [0.0, 0.0, 0.0, 1.0] } else { premul(*col) }, ..base });
+                        slot_of.push((slots.len() - 2, slots.len() - 1));
+                    }
+                    Op::Flat { col, .. } => {
+                        slots.push(Uniforms { col: premul(*col), ..base });
+                        slot_of.push((slots.len() - 1, slots.len() - 1));
+                    }
                 }
             }
+            plan.push((pi, paper_slot, slot_of));
         }
         if slots.is_empty() {
-            slots.push(base);
+            slots.push(Uniforms::zeroed());
         }
         if slots.len() as u64 > self.uniform_capacity {
             self.uniform_capacity = (slots.len() as u64).next_power_of_two();
@@ -411,87 +511,108 @@ impl GpuCanvas {
             bytes[i * UNIFORM_STRIDE as usize..i * UNIFORM_STRIDE as usize + std::mem::size_of::<Uniforms>()].copy_from_slice(bytemuck::bytes_of(s));
         }
         self.queue.write_buffer(&self.uniforms, 0, &bytes);
+        if !rects.is_empty() {
+            self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(&rects));
+        }
         let offset = |slot: usize| (slot as u64 * UNIFORM_STRIDE) as u32;
 
         let (_, cov_view, cov_bg) = self.cov_tex.as_ref().unwrap();
         let stencil = self.stencil.as_ref().unwrap();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("canvas") });
-        // The paper (or nothing), and a clean stencil.
+        // The desk (or nothing), and a clean stencil.
         {
-            let clear = paper.map(|p| wgpu::Color { r: p.r as f64, g: p.g as f64, b: p.b as f64, a: p.a as f64 }).unwrap_or(wgpu::Color::TRANSPARENT);
+            let clear = frame.clear.map(|p| wgpu::Color { r: p.r as f64, g: p.g as f64, b: p.b as f64, a: p.a as f64 }).unwrap_or(wgpu::Color::TRANSPARENT);
             enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("paper"),
+                label: Some("desk"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: stencil, depth_ops: None, stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Store }) }),
                 ..Default::default()
             });
         }
-        for (i, op) in scene.ops.iter().enumerate() {
-            let (s0, s1) = slot_of[i];
-            match op {
-                Op::See { first, count, bx, .. } => {
-                    let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
-                    if *count == 0 {
-                        continue;
-                    }
-                    // The run's coverage: the union of its capsules (max), within its box.
-                    {
-                        let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("coverage"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: cov_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
-                            depth_stencil_attachment: None,
-                            ..Default::default()
-                        });
-                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                        p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
-                        p.set_pipeline(&self.zero_cov);
-                        p.draw(0..3, 0..1);
-                        p.set_pipeline(&self.caps_cov);
-                        p.set_vertex_buffer(0, scene.caps.slice(..));
-                        p.draw(0..4, *first..*first + *count);
-                    }
-                    // Composited once, in the run's colour.
-                    let mut p = target_pass(&mut enc, target, stencil, "compose", false);
+        for (pi, paper_slot, slot_of) in &plan {
+            let page = &frame.pages[*pi];
+            let (tf, scene) = (&page.tf, page.scene);
+            if let (Some(ps), Some(paper)) = (paper_slot, page.paper) {
+                let bx = PageBox { x0: 0.0, y0: 0.0, x1: paper.width, y1: paper.height };
+                if let Some(sc) = self.scissor(&bx, tf, 0.5) {
+                    let mut p = target_pass(&mut enc, target, stencil, "paper", false);
                     p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                    p.set_bind_group(0, &self.uniform_bg, &[offset(s1)]);
+                    p.set_bind_group(0, &self.uniform_bg, &[offset(*ps)]);
                     p.set_bind_group(1, cov_bg, &[]);
-                    p.set_pipeline(&self.compose);
                     p.set_stencil_reference(0);
-                    p.draw(0..3, 0..1);
+                    p.set_pipeline(&self.paper);
+                    p.set_vertex_buffer(0, self.rects.slice(..));
+                    let v0 = (*pi * 6) as u32;
+                    p.draw(v0..v0 + 6, 0..1);
                 }
-                Op::Fill { first, count, mode, bx, box_first, hatch_first, hatch_count, .. } => {
-                    let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
-                    let mut p = target_pass(&mut enc, target, stencil, "fill", true);
-                    p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                    p.set_bind_group(1, cov_bg, &[]);
-                    p.set_stencil_reference(0);
-                    // Even-odd: each triangle of the fan flips the stencil.
-                    p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
-                    p.set_pipeline(&self.fill_stencil);
-                    p.set_vertex_buffer(0, scene.flat.slice(..));
-                    p.draw(*first..*first + *count, 0..1);
-                    p.set_bind_group(0, &self.uniform_bg, &[offset(s1)]);
-                    match mode {
-                        FillMode::Hatch => {
-                            p.set_pipeline(&self.caps_hatch);
+            }
+            for (i, op) in scene.ops.iter().enumerate() {
+                let (s0, s1) = slot_of[i];
+                match op {
+                    Op::See { first, count, bx, .. } => {
+                        let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
+                        if *count == 0 {
+                            continue;
+                        }
+                        // The run's coverage: the union of its capsules (max), within its box.
+                        {
+                            let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("coverage"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: cov_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
+                                depth_stencil_attachment: None,
+                                ..Default::default()
+                            });
+                            p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                            p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
+                            p.set_pipeline(&self.zero_cov);
+                            p.draw(0..3, 0..1);
+                            p.set_pipeline(&self.caps_cov);
                             p.set_vertex_buffer(0, scene.caps.slice(..));
-                            p.draw(0..4, *hatch_first..*hatch_first + *hatch_count);
+                            p.draw(0..4, *first..*first + *count);
                         }
-                        FillMode::Solid | FillMode::Hole => {
-                            p.set_pipeline(if *mode == FillMode::Hole { &self.flat_hole } else { &self.flat_box });
-                            p.set_vertex_buffer(0, scene.flat.slice(..));
-                            p.draw(*box_first..*box_first + 6, 0..1);
+                        // Composited once, in the run's colour.
+                        let mut p = target_pass(&mut enc, target, stencil, "compose", false);
+                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(s1)]);
+                        p.set_bind_group(1, cov_bg, &[]);
+                        p.set_pipeline(&self.compose);
+                        p.set_stencil_reference(0);
+                        p.draw(0..3, 0..1);
+                    }
+                    Op::Fill { first, count, mode, bx, box_first, hatch_first, hatch_count, .. } => {
+                        let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
+                        let mut p = target_pass(&mut enc, target, stencil, "fill", true);
+                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                        p.set_bind_group(1, cov_bg, &[]);
+                        p.set_stencil_reference(0);
+                        // Even-odd: each triangle of the fan flips the stencil.
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
+                        p.set_pipeline(&self.fill_stencil);
+                        p.set_vertex_buffer(0, scene.flat.slice(..));
+                        p.draw(*first..*first + *count, 0..1);
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(s1)]);
+                        match mode {
+                            FillMode::Hatch => {
+                                p.set_pipeline(&self.caps_hatch);
+                                p.set_vertex_buffer(0, scene.caps.slice(..));
+                                p.draw(0..4, *hatch_first..*hatch_first + *hatch_count);
+                            }
+                            FillMode::Solid | FillMode::Hole => {
+                                p.set_pipeline(if *mode == FillMode::Hole { &self.flat_hole } else { &self.flat_box });
+                                p.set_vertex_buffer(0, scene.flat.slice(..));
+                                p.draw(*box_first..*box_first + 6, 0..1);
+                            }
                         }
                     }
-                }
-                Op::Flat { first, count, .. } => {
-                    let mut p = target_pass(&mut enc, target, stencil, "flat", false);
-                    p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
-                    p.set_bind_group(1, cov_bg, &[]);
-                    p.set_stencil_reference(0);
-                    p.set_pipeline(&self.flat_plain);
-                    p.set_vertex_buffer(0, scene.flat.slice(..));
-                    p.draw(*first..*first + *count, 0..1);
+                    Op::Flat { first, count, .. } => {
+                        let mut p = target_pass(&mut enc, target, stencil, "flat", false);
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
+                        p.set_bind_group(1, cov_bg, &[]);
+                        p.set_stencil_reference(0);
+                        p.set_pipeline(&self.flat_plain);
+                        p.set_vertex_buffer(0, scene.flat.slice(..));
+                        p.draw(*first..*first + *count, 0..1);
+                    }
                 }
             }
         }
@@ -524,6 +645,12 @@ pub fn pc_device() -> Result<(wgpu::Device, wgpu::Queue, String), String> {
 
 /// Renders `scene` into `w` x `h` RGBA8 pixels (straight alpha over `paper`), on the PC.
 pub fn render_offscreen(canvas: &mut GpuCanvas, scene: &Scene, w: u32, h: u32, tf: &Transform, paper: Option<Rgba>) -> Vec<u8> {
+    let gs = canvas.upload(scene);
+    render_frame_offscreen(canvas, w, h, &Frame { clear: paper, pages: vec![PageDraw { scene: &gs, tf: *tf, paper: None }] })
+}
+
+/// Renders a frame into `w` x `h` RGBA8 pixels, on the PC.
+pub fn render_frame_offscreen(canvas: &mut GpuCanvas, w: u32, h: u32, frame: &Frame) -> Vec<u8> {
     let tex = canvas.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("offscreen"),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -535,8 +662,7 @@ pub fn render_offscreen(canvas: &mut GpuCanvas, scene: &Scene, w: u32, h: u32, t
         view_formats: &[],
     });
     let view = tex.create_view(&Default::default());
-    let gs = canvas.upload(scene);
-    canvas.draw(&view, w, h, &gs, tf, paper);
+    canvas.draw_frame(&view, w, h, frame);
     let padded = (w * 4).div_ceil(256) * 256;
     let buf = canvas.device.create_buffer(&wgpu::BufferDescriptor { label: Some("readback"), size: (padded * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
     let mut enc = canvas.device.create_command_encoder(&Default::default());

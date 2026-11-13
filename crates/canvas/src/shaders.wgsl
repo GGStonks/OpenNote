@@ -14,6 +14,19 @@ struct Uniforms {
   glow_pad: f32,
   cov: u32,
   col: vec4<f32>,
+  // Paper (fs_paper): the app's paperBackground (src/components/CanvasPage.tsx) in page px.
+  p_style: u32,
+  p_lw: f32,
+  p_origin: vec2<f32>,
+  p_size: vec2<f32>,
+  p_pad: vec2<f32>,
+  p_base: vec4<f32>,
+  p_line: vec4<f32>,
+  p_margin: vec4<f32>,
+  p_grid: vec4<f32>,
+  p_major: vec4<f32>,
+  p_minor: vec4<f32>,
+  p_dot: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -128,4 +141,75 @@ fn fs_compose(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_zero() -> @location(0) vec4<f32> {
   return vec4<f32>(0.0);
+}
+
+// ---------------------------------------------------------------------------------- paper
+
+struct PageOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) p: vec2<f32>,
+};
+
+@vertex
+fn vs_page(@location(0) pos: vec2<f32>) -> PageOut {
+  var o: PageOut;
+  o.p = pos;
+  o.pos = clip(u.m * pos + u.t);
+  return o;
+}
+
+fn over(dst: vec4<f32>, src: vec4<f32>, a: f32) -> vec4<f32> {
+  let sa = src.a * a;
+  return vec4<f32>(src.rgb * sa + dst.rgb * (1.0 - sa), sa + dst.a * (1.0 - sa));
+}
+
+// Coverage of the band [s, e) over this pixel's extent in page px (the page px per device px).
+fn band(v: f32, s: f32, e: f32, hw: f32, px: f32) -> f32 {
+  return clamp((min(e, v + hw) - max(s, v - hw)) * px, 0.0, 1.0);
+}
+
+// Coverage of the bands [k * period + off, k * period + off + lw) around v.
+fn rep(v: f32, period: f32, lw: f32, off: f32, hw: f32, px: f32) -> f32 {
+  let s = v - ((v - off) - floor((v - off) / period) * period);
+  return min(1.0, band(v, s, s + lw, hw, px) + band(v, s + period, s + period + lw, hw, px) + band(v, s - period, s - period + lw, hw, px));
+}
+
+@fragment
+fn fs_paper(i: PageOut) -> @location(0) vec4<f32> {
+  let px = u.px;
+  let hw = 0.5 / px;
+  let lw = u.p_lw;
+  var c = u.p_base;
+  let x = i.p.x;
+  let y = i.p.y;
+  let st = u.p_style;
+  if (st >= 1u && st <= 4u) {
+    // Ruled / narrow / lines / narrow lines: lines every gap from y = 80, under a plain top band
+    // of 79 px; ruled and narrow keep a margin line at x = 79.
+    var gap = 32.0;
+    if (st == 2u || st == 4u) { gap = 24.0; }
+    let lines = rep(y, gap, lw, 80.0 - lw, hw, px) * band(y, 79.0, 1e9, hw, px);
+    c = over(c, u.p_line, lines);
+    if (st <= 2u) { c = over(c, u.p_margin, band(x, 79.0, 79.0 + lw, hw, px)); }
+  } else if (st == 5u) {
+    let ox = x + u.p_origin.x;
+    let oy = y + u.p_origin.y;
+    c = over(c, u.p_grid, rep(oy, 24.0, lw, 0.0, hw, px));
+    c = over(c, u.p_grid, rep(ox, 24.0, lw, 0.0, hw, px));
+  } else if (st == 6u) {
+    let ox = x + u.p_origin.x;
+    let oy = y + u.p_origin.y;
+    c = over(c, u.p_minor, rep(oy, 12.0, 1.0, 0.0, hw, px));
+    c = over(c, u.p_minor, rep(ox, 12.0, 1.0, 0.0, hw, px));
+    c = over(c, u.p_major, rep(oy, 60.0, lw, 0.0, hw, px));
+    c = over(c, u.p_major, rep(ox, 60.0, lw, 0.0, hw, px));
+  } else if (st == 7u) {
+    // Dots of radius 1.3 (fading to 0 over 0.4 px) on the 24 px lattice, centred at 12.
+    let ox = x + u.p_origin.x - 12.0;
+    let oy = y + u.p_origin.y - 12.0;
+    let d = length(vec2<f32>(ox - round(ox / 24.0) * 24.0, oy - round(oy / 24.0) * 24.0));
+    let r = u.p_pad.x;
+    c = over(c, u.p_dot, 1.0 - clamp((d - r) / 0.4, 0.0, 1.0));
+  }
+  return vec4<f32>(c.rgb * c.a, c.a);
 }
