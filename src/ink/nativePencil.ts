@@ -29,7 +29,7 @@ export type PencilListener = (samples: PencilSample[], predicted: PencilSample[]
 
 const STRIDE = 6;
 /** The shells draw the lead to a sample with more force than this (OpenNoteShell.m, OpenNoteInkPlugin.java). */
-const LEAD_FORCE = 0.02;
+const LEAD_FORCE = 0.05;
 
 /** performance.now() minus the native clock, in ms: the smallest value seen (least IPC delay). */
 let offset = Infinity;
@@ -92,7 +92,7 @@ function receive(phase: number, nativeNow: number, data: number[], predicted: nu
   if (phase === 0) lead = null;
   else if (phase === 1 && samples.length) {
     const newest = samples[samples.length - 1];
-    lead = newest.pressure > LEAD_FORCE ? newest : null;
+    lead = newest.pressure >= LEAD_FORCE ? newest : null;
   }
   const ended = phase >= 2;
   if (ended) {

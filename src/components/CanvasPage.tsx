@@ -1467,6 +1467,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     /** A snapped eraser's erasing along its shape is waiting for the next frame. */
     eraseQueued?: boolean;
     lastMove: { x: number; y: number };
+    /** Last contact point with stable pressure (>= 0.05) before liftoff jitter. */
+    lastStable: { x: number; y: number } | null;
     smart: SmartPenState | null;
     pressure: number;
     /** Raw Pencil force of each sample (lift-off trimming). */
@@ -1948,6 +1950,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       adjust: null,
       holdTimer: null,
       lastMove: { x: pt.x, y: pt.y },
+      lastStable: pt.pressure >= 0.05 ? { x: pt.x, y: pt.y } : null,
       smart: tool === 'shape' ? beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current) : null,
       pressure: pt.pressure,
       force: [pt.pressure],
@@ -2073,8 +2076,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const dense = d.dense && !d.snapped && (d.model || d.tool === 'lasso' || d.smart?.mode === 'curve') ? d.dense : null;
       const last = d.points[d.points.length - 1];
       if (!dense && Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
-      // A pen sample without force is the Pencil leaving the glass: it must not read as 0.5.
-      const lifting = ce.pointerType === 'pen' && !(ce.pressure > 0);
+      if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
+      // Pressure gate (Mechanism 2): ignore coordinates during liftoff jitter (< 0.05)
+      const lifting = ce.pointerType === 'pen' && !(ce.pressure >= 0.05);
+      if (d.realPressure) {
+        if (!lifting) d.lastStable = { x: pt.x, y: pt.y };
+        else if (d.lastStable) {
+          pt.x = d.lastStable.x;
+          pt.y = d.lastStable.y;
+        }
+      }
       // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
       // outline wobble.
       // pen: the raw force (the engine smooths it with no lag; 0 = lifting, force unknown);
@@ -2084,7 +2095,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
         pt.pressure = d.pressure;
       }
-      if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
       // Pen: wide gaps between samples are filled with points on a smooth curve (src/ink/densify.ts);
       // the stroke keeps them, so the finished stroke is the line drawn live.
       for (const q of dense ? dense.push(pt) : [pt]) {
@@ -2210,6 +2220,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.pressure = pt.pressure;
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
+      d.lastStable = pt.pressure >= 0.05 ? { x: pt.x, y: pt.y } : null;
       d.realPressure = first.pressure > 0 && first.pressure !== 0.5;
       d.model = new SmoothLiveStroke();
       d.model.add(pt.x, pt.y, pt.t ?? 0, pt.pressure);
@@ -2227,6 +2238,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.points = [pt];
       d.force = [first.pressure > 0 ? pt.pressure : 0];
       d.lastMove = { x: pt.x, y: pt.y };
+      d.lastStable = pt.pressure >= 0.05 ? { x: pt.x, y: pt.y } : null;
       d.smart = beginSmartPen(pt, smartOptions(), page.strokes, zoomRef.current);
       d.dense = new SampleDensifier();
       d.dense.push(pt);
@@ -2235,7 +2247,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     d.nativeSeen = true;
     if (ended) d.nativeEnded = true;
     const lead = nativePencil.lead;
-    d.lead = ended ? null : (lead ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null);
+    d.lead = ended ? null : (lead && lead.pressure >= 0.05 ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null);
     ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
     if (ended && d.finishPending) {
       clearTimeout(d.finishPending.timer);

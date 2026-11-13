@@ -761,7 +761,7 @@ public class OpenNoteInkPlugin extends Plugin {
                 // stylus's own pointer, whose samples the page gets (its lead is the same: nativePencil.ts).
                 int p = stylusId >= 0 ? ev.findPointerIndex(stylusId) : -1;
                 if (p < 0) break;
-                if (ev.getPressure(p) > 0.02f) view.leadTo(ev.getX(p), ev.getY(p));
+                if (ev.getPressure(p) >= 0.05f) view.leadTo(ev.getX(p), ev.getY(p));
                 else view.dropLead();
                 break;
             }

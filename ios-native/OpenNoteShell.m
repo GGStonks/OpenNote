@@ -164,12 +164,14 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         ONInkView *ink = self.inkView;
         UITouch *newest = samples.lastObject;
         CGFloat maxForce = newest.maximumPossibleForce > 0 ? newest.maximumPossibleForce : 1;
+        CGFloat normForce = newest.force / maxForce;
         if (ink.active && phase == 1) {
-            if (newest.force / maxForce > 0.02) [ink leadTo:[newest preciseLocationInView:view]];
+            if (normForce >= 0.05) [ink leadTo:[newest preciseLocationInView:view]];
             else [ink dropLead];
         }
         if (phase >= 2) {
             _pencil = nil;
+            [ink dropLead];
             [ink touchEnded];
         }
     }
@@ -879,7 +881,7 @@ static const double kInkHoldSeconds = 0.06;
 }
 
 - (void)dropLead {
-    if (_lifted || !_hasRaw) return;
+    if (!_hasRaw) return;
     _hasRaw = NO;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
