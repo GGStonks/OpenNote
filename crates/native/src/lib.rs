@@ -79,10 +79,11 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
+        "canvasRender" => canvas_render(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -168,6 +169,81 @@ fn render_thumbnail(meta: &str) -> Result<(String, Vec<u8>), String> {
     });
 
     Ok((reply_meta.to_string(), buf.data))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CanvasRenderReq {
+    width: u32,
+    height: u32,
+    scale: Option<f32>,
+    ox: Option<f32>,
+    oy: Option<f32>,
+    paper_color: Option<String>,
+    paper_style: Option<String>,
+    strokes: Vec<Stroke>,
+}
+
+fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
+    let t0 = clock_ms();
+    let req: CanvasRenderReq = serde_json::from_str(meta).map_err(|e| format!("canvasRender request: {e}"))?;
+    if req.width == 0 || req.height == 0 {
+        return Err("invalid dimensions".into());
+    }
+    let (mut host, _gpu_name) = canvas::host::CanvasHost::offscreen(req.width, req.height)?;
+    let scene_caps = host.set_scene("page", &req.strokes);
+
+    let scale = req.scale.unwrap_or(1.0);
+    let ox = req.ox.unwrap_or(0.0);
+    let oy = req.oy.unwrap_or(0.0);
+    let tf = canvas::Transform::scale(scale, ox, oy);
+
+    let clear_rgba = req
+        .paper_color
+        .as_deref()
+        .map(|c| renderer::color::Rgba::parse(c, 1.0))
+        .unwrap_or(renderer::color::Rgba::WHITE);
+
+    let style_code = req
+        .paper_style
+        .as_deref()
+        .map(canvas::Paper::style_code)
+        .unwrap_or(0);
+
+    let paper = if style_code > 0 {
+        Some(canvas::Paper {
+            width: req.width as f32 / scale,
+            height: req.height as f32 / scale,
+            style: style_code,
+            base: [clear_rgba.r, clear_rgba.g, clear_rgba.b, clear_rgba.a],
+            dark: false,
+            pattern: None,
+            origin: [0.0, 0.0],
+        })
+    } else {
+        None
+    };
+
+    host.set_frame(canvas::host::FrameSpec {
+        clear: Some(clear_rgba),
+        pages: vec![canvas::host::PagePlacement {
+            page: "page".to_string(),
+            tf,
+            paper,
+        }],
+    });
+
+    host.draw()?;
+    let px = host.pixels();
+
+    let reply_meta = json!({
+        "width": req.width,
+        "height": req.height,
+        "capsules": scene_caps,
+        "ms": clock_ms() - t0,
+    });
+
+    Ok((reply_meta.to_string(), px))
 }
 
 #[derive(Deserialize)]
@@ -338,6 +414,70 @@ pub unsafe extern "C" fn opennote_live_update(h: *mut LiveHandle, fresh: *mut us
 /// `h` must come from `opennote_live_new`, not freed before.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_live_free(h: *mut LiveHandle) {
+    if !h.is_null() {
+        drop(Box::from_raw(h));
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Native GPU Canvas (canvas::host::CanvasHost): one host per shell surface or offscreen target.
+
+/// Creates an offscreen CanvasHost on the PC or test harness.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_offscreen(w: u32, h: u32) -> *mut canvas::host::CanvasHost {
+    match canvas::host::CanvasHost::offscreen(w, h) {
+        Ok((host, _name)) => Box::into_raw(Box::new(host)),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Resizes the CanvasHost viewport.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_resize(h: *mut canvas::host::CanvasHost, w: u32, height: u32) {
+    if let Some(host) = h.as_mut() {
+        host.resize(w, height);
+    }
+}
+
+/// Sets or updates a page's scene of strokes in the CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_set_scene(
+    h: *mut canvas::host::CanvasHost,
+    page_id: *const std::os::raw::c_char,
+    strokes_json: *const std::os::raw::c_char,
+) -> usize {
+    let Some(host) = h.as_mut() else { return 0 };
+    if page_id.is_null() || strokes_json.is_null() {
+        return 0;
+    }
+    let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
+    let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
+    let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
+    host.set_scene(id, &strokes)
+}
+
+/// Removes a page's scene from the CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_remove_scene(h: *mut canvas::host::CanvasHost, page_id: *const std::os::raw::c_char) {
+    let Some(host) = h.as_mut() else { return };
+    if page_id.is_null() {
+        return;
+    }
+    if let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() {
+        host.remove_scene(id);
+    }
+}
+
+/// Draws the current frame in CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasHost) -> bool {
+    let Some(host) = h.as_mut() else { return false };
+    host.draw().unwrap_or(false)
+}
+
+/// Frees a CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasHost) {
     if !h.is_null() {
         drop(Box::from_raw(h));
     }

@@ -96,20 +96,14 @@ pub fn catmull_rom_beziers(input: &[XY], closed: bool) -> Vec<Bezier> {
         let p0 = if closed {
             pts[(i + n - 1) % n]
         } else if i == 0 {
-            XY {
-                x: 2.0 * p1.x - p2.x,
-                y: 2.0 * p1.y - p2.y,
-            }
+            p1
         } else {
             pts[i - 1]
         };
         let p3 = if closed {
             pts[(i + 2) % n]
         } else if i >= n - 2 {
-            XY {
-                x: 2.0 * p2.x - p1.x,
-                y: 2.0 * p2.y - p1.y,
-            }
+            p2
         } else {
             pts[i + 2]
         };
@@ -125,13 +119,28 @@ pub fn catmull_rom_beziers(input: &[XY], closed: bool) -> Vec<Bezier> {
         let t12 = t1 + t2;
         let t23 = t2 + t3;
 
-        let m1x = (p1.x - p0.x) / t1 - (p2.x - p0.x) / t12;
-        let m1y = (p1.y - p0.y) / t1 - (p2.y - p0.y) / t12;
-        let m2x = (p3.x - p2.x) / t3 - (p3.x - p1.x) / t23;
-        let m2y = (p3.y - p2.y) / t3 - (p3.y - p1.y) / t23;
-
         let dx2 = p2.x - p1.x;
         let dy2 = p2.y - p1.y;
+
+        // When closed is false, endpoints clamp tangents directly to the terminal points
+        // (zero-tangent overshoot, quadratic Bézier termination directly at P_n).
+        let (m1x, m1y) = if !closed && i == 0 {
+            (-dx2 / t2, -dy2 / t2)
+        } else {
+            (
+                (p1.x - p0.x) / t1 - (p2.x - p0.x) / t12,
+                (p1.y - p0.y) / t1 - (p2.y - p0.y) / t12,
+            )
+        };
+
+        let (m2x, m2y) = if !closed && i >= n - 2 {
+            (-dx2 / t2, -dy2 / t2)
+        } else {
+            (
+                (p3.x - p2.x) / t3 - (p3.x - p1.x) / t23,
+                (p3.y - p2.y) / t3 - (p3.y - p1.y) / t23,
+            )
+        };
 
         out.push([
             p1,

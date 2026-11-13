@@ -68,6 +68,37 @@ pub fn without_backward_lift(pts: &[Point]) -> Vec<Point> {
     }
 }
 
+/// Minimal pressure floor below which coordinates are susceptible to digitizer centroid liftoff jitter.
+pub const LIFTOFF_PRESSURE_FLOOR: f64 = 0.05;
+
+/// Filters liftoff jitter on stylus strokes (Mechanism 2):
+/// If pressure drops below `LIFTOFF_PRESSURE_FLOOR` during the final frames before liftoff,
+/// ignores (x, y) coordinate jitter (keeps the last stable coordinate) while preserving
+/// the tapering pressure so stroke width finishes cleanly without digitizer centroid wobble.
+pub fn filter_liftoff_jitter(pts: &[Point]) -> Vec<Point> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut out = pts.to_vec();
+    let n = out.len();
+
+    let mut stable_idx = n - 1;
+    while stable_idx > 0 && out[stable_idx].pressure < LIFTOFF_PRESSURE_FLOOR {
+        stable_idx -= 1;
+    }
+
+    if stable_idx < n - 1 {
+        let stable_x = out[stable_idx].x;
+        let stable_y = out[stable_idx].y;
+        for i in (stable_idx + 1)..n {
+            out[i].x = stable_x;
+            out[i].y = stable_y;
+        }
+    }
+
+    out
+}
+
 pub fn engine_points(s: &Stroke) -> Vec<Point> {
     let pts = if pen_end(s).is_some() {
         &s.points[0..s.points.len().saturating_sub(1)]

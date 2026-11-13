@@ -9,6 +9,7 @@ edition = "2021"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
+canvas = { path = "../canvas" }
 ink = { path = "../ink" }
 model = { path = "../model" }
 nib = { path = "../nib" }
