@@ -1,0 +1,17 @@
+[package]
+name = "canvas"
+version = "0.1.0"
+edition = "2021"
+
+# The page drawn on the GPU by the shells (docs/rust-native-canvas.md): the same passes as the
+# page's WebGL ink (src/ink/glInk.ts), on wgpu (Metal on iOS, Vulkan / GLES on Android, Vulkan on
+# the PC for the tests).
+
+[dependencies]
+model = { path = "../model" }
+renderer = { path = "../renderer" }
+wgpu = { version = "27", default-features = false, features = ["metal", "vulkan", "gles", "wgsl"] }
+bytemuck = { version = "1.16", features = ["derive"] }
+pollster = "0.4"
+serde_json = "1.0"
+

@@ -168,6 +168,9 @@ Crates, in `crates/` (`cargo test --workspace` passes):
 
 ### Phase 2: one renderer
 
+Continued as the native canvas: docs/rust-native-canvas.md (N1 done on 2026-11-13: the page's ink on
+the GPU with wgpu, equal to the app's canvas within 1 px; the shells host it in N2).
+
 - [x] Paper patterns and colours, every stroke kind (fountain, ballpoint, highlighter multiplied
   under the ink, dashes, fills and holes, arrows), z-order, the selection glow. Thumbnails come
   from the same renderer, offscreen. (`crates/renderer`: an SDF capsule rasterizer on the CPU
