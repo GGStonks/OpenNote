@@ -9,6 +9,7 @@
 //! glInk's `draw` and `layOn` on wgpu. `render_offscreen` is the PC path (tests, the CLI).
 
 pub mod host;
+pub use wgpu;
 
 use bytemuck::{Pod, Zeroable};
 use model::Stroke;

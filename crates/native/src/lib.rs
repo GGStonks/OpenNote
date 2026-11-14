@@ -624,7 +624,7 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
     if layer.is_null() {
         return std::ptr::null_mut();
     }
-    let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
+    let target = canvas::wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
     match canvas::host::CanvasHost::attach(target, w, h) {
         Ok((host, _name)) => Box::into_raw(Box::new(host)),
         Err(_) => std::ptr::null_mut(),
