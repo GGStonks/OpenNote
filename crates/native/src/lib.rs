@@ -79,11 +79,15 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
         "canvasRender" => canvas_render(meta),
+        "selectInRect" => select_in_rect(meta),
+        "selectInLasso" => select_in_lasso(meta),
+        "selectionBounds" => selection_bounds(meta),
+        "transformPageItems" => transform_page_items(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -244,6 +248,74 @@ fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
     });
 
     Ok((reply_meta.to_string(), px))
+}
+
+fn select_in_rect(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        rect: [f64; 4],
+        page: model::NotePage,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("selectInRect request: {e}"))?;
+    let bounds = ink::RectBounds {
+        min_x: r.rect[0],
+        min_y: r.rect[1],
+        max_x: r.rect[2],
+        max_y: r.rect[3],
+    };
+    let stroke_ids = shapes::selection::rect_select_strokes(bounds, &r.page);
+    Ok((json!({ "strokeIds": stroke_ids }).to_string(), Vec::new()))
+}
+
+fn select_in_lasso(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        lasso: Vec<[f64; 2]>,
+        page: model::NotePage,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("selectInLasso request: {e}"))?;
+    let pts: Vec<nib::geometry::XY> = r.lasso.into_iter().map(|p| nib::geometry::XY { x: p[0], y: p[1] }).collect();
+    let stroke_ids = shapes::selection::lasso_select_strokes(&pts, &r.page);
+    Ok((json!({ "strokeIds": stroke_ids }).to_string(), Vec::new()))
+}
+
+fn selection_bounds(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        page: model::NotePage,
+        ids: Vec<String>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("selectionBounds request: {e}"))?;
+    let b = shapes::selection::selection_bounds(&r.page, &r.ids);
+    let bounds = b.map(|r| json!({ "minX": r.min_x, "minY": r.min_y, "maxX": r.max_x, "maxY": r.max_y }));
+    Ok((json!({ "bounds": bounds }).to_string(), Vec::new()))
+}
+
+fn transform_page_items(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        page: model::NotePage,
+        ids: Vec<String>,
+        dx: f64,
+        dy: f64,
+        scale_x: f64,
+        scale_y: f64,
+        rotation_rad: f64,
+        origin: [f64; 2],
+    }
+    let mut r: Req = serde_json::from_str(meta).map_err(|e| format!("transformPageItems request: {e}"))?;
+    shapes::selection::transform_page_items(
+        &mut r.page,
+        &r.ids,
+        r.dx,
+        r.dy,
+        r.scale_x,
+        r.scale_y,
+        r.rotation_rad,
+        nib::geometry::XY { x: r.origin[0], y: r.origin[1] },
+    );
+    Ok((json!({ "page": r.page }).to_string(), Vec::new()))
 }
 
 #[derive(Deserialize)]
@@ -454,6 +526,109 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene(
     let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
     let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
     host.set_scene(id, &strokes)
+}
+
+/// Sets or updates a page's scene from multiple stroke layers (z-layers) in the CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_set_scene_layers(
+    h: *mut canvas::host::CanvasHost,
+    page_id: *const std::os::raw::c_char,
+    layers_json: *const std::os::raw::c_char,
+) -> usize {
+    let Some(host) = h.as_mut() else { return 0 };
+    if page_id.is_null() || layers_json.is_null() {
+        return 0;
+    }
+    let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
+    let Ok(json_str) = std::ffi::CStr::from_ptr(layers_json).to_str() else { return 0 };
+    let Ok(layers) = serde_json::from_str::<Vec<Vec<Stroke>>>(json_str) else { return 0 };
+    let layer_refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
+    host.set_scene_layers(id, &layer_refs)
+}
+
+/// Sets the frame specification (clear color, visible pages, transforms, and paper) in CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_set_frame(
+    h: *mut canvas::host::CanvasHost,
+    frame_json: *const std::os::raw::c_char,
+) -> bool {
+    let Some(host) = h.as_mut() else { return false };
+    if frame_json.is_null() {
+        return false;
+    }
+    let Ok(json_str) = std::ffi::CStr::from_ptr(frame_json).to_str() else { return false };
+
+    #[derive(Deserialize)]
+    struct JsonPaper {
+        width: f32,
+        height: f32,
+        style: u32,
+        base: [f32; 4],
+        #[serde(default)]
+        dark: bool,
+        pattern: Option<[f32; 3]>,
+        #[serde(default)]
+        origin: [f32; 2],
+    }
+
+    #[derive(Deserialize)]
+    struct JsonPlacement {
+        page: String,
+        tf: [f32; 6],
+        paper: Option<JsonPaper>,
+    }
+
+    #[derive(Deserialize)]
+    struct JsonFrame {
+        clear: Option<[f32; 4]>,
+        pages: Vec<JsonPlacement>,
+    }
+
+    let Ok(jf) = serde_json::from_str::<JsonFrame>(json_str) else { return false };
+    let clear = jf.clear.map(|c| renderer::color::Rgba { r: c[0], g: c[1], b: c[2], a: c[3] });
+    let pages = jf.pages.into_iter().map(|jp| {
+        let paper = jp.paper.map(|p| canvas::Paper {
+            width: p.width,
+            height: p.height,
+            style: p.style,
+            base: p.base,
+            dark: p.dark,
+            pattern: p.pattern,
+            origin: p.origin,
+        });
+        canvas::host::PagePlacement {
+            page: jp.page,
+            tf: canvas::Transform {
+                a: jp.tf[0],
+                b: jp.tf[1],
+                c: jp.tf[2],
+                d: jp.tf[3],
+                ox: jp.tf[4],
+                oy: jp.tf[5],
+            },
+            paper,
+        }
+    }).collect();
+    host.set_frame(canvas::host::FrameSpec { clear, pages });
+    true
+}
+
+/// Attaches CanvasHost to a native CoreAnimation layer (CAMetalLayer on iOS/macOS).
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
+    layer: *mut std::ffi::c_void,
+    w: u32,
+    h: u32,
+) -> *mut canvas::host::CanvasHost {
+    if layer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
+    match canvas::host::CanvasHost::attach(target, w, h) {
+        Ok((host, _name)) => Box::into_raw(Box::new(host)),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 /// Removes a page's scene from the CanvasHost.

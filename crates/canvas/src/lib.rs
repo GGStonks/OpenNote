@@ -67,7 +67,7 @@ pub enum Op {
     /// `hatch_first` under the stencil.
     Fill { first: u32, count: u32, mode: FillMode, col: [f32; 4], bx: PageBox, box_first: u32, hatch_first: u32, hatch_count: u32 },
     /// Plain triangles in `col` (arrowheads).
-    Flat { first: u32, count: u32, col: [f32; 4] },
+    Flat { first: u32, count: u32, col: [f32; 4], bx: PageBox },
 }
 
 /// The page's draw list; `caps` and `flat` are the GPU buffers' contents.
@@ -116,6 +116,9 @@ impl Scene {
                         }
                         RenderOpKind::Fill { area, mode, hatch_caps } => {
                             run = None;
+                            if area.len() < 3 {
+                                continue;
+                            }
                             let bx = {
                                 let mut b = PageBox { x0: f32::INFINITY, y0: f32::INFINITY, x1: f32::NEG_INFINITY, y1: f32::NEG_INFINITY };
                                 for p in &area {
@@ -163,12 +166,24 @@ impl Scene {
                             }
                         }
                         RenderOpKind::Arrow { points } => {
-                            // Pushing flat vertices does not break a capsule run.
+                            if points.is_empty() {
+                                continue;
+                            }
+                            let bx = {
+                                let mut b = PageBox { x0: f32::INFINITY, y0: f32::INFINITY, x1: f32::NEG_INFINITY, y1: f32::NEG_INFINITY };
+                                for p in &points {
+                                    b.x0 = b.x0.min(p.x as f32);
+                                    b.y0 = b.y0.min(p.y as f32);
+                                    b.x1 = b.x1.max(p.x as f32);
+                                    b.y1 = b.y1.max(p.y as f32);
+                                }
+                                b
+                            };
                             let first = sc.flat.len() as u32;
                             for p in points {
                                 sc.flat.push([p.x as f32, p.y as f32]);
                             }
-                            arrows.push(Op::Flat { first, count: 3, col: rgba(op.color) });
+                            arrows.push(Op::Flat { first, count: 3, col: rgba(op.color), bx });
                         }
                         RenderOpKind::Glow { .. } => {}
                     }
@@ -281,6 +296,23 @@ pub struct GpuScene {
     ops: Vec<Op>,
 }
 
+#[derive(Clone, Copy)]
+struct SeeItem {
+    s0: usize,
+    s1: usize,
+    first: u32,
+    count: u32,
+    sc: (u32, u32, u32, u32),
+}
+
+#[derive(Clone, Copy)]
+struct FlatItem {
+    s0: usize,
+    first: u32,
+    count: u32,
+    sc: (u32, u32, u32, u32),
+}
+
 pub struct GpuCanvas {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -305,6 +337,10 @@ pub struct GpuCanvas {
     size: (u32, u32),
     cov_tex: Option<(wgpu::Texture, wgpu::TextureView, wgpu::BindGroup)>,
     stencil: Option<wgpu::TextureView>,
+    slots_scratch: Vec<Uniforms>,
+    rects_scratch: Vec<[f32; 2]>,
+    plan_scratch: Vec<(usize, Option<usize>, Vec<(usize, usize)>)>,
+    bytes_scratch: Vec<u8>,
 }
 
 const OVER: wgpu::BlendState = wgpu::BlendState {
@@ -395,6 +431,7 @@ impl GpuCanvas {
         GpuCanvas {
             device, queue, format, uniform_bgl, tex_bgl, caps_cov, zero_cov, compose, fill_stencil, flat_box, flat_hole, caps_hatch, flat_plain, paper, rects, rects_capacity,
             uniforms, uniform_bg, uniform_capacity, size: (0, 0), cov_tex: None, stencil: None,
+            slots_scratch: Vec::new(), rects_scratch: Vec::new(), plan_scratch: Vec::new(), bytes_scratch: Vec::new(),
         }
     }
 
@@ -458,134 +495,141 @@ impl GpuCanvas {
             self.rects = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("rects"), size: (self.rects_capacity * 6 * 8) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
         }
         let premul = |c: [f32; 4]| [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
-        // Every op's uniforms first (the colour; `cov` for the coverage pass), one slot each; the
-        // pages' paper slots and rectangles too.
-        let mut slots: Vec<Uniforms> = Vec::new();
-        let mut rects: Vec<[f32; 2]> = Vec::with_capacity(frame.pages.len() * 6);
-        let mut plan: Vec<(usize, Option<usize>, Vec<(usize, usize)>)> = Vec::with_capacity(frame.pages.len());
+
+        self.slots_scratch.clear();
+        self.rects_scratch.clear();
+        self.plan_scratch.clear();
+        self.bytes_scratch.clear();
+
         for (pi, page) in frame.pages.iter().enumerate() {
             let tf = &page.tf;
             let base = Uniforms { m: [tf.a, tf.b, tf.c, tf.d], t: [tf.ox, tf.oy], size: [w as f32, h as f32], px: tf.px(), ..Uniforms::zeroed() };
             let paper_slot = page.paper.map(|p| {
-                slots.push(p.uniforms(&base));
+                self.slots_scratch.push(p.uniforms(&base));
                 for (x, y) in [(0.0, 0.0), (p.width, 0.0), (0.0, p.height), (p.width, 0.0), (p.width, p.height), (0.0, p.height)] {
-                    rects.push([x, y]);
+                    self.rects_scratch.push([x, y]);
                 }
-                slots.len() - 1
+                self.slots_scratch.len() - 1
             });
             if paper_slot.is_none() {
-                rects.extend([[0.0f32; 2]; 6]);
+                self.rects_scratch.extend([[0.0f32; 2]; 6]);
             }
             let mut slot_of: Vec<(usize, usize)> = Vec::with_capacity(page.scene.ops.len());
             for op in &page.scene.ops {
                 match op {
                     Op::See { col, .. } => {
-                        slots.push(Uniforms { cov: 1, ..base });
-                        slots.push(Uniforms { col: premul(*col), ..base });
-                        slot_of.push((slots.len() - 2, slots.len() - 1));
+                        self.slots_scratch.push(Uniforms { cov: 1, ..base });
+                        self.slots_scratch.push(Uniforms { col: premul(*col), ..base });
+                        slot_of.push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
                     }
                     Op::Fill { mode, col, .. } => {
-                        slots.push(base);
-                        slots.push(Uniforms { col: if *mode == FillMode::Hole { [0.0, 0.0, 0.0, 1.0] } else { premul(*col) }, ..base });
-                        slot_of.push((slots.len() - 2, slots.len() - 1));
+                        self.slots_scratch.push(base);
+                        self.slots_scratch.push(Uniforms { col: if *mode == FillMode::Hole { [0.0, 0.0, 0.0, 1.0] } else { premul(*col) }, ..base });
+                        slot_of.push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
                     }
                     Op::Flat { col, .. } => {
-                        slots.push(Uniforms { col: premul(*col), ..base });
-                        slot_of.push((slots.len() - 1, slots.len() - 1));
+                        self.slots_scratch.push(Uniforms { col: premul(*col), ..base });
+                        slot_of.push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
                     }
                 }
             }
-            plan.push((pi, paper_slot, slot_of));
+            self.plan_scratch.push((pi, paper_slot, slot_of));
         }
-        if slots.is_empty() {
-            slots.push(Uniforms::zeroed());
+        if self.slots_scratch.is_empty() {
+            self.slots_scratch.push(Uniforms::zeroed());
         }
-        if slots.len() as u64 > self.uniform_capacity {
-            self.uniform_capacity = (slots.len() as u64).next_power_of_two();
+        if self.slots_scratch.len() as u64 > self.uniform_capacity {
+            self.uniform_capacity = (self.slots_scratch.len() as u64).next_power_of_two();
             let (b, bg) = Self::uniform_buffer(&self.device, &self.uniform_bgl, self.uniform_capacity);
             self.uniforms = b;
             self.uniform_bg = bg;
         }
-        let mut bytes = vec![0u8; slots.len() * UNIFORM_STRIDE as usize];
-        for (i, s) in slots.iter().enumerate() {
-            bytes[i * UNIFORM_STRIDE as usize..i * UNIFORM_STRIDE as usize + std::mem::size_of::<Uniforms>()].copy_from_slice(bytemuck::bytes_of(s));
+        let needed_bytes = self.slots_scratch.len() * UNIFORM_STRIDE as usize;
+        self.bytes_scratch.resize(needed_bytes, 0);
+        for (i, s) in self.slots_scratch.iter().enumerate() {
+            let offset = i * UNIFORM_STRIDE as usize;
+            self.bytes_scratch[offset..offset + std::mem::size_of::<Uniforms>()].copy_from_slice(bytemuck::bytes_of(s));
         }
-        self.queue.write_buffer(&self.uniforms, 0, &bytes);
-        if !rects.is_empty() {
-            self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(&rects));
+        self.queue.write_buffer(&self.uniforms, 0, &self.bytes_scratch);
+        if !self.rects_scratch.is_empty() {
+            self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(&self.rects_scratch));
         }
         let offset = |slot: usize| (slot as u64 * UNIFORM_STRIDE) as u32;
 
         let (_, cov_view, cov_bg) = self.cov_tex.as_ref().unwrap();
         let stencil = self.stencil.as_ref().unwrap();
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("canvas") });
-        // The desk (or nothing), and a clean stencil.
+
+        // 1. Initial "desk" pass (clears target + stencil), drawing paper directly inside it!
         {
             let clear = frame.clear.map(|p| wgpu::Color { r: p.r as f64, g: p.g as f64, b: p.b as f64, a: p.a as f64 }).unwrap_or(wgpu::Color::TRANSPARENT);
-            enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("desk"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: target, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(clear), store: wgpu::StoreOp::Store } })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: stencil, depth_ops: None, stencil_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0), store: wgpu::StoreOp::Store }) }),
                 ..Default::default()
             });
-        }
-        for (pi, paper_slot, slot_of) in &plan {
-            let page = &frame.pages[*pi];
-            let (tf, scene) = (&page.tf, page.scene);
-            if let (Some(ps), Some(paper)) = (paper_slot, page.paper) {
-                let bx = PageBox { x0: 0.0, y0: 0.0, x1: paper.width, y1: paper.height };
-                if let Some(sc) = self.scissor(&bx, tf, 0.5) {
-                    let mut p = target_pass(&mut enc, target, stencil, "paper", false);
-                    p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                    p.set_bind_group(0, &self.uniform_bg, &[offset(*ps)]);
-                    p.set_bind_group(1, cov_bg, &[]);
-                    p.set_stencil_reference(0);
-                    p.set_pipeline(&self.paper);
-                    p.set_vertex_buffer(0, self.rects.slice(..));
-                    let v0 = (*pi * 6) as u32;
-                    p.draw(v0..v0 + 6, 0..1);
+            let mut paper_bound = false;
+            for (pi, paper_slot, _) in &self.plan_scratch {
+                let page = &frame.pages[*pi];
+                if let (Some(ps), Some(paper)) = (paper_slot, page.paper) {
+                    let bx = PageBox { x0: 0.0, y0: 0.0, x1: paper.width, y1: paper.height };
+                    if let Some(sc) = self.scissor(&bx, &page.tf, 0.5) {
+                        if !paper_bound {
+                            p.set_bind_group(1, cov_bg, &[]);
+                            p.set_stencil_reference(0);
+                            p.set_pipeline(&self.paper);
+                            p.set_vertex_buffer(0, self.rects.slice(..));
+                            paper_bound = true;
+                        }
+                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(*ps)]);
+                        let v0 = (*pi * 6) as u32;
+                        p.draw(v0..v0 + 6, 0..1);
+                    }
                 }
             }
+        }
+
+        let scissor_overlaps = |a: (u32, u32, u32, u32), b: (u32, u32, u32, u32)| -> bool {
+            !(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1)
+        };
+
+        let mut see_batch: Vec<SeeItem> = Vec::new();
+        let mut flat_batch: Vec<FlatItem> = Vec::new();
+
+        for (pi, _, slot_of) in &self.plan_scratch {
+            let page = &frame.pages[*pi];
+            let (tf, scene) = (&page.tf, page.scene);
+
             for (i, op) in scene.ops.iter().enumerate() {
                 let (s0, s1) = slot_of[i];
                 match op {
                     Op::See { first, count, bx, .. } => {
-                        let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
+                        if !flat_batch.is_empty() {
+                            Self::flush_flat(&mut enc, target, stencil, cov_bg, &self.uniform_bg, &self.flat_plain, scene.flat.slice(..), &mut flat_batch);
+                        }
                         if *count == 0 {
                             continue;
                         }
-                        // The run's coverage: the union of its capsules (max), within its box.
-                        {
-                            let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                                label: Some("coverage"),
-                                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: cov_view, resolve_target: None, depth_slice: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store } })],
-                                depth_stencil_attachment: None,
-                                ..Default::default()
-                            });
-                            p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                            p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
-                            p.set_pipeline(&self.zero_cov);
-                            p.draw(0..3, 0..1);
-                            p.set_pipeline(&self.caps_cov);
-                            p.set_vertex_buffer(0, scene.caps.slice(..));
-                            p.draw(0..4, *first..*first + *count);
+                        let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
+                        if see_batch.iter().any(|item| scissor_overlaps(item.sc, sc)) {
+                            Self::flush_see(&mut enc, cov_view, target, stencil, cov_bg, &self.uniform_bg, scene.caps.slice(..), &self.zero_cov, &self.caps_cov, &self.compose, &mut see_batch);
                         }
-                        // Composited once, in the run's colour.
-                        let mut p = target_pass(&mut enc, target, stencil, "compose", false);
-                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
-                        p.set_bind_group(0, &self.uniform_bg, &[offset(s1)]);
-                        p.set_bind_group(1, cov_bg, &[]);
-                        p.set_pipeline(&self.compose);
-                        p.set_stencil_reference(0);
-                        p.draw(0..3, 0..1);
+                        see_batch.push(SeeItem { s0, s1, first: *first, count: *count, sc });
                     }
                     Op::Fill { first, count, mode, bx, box_first, hatch_first, hatch_count, .. } => {
+                        if !see_batch.is_empty() {
+                            Self::flush_see(&mut enc, cov_view, target, stencil, cov_bg, &self.uniform_bg, scene.caps.slice(..), &self.zero_cov, &self.caps_cov, &self.compose, &mut see_batch);
+                        }
+                        if !flat_batch.is_empty() {
+                            Self::flush_flat(&mut enc, target, stencil, cov_bg, &self.uniform_bg, &self.flat_plain, scene.flat.slice(..), &mut flat_batch);
+                        }
                         let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
                         let mut p = target_pass(&mut enc, target, stencil, "fill", true);
                         p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
                         p.set_bind_group(1, cov_bg, &[]);
                         p.set_stencil_reference(0);
-                        // Even-odd: each triangle of the fan flips the stencil.
                         p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
                         p.set_pipeline(&self.fill_stencil);
                         p.set_vertex_buffer(0, scene.flat.slice(..));
@@ -604,19 +648,105 @@ impl GpuCanvas {
                             }
                         }
                     }
-                    Op::Flat { first, count, .. } => {
-                        let mut p = target_pass(&mut enc, target, stencil, "flat", false);
-                        p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
-                        p.set_bind_group(1, cov_bg, &[]);
-                        p.set_stencil_reference(0);
-                        p.set_pipeline(&self.flat_plain);
-                        p.set_vertex_buffer(0, scene.flat.slice(..));
-                        p.draw(*first..*first + *count, 0..1);
+                    Op::Flat { first, count, bx, .. } => {
+                        if !see_batch.is_empty() {
+                            Self::flush_see(&mut enc, cov_view, target, stencil, cov_bg, &self.uniform_bg, scene.caps.slice(..), &self.zero_cov, &self.caps_cov, &self.compose, &mut see_batch);
+                        }
+                        if *count == 0 {
+                            continue;
+                        }
+                        let Some(sc) = self.scissor(bx, tf, 1.5) else { continue };
+                        flat_batch.push(FlatItem { s0, first: *first, count: *count, sc });
                     }
                 }
             }
+            if !see_batch.is_empty() {
+                Self::flush_see(&mut enc, cov_view, target, stencil, cov_bg, &self.uniform_bg, scene.caps.slice(..), &self.zero_cov, &self.caps_cov, &self.compose, &mut see_batch);
+            }
+            if !flat_batch.is_empty() {
+                Self::flush_flat(&mut enc, target, stencil, cov_bg, &self.uniform_bg, &self.flat_plain, scene.flat.slice(..), &mut flat_batch);
+            }
         }
         self.queue.submit([enc.finish()]);
+    }
+
+    fn flush_see(
+        enc: &mut wgpu::CommandEncoder,
+        cov_view: &wgpu::TextureView,
+        target: &wgpu::TextureView,
+        stencil: &wgpu::TextureView,
+        cov_bg: &wgpu::BindGroup,
+        uniform_bg: &wgpu::BindGroup,
+        scene_caps: wgpu::BufferSlice,
+        zero_cov: &wgpu::RenderPipeline,
+        caps_cov: &wgpu::RenderPipeline,
+        compose: &wgpu::RenderPipeline,
+        batch: &mut Vec<SeeItem>,
+    ) {
+        if batch.is_empty() {
+            return;
+        }
+        let offset = |slot: usize| (slot as u64 * UNIFORM_STRIDE) as u32;
+        {
+            let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("coverage-batch"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: cov_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+            p.set_vertex_buffer(0, scene_caps);
+            for item in batch.iter() {
+                p.set_scissor_rect(item.sc.0, item.sc.1, item.sc.2, item.sc.3);
+                p.set_bind_group(0, uniform_bg, &[offset(item.s0)]);
+                p.set_pipeline(zero_cov);
+                p.draw(0..3, 0..1);
+                p.set_pipeline(caps_cov);
+                p.draw(0..4, item.first..item.first + item.count);
+            }
+        }
+        {
+            let mut p = target_pass(enc, target, stencil, "compose-batch", false);
+            p.set_pipeline(compose);
+            p.set_bind_group(1, cov_bg, &[]);
+            p.set_stencil_reference(0);
+            for item in batch.iter() {
+                p.set_scissor_rect(item.sc.0, item.sc.1, item.sc.2, item.sc.3);
+                p.set_bind_group(0, uniform_bg, &[offset(item.s1)]);
+                p.draw(0..3, 0..1);
+            }
+        }
+        batch.clear();
+    }
+
+    fn flush_flat(
+        enc: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        stencil: &wgpu::TextureView,
+        cov_bg: &wgpu::BindGroup,
+        uniform_bg: &wgpu::BindGroup,
+        flat_plain: &wgpu::RenderPipeline,
+        scene_flat: wgpu::BufferSlice,
+        batch: &mut Vec<FlatItem>,
+    ) {
+        if batch.is_empty() {
+            return;
+        }
+        let offset = |slot: usize| (slot as u64 * UNIFORM_STRIDE) as u32;
+        let mut p = target_pass(enc, target, stencil, "flat-batch", false);
+        p.set_bind_group(1, cov_bg, &[]);
+        p.set_stencil_reference(0);
+        p.set_pipeline(flat_plain);
+        p.set_vertex_buffer(0, scene_flat);
+        for item in batch.drain(..) {
+            p.set_scissor_rect(item.sc.0, item.sc.1, item.sc.2, item.sc.3);
+            p.set_bind_group(0, uniform_bg, &[offset(item.s0)]);
+            p.draw(item.first..item.first + item.count, 0..1);
+        }
     }
 
     pub fn format(&self) -> wgpu::TextureFormat {

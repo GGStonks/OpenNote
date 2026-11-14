@@ -101,6 +101,14 @@ fn test_canvas_host_ffi_lifecycle() {
         let n = opennote_canvas_host_set_scene(host, page_id.as_ptr(), strokes_json.as_ptr());
         assert_eq!(n, 0);
 
+        let layers_json = CString::new("[[]]").unwrap();
+        let nl = opennote_native::opennote_canvas_host_set_scene_layers(host, page_id.as_ptr(), layers_json.as_ptr());
+        assert_eq!(nl, 0);
+
+        let frame_json = CString::new(r#"{"clear":[1.0,1.0,1.0,1.0],"pages":[{"page":"p1","tf":[1.0,0.0,0.0,1.0,0.0,0.0],"paper":{"width":100.0,"height":100.0,"style":1,"base":[1.0,1.0,1.0,1.0],"dark":false,"origin":[0.0,0.0]}}]}"#).unwrap();
+        let set_frame_ok = opennote_native::opennote_canvas_host_set_frame(host, frame_json.as_ptr());
+        assert!(set_frame_ok);
+
         let drawn = opennote_canvas_host_draw(host);
         assert!(drawn, "first draw on dirty host should succeed");
 
@@ -108,5 +116,87 @@ fn test_canvas_host_ffi_lifecycle() {
 
         opennote_canvas_host_free(host);
     }
+}
+
+#[test]
+fn test_selection_methods_through_bridge() {
+    let page_json = json!({
+        "id": "p1",
+        "pageNumber": 1,
+        "strokes": [
+            {
+                "id": "s1",
+                "tool": "pen",
+                "color": "#000000",
+                "width": 2.0,
+                "opacity": 1.0,
+                "points": [
+                    { "x": 10.0, "y": 10.0, "pressure": 0.5 },
+                    { "x": 20.0, "y": 20.0, "pressure": 0.5 }
+                ]
+            },
+            {
+                "id": "s2",
+                "tool": "pen",
+                "color": "#000000",
+                "width": 2.0,
+                "opacity": 1.0,
+                "points": [
+                    { "x": 100.0, "y": 100.0, "pressure": 0.5 },
+                    { "x": 120.0, "y": 120.0, "pressure": 0.5 }
+                ]
+            }
+        ],
+        "latexBlocks": [],
+        "textBlocks": [],
+        "imageBlocks": []
+    });
+
+    // 1. selectInRect
+    let req_rect = json!({
+        "rect": [0.0, 0.0, 50.0, 50.0],
+        "page": page_json
+    });
+    let (res_rect_meta, _) = call("selectInRect", &req_rect.to_string(), &[]).unwrap();
+    let res_rect: serde_json::Value = serde_json::from_str(&res_rect_meta).unwrap();
+    assert_eq!(res_rect["strokeIds"].as_array().unwrap().len(), 1);
+    assert_eq!(res_rect["strokeIds"][0], "s1");
+
+    // 2. selectInLasso
+    let req_lasso = json!({
+        "lasso": [[0.0, 0.0], [50.0, 0.0], [50.0, 50.0], [0.0, 50.0]],
+        "page": page_json
+    });
+    let (res_lasso_meta, _) = call("selectInLasso", &req_lasso.to_string(), &[]).unwrap();
+    let res_lasso: serde_json::Value = serde_json::from_str(&res_lasso_meta).unwrap();
+    assert_eq!(res_lasso["strokeIds"].as_array().unwrap().len(), 1);
+    assert_eq!(res_lasso["strokeIds"][0], "s1");
+
+    // 3. selectionBounds
+    let req_bounds = json!({
+        "page": page_json,
+        "ids": ["s1"]
+    });
+    let (res_bounds_meta, _) = call("selectionBounds", &req_bounds.to_string(), &[]).unwrap();
+    let res_bounds: serde_json::Value = serde_json::from_str(&res_bounds_meta).unwrap();
+    assert!(res_bounds["bounds"].is_object());
+
+    // 4. transformPageItems
+    let req_tf = json!({
+        "page": page_json,
+        "ids": ["s1"],
+        "dx": 10.0,
+        "dy": 20.0,
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+        "rotationRad": 0.0,
+        "origin": [0.0, 0.0]
+    });
+    let (res_tf_meta, _) = call("transformPageItems", &req_tf.to_string(), &[]).unwrap();
+    let res_tf: serde_json::Value = serde_json::from_str(&res_tf_meta).unwrap();
+    let transformed_stroke = &res_tf["page"]["strokes"][0];
+    assert_eq!(transformed_stroke["id"], "s1");
+    assert_eq!(transformed_stroke["points"][0]["x"].as_f64(), Some(20.0));
+    assert_eq!(transformed_stroke["points"][0]["y"].as_f64(), Some(30.0));
 }
 

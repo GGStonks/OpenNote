@@ -116,14 +116,19 @@ impl CanvasHost {
         self.dirty = true;
     }
 
-    /// The scene of page `id`: its strokes as the page stores them (one z-layer in N2).
-    pub fn set_scene(&mut self, id: &str, strokes: &[Stroke]) -> usize {
-        let scene = Scene::build(&[strokes]);
+    /// The scene of page `id`: built from multiple stroke layers (e.g. from `shapes::z_layers` when blocks interleave).
+    pub fn set_scene_layers(&mut self, id: &str, layers: &[&[Stroke]]) -> usize {
+        let scene = Scene::build(layers);
         let n = scene.caps.len();
         let gs = self.canvas.upload(&scene);
         self.scenes.insert(id.to_string(), (gs, n));
         self.dirty = true;
         n
+    }
+
+    /// The scene of page `id`: its strokes as the page stores them (one z-layer in N2).
+    pub fn set_scene(&mut self, id: &str, strokes: &[Stroke]) -> usize {
+        self.set_scene_layers(id, &[strokes])
     }
 
     pub fn remove_scene(&mut self, id: &str) {
@@ -164,15 +169,24 @@ impl CanvasHost {
             clear: self.frame.clear,
             pages,
         };
-        match &self.target {
-            Target::Surface { surface, .. } => {
+        match &mut self.target {
+            Target::Surface { surface, config } => {
                 let st = match surface.get_current_texture() {
                     Ok(st) => st,
                     Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
-                        // The next call reconfigures (resize) and draws.
-                        return Ok(false);
+                        surface.configure(&self.canvas.device, config);
+                        match surface.get_current_texture() {
+                            Ok(st) => st,
+                            Err(_) => {
+                                self.dirty = true;
+                                return Ok(false);
+                            }
+                        }
                     }
-                    Err(e) => return Err(format!("surface: {e}")),
+                    Err(e) => {
+                        self.dirty = true;
+                        return Err(format!("surface: {e}"));
+                    }
                 };
                 let view = st.texture.create_view(&Default::default());
                 self.canvas.draw_frame(&view, w, h, &frame);

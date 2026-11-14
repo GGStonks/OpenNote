@@ -1653,6 +1653,7 @@ dependencies = [
  "renderer",
  "serde",
  "serde_json",
+ "shapes",
 ]
 
 [[package]]
