@@ -174,28 +174,28 @@ export function enginePoints(s: Stroke): Point[] {
 }
 
 /** A lift sample turning more than this from the line's last direction is left out (cosine). */
-const LIFT_TURN_COS = 0.5;
+const LIFT_TURN_COS = 0.0;
 
 /**
- * A stroke without real pressure (finger, mouse) ends with the lift's own sample, which CanvasPage
- * marks with pressure 0 (every other point has 0.5). Android's web view reports the lift ~25 ms
- * after the last move and up to a few px back along the path, even when the finger was moving
- * fast; drawn as ink, the engine bent the line's end back to reach it, a hook on quick strokes.
- * It is left out when it turns more than 60° from the direction of the line's last 6 px; one
- * that goes on (where the lift carries the true end) stays.
+ * Strips backward lift-off hooks (turning > 90° from preceding trajectory) while preserving
+ * forward-moving lift contacts.
  */
 function withoutBackwardLift(pts: Point[]): Point[] {
   const n = pts.length;
-  if (n < 3 || pts[n - 1].pressure !== 0 || !(pts[n - 2].pressure > 0)) return pts;
-  let j = n - 2, d = 0;
+  if (n < 3) return pts;
+  let endIdx = n;
+  while (endIdx > 1 && !(pts[endIdx - 1].pressure > 0)) endIdx--;
+  const liftIdx = endIdx < n ? endIdx : n - 1;
+  if (liftIdx < 2 || !(pts[liftIdx - 1].pressure > 0)) return pts;
+  let j = liftIdx - 1, d = 0;
   while (j > 0 && d < 6) {
     d += Math.hypot(pts[j].x - pts[j - 1].x, pts[j].y - pts[j - 1].y);
     j--;
   }
-  const bx = pts[n - 2].x - pts[j].x, by = pts[n - 2].y - pts[j].y, bl = Math.hypot(bx, by);
-  const lx = pts[n - 1].x - pts[n - 2].x, ly = pts[n - 1].y - pts[n - 2].y, ll = Math.hypot(lx, ly);
+  const bx = pts[liftIdx - 1].x - pts[j].x, by = pts[liftIdx - 1].y - pts[j].y, bl = Math.hypot(bx, by);
+  const lx = pts[n - 1].x - pts[liftIdx - 1].x, ly = pts[n - 1].y - pts[liftIdx - 1].y, ll = Math.hypot(lx, ly);
   if (bl < 1 || ll < 0.05) return pts;
-  return (bx * lx + by * ly) / (bl * ll) < LIFT_TURN_COS ? pts.slice(0, -1) : pts;
+  return (bx * lx + by * ly) / (bl * ll) < LIFT_TURN_COS ? pts.slice(0, liftIdx) : pts;
 }
 
 /**

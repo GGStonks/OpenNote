@@ -83,7 +83,7 @@ for (const file of files) {
       const k = strokeGeometry(q);
       return { pts: k.pts.map(pt4), widths: k.widths ? k.widths.map(n) : null, width: n(k.width) };
     };
-    const asModeled = modeled.map((q) => ({ x: q.x, y: q.y, t: q.t, pressure: q.p }));
+    const asModeled = modeled.map(pt4).map(([x, y, t, pressure]) => ({ x, y, t, pressure }));
     const variants: Record<string, Stroke> = {
       ballpoint: { ...stroke, penStyle: 'ballpoint' },
       highlighter: { ...stroke, tool: 'highlighter' },

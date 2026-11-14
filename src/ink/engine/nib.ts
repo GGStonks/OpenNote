@@ -128,35 +128,13 @@ export class NibModeler {
   }
 
   /**
-   * Number of samples that are ink: the trailing samples after it are the lift-off (force under
-   * LIFT_FORCE of the median, within the last LIFT_MS and LIFT_PX) and may be dropped.
+   * Number of samples that are ink: trims trailing zero-pressure (pen lifted/in air) samples.
    */
   private inkEnd(): number {
     const r = this.raw, n = r.length, fs = this.forces;
     if (!fs.length) return n;
-    // A sample without force is the pen in the air: never ink, however far away it is. (At speed
-    // the Pencil can lift with its force still high and report the lift 15-25 ms later, tens of
-    // px further on: that drew a straight line out to the pen in the air.)
     let k = n;
     while (k > 1 && !(r[k - 1].f > 0)) k--;
-    if (k < 4) return k;
-    // The lift: the force falls steadily from where it was just before. Find that run (a few
-    // percent of noise allowed) and its starting force F0; the ink ends where the force drops
-    // under LIFT_FORCE of F0. (Relative to the stroke's median, as before, the threshold was too
-    // low: the placeholder force the Pencil reports at touch-down pulls the median down, and the
-    // fading samples were drawn as a small extra point after the pen had lifted.)
-    const tEnd = r[k - 1].t;
-    let s = k - 1;
-    while (s > 0 && r[s - 1].f > 0 && r[s - 1].f >= r[s].f * 0.97 && tEnd - r[s - 1].t <= NIB.LIFT_MS) s--;
-    const limit = NIB.LIFT_FORCE * r[s].f;
-    let len = 0;
-    while (k > Math.max(s + 1, 2)) {
-      const i = k - 1;
-      if (r[i].f >= limit) break;
-      len += Math.hypot(r[i].x - r[i - 1].x, r[i].y - r[i - 1].y);
-      if (len > NIB.LIFT_PX) break;
-      k--;
-    }
     return k;
   }
 
@@ -167,36 +145,36 @@ export class NibModeler {
   tail(): ModeledPoint[] {
     if (!this.raw.length) return [];
     // Possible lift-off samples are not drawn.
-    const n = this.inkEnd();
+    const n = Math.max(this.inkEnd(), this.anchors.length, 1);
     const provisional: Anchor[] = [];
     let env = this.env;
-    const latest = this.raw[this.raw.length - 1].t;
+    const latest = this.raw[n - 1].t;
     for (let i = this.anchors.length; i < n; i++) {
-      const a = this.fitAnchor(i, provisional, env);
+      const a = this.fitAnchor(i, provisional, env, n);
       env = a.p;
       const q = this.provisional(a.x, a.y, this.raw[i].x, this.raw[i].y, a.t, a.h, latest);
       provisional.push({ ...a, x: q.x, y: q.y });
     }
     const all = provisional.length ? this.anchors.concat(provisional) : this.anchors;
     const out: ModeledPoint[] = [];
-    for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out, i >= this.anchors.length - 1 ? latest : null);
+    for (let i = Math.max(1, this.emitted); i < all.length; i++) this.segment(all, i, true, out, i >= this.anchors.length - 1 ? latest : null, n);
     if (this.emitted === 0 && all.length) out.unshift(this.point(all[0]));
     return out;
   }
 
   // ------------------------------------------------------------------------------------- anchors
-  private speedAt(i: number): number {
+  private speedAt(i: number, limit: number = this.raw.length): number {
     const r = this.raw;
     const ti = r[i].t;
     let a = i, b = i;
     while (a > 0 && ti - r[a - 1].t <= NIB.SPEED_WIN) a--;
-    while (b < r.length - 1 && r[b + 1].t - ti <= NIB.SPEED_WIN) b++;
+    while (b < limit - 1 && r[b + 1].t - ti <= NIB.SPEED_WIN) b++;
     const dt = r[b].t - r[a].t;
     return dt > 0 ? Math.hypot(r[b].x - r[a].x, r[b].y - r[a].y) / dt : 0;
   }
 
-  private halfWindow(i: number): number {
-    const v = this.speedAt(i);
+  private halfWindow(i: number, limit: number = this.raw.length): number {
+    const v = this.speedAt(i, limit);
     return Math.max(NIB.MIN_HALF, Math.min(NIB.MAX_HALF, v > 0 ? NIB.ARC / v : NIB.MAX_HALF));
   }
 
@@ -205,15 +183,16 @@ export class NibModeler {
     const latest = r[r.length - 1].t;
     // Samples that may be the lift-off wait: once ink, they settle; if the pen lifts, they go.
     const end = final ? r.length : this.inkEnd();
+    const limit = r.length;
     while (this.anchors.length < end) {
       const i = this.anchors.length;
       if (!final) {
         const ti = r[i].t;
         if (latest < ti + NIB.SPEED_WIN) break;
-        if (latest < ti + Math.max(this.halfWindow(i), NIB.PRESS_HALF)) break;
+        if (latest < ti + Math.max(this.halfWindow(i, limit), NIB.PRESS_HALF)) break;
         if (ti < NIB.ATTACK && latest < NIB.ATTACK + NIB.PRESS_HALF) break;
       }
-      const a = this.fitAnchor(i, [], this.env);
+      const a = this.fitAnchor(i, [], this.env, limit);
       this.env = a.p;
       this.anchors.push(a);
     }
@@ -221,19 +200,19 @@ export class NibModeler {
   }
 
   /** Anchor i from the samples available now. `pending` = provisional anchors before it. */
-  private fitAnchor(i: number, _pending: Anchor[], prevEnv: number): Anchor {
+  private fitAnchor(i: number, _pending: Anchor[], prevEnv: number, limit: number = this.raw.length): Anchor {
     const r = this.raw;
     const ti = r[i].t;
-    const h = this.halfWindow(i);
+    const h = this.halfWindow(i, limit);
     // The distance limit guards corners, where the pen slows down and the time window grows; at
     // speed it must not shrink the window below its time span.
-    const cr = Math.max(NIB.CHORD, 1.2 * this.speedAt(i) * h);
-    const pos = this.smoothAt(ti, r[i].x, r[i].y, i, h, cr);
+    const cr = Math.max(NIB.CHORD, 1.2 * this.speedAt(i, limit) * h);
+    const pos = this.smoothAt(ti, r[i].x, r[i].y, i, h, cr, limit);
 
     // Pressure: zero-phase weighted mean of the known forces.
     let pa = i, pb = i;
     while (pa > 0 && ti - r[pa - 1].t < NIB.PRESS_HALF) pa--;
-    while (pb < r.length - 1 && r[pb + 1].t - ti < NIB.PRESS_HALF) pb++;
+    while (pb < limit - 1 && r[pb + 1].t - ti < NIB.PRESS_HALF) pb++;
     let sw = 0, sf = 0;
     for (let j = pa; j <= pb; j++) {
       if (!(r[j].f > 0)) continue;
@@ -257,13 +236,13 @@ export class NibModeler {
    * Both weights fade to zero at the edge of the window, so the curve is continuous and smooth
    * in t: samples never switch on or off abruptly.
    */
-  private smoothAt(t: number, cx: number, cy: number, c: number, h: number, cr: number): { x: number; y: number } {
+  private smoothAt(t: number, cx: number, cy: number, c: number, h: number, cr: number, limit: number = this.raw.length): { x: number; y: number } {
     const r = this.raw;
     const cr2 = cr * cr;
     const near = (j: number) => { const dx = r[j].x - cx, dy = r[j].y - cy; return dx * dx + dy * dy < cr2; };
     let a = c, b = c;
     while (a > 0 && t - r[a - 1].t < h && near(a - 1)) a--;
-    while (b < r.length - 1 && r[b + 1].t - t < h && near(b + 1)) b++;
+    while (b < limit - 1 && r[b + 1].t - t < h && near(b + 1)) b++;
     return fitAt(r, a, b, t, h, cx, cy, cr);
   }
 
@@ -297,8 +276,9 @@ export class NibModeler {
       this.points.push(this.point(A[0]));
       this.emitted = 1;
     }
+    const limit = this.raw.length;
     while (this.emitted < A.length && (final || this.emitted + 1 < A.length)) {
-      this.segment(A, this.emitted, final && this.emitted === A.length - 1, this.points);
+      this.segment(A, this.emitted, final && this.emitted === A.length - 1, this.points, null, limit);
       this.emitted++;
     }
   }
@@ -308,7 +288,7 @@ export class NibModeler {
    * smoothed position evaluated every STEP px along the way, not a spline through the anchors
    * (a spline through one point per sample bends at every point: visible as a fine wiggle).
    */
-  private segment(A: Anchor[], i: number, _last: boolean, out: ModeledPoint[], latest: number | null = null) {
+  private segment(A: readonly Anchor[], i: number, _last: boolean, out: ModeledPoint[], latest: number | null = null, limit: number = this.raw.length) {
     const p1 = A[i - 1], p2 = A[i];
     const r = this.raw;
     const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
@@ -318,7 +298,7 @@ export class NibModeler {
       const t = p1.t + (p2.t - p1.t) * f;
       const cx = r[i - 1].x + (r[i].x - r[i - 1].x) * f, cy = r[i - 1].y + (r[i].y - r[i - 1].y) * f;
       const h = p1.h + (p2.h - p1.h) * f;
-      let q = this.smoothAt(t, cx, cy, f < 0.5 ? i - 1 : i, h, p1.cr + (p2.cr - p1.cr) * f);
+      let q = this.smoothAt(t, cx, cy, f < 0.5 ? i - 1 : i, h, p1.cr + (p2.cr - p1.cr) * f, limit);
       if (latest !== null) q = this.provisional(q.x, q.y, cx, cy, t, h, latest);
       out.push({ x: q.x, y: q.y, p: p1.p + (p2.p - p1.p) * f, t });
     }

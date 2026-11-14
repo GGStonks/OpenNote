@@ -88,7 +88,7 @@ function nibExtent(ux: number, uy: number): number {
 
 /** Pressure part of the width: a factor of the nominal width for a normalised force 0..1. */
 export function pressureFactor(pressure: number): number {
-  const p = Math.max(0, Math.min(1, pressure || 0.5));
+  const p = Math.max(0, Math.min(1, Number.isFinite(pressure) ? pressure : 0.5));
   return 0.61 + 0.94 * Math.pow(p, 0.68);
 }
 

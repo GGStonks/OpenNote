@@ -140,33 +140,6 @@ impl NibModeler {
         while k > 1 && !(self.raw[k - 1].f > 0.0) {
             k -= 1;
         }
-        if k < 4 {
-            return k;
-        }
-
-        let t_end = self.raw[k - 1].t;
-        let mut s = k - 1;
-        while s > 0
-            && self.raw[s - 1].f > 0.0
-            && self.raw[s - 1].f >= self.raw[s].f * 0.97
-            && (t_end - self.raw[s - 1].t) <= self.params.lift_ms
-        {
-            s -= 1;
-        }
-
-        let limit = self.params.lift_force * self.raw[s].f;
-        let mut len = 0.0;
-        while k > (s + 1).max(2) {
-            let i = k - 1;
-            if self.raw[i].f >= limit {
-                break;
-            }
-            len += (self.raw[i].x - self.raw[i - 1].x).js_hypot(self.raw[i].y - self.raw[i - 1].y);
-            if len > self.params.lift_px {
-                break;
-            }
-            k -= 1;
-        }
         k
     }
 
@@ -174,13 +147,13 @@ impl NibModeler {
         if self.raw.is_empty() {
             return Vec::new();
         }
-        let n = self.ink_end();
+        let n = self.ink_end().max(self.anchors.len()).max(1);
         let mut provisional: Vec<Anchor> = Vec::new();
         let mut env = self.env;
-        let latest = self.raw.last().unwrap().t;
+        let latest = self.raw[n - 1].t;
 
         for i in self.anchors.len()..n {
-            let a = self.fit_anchor(i, &provisional, env);
+            let a = self.fit_anchor(i, &provisional, env, n);
             env = a.p;
             let q = self.provisional(a.x, a.y, self.raw[i].x, self.raw[i].y, a.t, a.h, latest);
             provisional.push(Anchor {
@@ -203,7 +176,7 @@ impl NibModeler {
             } else {
                 None
             };
-            self.segment(&all, i, true, &mut out, lat);
+            self.segment(&all, i, true, &mut out, lat, n);
         }
 
         if self.emitted == 0 && !all.is_empty() {
@@ -213,8 +186,8 @@ impl NibModeler {
         out
     }
 
-    fn speed_at(&self, i: usize) -> f64 {
-        let r = &self.raw;
+    fn speed_at(&self, i: usize, limit: usize) -> f64 {
+        let r = &self.raw[..limit];
         let ti = r[i].t;
         let mut a = i;
         let mut b = i;
@@ -232,8 +205,8 @@ impl NibModeler {
         }
     }
 
-    fn half_window(&self, i: usize) -> f64 {
-        let v = self.speed_at(i);
+    fn half_window(&self, i: usize, limit: usize) -> f64 {
+        let v = self.speed_at(i, limit);
         self.params.min_half.max(self.params.max_half.min(if v > 0.0 {
             self.params.arc / v
         } else {
@@ -252,6 +225,7 @@ impl NibModeler {
             self.ink_end()
         };
 
+        let limit = self.raw.len();
         while self.anchors.len() < end {
             let i = self.anchors.len();
             if !final_flag {
@@ -259,26 +233,26 @@ impl NibModeler {
                 if latest < ti + self.params.speed_win {
                     break;
                 }
-                if latest < ti + self.half_window(i).max(self.params.press_half) {
+                if latest < ti + self.half_window(i, limit).max(self.params.press_half) {
                     break;
                 }
                 if ti < self.params.attack && latest < self.params.attack + self.params.press_half {
                     break;
                 }
             }
-            let a = self.fit_anchor(i, &[], self.env);
+            let a = self.fit_anchor(i, &[], self.env, limit);
             self.env = a.p;
             self.anchors.push(a);
         }
         self.emit(false);
     }
 
-    fn fit_anchor(&self, i: usize, _pending: &[Anchor], prev_env: f64) -> Anchor {
-        let r = &self.raw;
+    fn fit_anchor(&self, i: usize, _pending: &[Anchor], prev_env: f64, limit: usize) -> Anchor {
+        let r = &self.raw[..limit];
         let ti = r[i].t;
-        let h = self.half_window(i);
-        let cr = self.params.chord.max(1.2 * self.speed_at(i) * h);
-        let pos = self.smooth_at(ti, r[i].x, r[i].y, i, h, cr);
+        let h = self.half_window(i, limit);
+        let cr = self.params.chord.max(1.2 * self.speed_at(i, limit) * h);
+        let pos = self.smooth_at(ti, r[i].x, r[i].y, i, h, cr, limit);
 
         let mut pa = i;
         let mut pb = i;
@@ -327,8 +301,8 @@ impl NibModeler {
         }
     }
 
-    fn smooth_at(&self, t: f64, cx: f64, cy: f64, c: usize, h: f64, cr: f64) -> XY {
-        let r = &self.raw;
+    fn smooth_at(&self, t: f64, cx: f64, cy: f64, c: usize, h: f64, cr: f64, limit: usize) -> XY {
+        let r = &self.raw[..limit];
         let cr2 = cr * cr;
         let near = |j: usize| {
             let dx = r[j].x - cx;
@@ -388,10 +362,11 @@ impl NibModeler {
             self.points.push(self.point(&self.anchors[0]));
             self.emitted = 1;
         }
+        let limit = self.raw.len();
         let mut new_points = Vec::new();
         while self.emitted < self.anchors.len() && (final_flag || self.emitted + 1 < self.anchors.len()) {
             let last_seg = final_flag && self.emitted == self.anchors.len() - 1;
-            self.segment(&self.anchors, self.emitted, last_seg, &mut new_points, None);
+            self.segment(&self.anchors, self.emitted, last_seg, &mut new_points, None, limit);
             self.emitted += 1;
         }
         self.points.extend(new_points);
@@ -404,10 +379,11 @@ impl NibModeler {
         _last: bool,
         out: &mut Vec<ModeledPoint>,
         latest: Option<f64>,
+        limit: usize,
     ) {
         let p1 = &anchors[i - 1];
         let p2 = &anchors[i];
-        let r = &self.raw;
+        let r = &self.raw[..limit];
         let len = (p2.x - p1.x).js_hypot(p2.y - p1.y);
         let n = 1.max((len / self.params.step).ceil() as usize);
 
@@ -418,7 +394,7 @@ impl NibModeler {
             let cy = r[i - 1].y + (r[i].y - r[i - 1].y) * f;
             let h = p1.h + (p2.h - p1.h) * f;
             let cr = p1.cr + (p2.cr - p1.cr) * f;
-            let mut q = self.smooth_at(t, cx, cy, if f < 0.5 { i - 1 } else { i }, h, cr);
+            let mut q = self.smooth_at(t, cx, cy, if f < 0.5 { i - 1 } else { i }, h, cr, limit);
             if let Some(lat) = latest {
                 q = self.provisional(q.x, q.y, cx, cy, t, h, lat);
             }

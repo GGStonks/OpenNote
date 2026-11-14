@@ -37,32 +37,41 @@ pub fn pen_end(s: &Stroke) -> Option<Point> {
     }
 }
 
-const LIFT_TURN_COS: f64 = 0.5;
+const LIFT_TURN_COS: f64 = 0.0;
 
 pub fn without_backward_lift(pts: &[Point]) -> Vec<Point> {
     let n = pts.len();
-    if n < 3 || pts[n - 1].pressure != 0.0 || !(pts[n - 2].pressure > 0.0) {
+    if n < 3 {
         return pts.to_vec();
     }
-    let mut j = n - 2;
+    let mut end_idx = n;
+    while end_idx > 1 && !(pts[end_idx - 1].pressure > 0.0) {
+        end_idx -= 1;
+    }
+    let lift_idx = if end_idx < n { end_idx } else { n - 1 };
+    if lift_idx < 2 || !(pts[lift_idx - 1].pressure > 0.0) {
+        return pts.to_vec();
+    }
+
+    let mut j = lift_idx - 1;
     let mut d = 0.0;
     while j > 0 && d < 6.0 {
         d += (pts[j].x - pts[j - 1].x).js_hypot(pts[j].y - pts[j - 1].y);
         j -= 1;
     }
-    let bx = pts[n - 2].x - pts[j].x;
-    let by = pts[n - 2].y - pts[j].y;
+    let bx = pts[lift_idx - 1].x - pts[j].x;
+    let by = pts[lift_idx - 1].y - pts[j].y;
     let bl = bx.js_hypot(by);
 
-    let lx = pts[n - 1].x - pts[n - 2].x;
-    let ly = pts[n - 1].y - pts[n - 2].y;
+    let lx = pts[n - 1].x - pts[lift_idx - 1].x;
+    let ly = pts[n - 1].y - pts[lift_idx - 1].y;
     let ll = lx.js_hypot(ly);
 
     if bl < 1.0 || ll < 0.05 {
         return pts.to_vec();
     }
     if (bx * lx + by * ly) / (bl * ll) < LIFT_TURN_COS {
-        pts[0..n - 1].to_vec()
+        pts[0..lift_idx].to_vec()
     } else {
         pts.to_vec()
     }

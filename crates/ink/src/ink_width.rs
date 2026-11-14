@@ -48,7 +48,6 @@ pub fn nib_factor(dx: f64, dy: f64) -> f64 {
 
 pub fn pressure_factor(pressure: f64) -> f64 {
     let p = pressure.clamp(0.0, 1.0);
-    let p = if p == 0.0 { 0.5 } else { p };
     0.61 + 0.94 * p.powf(0.68)
 }
 
