@@ -1205,15 +1205,10 @@ function eventTime(e: { timeStamp?: number }): number {
 /**
  * The Pencil's predicted sample, used to hide a frame of latency, only while the pen is not
  * slowing down and only half way: full predictions shot past the end of every stroke and were
- * then pulled back.
+ * then pulled back. Disabled to eliminate prediction overshoot and snap-back on liftoff.
  */
-function dampedPrediction(points: Point[], q: Point | null): Point[] {
-  const n = points.length;
-  if (!q || n < 3) return [];
-  const [a, b, c] = [points[n - 3], points[n - 2], points[n - 1]];
-  const speed = (u: Point, v: Point) => Math.hypot(v.x - u.x, v.y - u.y) / Math.max(1, (v.t ?? 0) - (u.t ?? 0));
-  if (speed(b, c) < speed(a, b) * 0.9) return [];
-  return [{ ...q, x: c.x + (q.x - c.x) * 0.5, y: c.y + (q.y - c.y) * 0.5 }];
+function dampedPrediction(_points: Point[], _q: Point | null): Point[] {
+  return [];
 }
 
 const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
@@ -2014,6 +2009,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       return;
     }
     if (e.pointerId !== d.pointerId) return;
+    // Hover moves (buttons == 0 / non-contact pointermove) are ignored while inking
+    if ((e.pointerType === 'pen' || e.pointerType === 'mouse') && e.buttons === 0) return;
     const native = e.nativeEvent;
     const coalesced: PointerEvent[] = native.getCoalescedEvents ? native.getCoalescedEvents() : [];
     const events = coalesced.length ? coalesced : [native];
@@ -2033,23 +2030,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       d.native = null;
       events.splice(0, events.length, ...webAfterNative(d));
     }
-    const predicted = native.getPredictedEvents ? native.getPredictedEvents() : [];
-    ingestSamples(d, retimeWebSamples(d, events), predicted[0] ?? null);
+    ingestSamples(d, retimeSamples(d, events), null);
     requestRender();
   };
 
   /**
-   * Web pointer events (Android, browsers): the samples' own timestamps drive the ink engine, so
-   * they must be real sample times. Chromium gives every coalesced event its hardware time, but
-   * some WebViews stamp a whole batch (or a burst of events) with nearly the same time: the engine
-   * then reads tens of px in a fraction of a millisecond as a huge speed, and its fit at the start
-   * of a stroke flung the ink far off. Bunched timestamps are spread evenly over the time since the
-   * previous sample, and times always increase.
+   * Retimes event samples (web pointer events or native 240 Hz samples): bunched or duplicate
+   * timestamps (dt < MIN_SAMPLE_DT) are spread evenly over the time since the previous sample,
+   * preventing velocity spikes and chord radius ballooning in NibModeler.
    */
-  function retimeWebSamples(d: NonNullable<typeof drawing.current>, events: PointerEvent[]): (PointerEvent | PencilSample)[] {
+  function retimeSamples(d: NonNullable<typeof drawing.current>, events: (PointerEvent | PencilSample)[]): (PointerEvent | PencilSample)[] {
     if (!events.length) return events;
     const times = events.map((e) => eventTime(e));
-    const prev = d.start + (d.points[d.points.length - 1].t ?? 0);
+    const prev = d.start + (d.points[d.points.length - 1]?.t ?? 0);
     const end = Math.max(times[times.length - 1], prev + events.length * MIN_SAMPLE_DT);
     let bunched = false;
     for (let i = 0; i < times.length; i++) if (times[i] - (i ? times[i - 1] : prev) < MIN_SAMPLE_DT) bunched = true;
@@ -2059,7 +2052,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       return {
         clientX: e.clientX, clientY: e.clientY, pressure: e.pressure, pointerType: 'pen' as const,
         timeStamp: prev + ((end - prev) * (i + 1)) / events.length,
-        altitudeAngle: anyE.altitudeAngle ?? 0, azimuthAngle: anyE.azimuthAngle ?? 0, tiltX: e.tiltX, tiltY: e.tiltY,
+        altitudeAngle: anyE.altitudeAngle ?? 0, azimuthAngle: anyE.azimuthAngle ?? 0, tiltX: e.tiltX ?? 0, tiltY: e.tiltY ?? 0,
         ...(e.pointerType !== 'pen' ? { pointerType: e.pointerType as 'pen' } : {}),
       };
     });
@@ -2069,6 +2062,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   function ingestSamples(d: NonNullable<typeof drawing.current>, events: (PointerEvent | PencilSample)[], predictedEvent: PointerEvent | PencilSample | null) {
     let snapTick = false;
     for (const ce of events) {
+      if ('buttons' in ce && (ce.pointerType === 'pen' || ce.pointerType === 'mouse') && (ce as PointerEvent).buttons === 0) continue;
       const pt = toPoint(ce, d.start, stylusAngles(ce as PointerEvent));
       if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
       // Pen: the densifier decides about samples where the pen rests (some must reach the engine,
@@ -2077,19 +2071,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const last = d.points[d.points.length - 1];
       if (!dense && Math.abs(pt.x - last.x) < 0.2 && Math.abs(pt.y - last.y) < 0.2) continue;
       if (ce.pointerType === 'pen' && ce.pressure > 0 && ce.pressure !== 0.5) d.realPressure = true;
-      // Pressure gate (Mechanism 2): ignore coordinates during liftoff jitter (< 0.05)
-      const lifting = ce.pointerType === 'pen' && !(ce.pressure >= 0.05);
-      if (d.realPressure) {
-        if (!lifting) d.lastStable = { x: pt.x, y: pt.y };
-        else if (d.lastStable) {
-          pt.x = d.lastStable.x;
-          pt.y = d.lastStable.y;
-        }
-      }
-      // Light smoothing of the Pencil's force signal: raw values jitter and made the fountain-pen
-      // outline wobble.
-      // pen: the raw force (the engine smooths it with no lag; 0 = lifting, force unknown);
-      // highlighter / shapes: light smoothing, raw values jitter.
+      // Preserve valid low-pressure tapering contacts so they are not stripped by engine_points or ink_end.
+      const lifting = ce.pointerType === 'pen' && !(ce.pressure > 0);
       if (d.model) pt.pressure = lifting ? 0 : pt.pressure;
       else {
         if (!lifting) d.pressure = d.pressure * 0.55 + pt.pressure * 0.45;
@@ -2248,7 +2231,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (ended) d.nativeEnded = true;
     const lead = nativePencil.lead;
     d.lead = ended ? null : (lead && lead.pressure >= 0.05 ? toPoint(lead, d.start, stylusAngles(lead as unknown as PointerEvent)) : null);
-    ingestSamples(d, samples, ended ? null : predicted[0] ?? null);
+    ingestSamples(d, retimeSamples(d, samples), null);
     if (ended && d.finishPending) {
       clearTimeout(d.finishPending.timer);
       finishStroke(d, d.finishPending.cancelled, d.finishPending.pointerType);

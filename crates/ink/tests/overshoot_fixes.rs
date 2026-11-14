@@ -124,3 +124,81 @@ fn test_mechanism_4_critically_damped_spring_filter() {
     assert_eq!(spring.pos, up_touch);
     assert_eq!(spring.vel, XY { x: 0.0, y: 0.0 }, "Velocity halted immediately on UP");
 }
+
+#[test]
+fn test_fast_stroke_live_vs_committed_endpoint() {
+    use ink::{SampleDensifier, SmoothLiveStroke, stroke_geometry};
+    use model::{LineStyle, PenStyle, Point, Stroke};
+
+    // Fast upward flick simulating Apple Pencil at 240 Hz (~4.167 ms sample interval).
+    // Velocity: ~1800 px/s upward flick (dx ~2 px, dy ~7.5 px per sample).
+    let mut raw_samples: Vec<Point> = Vec::new();
+    let mut t = 0.0;
+    let mut x = 100.0;
+    let mut y = 500.0;
+    let n_samples = 30;
+
+    for i in 0..n_samples {
+        let speed_factor = 1.0 + (i as f64 / n_samples as f64) * 0.5;
+        x += 2.0 * speed_factor;
+        y -= 7.5 * speed_factor;
+        t += 4.167;
+
+        let pressure = if i < n_samples - 4 {
+            0.6
+        } else if i == n_samples - 4 {
+            0.35
+        } else if i == n_samples - 3 {
+            0.18
+        } else if i == n_samples - 2 {
+            0.08
+        } else {
+            0.03
+        };
+
+        raw_samples.push(Point {
+            x,
+            y,
+            pressure,
+            t: Some(t),
+            ..Default::default()
+        });
+    }
+
+    let mut dens = SampleDensifier::new();
+    let mut live = SmoothLiveStroke::new();
+    let mut stroke_points: Vec<Point> = Vec::new();
+
+    for pt in &raw_samples {
+        for q in dens.push(*pt) {
+            stroke_points.push(q);
+            live.add(q.x, q.y, q.t.unwrap_or(0.0), q.pressure);
+        }
+    }
+
+    // 1. Live line endpoint right before lift-off commit
+    let line = live.line(2.0, true);
+    let live_end = line.rest_pts.last().or_else(|| line.final_pts.last()).expect("live points exist");
+
+    // 2. Committed stroke geometry
+    let stroke = Stroke {
+        id: "test_flick".to_string(),
+        tool: "pen".to_string(),
+        color: "#000000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        pen_style: Some(PenStyle::Fountain),
+        line_style: Some(LineStyle::Solid),
+        points: stroke_points,
+        ..Default::default()
+    };
+
+    let geo = stroke_geometry(&stroke);
+    let committed_end = geo.pts.last().expect("committed points exist");
+
+    let dist = (live_end.x - committed_end.x).hypot(live_end.y - committed_end.y);
+    println!("Fast stroke live end: ({:.4}, {:.4}), committed end: ({:.4}, {:.4}), dist: {:.6} px",
+        live_end.x, live_end.y, committed_end.x, committed_end.y, dist);
+
+    assert!(dist < 0.05, "Live endpoint and committed endpoint must match without tail erasure: dist = {dist} px");
+}
