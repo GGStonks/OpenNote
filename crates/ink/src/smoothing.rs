@@ -5,6 +5,7 @@ use std::f64::consts::PI;
 
 pub const SMOOTH_SIGMA: f64 = 1.6;
 pub const CORNER_DEG: f64 = 55.0;
+pub const CORNER_CHORD: f64 = 2.5;
 
 // The smoothing is as wide as the pen's samples are apart there (SIGMA_PER_GAP times the gap, from
 // SMOOTH_SIGMA_MIN up to SMOOTH_SIGMA): it rounds off the engine's corners at the samples and
@@ -63,10 +64,10 @@ pub fn smooth_line(p: &[ModeledPoint], up_to: usize, from: usize) -> Vec<Modeled
     for i in 1..n - 1 {
         let mut a = i;
         let mut b = i;
-        while a > 0 && at[i] - at[a] < 1.0 {
+        while a > 0 && at[i] - at[a] < CORNER_CHORD {
             a -= 1;
         }
-        while b < n - 1 && at[b] - at[i] < 1.0 {
+        while b < n - 1 && at[b] - at[i] < CORNER_CHORD {
             b += 1;
         }
         if a == i || b == i {

@@ -70,7 +70,7 @@ pub struct NibModeler {
     t0: f64,
     env: f64,
     attack_force: f64,
-    forces: Vec<f64>,
+    has_force: bool,
     params: NibParams,
 }
 
@@ -94,7 +94,7 @@ impl NibModeler {
             t0: f64::NAN,
             env: -1.0,
             attack_force: -1.0,
-            forces: Vec::new(),
+            has_force: false,
             params,
         }
     }
@@ -113,11 +113,7 @@ impl NibModeler {
         self.raw.push(Raw { x, y, t: tt, f });
 
         if f > 0.0 {
-            let idx = match self.forces.binary_search_by(|val| val.partial_cmp(&f).unwrap()) {
-                Ok(i) => i,
-                Err(i) => i,
-            };
-            self.forces.insert(idx, f);
+            self.has_force = true;
         }
 
         self.settle(false);
@@ -133,7 +129,7 @@ impl NibModeler {
 
     fn ink_end(&self) -> usize {
         let n = self.raw.len();
-        if self.forces.is_empty() {
+        if !self.has_force {
             return n;
         }
         let mut k = n;
@@ -219,6 +215,9 @@ impl NibModeler {
             return;
         }
         let latest = self.raw.last().unwrap().t;
+        if self.attack_force < 0.0 && (final_flag || latest > self.params.attack + self.params.press_half) {
+            self.attack_force = self.landing_force();
+        }
         let end = if final_flag {
             self.raw.len()
         } else {
@@ -427,6 +426,52 @@ fn fit_at(r: &[Raw], a: usize, b: usize, tc: f64, h: f64, cx: f64, cy: f64, cr: 
     poly_fit0(r, a, b, tc, h, degree, cx, cy, cr)
 }
 
+fn solve_poly_system(deg: usize, s: &[f64], x_rhs: &[f64], y_rhs: &[f64]) -> Option<XY> {
+    let m = deg + 1;
+    let cols = m + 2;
+    let mut a_mat = [0.0f64; 15]; // up to 3 rows * 5 cols
+    for i in 0..m {
+        for k in 0..m {
+            a_mat[i * cols + k] = s[i + k];
+        }
+        a_mat[i * cols + m] = x_rhs[i];
+        a_mat[i * cols + m + 1] = y_rhs[i];
+    }
+
+    for c in 0..m {
+        let mut piv = c;
+        for rr in c + 1..m {
+            if a_mat[rr * cols + c].abs() > a_mat[piv * cols + c].abs() {
+                piv = rr;
+            }
+        }
+        if a_mat[piv * cols + c].abs() < 1e-10 {
+            return None;
+        }
+        if piv != c {
+            for k in 0..cols {
+                let tmp = a_mat[c * cols + k];
+                a_mat[c * cols + k] = a_mat[piv * cols + k];
+                a_mat[piv * cols + k] = tmp;
+            }
+        }
+        for rr in 0..m {
+            if rr == c {
+                continue;
+            }
+            let factor = a_mat[rr * cols + c] / a_mat[c * cols + c];
+            for k in c..cols {
+                a_mat[rr * cols + k] -= factor * a_mat[c * cols + k];
+            }
+        }
+    }
+
+    if a_mat[0].abs() < 1e-10 {
+        return None;
+    }
+    Some(XY::new(a_mat[m] / a_mat[0], a_mat[m + 1] / a_mat[0]))
+}
+
 fn poly_fit0(
     r: &[Raw],
     a: usize,
@@ -440,7 +485,6 @@ fn poly_fit0(
 ) -> XY {
     let m = degree + 1;
     let w2 = 2 * m - 1;
-    let cols = m + 2;
 
     let mut s = [0.0f64; 5];
     let mut x_rhs = [0.0f64; 3];
@@ -464,45 +508,16 @@ fn poly_fit0(
         }
     }
 
-    let mut a_mat = [0.0f64; 15]; // 3 rows * 5 cols
-    for i in 0..m {
-        for k in 0..m {
-            a_mat[i * cols + k] = s[i + k];
-        }
-        a_mat[i * cols + m] = x_rhs[i];
-        a_mat[i * cols + m + 1] = y_rhs[i];
+    if let Some(res) = solve_poly_system(degree, &s, &x_rhs, &y_rhs) {
+        return res;
     }
-
-    for c in 0..m {
-        let mut piv = c;
-        for rr in c + 1..m {
-            if a_mat[rr * cols + c].abs() > a_mat[piv * cols + c].abs() {
-                piv = rr;
-            }
-        }
-        if a_mat[piv * cols + c].abs() < 1e-10 {
-            // Degenerate (all samples at one time): weighted mean.
-            return XY::new(x_rhs[0] / s[0], y_rhs[0] / s[0]);
-        }
-        if piv != c {
-            for k in 0..cols {
-                let tmp = a_mat[c * cols + k];
-                a_mat[c * cols + k] = a_mat[piv * cols + k];
-                a_mat[piv * cols + k] = tmp;
-            }
-        }
-        for rr in 0..m {
-            if rr == c {
-                continue;
-            }
-            let factor = a_mat[rr * cols + c] / a_mat[c * cols + c];
-            for k in c..cols {
-                a_mat[rr * cols + k] -= factor * a_mat[c * cols + k];
-            }
+    if degree == 2 {
+        if let Some(res) = solve_poly_system(1, &s, &x_rhs, &y_rhs) {
+            return res;
         }
     }
 
-    XY::new(a_mat[m] / a_mat[0], a_mat[m + 1] / a_mat[0])
+    XY::new(x_rhs[0] / s[0], y_rhs[0] / s[0])
 }
 
 pub fn nib_stroke(points: &[InkPoint]) -> Vec<ModeledPoint> {

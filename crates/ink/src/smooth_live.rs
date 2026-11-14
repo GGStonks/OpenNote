@@ -73,27 +73,28 @@ impl SmoothLiveStroke {
         } else {
             Vec::new()
         };
-        let rest_w = if !rest_pts.is_empty() {
-            let mut from = up_to;
-            let mut back = 0.0;
-            while from > 0 && back < width_behind() {
-                back += (raw[from].x - raw[from - 1].x).js_hypot(raw[from].y - raw[from - 1].y);
-                from -= 1;
-            }
-            let tail = self.model.tail();
-            let mut all_seg = raw[from..].to_vec();
-            all_seg.extend(tail.iter().copied());
-            let all_w = widths_of(&all_seg);
-            let take = all_seg.len() - (up_to - from);
-            rest_pts.extend(tail);
-            all_w[all_w.len() - take..].to_vec()
+        let tail = self.model.tail();
+        let mut from = up_to;
+        let mut back = 0.0;
+        let behind = width_behind() + 1.0;
+        while from > 0 && back < behind {
+            back += (raw[from].x - raw[from - 1].x).js_hypot(raw[from].y - raw[from - 1].y);
+            from -= 1;
+        }
+        let mut all_seg = if from < raw.len() {
+            raw[from..].to_vec()
         } else {
-            let tail = self.model.tail();
-            let _tail_len = tail.len();
-            let w = widths_of(&tail);
-            rest_pts.extend(tail);
-            w
+            Vec::new()
         };
+        all_seg.extend(tail.iter().copied());
+        let all_w = widths_of(&all_seg);
+        let prefix_len = up_to - from;
+        let rest_w = if all_w.len() >= prefix_len {
+            all_w[prefix_len..].to_vec()
+        } else {
+            all_w
+        };
+        rest_pts.extend(tail);
 
         LiveResult {
             final_pts: self.final_pts.clone(),

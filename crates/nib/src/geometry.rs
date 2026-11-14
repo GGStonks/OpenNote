@@ -69,20 +69,28 @@ pub fn pressure_width(base: f64, pressure: f64) -> f64 {
     base * (0.72 + 0.58 * p.powf(0.7))
 }
 
-pub fn thin_modeled(pts: &[ModeledPoint], min: f64) -> Vec<ModeledPoint> {
+pub fn thin_modeled_indices(pts: &[ModeledPoint], min: f64) -> Vec<usize> {
+    if pts.is_empty() {
+        return Vec::new();
+    }
     if pts.len() < 3 {
-        return pts.to_vec();
+        return (0..pts.len()).collect();
     }
     let mut out = Vec::with_capacity(pts.len());
-    out.push(pts[0]);
+    out.push(0);
     for i in 1..pts.len() - 1 {
-        let last = out.last().unwrap();
-        if (pts[i].x - last.x).js_hypot(pts[i].y - last.y) >= min {
-            out.push(pts[i]);
+        let last_idx = *out.last().unwrap();
+        if (pts[i].x - pts[last_idx].x).js_hypot(pts[i].y - pts[last_idx].y) >= min {
+            out.push(i);
         }
     }
-    out.push(*pts.last().unwrap());
+    out.push(pts.len() - 1);
     out
+}
+
+pub fn thin_modeled(pts: &[ModeledPoint], min: f64) -> Vec<ModeledPoint> {
+    let indices = thin_modeled_indices(pts, min);
+    indices.into_iter().map(|i| pts[i]).collect()
 }
 
 /// `Math.hypot` as the JavaScript engines compute it (JavaScriptCore and V8 alike: scaled by the

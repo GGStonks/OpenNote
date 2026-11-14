@@ -95,8 +95,7 @@ export class NibModeler {
   private t0 = NaN;
   private env = -1;
   private attackForce = -1;
-  /** Known forces, sorted (median of the stroke's force). */
-  private forces: number[] = [];
+  private hasForce = false;
 
   add(x: number, y: number, t: number, p: number): void {
     if (Number.isNaN(this.t0)) this.t0 = t;
@@ -106,14 +105,7 @@ export class NibModeler {
     const f = p > 0 ? Math.min(1, p) : 0;
     this.raw.push({ x, y, t: tt, f });
     if (f > 0) {
-      const fs = this.forces;
-      let lo = 0, hi = fs.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (fs[mid] < f) lo = mid + 1;
-        else hi = mid;
-      }
-      fs.splice(lo, 0, f);
+      this.hasForce = true;
     }
     this.settle(false);
   }
@@ -131,8 +123,8 @@ export class NibModeler {
    * Number of samples that are ink: trims trailing zero-pressure (pen lifted/in air) samples.
    */
   private inkEnd(): number {
-    const r = this.raw, n = r.length, fs = this.forces;
-    if (!fs.length) return n;
+    const r = this.raw, n = r.length;
+    if (!this.hasForce) return n;
     let k = n;
     while (k > 1 && !(r[k - 1].f > 0)) k--;
     return k;
@@ -181,6 +173,9 @@ export class NibModeler {
   private settle(final: boolean) {
     const r = this.raw;
     const latest = r[r.length - 1].t;
+    if (this.attackForce < 0 && (final || latest >= NIB.ATTACK + NIB.PRESS_HALF)) {
+      this.attackForce = this.landingForce();
+    }
     // Samples that may be the lift-off wait: once ink, they settle; if the pen lifts, they go.
     const end = final ? r.length : this.inkEnd();
     const limit = r.length;
@@ -347,8 +342,37 @@ const FA = new Float64Array(3 * 5);
  * Math.hypot and `**`: the engine is 5.6x faster and its output differs from Nib v1's by at most
  * 3e-11 px on the owner's recordings (test:engine allows 1e-4).
  */
+function solvePolySystem(deg: 1 | 2, S: Float64Array, X: Float64Array, Y: Float64Array): { x: number; y: number } | null {
+  const m = deg + 1, cols = m + 2;
+  const A = FA;
+  for (let i = 0; i < m; i++) {
+    for (let k = 0; k < m; k++) A[i * cols + k] = S[i + k];
+    A[i * cols + m] = X[i];
+    A[i * cols + m + 1] = Y[i];
+  }
+  for (let c = 0; c < m; c++) {
+    let piv = c;
+    for (let rr = c + 1; rr < m; rr++) if (Math.abs(A[rr * cols + c]) > Math.abs(A[piv * cols + c])) piv = rr;
+    if (Math.abs(A[piv * cols + c]) < 1e-10) return null;
+    if (piv !== c) {
+      for (let k = 0; k < cols; k++) {
+        const t = A[c * cols + k];
+        A[c * cols + k] = A[piv * cols + k];
+        A[piv * cols + k] = t;
+      }
+    }
+    for (let rr = 0; rr < m; rr++) {
+      if (rr === c) continue;
+      const f = A[rr * cols + c] / A[c * cols + c];
+      for (let k = c; k < cols; k++) A[rr * cols + k] -= f * A[c * cols + k];
+    }
+  }
+  if (Math.abs(A[0]) < 1e-10) return null;
+  return { x: A[m] / A[0], y: A[m + 1] / A[0] };
+}
+
 function polyFit0(r: Raw[], a: number, b: number, tc: number, h: number, degree: 1 | 2, nx: number, ny: number, nr: number): { x: number; y: number } {
-  const m = degree + 1, w2 = 2 * m - 1, cols = m + 2;
+  const m = degree + 1, w2 = 2 * m - 1;
   const S = FS, X = FX, Y = FY;
   S.fill(0);
   X.fill(0);
@@ -369,33 +393,13 @@ function polyFit0(r: Raw[], a: number, b: number, tc: number, h: number, degree:
       pw *= u;
     }
   }
-  const A = FA;
-  for (let i = 0; i < m; i++) {
-    for (let k = 0; k < m; k++) A[i * cols + k] = S[i + k];
-    A[i * cols + m] = X[i];
-    A[i * cols + m + 1] = Y[i];
+  const res = solvePolySystem(degree, S, X, Y);
+  if (res) return res;
+  if (degree === 2) {
+    const res1 = solvePolySystem(1, S, X, Y);
+    if (res1) return res1;
   }
-  for (let c = 0; c < m; c++) {
-    let piv = c;
-    for (let rr = c + 1; rr < m; rr++) if (Math.abs(A[rr * cols + c]) > Math.abs(A[piv * cols + c])) piv = rr;
-    if (Math.abs(A[piv * cols + c]) < 1e-10) {
-      // Degenerate (all samples at one time): weighted mean.
-      return { x: X[0] / S[0], y: Y[0] / S[0] };
-    }
-    if (piv !== c) {
-      for (let k = 0; k < cols; k++) {
-        const t = A[c * cols + k];
-        A[c * cols + k] = A[piv * cols + k];
-        A[piv * cols + k] = t;
-      }
-    }
-    for (let rr = 0; rr < m; rr++) {
-      if (rr === c) continue;
-      const f = A[rr * cols + c] / A[c * cols + c];
-      for (let k = c; k < cols; k++) A[rr * cols + k] -= f * A[c * cols + k];
-    }
-  }
-  return { x: A[m] / A[0], y: A[m + 1] / A[0] };
+  return { x: X[0] / S[0], y: Y[0] / S[0] };
 }
 
 /** The full stroke as drawn when finished. */

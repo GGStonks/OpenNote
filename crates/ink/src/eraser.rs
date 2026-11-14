@@ -427,7 +427,7 @@ pub fn erase_strokes_partial(
                 az: None,
             })
             .collect();
-        let pts = densify_points(&g_pts, false, 1.0);
+        let pts = densify_points(&g_pts, closed, 1.0);
         let inside = |p: &Point| (p.x - x).js_hypot(p.y - y) <= r;
 
         if !pts.iter().any(inside) {
@@ -439,33 +439,34 @@ pub fn erase_strokes_partial(
         let last_index = pts.len().saturating_sub(1);
         let dashed = s.line_style.is_some() && s.line_style != Some(model::LineStyle::Solid);
 
-        let mut run: Vec<Point> = Vec::new();
-        let mut run_end = -1isize;
-        let mut run_from = 0.0;
+        struct HRun {
+            points: Vec<Point>,
+            offset: f64,
+            first: bool,
+            last: bool,
+        }
+
+        let mut runs: Vec<HRun> = Vec::new();
+        let mut cur_points: Vec<Point> = Vec::new();
+        let mut cur_first = false;
+        let mut cur_from = 0.0;
+        let mut cur_end = -1isize;
         let mut along = 0.0;
 
-        let mut flush = |run: &mut Vec<Point>,
-                         run_end: isize,
-                         run_from: f64,
-                         out: &mut Vec<Stroke>| {
-            if run.len() >= 2 {
-                let keeps_end = run_end == last_index as isize && !closed;
-                let mut piece = s.clone();
-                piece.id = make_id();
-                piece.points = run.clone();
-                piece.closed = Some(false);
-                piece.fill = None;
-                piece.arrow = if keeps_end { s.arrow } else { None };
-                piece.modeled = modeled;
-                piece.pen_end = None;
-                if dashed {
-                    piece.dash_offset = Some(s.dash_offset.unwrap_or(0.0) + run_from);
-                } else {
-                    piece.dash_offset = None;
-                }
-                out.push(piece);
+        let flush = |cur_points: &mut Vec<Point>,
+                         cur_first: bool,
+                         cur_end: isize,
+                         cur_from: f64,
+                         runs: &mut Vec<HRun>| {
+            if cur_points.len() >= 2 {
+                runs.push(HRun {
+                    points: cur_points.clone(),
+                    offset: cur_from,
+                    first: cur_first,
+                    last: cur_end == last_index as isize,
+                });
             }
-            run.clear();
+            cur_points.clear();
         };
 
         for (i, p) in pts.iter().enumerate() {
@@ -478,30 +479,75 @@ pub fn erase_strokes_partial(
 
             if inside(p) {
                 if let Some(pr) = prev {
-                    if !inside(&pr) && !run.is_empty() {
-                        run.push(circle_crossing(pr, *p, x, y, r));
+                    if !inside(&pr) && !cur_points.is_empty() {
+                        cur_points.push(circle_crossing(pr, *p, x, y, r));
                     }
                 }
-                flush(&mut run, run_end, run_from, &mut out);
+                flush(&mut cur_points, cur_first, cur_end, cur_from, &mut runs);
             } else {
                 if let Some(pr) = prev {
                     if inside(&pr) {
                         let c = circle_crossing(*p, pr, x, y, r);
-                        run.push(c);
-                        run_from = along + step - (p.x - c.x).js_hypot(p.y - c.y);
-                    } else if run.is_empty() {
-                        run_from = along + step;
+                        cur_points.push(c);
+                        cur_from = along + step - (p.x - c.x).js_hypot(p.y - c.y);
+                        cur_first = false;
+                    } else if cur_points.is_empty() {
+                        cur_from = along + step;
+                        cur_first = i == 0;
                     }
-                } else if run.is_empty() {
-                    run_from = along + step;
+                } else if cur_points.is_empty() {
+                    cur_from = along + step;
+                    cur_first = true;
                 }
-                run.push(*p);
-                run_end = i as isize;
+                cur_points.push(*p);
+                cur_end = i as isize;
             }
             along += step;
         }
 
-        flush(&mut run, run_end, run_from, &mut out);
+        flush(&mut cur_points, cur_first, cur_end, cur_from, &mut runs);
+
+        if closed && runs.len() > 1 && runs[0].first && runs.last().unwrap().last {
+            let tail = runs.pop().unwrap();
+            let head = runs.remove(0);
+            let mut merged = tail.points;
+            merged.extend(head.points.into_iter().skip(1));
+            runs.insert(
+                0,
+                HRun {
+                    points: merged,
+                    offset: tail.offset,
+                    first: false,
+                    last: false,
+                },
+            );
+        }
+
+        if closed && s.fill.is_some() && s.fill != Some(model::FillType::None) {
+            let mut fill_piece = s.clone();
+            fill_piece.id = make_id();
+            fill_piece.fill_only = Some(true);
+            fill_piece.arrow = None;
+            out.push(fill_piece);
+        }
+
+        for run in runs {
+            let keeps_end = run.last && !closed;
+            let mut piece = s.clone();
+            piece.id = make_id();
+            piece.points = run.points;
+            piece.closed = Some(false);
+            piece.fill = None;
+            piece.arrow = if keeps_end { s.arrow } else { None };
+            piece.modeled = modeled;
+            piece.pen_end = None;
+            if dashed {
+                piece.dash_offset = Some(s.dash_offset.unwrap_or(0.0) + run.offset);
+            } else {
+                piece.dash_offset = None;
+            }
+            out.push(piece);
+        }
     }
 
     (if changed { out } else { strokes.to_vec() }, changed)

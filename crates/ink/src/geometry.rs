@@ -2,7 +2,7 @@ use nib::geometry::JsMath;
 use crate::ink_width::ink_widths;
 use crate::smoothing::settled_smooth;
 use model::{ModeledKind, PenStyle, Point, Stroke};
-use nib::geometry::{has_real_pressure, thin_modeled, InkPoint, ModeledPoint, XY};
+use nib::geometry::{has_real_pressure, thin_modeled_indices, InkPoint, ModeledPoint, XY};
 use nib::nib::nib_stroke;
 use std::f64::consts::PI;
 
@@ -163,26 +163,10 @@ pub fn modeled_line(points: &[Point], modeled: Option<ModeledKind>) -> Vec<Model
     nib_stroke(&ink_pts)
 }
 
-fn thinned_widths(
-    line: &[ModeledPoint],
-    kept: &[ModeledPoint],
-    widths: &[f64],
-) -> Vec<f64> {
-    let mut out = Vec::with_capacity(kept.len());
-    let mut j = 0;
-    for q in kept {
-        while j < line.len() && (line[j].x != q.x || line[j].y != q.y || line[j].t != q.t) {
-            j += 1;
-        }
-        let idx = j.min(widths.len().saturating_sub(1));
-        out.push(widths[idx]);
-    }
-    out
-}
-
 pub fn ink_geometry(points: &[Point], s: &Stroke) -> InkGeometry {
     let line = modeled_line(points, s.modeled);
-    let pts = thin_modeled(&line, 0.35);
+    let kept_indices = thin_modeled_indices(&line, 0.35);
+    let pts: Vec<ModeledPoint> = kept_indices.iter().map(|&i| line[i]).collect();
     let width = if s.tool == "highlighter" {
         s.width * 5.5
     } else {
@@ -212,10 +196,15 @@ pub fn ink_geometry(points: &[Point], s: &Stroke) -> InkGeometry {
             widths = Some(pts.iter().map(|p| width * 0.02f64.max(p.p)).collect());
         } else {
             let all = ink_widths(&line, width);
-            if pts.len() == line.len() {
+            if kept_indices.len() == line.len() {
                 widths = Some(all);
             } else {
-                widths = Some(thinned_widths(&line, &pts, &all));
+                widths = Some(
+                    kept_indices
+                        .iter()
+                        .map(|&i| all[i.min(all.len().saturating_sub(1))])
+                        .collect(),
+                );
             }
         }
     }

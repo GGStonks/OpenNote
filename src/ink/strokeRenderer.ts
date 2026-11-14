@@ -296,6 +296,7 @@ function smoothSigma(P: readonly ModeledPoint[], at: Float64Array, i: number): n
 }
 /** A turn sharper than this (degrees, over about a px either side) is a corner: the line is smoothed on either side of it. */
 const CORNER_DEG = 55;
+const CORNER_CHORD = 2.5;
 
 /**
  * The modelled line made smooth for zoomed-in display. The ink engine's line is nearly straight
@@ -334,8 +335,8 @@ export function smoothLine(g: InkGeometry, upTo: number, from = 0): InkGeometry 
   const cuts = [0];
   for (let i = 1; i < n - 1; i++) {
     let a = i, b = i;
-    while (a > 0 && at[i] - at[a] < 1) a--;
-    while (b < n - 1 && at[b] - at[i] < 1) b++;
+    while (a > 0 && at[i] - at[a] < CORNER_CHORD) a--;
+    while (b < n - 1 && at[b] - at[i] < CORNER_CHORD) b++;
     if (a === i || b === i) continue;
     const t1 = Math.atan2(P[i].y - P[a].y, P[i].x - P[a].x), t2 = Math.atan2(P[b].y - P[i].y, P[b].x - P[i].x);
     let turn = Math.abs(t2 - t1);
@@ -1332,7 +1333,7 @@ export function eraseStrokesPartial(
     const closed = !!s.closed && s.points.length > 2;
     const g = strokeGeometry(s);
     const modeled: Stroke['modeled'] = s.modeled === 'proportional' && g.widths ? 'proportional' : g.widths ? 'variable' : 'uniform';
-    const pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), false, 1);
+    const pts = densify(g.pts.map((q) => ({ x: q.x, y: q.y, pressure: q.p, t: q.t })), closed, 1);
     const inside = (p: Point) => Math.hypot(p.x - x, p.y - y) <= r;
     if (!pts.some(inside)) {
       // Touched the outline's padding only: nothing of the line is under the eraser.
@@ -1344,27 +1345,21 @@ export function eraseStrokesPartial(
     // A dashed line's pieces keep their dashes where they were: each starts the pattern at its
     // distance along the line (Stroke.dashOffset, as the shapes' pieces do).
     const dashed = (s.lineStyle ?? 'solid') !== 'solid';
+    type HRun = { points: Point[]; offset: number; first: boolean; last: boolean };
+    const runs: HRun[] = [];
     let run: Point[] = [];
     let runEnd = -1;
     let runFrom = 0;
+    let runFirst = false;
     let along = 0;
     const flush = () => {
       if (run.length >= 2) {
-        const keepsEnd = runEnd === lastIndex && !closed;
-        const piece: Stroke = {
-          ...s,
-          id: makeId(),
-          createdAt: itemTime(s),
+        runs.push({
           points: run,
-          closed: false,
-          fill: undefined,
-          arrow: keepsEnd ? s.arrow : undefined,
-          modeled,
-          penEnd: undefined,
-        };
-        if (dashed) piece.dashOffset = (s.dashOffset ?? 0) + runFrom;
-        else delete piece.dashOffset;
-        out.push(piece);
+          offset: runFrom,
+          first: runFirst,
+          last: runEnd === lastIndex,
+        });
       }
       run = [];
     };
@@ -1381,13 +1376,42 @@ export function eraseStrokesPartial(
           const c = circleCrossing(p, prev, x, y, r);
           run.push(c);
           runFrom = along + step - Math.hypot(p.x - c.x, p.y - c.y);
-        } else if (!run.length) runFrom = along + step;
+          runFirst = false;
+        } else if (!run.length) {
+          runFrom = along + step;
+          runFirst = i === 0;
+        }
         run.push(p);
         runEnd = i;
       }
       along += step;
     });
     flush();
+
+    if (closed && runs.length > 1 && runs[0].first && runs[runs.length - 1].last) {
+      const tail = runs.pop()!, head = runs.shift()!;
+      runs.unshift({ points: [...tail.points, ...head.points.slice(1)], offset: tail.offset, first: false, last: false });
+    }
+
+    if (closed && s.fill && s.fill !== 'none') out.push({ ...s, id: makeId(), createdAt: itemTime(s), fillOnly: true, arrow: undefined });
+
+    for (const r of runs) {
+      const keepsEnd = r.last && !closed;
+      const piece: Stroke = {
+        ...s,
+        id: makeId(),
+        createdAt: itemTime(s),
+        points: r.points,
+        closed: false,
+        fill: undefined,
+        arrow: keepsEnd ? s.arrow : undefined,
+        modeled,
+        penEnd: undefined,
+      };
+      if (dashed) piece.dashOffset = (s.dashOffset ?? 0) + r.offset;
+      else delete piece.dashOffset;
+      out.push(piece);
+    }
   }
   return { strokes: changed ? out : strokes, changed };
 }

@@ -6,7 +6,7 @@ pub const PRESSURE_SIGMA: f64 = 2.0;
 const DIR_PX: f64 = 3.0;
 const DIR_SIGMA: f64 = 2.5;
 pub const WIDTH_AHEAD: f64 = 3.0 * PRESSURE_SIGMA;
-pub const WIDTH_BEHIND: f64 = 3.0 * PRESSURE_SIGMA; // max(6.0, 3 + 7.5 = 10.5) -> 10.5 actually!
+pub const WIDTH_BEHIND: f64 = 10.5; // (3.0 * PRESSURE_SIGMA).max(DIR_PX + 3.0 * DIR_SIGMA)
 
 pub const NIB_RATIO: f64 = 1.9;
 pub const NIB_ANGLE: f64 = 28.0;
@@ -16,7 +16,7 @@ const WRITING_DIRECTIONS: [f64; 12] = [
 ];
 
 pub fn width_behind() -> f64 {
-    (3.0 * PRESSURE_SIGMA).max(DIR_PX + 3.0 * DIR_SIGMA)
+    WIDTH_BEHIND
 }
 
 fn nib_extent(ux: f64, uy: f64) -> f64 {
@@ -29,12 +29,15 @@ fn nib_extent(ux: f64, uy: f64) -> f64 {
 }
 
 pub fn nib_norm() -> f64 {
-    let mut s = 0.0;
-    for (k, &h) in WRITING_DIRECTIONS.iter().enumerate() {
-        let a = ((7.5 + 15.0 * k as f64) * PI) / 180.0;
-        s += h * nib_extent(a.cos(), a.sin());
-    }
-    1.0 / s
+    static NORM: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *NORM.get_or_init(|| {
+        let mut s = 0.0;
+        for (k, &h) in WRITING_DIRECTIONS.iter().enumerate() {
+            let a = ((7.5 + 15.0 * k as f64) * PI) / 180.0;
+            s += h * nib_extent(a.cos(), a.sin());
+        }
+        1.0 / s
+    })
 }
 
 pub fn nib_factor(dx: f64, dy: f64) -> f64 {

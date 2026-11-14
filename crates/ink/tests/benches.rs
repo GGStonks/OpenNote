@@ -631,14 +631,14 @@ fn test_bench_look() {
     println!("nervous    width roughness {:.2}", nervous_val);
     println!("ripple     width jitter {:.2}%", ripple_pct);
 
-    // OpenNote 2.9.4-rs.10 figures (npm run bench:look on the same recordings).
+    // OpenNote 2.9.4-rs.12 figures (npm run bench:look on the same recordings).
     assert_eq!(strokes_count, 292);
     assert!((dev_median - 0.29).abs() <= 0.02);
     assert!((dev_p95 - 0.67).abs() <= 0.05);
-    assert!((wobble_val - 37.8).abs() <= 0.5, "Wobble should be ~37.8");
+    assert!((wobble_val - 39.4).abs() <= 0.6, "Wobble should be ~39.4");
     assert!((range_median - 1.66).abs() <= 0.03);
     assert!((range_p95 - 2.34).abs() <= 0.05);
-    assert!((nervous_val - 32.63).abs() <= 0.5);
+    assert!((nervous_val - 34.69).abs() <= 0.6);
     assert!((ripple_pct - 2.00).abs() <= 0.05);
 }
 

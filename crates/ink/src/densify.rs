@@ -67,6 +67,18 @@ impl SampleDensifier {
         lead
     }
 
+    pub fn flush(&mut self) -> Vec<Point> {
+        if let Some(held) = self.held.take() {
+            vec![held]
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn finish(&mut self) -> Vec<Point> {
+        self.flush()
+    }
+
     fn fill(&mut self, a: Point, pt: Point) -> Vec<Point> {
         let cx = pt.x - a.x;
         let cy = pt.y - a.y;
@@ -111,8 +123,13 @@ impl SampleDensifier {
         let angle = |u: V, v: V| (u.x * v.y - u.y * v.x).atan2(u.x * v.x + u.y * v.y);
         let a1 = angle(start, chord);
         let a2 = angle(chord, end);
-        let arc = a1.abs() < MAX_TURN
-            && a2.abs() < MAX_TURN
+        let turn_limit = if l > 30.0 {
+            MAX_TURN * (30.0 / l)
+        } else {
+            MAX_TURN
+        };
+        let arc = a1.abs() < turn_limit
+            && a2.abs() < turn_limit
             && (a1 - a2).abs() <= MIN_SKEW.max(0.6 * a1.abs().max(a2.abs()));
 
         self.dir = Some(end);
@@ -131,6 +148,12 @@ impl SampleDensifier {
             1
         }
         .max(((tb - ta) / FILL_DT).ceil() as usize);
+
+        let effective_tb = if tb <= ta && n > 1 {
+            ta + (n as f64) * 0.5
+        } else {
+            tb
+        };
 
         let mut out = Vec::with_capacity(n);
         for k in 1..n {
@@ -152,7 +175,7 @@ impl SampleDensifier {
             } else {
                 a.y + cy * s
             };
-            let t = Some(ta + (tb - ta) * s);
+            let t = Some(ta + (effective_tb - ta) * s);
             let pressure = if inked {
                 a.pressure + (pt.pressure - a.pressure) * s
             } else {
@@ -168,7 +191,11 @@ impl SampleDensifier {
                 az: pt.az,
             });
         }
-        out.push(pt);
+        let mut end_pt = pt;
+        if tb <= ta && n > 1 {
+            end_pt.t = Some(effective_tb);
+        }
+        out.push(end_pt);
         out
     }
 }

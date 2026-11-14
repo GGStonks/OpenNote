@@ -83,6 +83,19 @@ export class SampleDensifier {
     return lead.concat(this.fill(a, pt));
   }
 
+  flush(): Point[] {
+    if (this.held) {
+      const p = this.held;
+      this.held = null;
+      return [p];
+    }
+    return [];
+  }
+
+  finish(): Point[] {
+    return this.flush();
+  }
+
   private fill(a: Point, pt: Point): Point[] {
     const cx = pt.x - a.x, cy = pt.y - a.y, L = Math.hypot(cx, cy);
     if (L < 1e-6) return [pt];
@@ -111,7 +124,8 @@ export class SampleDensifier {
     // across a corner is lopsided (straight in, turned out) and stays straight, as does one where
     // the pen turns sharply. Lifting or landing (no force: the pen in the air for the engine) too.
     const a1 = angle(start, chord), a2 = angle(chord, end);
-    const arc = Math.abs(a1) < maxTurn && Math.abs(a2) < maxTurn && Math.abs(a1 - a2) <= Math.max(MIN_SKEW, 0.6 * Math.max(Math.abs(a1), Math.abs(a2)));
+    const turnLimit = L > 30 ? maxTurn * (30 / L) : maxTurn;
+    const arc = Math.abs(a1) < turnLimit && Math.abs(a2) < turnLimit && Math.abs(a1 - a2) <= Math.max(MIN_SKEW, 0.6 * Math.max(Math.abs(a1), Math.abs(a2)));
     // The next gap leaves in the direction the pen is moving here (also after a straight piece, so
     // the curve picks up again).
     this.dir = end;
@@ -125,6 +139,7 @@ export class SampleDensifier {
     const curved = arc && inked;
     const out: Point[] = [];
     const n = Math.max(inked ? Math.ceil(L / STEP) : 1, Math.ceil((tb - ta) / FILL_DT));
+    const effectiveTb = tb <= ta && n > 1 ? ta + n * 0.5 : tb;
     for (let k = 1; k < n; k++) {
       const s = k / n, s2 = s * s, s3 = s2 * s;
       const h00 = 2 * s3 - 3 * s2 + 1, h10 = s3 - 2 * s2 + s, h01 = -2 * s3 + 3 * s2, h11 = s3 - s2;
@@ -132,11 +147,12 @@ export class SampleDensifier {
         ...pt,
         x: curved ? h00 * a.x + h10 * L * start.x + h01 * pt.x + h11 * L * end.x : a.x + cx * s,
         y: curved ? h00 * a.y + h10 * L * start.y + h01 * pt.y + h11 * L * end.y : a.y + cy * s,
-        t: ta + (tb - ta) * s,
+        t: ta + (effectiveTb - ta) * s,
         pressure: inked ? a.pressure + (pt.pressure - a.pressure) * s : 0,
       });
     }
-    out.push(pt);
+    const endPt = tb <= ta && n > 1 ? { ...pt, t: effectiveTb } : pt;
+    out.push(endPt);
     return out;
   }
 }
