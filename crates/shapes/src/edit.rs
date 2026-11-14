@@ -2,7 +2,6 @@ use nib::geometry::JsMath;
 use ink::stroke_geometry;
 use model::{Point, ShapeKind, Stroke};
 use nib::geometry::XY;
-use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HandleRole {
@@ -30,7 +29,7 @@ fn dist(a: XY, b: XY) -> f64 {
     (a.x - b.x).js_hypot(a.y - b.y)
 }
 
-fn centroid(pts: &[XY]) -> XY {
+fn centroid_points(pts: &[Point]) -> XY {
     if pts.is_empty() {
         return XY { x: 0.0, y: 0.0 };
     }
@@ -55,17 +54,16 @@ fn curve_handle_indices(n: usize, closed: bool) -> Vec<usize> {
     } else {
         MAX_CURVE_HANDLES - 1
     };
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(count + 1);
+    let step_n = if closed { n } else { n - 1 };
     for k in 0..count {
-        out.push(((k * if closed { n } else { n - 1 }) as f64 / count as f64).round() as usize);
+        out.push(((k * step_n) as f64 / count as f64).round() as usize);
     }
     if !closed {
         out.push(n - 1);
     }
-    let set: HashSet<usize> = out.into_iter().collect();
-    let mut sorted: Vec<usize> = set.into_iter().collect();
-    sorted.sort();
-    sorted
+    out.dedup();
+    out
 }
 
 pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
@@ -117,8 +115,6 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
         anchor: None,
     };
 
-    let pts_xy: Vec<XY> = pts.iter().map(|p| XY { x: p.x, y: p.y }).collect();
-
     match s.shape_kind {
         Some(ShapeKind::Point)
         | Some(ShapeKind::Line)
@@ -126,35 +122,35 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
         | Some(ShapeKind::Triangle)
         | Some(ShapeKind::Polygon)
         | Some(ShapeKind::Rectangle) => {
-            Some(pts_xy.into_iter().enumerate().map(|(i, p)| h(p, HandleRole::Vertex, i as isize)).collect())
+            Some(pts.iter().enumerate().map(|(i, p)| h(XY { x: p.x, y: p.y }, HandleRole::Vertex, i as isize)).collect())
         }
         Some(ShapeKind::Arrow) => {
             if pts.len() >= 2 {
                 Some(vec![
-                    h(pts_xy[0], HandleRole::Vertex, 0),
-                    h(pts_xy[1], HandleRole::Vertex, 1),
+                    h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::Vertex, 0),
+                    h(XY { x: pts[1].x, y: pts[1].y }, HandleRole::Vertex, 1),
                 ])
             } else {
                 None
             }
         }
         Some(ShapeKind::Circle) => {
-            let c = centroid(&pts_xy);
-            Some(vec![h(c, HandleRole::Center, -1), h(pts_xy[0], HandleRole::AxisA, 0)])
+            let c = centroid_points(pts);
+            Some(vec![h(c, HandleRole::Center, -1), h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::AxisA, 0)])
         }
         Some(ShapeKind::Ellipse) => {
-            let c = centroid(&pts_xy);
+            let c = centroid_points(pts);
             let b_idx = pts.len() / 4;
             Some(vec![
                 h(c, HandleRole::Center, -1),
-                h(pts_xy[0], HandleRole::AxisA, 0),
-                h(pts_xy[b_idx], HandleRole::AxisB, b_idx as isize),
+                h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::AxisA, 0),
+                h(XY { x: pts[b_idx].x, y: pts[b_idx].y }, HandleRole::AxisB, b_idx as isize),
             ])
         }
         Some(ShapeKind::Curve) => {
             let is_closed = closed && pts.len() > 2;
             let indices = curve_handle_indices(pts.len(), is_closed);
-            Some(indices.into_iter().map(|i| h(pts_xy[i], HandleRole::Curve, i as isize)).collect())
+            Some(indices.into_iter().map(|i| h(XY { x: pts[i].x, y: pts[i].y }, HandleRole::Curve, i as isize)).collect())
         }
         _ => None,
     }

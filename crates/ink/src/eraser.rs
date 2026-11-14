@@ -84,10 +84,12 @@ pub fn stroke_hit_test(s: &Stroke, x: f64, y: f64, radius: f64) -> bool {
             s.width * 0.9
         });
     let pts = &s.points;
-    let xy_pts: Vec<XY> = pts.iter().map(|p| XY { x: p.x, y: p.y }).collect();
 
-    if s.fill_only.unwrap_or(false) && pts.len() > 2 && inside_polygon(x, y, &xy_pts) {
-        return true;
+    if s.fill_only.unwrap_or(false) && pts.len() > 2 {
+        let xy_pts: Vec<XY> = pts.iter().map(|p| XY { x: p.x, y: p.y }).collect();
+        if inside_polygon(x, y, &xy_pts) {
+            return true;
+        }
     }
     if pts.len() == 1 {
         let extra = if s.shape_kind == Some(ShapeKind::Point) {
@@ -98,20 +100,24 @@ pub fn stroke_hit_test(s: &Stroke, x: f64, y: f64, radius: f64) -> bool {
         return (pts[0].x - x).js_hypot(pts[0].y - y) <= r + extra;
     }
     for i in 1..pts.len() {
-        if dist_to_segment(x, y, xy_pts[i - 1], xy_pts[i]) <= r {
+        let a = XY { x: pts[i - 1].x, y: pts[i - 1].y };
+        let b = XY { x: pts[i].x, y: pts[i].y };
+        if dist_to_segment(x, y, a, b) <= r {
             return true;
         }
     }
     if s.closed.unwrap_or(false) && pts.len() > 2 {
-        if dist_to_segment(x, y, *xy_pts.last().unwrap(), xy_pts[0]) <= r {
+        let last = XY { x: pts.last().unwrap().x, y: pts.last().unwrap().y };
+        let first = XY { x: pts[0].x, y: pts[0].y };
+        if dist_to_segment(x, y, last, first) <= r {
             return true;
         }
         if let Some(fill) = s.fill {
-            if fill != model::FillType::None
-                && fill != model::FillType::Hole
-                && inside_polygon(x, y, &xy_pts)
-            {
-                return true;
+            if fill != model::FillType::None && fill != model::FillType::Hole {
+                let xy_pts: Vec<XY> = pts.iter().map(|p| XY { x: p.x, y: p.y }).collect();
+                if inside_polygon(x, y, &xy_pts) {
+                    return true;
+                }
             }
         }
     }

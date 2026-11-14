@@ -1,7 +1,8 @@
-use model::{NotePage, Point, ShapeKind, Stroke};
+use model::{FillType, ImageBlock, LatexBlock, NotePage, Point, ShapeKind, Stroke, TextBlock};
 use nib::geometry::XY;
 use shapes::{
-    detect_shape, lasso_select_strokes, restamp, shape_handles, transform_points, z_layers,
+    detect_shape, lasso_select_strokes, rect_select_strokes, restamp, selection_bounds,
+    shape_handles, transform_page_items, transform_points, transform_stroke, z_layers,
     HandleRole,
 };
 
@@ -261,4 +262,291 @@ fn test_lasso_selection_and_transform() {
     );
     assert_eq!(pts[0].x, 60.0);
     assert_eq!(pts[0].y, 70.0);
+}
+
+#[test]
+fn test_rect_select_strokes_and_circle_promotion() {
+    use ink::RectBounds;
+
+    // Line from (10, 50) to (90, 50)
+    let line_stroke = Stroke {
+        id: "line_1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![make_pt(10.0, 50.0), make_pt(90.0, 50.0)],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(false),
+        shape_kind: Some(ShapeKind::Line),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(1.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    // Rectangle from (100, 100) to (200, 200)
+    let rect_stroke = Stroke {
+        id: "rect_1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            make_pt(100.0, 100.0),
+            make_pt(200.0, 100.0),
+            make_pt(200.0, 200.0),
+            make_pt(100.0, 200.0),
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(true),
+        shape_kind: Some(ShapeKind::Rectangle),
+        fill: Some(FillType::Solid),
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(2.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    // Smooth curve through control points
+    let curve_stroke = Stroke {
+        id: "curve_1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            make_pt(300.0, 10.0),
+            make_pt(350.0, 80.0),
+            make_pt(400.0, 10.0),
+            make_pt(450.0, 80.0),
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(false),
+        shape_kind: Some(ShapeKind::Curve),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(3.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    // Handwriting stroke with un-inked lift point (pressure == 0.0)
+    let hw_stroke = Stroke {
+        id: "hw_1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            make_pt(500.0, 50.0),
+            Point { x: 520.0, y: 55.0, pressure: 0.8, t: Some(10.0), alt: None, az: None },
+            Point { x: 540.0, y: 60.0, pressure: 0.6, t: Some(20.0), alt: None, az: None },
+            // Lift point outside normal ink
+            Point { x: 999.0, y: 999.0, pressure: 0.0, t: Some(30.0), alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: None,
+        closed: None,
+        shape_kind: None,
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(4.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    // Circle shape
+    let mut circle_stroke = Stroke {
+        id: "circle_1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            make_pt(600.0, 600.0),
+            make_pt(650.0, 600.0),
+            make_pt(600.0, 650.0),
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(true),
+        shape_kind: Some(ShapeKind::Circle),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(5.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let page = NotePage {
+        id: "p_rect".to_string(),
+        page_number: 1,
+        strokes: vec![
+            line_stroke,
+            rect_stroke,
+            curve_stroke,
+            hw_stroke,
+            circle_stroke.clone(),
+        ],
+        latex_blocks: vec![LatexBlock {
+            id: "lat_rect".to_string(),
+            x: 50.0,
+            y: 50.0,
+            width: 100.0,
+            height: 40.0,
+            scale: None,
+            stretch_x: None,
+            latex_code: "E=mc^2".to_string(),
+            is_tikz: None,
+            tikz_svg: None,
+            tikz_svg_source: None,
+            color: None,
+            rotation: None,
+            created_at: 10.0,
+        }],
+        text_blocks: Some(vec![TextBlock {
+            id: "txt_rect".to_string(),
+            x: 700.0,
+            y: 700.0,
+            width: 80.0,
+            height: Some(30.0),
+            text: "Hello".to_string(),
+            font_size: 16.0,
+            color: "#000".to_string(),
+            bold: None,
+            italic: None,
+            underline: None,
+            font_family: None,
+            align: None,
+            line_height: None,
+            strike: None,
+            spans: None,
+            paras: None,
+            background: None,
+            radius: None,
+            padding: None,
+            rotation: None,
+            created_at: 11.0,
+        }]),
+        image_blocks: Some(vec![ImageBlock {
+            id: "img_rect".to_string(),
+            x: 800.0,
+            y: 800.0,
+            width: 50.0,
+            height: 50.0,
+            data_url: "data:image/png;base64,...".to_string(),
+            rotation: None,
+            created_at: 12.0,
+        }]),
+    };
+
+    // Selection 1: Box crossing line_1 (box [40..60, 40..60])
+    let sel1 = rect_select_strokes(
+        RectBounds { min_x: 40.0, min_y: 40.0, max_x: 60.0, max_y: 60.0 },
+        &page,
+    );
+    assert_eq!(sel1, vec!["line_1"]);
+
+    // Selection 2: Box entirely inside filled rect_1 (box [120..140, 120..140])
+    let sel2 = rect_select_strokes(
+        RectBounds { min_x: 120.0, min_y: 120.0, max_x: 140.0, max_y: 140.0 },
+        &page,
+    );
+    assert_eq!(sel2, vec!["rect_1"]);
+
+    // Selection 3: Box intersecting curve_1
+    let sel3 = rect_select_strokes(
+        RectBounds { min_x: 340.0, min_y: 60.0, max_x: 360.0, max_y: 90.0 },
+        &page,
+    );
+    assert_eq!(sel3, vec!["curve_1"]);
+
+    // Selection 4: Box intersecting handwriting stroke hw_1 (box [510..530, 45..65])
+    let sel4 = rect_select_strokes(
+        RectBounds { min_x: 510.0, min_y: 45.0, max_x: 530.0, max_y: 65.0 },
+        &page,
+    );
+    assert_eq!(sel4, vec!["hw_1"]);
+
+    // Selection 5: Box touching only the un-inked lift point (999, 999) must NOT select hw_1
+    let sel5 = rect_select_strokes(
+        RectBounds { min_x: 990.0, min_y: 990.0, max_x: 1010.0, max_y: 1010.0 },
+        &page,
+    );
+    assert!(sel5.is_empty());
+
+    // Test selection_bounds (includes stroke width padding: 10 - 2 = 8.0)
+    let bounds = selection_bounds(&page, &["line_1".to_string(), "lat_rect".to_string()]).unwrap();
+    assert_eq!(bounds.min_x, 8.0);
+    assert_eq!(bounds.max_x, 150.0); // latex block reaches 50 + 100 = 150
+
+    // Test transform_page_items with blocks
+    let mut mut_page = page;
+    transform_page_items(
+        &mut mut_page,
+        &["lat_rect".to_string(), "txt_rect".to_string(), "img_rect".to_string()],
+        10.0,
+        20.0,
+        1.0,
+        1.0,
+        0.0,
+        XY { x: 0.0, y: 0.0 },
+    );
+    assert_eq!(mut_page.latex_blocks[0].x, 60.0);
+    assert_eq!(mut_page.latex_blocks[0].y, 70.0);
+    assert_eq!(mut_page.text_blocks.as_ref().unwrap()[0].x, 710.0);
+    assert_eq!(mut_page.text_blocks.as_ref().unwrap()[0].y, 720.0);
+    assert_eq!(mut_page.image_blocks.as_ref().unwrap()[0].x, 810.0);
+    assert_eq!(mut_page.image_blocks.as_ref().unwrap()[0].y, 820.0);
+    assert_eq!(circle_stroke.shape_kind, Some(ShapeKind::Circle));
+    transform_stroke(
+        &mut circle_stroke,
+        0.0,
+        0.0,
+        1.5, // scale_x != scale_y
+        1.0,
+        0.0,
+        XY { x: 600.0, y: 600.0 },
+    );
+    assert_eq!(circle_stroke.shape_kind, Some(ShapeKind::Ellipse));
 }

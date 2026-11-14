@@ -5,9 +5,8 @@ pub fn item_time(id: &str, created_at: Option<f64>) -> f64 {
     if let Some(t) = created_at {
         return t;
     }
-    let parts: Vec<&str> = id.split('_').collect();
-    if parts.len() > 1 {
-        if let Ok(t) = u64::from_str_radix(parts[1], 36) {
+    if let Some(part) = id.split('_').nth(1) {
+        if let Ok(t) = u64::from_str_radix(part, 36) {
             return t as f64;
         }
     }
@@ -86,7 +85,7 @@ pub fn z_layers(page: &NotePage) -> Vec<ZLayer> {
     if !ink_layers[0].is_empty() {
         out.push(ZLayer::Ink {
             key: "ink:base".to_string(),
-            strokes: ink_layers[0].clone(),
+            strokes: std::mem::take(&mut ink_layers[0]),
         });
     }
     for (i, b) in blocks.into_iter().enumerate() {
@@ -107,7 +106,7 @@ pub fn z_layers(page: &NotePage) -> Vec<ZLayer> {
         if !ink_layers[i + 1].is_empty() {
             out.push(ZLayer::Ink {
                 key: format!("ink:{}", b.id),
-                strokes: ink_layers[i + 1].clone(),
+                strokes: std::mem::take(&mut ink_layers[i + 1]),
             });
         }
     }

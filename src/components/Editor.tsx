@@ -123,6 +123,7 @@ function loadToolPrefs(settings: AppSettings): ToolSettings {
     highlighterOpacity: 0.35,
     eraserMode: settings.eraserMode,
     eraserSize: 14,
+    lassoMode: 'freeform',
     stylusOnly: settings.stylusOnly,
     holdToSnap: settings.holdToSnap,
     shapeMode: 'curve',

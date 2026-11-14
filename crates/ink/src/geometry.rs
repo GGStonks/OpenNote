@@ -2,7 +2,7 @@ use nib::geometry::JsMath;
 use crate::ink_width::ink_widths;
 use crate::smoothing::settled_smooth;
 use model::{ModeledKind, PenStyle, Point, Stroke};
-use nib::geometry::{has_real_pressure, thin_modeled_indices, InkPoint, ModeledPoint, XY};
+use nib::geometry::{thin_modeled_indices, InkPoint, ModeledPoint, XY};
 use nib::nib::nib_stroke;
 use std::f64::consts::PI;
 
@@ -118,17 +118,7 @@ pub fn engine_points(s: &Stroke) -> Vec<Point> {
         return pts.to_vec();
     }
 
-    let ink_pts: Vec<InkPoint> = pts
-        .iter()
-        .map(|p| InkPoint {
-            x: p.x,
-            y: p.y,
-            pressure: p.pressure,
-            t: p.t,
-        })
-        .collect();
-
-    if !has_real_pressure(&ink_pts) {
+    if !pts.iter().any(|p| p.pressure != 0.5 && p.pressure > 0.0) {
         return without_backward_lift(pts);
     }
 
@@ -173,20 +163,10 @@ pub fn ink_geometry(points: &[Point], s: &Stroke) -> InkGeometry {
         stroke_width(s)
     };
 
-    let ink_pts: Vec<InkPoint> = points
-        .iter()
-        .map(|p| InkPoint {
-            x: p.x,
-            y: p.y,
-            pressure: p.pressure,
-            t: p.t,
-        })
-        .collect();
-
     let pressured = if s.modeled.is_some() {
         s.modeled != Some(ModeledKind::Uniform)
     } else {
-        has_real_pressure(&ink_pts)
+        points.iter().any(|p| p.pressure != 0.5 && p.pressure > 0.0)
     };
     let share = s.modeled == Some(ModeledKind::Proportional);
 

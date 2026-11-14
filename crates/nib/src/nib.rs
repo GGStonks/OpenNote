@@ -159,10 +159,12 @@ impl NibModeler {
             });
         }
 
-        let all: Vec<Anchor> = if provisional.is_empty() {
-            self.anchors.clone()
+        let all_storage: Vec<Anchor>;
+        let all: &[Anchor] = if provisional.is_empty() {
+            &self.anchors
         } else {
-            self.anchors.iter().cloned().chain(provisional).collect()
+            all_storage = self.anchors.iter().cloned().chain(provisional).collect();
+            &all_storage
         };
 
         let mut out: Vec<ModeledPoint> = Vec::new();
@@ -172,7 +174,7 @@ impl NibModeler {
             } else {
                 None
             };
-            self.segment(&all, i, true, &mut out, lat, n);
+            self.segment(all, i, true, &mut out, lat, n);
         }
 
         if self.emitted == 0 && !all.is_empty() {

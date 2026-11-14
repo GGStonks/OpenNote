@@ -340,9 +340,31 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         )}
       </div>
 
-      <ToolButton active={tools.tool === 'lasso'} title="Lasso: select, move, convert to LaTeX/TikZ" onClick={() => selectTool('lasso')}>
-        <Lasso className="w-6 h-6" />
-      </ToolButton>
+      <div className="relative">
+        <ToolButton active={tools.tool === 'lasso'} title="Lasso: select, move, convert to LaTeX/TikZ" onClick={() => selectTool('lasso', 'lasso')}>
+          <Lasso className="w-6 h-6" />
+        </ToolButton>
+        {pop.open === 'lasso' && (
+          <Popover align="center">
+            <Label>Mode</Label>
+            <div className="flex gap-1 mb-2">
+              {(['freeform', 'rect'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setTools({ lassoMode: m })}
+                  className={`flex-1 text-sm py-2 rounded-xl border ${
+                    (tools.lassoMode ?? 'freeform') === m
+                      ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                      : 'border-gray-200 dark:border-gray-600'
+                  }`}
+                >
+                  {m === 'freeform' ? 'Freeform' : 'Rectangle'}
+                </button>
+              ))}
+            </div>
+          </Popover>
+        )}
+      </div>
       <ToolButton active={tools.tool === 'text'} title="Text" onClick={() => selectTool('text')}>
         <Type className="w-6 h-6" />
       </ToolButton>

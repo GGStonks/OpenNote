@@ -79,43 +79,62 @@ fn dist_to_seg(p: Point, a: Point, b: Point) -> f64 {
 }
 
 fn rdp(pts: &[Point], eps: f64) -> Vec<Point> {
-    if pts.len() < 3 {
+    let n = pts.len();
+    if n < 3 {
         return pts.to_vec();
     }
-    let mut max_d = 0.0;
-    let mut idx = 0;
-    for i in 1..pts.len() - 1 {
-        let d = dist_to_seg(pts[i], pts[0], pts[pts.len() - 1]);
-        if d > max_d {
-            max_d = d;
-            idx = i;
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+
+    let mut stack = Vec::with_capacity(16);
+    stack.push((0, n - 1));
+
+    while let Some((start, end)) = stack.pop() {
+        if end <= start + 1 {
+            continue;
+        }
+        let mut max_d = 0.0;
+        let mut idx = start;
+        for i in (start + 1)..end {
+            let d = dist_to_seg(pts[i], pts[start], pts[end]);
+            if d > max_d {
+                max_d = d;
+                idx = i;
+            }
+        }
+        if max_d > eps {
+            keep[idx] = true;
+            stack.push((start, idx));
+            stack.push((idx, end));
         }
     }
-    if max_d <= eps {
-        return vec![pts[0], pts[pts.len() - 1]];
-    }
-    let left = rdp(&pts[0..=idx], eps);
-    let right = rdp(&pts[idx..], eps);
-    let mut out = left[0..left.len() - 1].to_vec();
-    out.extend(right);
-    out
+
+    pts.iter()
+        .enumerate()
+        .filter_map(|(i, p)| if keep[i] { Some(*p) } else { None })
+        .collect()
 }
 
 fn polyline_error(pts: &[Point], poly: &[Point], closed: bool) -> f64 {
     if poly.is_empty() || pts.is_empty() {
         return 0.0;
     }
-    let mut segs = Vec::new();
-    for i in 1..poly.len() {
-        segs.push((poly[i - 1], poly[i]));
-    }
-    if closed && poly.len() > 1 {
-        segs.push((poly[poly.len() - 1], poly[0]));
-    }
+    let closing_seg = if closed && poly.len() > 1 {
+        Some((*poly.last().unwrap(), poly[0]))
+    } else {
+        None
+    };
     let mut sum = 0.0;
     for p in pts {
         let mut best = f64::INFINITY;
-        for &(a, b) in &segs {
+        for w in poly.windows(2) {
+            let d = dist_to_seg(*p, w[0], w[1]);
+            if d < best {
+                best = d;
+            }
+        }
+        if let Some((a, b)) = closing_seg {
             let d = dist_to_seg(*p, a, b);
             if d < best {
                 best = d;
@@ -203,17 +222,18 @@ struct ParabolaFit {
     c_coef: f64,
     c_ang: f64,
     s_ang: f64,
-    uv: Vec<[f64; 2]>,
+    u0: f64,
+    u1: f64,
+    travel: f64,
     rms: f64,
 }
 
 fn fit_parabola(pts: &[Point], ang: f64) -> Option<ParabolaFit> {
+    if pts.is_empty() {
+        return None;
+    }
     let c_ang = ang.cos();
     let s_ang = ang.sin();
-    let uv: Vec<[f64; 2]> = pts
-        .iter()
-        .map(|p| [p.x * c_ang + p.y * s_ang, -p.x * s_ang + p.y * c_ang])
-        .collect();
 
     let mut s0 = 0.0;
     let mut s1 = 0.0;
@@ -224,9 +244,12 @@ fn fit_parabola(pts: &[Point], ang: f64) -> Option<ParabolaFit> {
     let mut t1 = 0.0;
     let mut t2 = 0.0;
 
-    for row in &uv {
-        let u = row[0];
-        let v = row[1];
+    let mut travel = 0.0;
+    let mut prev_u: Option<f64> = None;
+
+    for p in pts {
+        let u = p.x * c_ang + p.y * s_ang;
+        let v = -p.x * s_ang + p.y * c_ang;
         let u2 = u * u;
         s0 += 1.0;
         s1 += u;
@@ -236,6 +259,10 @@ fn fit_parabola(pts: &[Point], ang: f64) -> Option<ParabolaFit> {
         t0 += v;
         t1 += u * v;
         t2 += u2 * v;
+        if let Some(pu) = prev_u {
+            travel += (u - pu).abs();
+        }
+        prev_u = Some(u);
     }
 
     let det3 = |m: &[f64; 9]| {
@@ -251,20 +278,26 @@ fn fit_parabola(pts: &[Point], ang: f64) -> Option<ParabolaFit> {
     let c_coef = det3(&[s4, s3, t2, s3, s2, t1, s2, s1, t0]) / d;
 
     let mut err = 0.0;
-    for row in &uv {
-        let u = row[0];
-        let v = row[1];
+    for p in pts {
+        let u = p.x * c_ang + p.y * s_ang;
+        let v = -p.x * s_ang + p.y * c_ang;
         let pred = a_coef * u * u + b_coef * u + c_coef;
         err += (v - pred).powi(2);
     }
-    let rms = (err / uv.len() as f64).sqrt();
+    let rms = (err / pts.len() as f64).sqrt();
+
+    let u0 = pts[0].x * c_ang + pts[0].y * s_ang;
+    let u1 = pts.last()?.x * c_ang + pts.last()?.y * s_ang;
+
     Some(ParabolaFit {
         a_coef,
         b_coef,
         c_coef,
         c_ang,
         s_ang,
-        uv,
+        u0,
+        u1,
+        travel,
         rms,
     })
 }
@@ -285,17 +318,27 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
     }
 
     let mut best: Option<ParabolaFit> = None;
-    let mut best_ang = 0.0;
-    for deg in (0..180).step_by(2) {
+    let mut best_deg = 0;
+    for deg in (0..180).step_by(10) {
         let ang = (deg as f64 * PI) / 180.0;
         if let Some(f) = fit_parabola(pts, ang) {
             if best.as_ref().map_or(true, |b| f.rms < b.rms) {
                 best = Some(f);
-                best_ang = ang;
+                best_deg = deg;
+            }
+        }
+    }
+    for delta in [-8, -6, -4, -2, 2, 4, 6, 8] {
+        let deg = (best_deg as i32 + delta).rem_euclid(180) as usize;
+        let ang = (deg as f64 * PI) / 180.0;
+        if let Some(f) = fit_parabola(pts, ang) {
+            if best.as_ref().map_or(true, |b| f.rms < b.rms) {
+                best = Some(f);
             }
         }
     }
     let mut f = best?;
+    let best_ang = f.s_ang.atan2(f.c_ang).rem_euclid(PI);
     let axis_snap = (8.0 * PI) / 180.0;
     for t in [0.0, PI / 2.0, PI] {
         if (best_ang - t).abs() < axis_snap {
@@ -311,13 +354,9 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
         return None;
     }
 
-    let mut travel = 0.0;
-    for i in 1..f.uv.len() {
-        travel += (f.uv[i][0] - f.uv[i - 1][0]).abs();
-    }
-    let u0 = f.uv[0][0];
-    let u1 = f.uv.last().unwrap()[0];
-    if travel > 1.12 * (u1 - u0).abs() || (u1 - u0).abs() < 0.3 * diag {
+    let u0 = f.u0;
+    let u1 = f.u1;
+    if f.travel > 1.12 * (u1 - u0).abs() || (u1 - u0).abs() < 0.3 * diag {
         return None;
     }
 

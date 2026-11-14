@@ -1,5 +1,5 @@
 import { NotePage, Rect, Stroke } from '../types';
-import { curveSegments, markMoved, strokeBounds } from '../ink/strokeRenderer';
+import { curveSegments, markMoved, strokeBounds, strokeGeometry } from '../ink/strokeRenderer';
 import { flattenBeziers, XY } from '../ink/spline';
 
 export interface Selection {
@@ -144,9 +144,10 @@ function lineTouchesLasso(pts: XY[], closed: boolean, L: Lasso): boolean {
   return false;
 }
 
-/** The drawn line of a stroke (curves as their spline). */
+/** The drawn line of a stroke (curves as their spline, handwriting rendered ink). */
 function strokeLine(s: Stroke): XY[] {
   if (s.shapeKind === 'curve') return flattenBeziers(curveSegments(s.points, !!s.closed && s.points.length > 2), 2);
+  if (!s.isShape) return strokeGeometry(s).pts;
   return s.points;
 }
 
@@ -176,6 +177,90 @@ export function selectInLasso(page: NotePage, lasso: XY[]): Selection | null {
     latexIds: page.latexBlocks.filter((b) => boxTouches(blockCorners(page, 'latex', b.id), L)).map((b) => b.id),
     textIds: (page.textBlocks ?? []).filter((t) => boxTouches(blockCorners(page, 'text', t.id), L)).map((t) => t.id),
     imageIds: (page.imageBlocks ?? []).filter((im) => boxTouches(blockCorners(page, 'image', im.id), L)).map((im) => im.id),
+  };
+  const bounds = computeBounds(page, sel);
+  return bounds ? { ...sel, bounds } : null;
+}
+
+export interface RectBounds {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}
+
+function segmentIntersectsRect(a: XY, b: XY, rect: RectBounds): boolean {
+  if (a.x >= rect.minX && a.x <= rect.maxX && a.y >= rect.minY && a.y <= rect.maxY) return true;
+  if (b.x >= rect.minX && b.x <= rect.maxX && b.y >= rect.minY && b.y <= rect.maxY) return true;
+  const dx = b.x - a.x, dy = b.y - a.y;
+  let t0 = 0, t1 = 1;
+  const checks = [
+    [-dx, a.x - rect.minX],
+    [dx, rect.maxX - a.x],
+    [-dy, a.y - rect.minY],
+    [dy, rect.maxY - a.y],
+  ];
+  for (const [p, q] of checks) {
+    if (p === 0) {
+      if (q < 0) return false;
+    } else {
+      const r = q / p;
+      if (p < 0) {
+        if (r > t1) return false;
+        if (r > t0) t0 = r;
+      } else {
+        if (r < t0) return false;
+        if (r < t1) t1 = r;
+      }
+    }
+  }
+  return t0 <= t1;
+}
+
+function strokeTouchesRect(s: Stroke, rect: RectBounds): boolean {
+  const b = strokeBounds(s);
+  if (b.maxX < rect.minX || b.minX > rect.maxX || b.maxY < rect.minY || b.minY > rect.maxY) return false;
+  const pts = strokeLine(s);
+  if (!pts.length) return false;
+  for (const p of pts) {
+    if (p.x >= rect.minX && p.x <= rect.maxX && p.y >= rect.minY && p.y <= rect.maxY) return true;
+  }
+  const n = pts.length;
+  const closed = !!s.closed && n > 2;
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    if (segmentIntersectsRect(pts[i], pts[(i + 1) % n], rect)) return true;
+  }
+  const isFilled = closed && !!s.fill && s.fill !== 'none' && s.fill !== 'hole';
+  if (isFilled && insidePoly({ x: (rect.minX + rect.maxX) / 2, y: (rect.minY + rect.maxY) / 2 }, pts)) return true;
+  return false;
+}
+
+function boxTouchesRect(corners: XY[] | null, rect: RectBounds): boolean {
+  if (!corners || corners.length < 4) return false;
+  for (const p of corners) {
+    if (p.x >= rect.minX && p.x <= rect.maxX && p.y >= rect.minY && p.y <= rect.maxY) return true;
+  }
+  for (let i = 0; i < 4; i++) {
+    if (segmentIntersectsRect(corners[i], corners[(i + 1) % 4], rect)) return true;
+  }
+  if (insidePoly({ x: (rect.minX + rect.maxX) / 2, y: (rect.minY + rect.maxY) / 2 }, corners)) return true;
+  return false;
+}
+
+export function selectInRect(page: NotePage, rect: RectBounds): Selection | null {
+  const normRect: RectBounds = {
+    minX: Math.min(rect.minX, rect.maxX),
+    minY: Math.min(rect.minY, rect.maxY),
+    maxX: Math.max(rect.minX, rect.maxX),
+    maxY: Math.max(rect.minY, rect.maxY),
+  };
+  const sel = {
+    pageId: page.id,
+    strokeIds: page.strokes.filter((s) => strokeTouchesRect(s, normRect)).map((s) => s.id),
+    latexIds: page.latexBlocks.filter((b) => boxTouchesRect(blockCorners(page, 'latex', b.id), normRect)).map((b) => b.id),
+    textIds: (page.textBlocks ?? []).filter((t) => boxTouchesRect(blockCorners(page, 'text', t.id), normRect)).map((t) => t.id),
+    imageIds: (page.imageBlocks ?? []).filter((im) => boxTouchesRect(blockCorners(page, 'image', im.id), normRect)).map((im) => im.id),
   };
   const bounds = computeBounds(page, sel);
   return bounds ? { ...sel, bounds } : null;
@@ -233,6 +318,7 @@ export function transformSelection(page: NotePage, sel: Selection, dx: number, d
         ...st,
         width: st.width * (inkScale === 1 ? 1 : Math.sqrt(inkScale)),
         points: st.points.map((p) => ({ ...p, ...T(p.x, p.y) })),
+        shapeKind: st.shapeKind === 'circle' && Math.abs(fx - fy) > 1e-4 ? 'ellipse' : st.shapeKind,
         ...turned(st.rotation),
       };
       // Only moved: the ink keeps its geometry, moved (no re-modelling when a selection is dropped).
