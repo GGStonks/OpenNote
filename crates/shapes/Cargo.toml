@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nib = { path = "../nib" }
+nib = { path = "../nib", features = ["serde"] }
 model = { path = "../model" }
 ink = { path = "../ink" }
 serde = { version = "1.0", features = ["derive"] }

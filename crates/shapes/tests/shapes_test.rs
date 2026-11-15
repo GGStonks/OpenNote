@@ -550,3 +550,317 @@ fn test_rect_select_strokes_and_circle_promotion() {
     );
     assert_eq!(circle_stroke.shape_kind, Some(ShapeKind::Ellipse));
 }
+
+#[test]
+fn test_move_shape_handle_arrow() {
+    use shapes::edit::{move_shape_handle, HandleRole, ShapeHandle};
+    let stroke = Stroke {
+        id: "arrow1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            Point { x: 10.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 80.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 80.0, y: 20.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(false),
+        shape_kind: Some(ShapeKind::Arrow),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: Some(true),
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let handle_tip = ShapeHandle {
+        x: 100.0,
+        y: 10.0,
+        role: HandleRole::Vertex,
+        index: 1,
+        anchor: None,
+    };
+
+    // Move tip to (10.0, 100.0) making a vertical downward arrow
+    let (moved, guide) = move_shape_handle(&stroke, &handle_tip, nib::geometry::XY { x: 10.0, y: 100.0 }, None, None);
+    assert!((moved.points[1].x - 10.0).abs() < 1e-4);
+    assert!((moved.points[1].y - 100.0).abs() < 1e-4);
+    assert_eq!(moved.shape_kind, Some(ShapeKind::Arrow));
+    // Wings should now point upward (tail at 10,10, tip at 10,100)
+    assert!(moved.points[2].y < 100.0);
+    assert!(moved.points[4].y < 100.0);
+    assert!(guide.is_some());
+    assert_eq!(guide.unwrap().kind, shapes::recognition::SnapKind::Angle);
+}
+
+#[test]
+fn test_move_shape_handle_rectangle_orthogonality() {
+    use shapes::edit::{move_shape_handle, HandleRole, ShapeHandle};
+    let stroke = Stroke {
+        id: "rect1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            Point { x: 0.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 0.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(true),
+        shape_kind: Some(ShapeKind::Rectangle),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let handle_corner = ShapeHandle {
+        x: 100.0,
+        y: 50.0,
+        role: HandleRole::Vertex,
+        index: 2,
+        anchor: None,
+    };
+
+    // Drag corner 2 to (150.0, 80.0)
+    let (moved, _) = move_shape_handle(&stroke, &handle_corner, nib::geometry::XY { x: 150.0, y: 80.0 }, None, None);
+    assert_eq!(moved.points[0].x, 0.0);
+    assert_eq!(moved.points[0].y, 0.0);
+    assert_eq!(moved.points[1].x, 150.0);
+    assert_eq!(moved.points[1].y, 0.0);
+    assert_eq!(moved.points[2].x, 150.0);
+    assert_eq!(moved.points[2].y, 80.0);
+    assert_eq!(moved.points[3].x, 0.0);
+    assert_eq!(moved.points[3].y, 80.0);
+}
+
+#[test]
+fn test_snap_stroke_with_grid_and_objects() {
+    use shapes::recognition::{snap_stroke_with_context, SnapOptions, SnapKind};
+
+    let other_stroke = Stroke {
+        id: "target1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            Point { x: 200.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 300.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(false),
+        shape_kind: Some(ShapeKind::Line),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let page = NotePage {
+        id: "p1".to_string(),
+        page_number: 1,
+        strokes: vec![other_stroke],
+        latex_blocks: vec![],
+        text_blocks: None,
+        image_blocks: None,
+    };
+
+    // Raw line stroke drawn near (200, 200): start at (197.0, 203.0), end at (250.0, 100.0)
+    let drawn = Stroke {
+        id: "drawn1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            Point { x: 197.0, y: 203.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 220.0, y: 150.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 250.0, y: 100.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: None,
+        closed: Some(false),
+        shape_kind: None,
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    // 1. With snap_to_objects = true: snaps to (200, 200)
+    let opts_obj = SnapOptions {
+        snap_to_objects: true,
+        snap_to_grid: false,
+        magnetic_radius: Some(12.0),
+        paper_style: None,
+        origin_x: None,
+        origin_y: None,
+    };
+    let (snapped, guides) = snap_stroke_with_context(&drawn, Some(&page), opts_obj);
+    assert_eq!(snapped.shape_kind, Some(ShapeKind::Line));
+    assert_eq!(snapped.points[0].x, 200.0);
+    assert_eq!(snapped.points[0].y, 200.0);
+    assert!(!guides.is_empty());
+    assert_eq!(guides[0].kind, SnapKind::ShapePoint);
+
+    // 2. With snap_to_objects = false: ignores (200, 200)
+    let opts_no_obj = SnapOptions {
+        snap_to_objects: false,
+        snap_to_grid: false,
+        magnetic_radius: Some(12.0),
+        paper_style: None,
+        origin_x: None,
+        origin_y: None,
+    };
+    let (snapped_raw, guides_raw) = snap_stroke_with_context(&drawn, Some(&page), opts_no_obj);
+    assert_eq!(snapped_raw.shape_kind, Some(ShapeKind::Line));
+    assert_ne!(snapped_raw.points[0].x, 200.0);
+    assert!(guides_raw.is_empty());
+
+    // 3. With snap_to_grid = true on Ruled paper (lines at y=80 + k*32)
+    let opts_grid = SnapOptions {
+        snap_to_objects: false,
+        snap_to_grid: true,
+        magnetic_radius: Some(12.0),
+        paper_style: Some(model::PaperStyle::Ruled),
+        origin_x: Some(0.0),
+        origin_y: Some(0.0),
+    };
+    // drawn endpoint at y = 100.0 is near 80 + 32 = 112 or near 80? (100 - 112 = -12 <= 12)
+    let (snapped_grid, guides_grid) = snap_stroke_with_context(&drawn, None, opts_grid);
+    assert_eq!(snapped_grid.shape_kind, Some(ShapeKind::Line));
+    assert!(!guides_grid.is_empty());
+    assert_eq!(guides_grid[0].kind, SnapKind::RuledLine);
+}
+
+#[test]
+fn test_rect_and_lasso_select_page_blocks() {
+    use shapes::selection::{lasso_select_page, rect_select_page};
+    use ink::RectBounds;
+
+    let page = NotePage {
+        id: "p_blocks".to_string(),
+        page_number: 1,
+        strokes: vec![],
+        latex_blocks: vec![
+            LatexBlock {
+                id: "latex1".to_string(),
+                x: 100.0,
+                y: 100.0,
+                width: 80.0,
+                height: 40.0,
+                scale: None,
+                stretch_x: None,
+                latex_code: "\\frac{a}{b}".to_string(),
+                is_tikz: None,
+                tikz_svg: None,
+                tikz_svg_source: None,
+                color: Some("#000".to_string()),
+                rotation: None,
+                created_at: 0.0,
+            }
+        ],
+        text_blocks: Some(vec![
+            TextBlock {
+                id: "text1".to_string(),
+                x: 300.0,
+                y: 300.0,
+                width: 120.0,
+                height: Some(30.0),
+                text: "Hello Rust".to_string(),
+                font_size: 14.0,
+                color: "#000".to_string(),
+                bold: None,
+                italic: None,
+                underline: None,
+                strike: None,
+                font_family: None,
+                align: None,
+                line_height: None,
+                padding: None,
+                spans: None,
+                paras: None,
+                background: None,
+                radius: None,
+                rotation: None,
+                created_at: 0.0,
+            }
+        ]),
+        image_blocks: Some(vec![
+            ImageBlock {
+                id: "img1".to_string(),
+                x: 500.0,
+                y: 500.0,
+                width: 100.0,
+                height: 100.0,
+                data_url: "data:image/png;base64,...".to_string(),
+                rotation: None,
+                created_at: 0.0,
+            }
+        ]),
+    };
+
+    // 1. Rect select encompassing latex1 and text1
+    let sel_rect = rect_select_page(
+        RectBounds { min_x: 50.0, min_y: 50.0, max_x: 450.0, max_y: 450.0 },
+        &page,
+    );
+    assert_eq!(sel_rect.latex_ids, vec!["latex1"]);
+    assert_eq!(sel_rect.text_ids, vec!["text1"]);
+    assert!(sel_rect.image_ids.is_empty());
+    assert!(sel_rect.bounds.is_some());
+
+    // 2. Lasso select around img1
+    let lasso = vec![
+        XY { x: 480.0, y: 480.0 },
+        XY { x: 620.0, y: 480.0 },
+        XY { x: 620.0, y: 620.0 },
+        XY { x: 480.0, y: 620.0 },
+    ];
+    let sel_lasso = lasso_select_page(&lasso, &page);
+    assert_eq!(sel_lasso.image_ids, vec!["img1"]);
+    assert!(sel_lasso.latex_ids.is_empty());
+    assert!(sel_lasso.text_ids.is_empty());
+}

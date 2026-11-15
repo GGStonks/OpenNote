@@ -841,21 +841,340 @@ pub fn detect_shape(points: &[Point]) -> Option<SnappedShape> {
     None
 }
 
-pub fn snap_stroke(stroke: &Stroke) -> Stroke {
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SnapKind {
+    ShapePoint,
+    ShapeEdge,
+    BlockCorner,
+    GridIntersection,
+    RuledLine,
+    Angle,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapGuide {
+    pub at: nib::geometry::XY,
+    pub kind: SnapKind,
+    pub line: Option<[nib::geometry::XY; 2]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapOptions {
+    pub snap_to_objects: bool,
+    pub snap_to_grid: bool,
+    pub magnetic_radius: Option<f64>,
+    pub paper_style: Option<model::PaperStyle>,
+    pub origin_x: Option<f64>,
+    pub origin_y: Option<f64>,
+}
+
+impl Default for SnapOptions {
+    fn default() -> Self {
+        Self {
+            snap_to_objects: true,
+            snap_to_grid: true,
+            magnetic_radius: Some(12.0),
+            paper_style: None,
+            origin_x: None,
+            origin_y: None,
+        }
+    }
+}
+
+pub fn find_snap_target(
+    p: nib::geometry::XY,
+    page: Option<&model::NotePage>,
+    ignore_stroke_id: Option<&str>,
+    opts: &SnapOptions,
+) -> Option<SnapGuide> {
+    use nib::geometry::JsMath;
+    let r_mag = opts.magnetic_radius.unwrap_or(12.0);
+
+    // 1. Target: Other objects / strokes on the page
+    if opts.snap_to_objects {
+        if let Some(pg) = page {
+            let mut best_pt: Option<(nib::geometry::XY, f64, SnapKind)> = None;
+
+            // Check stroke key points
+            for s in &pg.strokes {
+                if ignore_stroke_id.map_or(false, |id| s.id == id) {
+                    continue;
+                }
+                let is_shape = s.is_shape.unwrap_or(false);
+                let pts = &s.points;
+                if pts.is_empty() {
+                    continue;
+                }
+
+                let mut key_pts = Vec::new();
+                if is_shape {
+                    for pt in pts {
+                        key_pts.push(nib::geometry::XY { x: pt.x, y: pt.y });
+                    }
+                    if pts.len() > 1 {
+                        for i in 0..pts.len() {
+                            let next_i = (i + 1) % pts.len();
+                            key_pts.push(nib::geometry::XY {
+                                x: (pts[i].x + pts[next_i].x) * 0.5,
+                                y: (pts[i].y + pts[next_i].y) * 0.5,
+                            });
+                        }
+                    }
+                } else {
+                    key_pts.push(nib::geometry::XY { x: pts[0].x, y: pts[0].y });
+                    if pts.len() > 1 {
+                        let last = pts.last().unwrap();
+                        key_pts.push(nib::geometry::XY { x: last.x, y: last.y });
+                    }
+                }
+
+                for q in key_pts {
+                    let d = (q.x - p.x).js_hypot(q.y - p.y);
+                    if d < r_mag {
+                        if best_pt.as_ref().map_or(true, |b| d < b.1) {
+                            best_pt = Some((q, d, SnapKind::ShapePoint));
+                        }
+                    }
+                }
+            }
+
+            // Check block corners and centers
+            for b in &pg.latex_blocks {
+                let cs = crate::selection::box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                for c in cs {
+                    let d = (c.x - p.x).js_hypot(c.y - p.y);
+                    if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
+                        best_pt = Some((c, d, SnapKind::BlockCorner));
+                    }
+                }
+            }
+            if let Some(text_blocks) = &pg.text_blocks {
+                for b in text_blocks {
+                    let h = b.height.unwrap_or(b.font_size * 1.4);
+                    let cs = crate::selection::box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+                    for c in cs {
+                        let d = (c.x - p.x).js_hypot(c.y - p.y);
+                        if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
+                            best_pt = Some((c, d, SnapKind::BlockCorner));
+                        }
+                    }
+                }
+            }
+            if let Some(image_blocks) = &pg.image_blocks {
+                for b in image_blocks {
+                    let cs = crate::selection::box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                    for c in cs {
+                        let d = (c.x - p.x).js_hypot(c.y - p.y);
+                        if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
+                            best_pt = Some((c, d, SnapKind::BlockCorner));
+                        }
+                    }
+                }
+            }
+
+            if let Some((pt, _, kind)) = best_pt {
+                return Some(SnapGuide {
+                    at: pt,
+                    kind,
+                    line: None,
+                });
+            }
+
+            // Check edge projections
+            let mut best_edge: Option<(nib::geometry::XY, f64, [nib::geometry::XY; 2])> = None;
+            for s in &pg.strokes {
+                if ignore_stroke_id.map_or(false, |id| s.id == id) {
+                    continue;
+                }
+                let pts = &s.points;
+                if pts.len() < 2 {
+                    continue;
+                }
+                let closed = s.closed.unwrap_or(false) && pts.len() > 2;
+                let segs = if closed { pts.len() } else { pts.len() - 1 };
+                for i in 0..segs {
+                    let a = nib::geometry::XY { x: pts[i].x, y: pts[i].y };
+                    let b = nib::geometry::XY { x: pts[(i + 1) % pts.len()].x, y: pts[(i + 1) % pts.len()].y };
+                    let dx = b.x - a.x;
+                    let dy = b.y - a.y;
+                    let l2 = dx * dx + dy * dy;
+                    if l2 > 1e-4 {
+                        let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0);
+                        if t > 0.05 && t < 0.95 {
+                            let proj = nib::geometry::XY { x: a.x + t * dx, y: a.y + t * dy };
+                            let d = (p.x - proj.x).js_hypot(p.y - proj.y);
+                            if d < r_mag * 0.8 && best_edge.as_ref().map_or(true, |b| d < b.1) {
+                                best_edge = Some((proj, d, [a, b]));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some((pt, _, seg)) = best_edge {
+                return Some(SnapGuide {
+                    at: pt,
+                    kind: SnapKind::ShapeEdge,
+                    line: Some(seg),
+                });
+            }
+        }
+    }
+
+    // 2. Target: Grid / dot / ruled line snapping
+    if opts.snap_to_grid {
+        let ox = opts.origin_x.unwrap_or(0.0);
+        let oy = opts.origin_y.unwrap_or(0.0);
+        match opts.paper_style {
+            Some(model::PaperStyle::Grid) => {
+                let step = 24.0;
+                let gx = ox + ((p.x - ox) / step).round() * step;
+                let gy = oy + ((p.y - oy) / step).round() * step;
+                if (p.x - gx).js_hypot(p.y - gy) < r_mag {
+                    return Some(SnapGuide {
+                        at: nib::geometry::XY { x: gx, y: gy },
+                        kind: SnapKind::GridIntersection,
+                        line: None,
+                    });
+                }
+            }
+            Some(model::PaperStyle::Graph) => {
+                let step = 12.0;
+                let gx = ox + ((p.x - ox) / step).round() * step;
+                let gy = oy + ((p.y - oy) / step).round() * step;
+                if (p.x - gx).js_hypot(p.y - gy) < r_mag {
+                    return Some(SnapGuide {
+                        at: nib::geometry::XY { x: gx, y: gy },
+                        kind: SnapKind::GridIntersection,
+                        line: None,
+                    });
+                }
+            }
+            Some(model::PaperStyle::Dots) => {
+                let step = 24.0;
+                let gx = ox + 12.0 + ((p.x - ox - 12.0) / step).round() * step;
+                let gy = oy + 12.0 + ((p.y - oy - 12.0) / step).round() * step;
+                if (p.x - gx).js_hypot(p.y - gy) < r_mag {
+                    return Some(SnapGuide {
+                        at: nib::geometry::XY { x: gx, y: gy },
+                        kind: SnapKind::GridIntersection,
+                        line: None,
+                    });
+                }
+            }
+            Some(model::PaperStyle::Ruled) | Some(model::PaperStyle::Lines) => {
+                let step = 32.0;
+                let gy = 80.0 + ((p.y - 80.0) / step).round() * step;
+                if (p.y - gy).abs() < r_mag {
+                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Ruled) && (p.x - 79.0).abs() < r_mag;
+                    let gx = if snap_margin { 79.0 } else { p.x };
+                    return Some(SnapGuide {
+                        at: nib::geometry::XY { x: gx, y: gy },
+                        kind: SnapKind::RuledLine,
+                        line: Some([nib::geometry::XY { x: 0.0, y: gy }, nib::geometry::XY { x: 5000.0, y: gy }]),
+                    });
+                }
+            }
+            Some(model::PaperStyle::Narrow) | Some(model::PaperStyle::NarrowLines) => {
+                let step = 24.0;
+                let gy = 80.0 + ((p.y - 80.0) / step).round() * step;
+                if (p.y - gy).abs() < r_mag {
+                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Narrow) && (p.x - 79.0).abs() < r_mag;
+                    let gx = if snap_margin { 79.0 } else { p.x };
+                    return Some(SnapGuide {
+                        at: nib::geometry::XY { x: gx, y: gy },
+                        kind: SnapKind::RuledLine,
+                        line: Some([nib::geometry::XY { x: 0.0, y: gy }, nib::geometry::XY { x: 5000.0, y: gy }]),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+pub fn snap_stroke_with_context(
+    stroke: &Stroke,
+    page: Option<&model::NotePage>,
+    opts: SnapOptions,
+) -> (Stroke, Vec<SnapGuide>) {
     if stroke.tool != "pen" || stroke.is_shape.unwrap_or(false) {
-        return stroke.clone();
+        return (stroke.clone(), Vec::new());
     }
     let shape = detect_shape(&stroke.points);
     if let Some(s) = shape {
         let mut st = stroke.clone();
-        st.points = s.points;
+        let mut guides = Vec::new();
+        let mut points = s.points;
+
+        if s.kind == ShapeKind::Line || s.kind == ShapeKind::Arrow {
+            if points.len() >= 2 {
+                // Snap endpoint 0
+                let p0_xy = nib::geometry::XY { x: points[0].x, y: points[0].y };
+                if let Some(g0) = find_snap_target(p0_xy, page, Some(&stroke.id), &opts) {
+                    points[0].x = g0.at.x;
+                    points[0].y = g0.at.y;
+                    guides.push(g0);
+                }
+                // Snap endpoint 1
+                let p1_xy = nib::geometry::XY { x: points[1].x, y: points[1].y };
+                if let Some(g1) = find_snap_target(p1_xy, page, Some(&stroke.id), &opts) {
+                    points[1].x = g1.at.x;
+                    points[1].y = g1.at.y;
+                    guides.push(g1);
+                }
+
+                // If Arrow, recompute wings around the snapped tip
+                if s.kind == ShapeKind::Arrow && points.len() >= 5 {
+                    let tail = points[0];
+                    let tip = points[1];
+                    let head_len = ((points[2].x - tip.x) * (points[2].x - tip.x) + (points[2].y - tip.y) * (points[2].y - tip.y)).sqrt();
+                    let dir = (tip.y - tail.y).atan2(tip.x - tail.x);
+                    let spread = (28.0 * PI) / 180.0;
+                    points[2].x = tip.x + head_len * (dir + PI - spread).cos();
+                    points[2].y = tip.y + head_len * (dir + PI - spread).sin();
+                    points[3] = tip;
+                    points[4].x = tip.x + head_len * (dir + PI + spread).cos();
+                    points[4].y = tip.y + head_len * (dir + PI + spread).sin();
+                }
+            }
+        } else if s.kind == ShapeKind::Rectangle {
+            for pt in &mut points {
+                let xy = nib::geometry::XY { x: pt.x, y: pt.y };
+                if let Some(g) = find_snap_target(xy, page, Some(&stroke.id), &opts) {
+                    pt.x = g.at.x;
+                    pt.y = g.at.y;
+                    guides.push(g);
+                }
+            }
+        } else if s.kind == ShapeKind::Polyline || s.kind == ShapeKind::Triangle || s.kind == ShapeKind::Polygon {
+            for pt in &mut points {
+                let xy = nib::geometry::XY { x: pt.x, y: pt.y };
+                if let Some(g) = find_snap_target(xy, page, Some(&stroke.id), &opts) {
+                    pt.x = g.at.x;
+                    pt.y = g.at.y;
+                    guides.push(g);
+                }
+            }
+        }
+
+        st.points = points;
         st.is_shape = Some(true);
         st.closed = Some(s.closed);
         st.shape_kind = Some(s.kind);
         st.modeled = None;
         st.pen_end = None;
-        st
+        (st, guides)
     } else {
-        stroke.clone()
+        (stroke.clone(), Vec::new())
     }
+}
+
+pub fn snap_stroke(stroke: &Stroke) -> Stroke {
+    snap_stroke_with_context(stroke, None, SnapOptions { snap_to_objects: false, snap_to_grid: false, ..Default::default() }).0
 }

@@ -5,7 +5,8 @@ use model::{ModeledKind, Point, ShapeKind, Stroke};
 use nib::geometry::XY;
 use std::collections::HashSet;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RectBounds {
     pub min_x: f64,
     pub min_y: f64,
@@ -213,7 +214,11 @@ fn erase_shape(
     make_id: &mut impl FnMut() -> String,
 ) -> Option<Vec<Stroke>> {
     let closed = s.closed.unwrap_or(false) && s.points.len() > 2;
-    let src: Vec<Point> = if s.shape_kind == Some(ShapeKind::Curve) {
+    let is_arrow = s.shape_kind == Some(ShapeKind::Arrow) && s.points.len() >= 5;
+
+    let src: Vec<Point> = if is_arrow {
+        vec![s.points[0], s.points[1]]
+    } else if s.shape_kind == Some(ShapeKind::Curve) {
         let xy: Vec<XY> = s.points.iter().map(|p| XY { x: p.x, y: p.y }).collect();
         flatten_beziers(&catmull_rom_beziers(&xy, closed), 0.2)
             .into_iter()
@@ -237,7 +242,6 @@ fn erase_shape(
     if src.len() < 2 {
         return None;
     }
-    let inside = |p: XY| (p.x - x).js_hypot(p.y - y) <= r;
 
     #[derive(Clone)]
     struct Run {
@@ -248,19 +252,7 @@ fn erase_shape(
     }
 
     let mut runs: Vec<Run> = Vec::new();
-    let mut cur: Option<Run> = if inside(XY {
-        x: src[0].x,
-        y: src[0].y,
-    }) {
-        None
-    } else {
-        Some(Run {
-            points: vec![src[0]],
-            offset: 0.0,
-            first: true,
-            last: false,
-        })
-    };
+    let mut cur: Option<Run> = None;
     let mut cut = false;
     let mut at = 0.0;
 
@@ -271,36 +263,42 @@ fn erase_shape(
         let b_xy = XY { x: b.x, y: b.y };
         let len = (b.x - a.x).js_hypot(b.y - a.y);
 
+        let mut ts = vec![0.0, 1.0];
         for t in circle_cuts(a_xy, b_xy, x, y, r) {
-            let p = lerp_point(a, b, t);
-            cut = true;
-            if let Some(mut c) = cur.take() {
-                c.points.push(p);
-                runs.push(c);
-            } else {
-                cur = Some(Run {
-                    points: vec![p],
-                    offset: at + len * t,
-                    first: false,
-                    last: false,
-                });
-            }
+            ts.push(t);
         }
+        ts.sort_by(|u, v| u.partial_cmp(v).unwrap_or(std::cmp::Ordering::Equal));
+        ts.dedup_by(|u, v| (*u - *v).abs() < 1e-7);
 
-        if let Some(c) = &mut cur {
-            if !inside(b_xy) {
-                c.points.push(b);
-            } else {
-                runs.push(cur.take().unwrap());
-                cut = true;
+        for w in ts.windows(2) {
+            let t0 = w[0];
+            let t1 = w[1];
+            if (t1 - t0) < 1e-7 {
+                continue;
             }
-        } else if !inside(b_xy) {
-            cur = Some(Run {
-                points: vec![b],
-                offset: at + len,
-                first: false,
-                last: false,
-            });
+            let p0 = lerp_point(a, b, t0);
+            let p1 = lerp_point(a, b, t1);
+            let mx = (p0.x + p1.x) * 0.5;
+            let my = (p0.y + p1.y) * 0.5;
+            let inside = (mx - x).js_hypot(my - y) <= r;
+
+            if inside {
+                cut = true;
+                if let Some(c) = cur.take() {
+                    runs.push(c);
+                }
+            } else {
+                if let Some(ref mut c) = cur {
+                    c.points.push(p1);
+                } else {
+                    cur = Some(Run {
+                        points: vec![p0, p1],
+                        offset: at + len * t0,
+                        first: i == 1 && t0 == 0.0,
+                        last: false,
+                    });
+                }
+            }
         }
         at += len;
     }
@@ -358,11 +356,29 @@ fn erase_shape(
         piece.created_at = created;
         piece.points = run.points;
         piece.is_shape = Some(true);
-        piece.shape_kind = Some(ShapeKind::Polyline);
         piece.closed = Some(false);
         piece.fill = None;
         piece.fill_only = None;
-        piece.arrow = if run.last && !closed { s.arrow } else { None };
+
+        if is_arrow && run.last {
+            piece.shape_kind = Some(ShapeKind::Arrow);
+            piece.arrow = s.arrow;
+            let tail = piece.points[0];
+            let tip = s.points[1];
+            let w1 = s.points[2];
+            let w2 = s.points[4];
+            piece.points = vec![tail, tip, w1, tip, w2];
+        } else if piece.points.len() == 2 && (s.shape_kind == Some(ShapeKind::Line) || is_arrow) {
+            piece.shape_kind = Some(ShapeKind::Line);
+            piece.arrow = None;
+        } else {
+            piece.shape_kind = if piece.points.len() == 2 {
+                Some(ShapeKind::Line)
+            } else {
+                Some(ShapeKind::Polyline)
+            };
+            piece.arrow = if run.last && !closed { s.arrow } else { None };
+        }
 
         if dashed {
             piece.dash_offset = Some(s.dash_offset.unwrap_or(0.0) + run.offset);
@@ -397,7 +413,12 @@ pub fn erase_strokes_partial(
             changed = true;
             continue;
         }
-        let r = radius + s.width * 0.6;
+        let r = radius
+            + (if s.tool == "highlighter" {
+                s.width * 2.75
+            } else {
+                s.width * 0.6
+            });
         if s.is_shape.unwrap_or(false) {
             let pieces = erase_shape(s, x, y, r, &mut make_id);
             match pieces {
@@ -413,7 +434,8 @@ pub fn erase_strokes_partial(
         // Handwriting
         let closed = s.closed.unwrap_or(false) && s.points.len() > 2;
         let g = stroke_geometry(s);
-        let modeled = if s.modeled == Some(ModeledKind::Proportional) && g.widths.is_some() {
+        let is_proportional = s.modeled == Some(ModeledKind::Proportional);
+        let modeled = if is_proportional && g.widths.is_some() {
             Some(ModeledKind::Proportional)
         } else if g.widths.is_some() {
             Some(ModeledKind::Variable)
@@ -421,18 +443,54 @@ pub fn erase_strokes_partial(
             Some(ModeledKind::Uniform)
         };
 
-        let g_pts: Vec<Point> = g
-            .pts
-            .iter()
-            .map(|q| Point {
-                x: q.x,
-                y: q.y,
-                pressure: q.p,
-                t: Some(q.t),
-                alt: None,
-                az: None,
-            })
-            .collect();
+        let g_pts: Vec<Point> = if is_proportional {
+            if let Some(widths) = &g.widths {
+                g.pts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| {
+                        let w = widths.get(i).copied().unwrap_or(g.width);
+                        let norm_p = if g.width > 0.0 {
+                            (w / g.width).max(0.02)
+                        } else {
+                            q.p
+                        };
+                        Point {
+                            x: q.x,
+                            y: q.y,
+                            pressure: norm_p,
+                            t: Some(q.t),
+                            alt: None,
+                            az: None,
+                        }
+                    })
+                    .collect()
+            } else {
+                g.pts
+                    .iter()
+                    .map(|q| Point {
+                        x: q.x,
+                        y: q.y,
+                        pressure: q.p,
+                        t: Some(q.t),
+                        alt: None,
+                        az: None,
+                    })
+                    .collect()
+            }
+        } else {
+            g.pts
+                .iter()
+                .map(|q| Point {
+                    x: q.x,
+                    y: q.y,
+                    pressure: q.p,
+                    t: Some(q.t),
+                    alt: None,
+                    az: None,
+                })
+                .collect()
+        };
         let pts = densify_points(&g_pts, closed, 1.0);
         let inside = |p: &Point| (p.x - x).js_hypot(p.y - y) <= r;
 

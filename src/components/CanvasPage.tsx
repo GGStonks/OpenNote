@@ -25,6 +25,7 @@ import {
 } from '../editor/smartPen';
 import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
+import { XY } from '../ink/spline';
 import { haptic } from '../platform';
 import { GestureBus } from '../editor/gestures';
 import {
@@ -839,6 +840,10 @@ const SharpInk = React.memo(function SharpInk(props: { strokes: Stroke[]; sheets
     }
     const added = appended ? strokes.slice(n) : [];
     for (const tile of tiles.current.values()) {
+      if (tile.painted !== before && tile.painted !== strokes) {
+        paintTile(tile, strokes);
+        continue;
+      }
       if (tile.painted !== before) continue;
       const rect = tileRect(tile.i, tile.j, r);
       if (appended) {
@@ -1307,27 +1312,35 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const scale = c.height / H || 1;
     const v0 = Math.max(0, (root.top - c.top) / scale), v1 = Math.min(H, (root.bottom - c.top) / scale);
     const u0 = Math.max(0, (root.left - c.left) / scale), u1 = Math.min(W, (root.right - c.left) / scale);
-    const height = Math.min(H, Math.ceil(Math.max(1, (root.bottom - root.top) / scale) * 1.5));
-    const width = Math.min(W, Math.ceil(Math.max(1, (root.right - root.left) / scale) * 1.5));
-    // Exactly the screen's resolution (rounding the zoom up, as the page canvases do, cost up to
-    // twice the memory for nothing).
-    const r = Math.max(1, Math.min(zoomRef.current * Math.min(window.devicePixelRatio || 1, 3), Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, width * height))));
+    const visH = Math.max(1, v1 - v0);
+    const visW = Math.max(1, u1 - u0);
+    const r = Math.max(1, zoomRef.current * Math.min(window.devicePixelRatio || 1, 3));
+    const maxArea = MAX_CANVAS_PIXELS / (r * r);
+    const margin = Math.min(1.5, Math.sqrt(Math.max(1, maxArea / (visW * visH))));
+    const height = Math.min(H, Math.ceil(visH * margin));
+    const width = Math.min(W, Math.ceil(visW * margin));
     const cur = live.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     if (
       cur && canvas.width > 0 && cur.top <= v0 && cur.top + cur.height >= v1 && cur.left <= u0 && cur.left + cur.width >= u1 &&
       cur.height === height && cur.width === width && Math.abs(cur.ratio - r) < 1e-6 && canvas.width === Math.round(width * r)
-    ) return ctx;
+    ) {
+      if (canvas.style.width !== `${width}px`) canvas.style.width = `${width}px`;
+      if (canvas.style.height !== `${height}px`) canvas.style.height = `${height}px`;
+      if (canvas.style.top !== `${cur.top}px`) canvas.style.top = `${cur.top}px`;
+      if (canvas.style.left !== `${cur.left}px`) canvas.style.left = `${cur.left}px`;
+      return ctx;
+    }
     const top = Math.max(0, Math.min(H - height, (v0 + v1) / 2 - height / 2));
     const left = Math.max(0, Math.min(W - width, (u0 + u1) / 2 - width / 2));
     const w = Math.round(width * r), h = Math.round(height * r);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w;
       canvas.height = h;
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
     }
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
     canvas.style.top = `${top}px`;
     canvas.style.left = `${left}px`;
     ctx.setTransform(r, 0, 0, r, -left * r, -top * r);
@@ -1539,6 +1552,23 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         next = unionRect(next, strokePaintBounds(edit.last));
       } else next = unionRect(next, drawLiveStroke(ctx, edit.last.points, styleOf(edit.last)));
       if (edit.snapDot) next = unionRect(next, drawSnapDot(ctx, edit.snapDot, false, k));
+      if (edit.guideLine) {
+        ctx.save();
+        ctx.strokeStyle = '#3B82F6';
+        ctx.lineWidth = 1.5 * k;
+        ctx.setLineDash([5 * k, 4 * k]);
+        ctx.beginPath();
+        ctx.moveTo(edit.guideLine[0].x, edit.guideLine[0].y);
+        ctx.lineTo(edit.guideLine[1].x, edit.guideLine[1].y);
+        ctx.stroke();
+        ctx.restore();
+        next = unionRect(next, {
+          minX: Math.min(edit.guideLine[0].x, edit.guideLine[1].x) - 4 * k,
+          minY: Math.min(edit.guideLine[0].y, edit.guideLine[1].y) - 4 * k,
+          maxX: Math.max(edit.guideLine[0].x, edit.guideLine[1].x) + 4 * k,
+          maxY: Math.max(edit.guideLine[0].y, edit.guideLine[1].y) + 4 * k,
+        });
+      }
     }
     // In the apps the shell's native layer draws the stroke or shape being made (d.ink, above the
     // web view, as vectors at the screen's resolution): it is not drawn here as well. Two copies of
@@ -1627,9 +1657,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (ep && (d?.tool === 'eraser' || !d)) {
       const r = toolsRef.current.eraserSize;
       ctx.save();
-      ctx.strokeStyle = 'rgba(100,116,139,0.9)';
-      ctx.fillStyle = 'rgba(148,163,184,0.15)';
-      ctx.lineWidth = k;
+      ctx.strokeStyle = '#2563EB';
+      ctx.fillStyle = 'rgba(37, 99, 235, 0.12)';
+      ctx.lineWidth = 1.5 * k;
       ctx.beginPath();
       ctx.arc(ep.x, ep.y, r, 0, Math.PI * 2);
       ctx.fill();
@@ -2769,6 +2799,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const handles = editShape && !drag ? shapeHandles(editShape) : null;
   const handleDrag = useRef<{
     pointerId: number; orig: Stroke; handle: ShapeHandle; cache: SnapCache | null; sel: Selection; last: Stroke; snapped: boolean; snapDot: { x: number; y: number } | null;
+    guideLine?: [XY, XY] | null;
   } | null>(null);
   const [editHandles, setEditHandles] = useState<ShapeHandle[] | null>(null);
 
@@ -2786,7 +2817,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const grid = tools.shapeGridSnap ? paperGrid(sheetAt(h.y).paperStyle) : null;
     const cache = snapCacheFor(others, tools.shapeSnap, grid);
     if (!claimLive()) return;
-    handleDrag.current = { pointerId: e.pointerId, orig: editShape, handle: h, cache, sel: selection, last: editShape, snapped: false, snapDot: null };
+    handleDrag.current = { pointerId: e.pointerId, orig: editShape, handle: h, cache, sel: selection, last: editShape, snapped: false, snapDot: null, guideLine: null };
     gestures.dragging = true;
     setHiddenIds(new Set([editShape.id]));
     requestRender();
@@ -2798,11 +2829,36 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     e.stopPropagation();
     const p = pagePoint(e);
     const snap = d.cache ? findSnapKind(d.cache, p, zoom) : null;
-    const shapeSnap = snap?.kind === 'shape';
-    if (shapeSnap && !d.snapped) haptic('snap');
-    d.snapped = shapeSnap;
-    d.snapDot = shapeSnap ? snap!.at : null;
-    d.last = dragHandle(d.orig, d.handle, snap?.at ?? p);
+    const shapeSnap = snap?.kind === 'shape' || snap?.kind === 'grid';
+    let target = snap?.at ?? p;
+    let snapDot = shapeSnap ? snap!.at : null;
+    let guideLine: [XY, XY] | null = null;
+    if (!snap) {
+      let anc: XY | null = null;
+      if (d.handle.role === 'end' && d.handle.anchor) anc = d.handle.anchor;
+      else if ((d.orig.shapeKind === 'line' || d.orig.shapeKind === 'arrow') && d.orig.points.length >= 2) {
+        anc = d.handle.index === 0 ? d.orig.points[1] : d.orig.points[0];
+      }
+      if (anc) {
+        const dx = p.x - anc.x, dy = p.y - anc.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 8) {
+          const ang = Math.atan2(dy, dx);
+          const step = Math.PI / 4;
+          const snappedAng = Math.round(ang / step) * step;
+          if (Math.abs(ang - snappedAng) < (6 * Math.PI) / 180) {
+            target = { x: anc.x + len * Math.cos(snappedAng), y: anc.y + len * Math.sin(snappedAng) };
+            snapDot = target;
+            guideLine = [anc, target];
+          }
+        }
+      }
+    }
+    if ((shapeSnap || guideLine) && !d.snapped) haptic('snap');
+    d.snapped = !!(shapeSnap || guideLine);
+    d.snapDot = snapDot;
+    d.guideLine = guideLine;
+    d.last = dragHandle(d.orig, d.handle, target);
     requestRender();
     setEditHandles(shapeHandles(d.last));
     setLiveBounds(computeBounds({ ...pageRef.current, strokes: [d.last] }, d.sel));
@@ -2996,7 +3052,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       )}
 
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
-      {!printMode && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" style={{ left: 0, top: 0, width: PAGE_W, height: 0 }} />}
+      {!printMode && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" />}
       {visible && !printMode && (
         <div
           ref={inputRef}
@@ -3131,8 +3187,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             key={i}
             data-no-pan
             data-shape-handle={h.role}
-            className="absolute z-30 flex items-center justify-center"
-            style={{ left: h.x - 15, top: h.y - 15, width: 30, height: 30, transform: `scale(${1 / zoom})`, touchAction: 'none', cursor: 'grab' }}
+            className="absolute z-30 flex items-center justify-center select-none"
+            style={{ left: h.x - 18, top: h.y - 18, width: 36, height: 36, transform: `scale(${1 / zoom})`, transformOrigin: 'center', touchAction: 'none', cursor: 'grab' }}
             onPointerDown={(e) => startHandle(e, handles[i] ?? h)}
             onPointerMove={moveHandle}
             onPointerUp={(e) => endHandle(e)}

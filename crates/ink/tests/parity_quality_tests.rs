@@ -112,3 +112,97 @@ fn test_erase_strokes_partial_closed_handwriting_across_seam() {
     );
     assert_eq!(pieces_seam[0].closed, Some(false));
 }
+
+#[test]
+fn test_highlighter_cut_radius_matches_half_width() {
+    let stroke = Stroke {
+        id: "hl1".to_string(),
+        tool: "highlighter".to_string(),
+        color: "#fde047".to_string(),
+        width: 10.0,
+        opacity: 0.5,
+        points: vec![
+            Point { x: 0.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 200.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(false),
+        closed: Some(false),
+        shape_kind: None,
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: None,
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: Some(0.35),
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let mut id_counter = 0;
+    let make_id = move || {
+        id_counter += 1;
+        format!("hl_cut_{id_counter}")
+    };
+
+    // Highlighter half-width is 10.0 * 2.75 = 27.5.
+    // Tap at y = 50 + 25 = 75 with radius 1.0 (total dist = 25 <= 27.5 + 1.0)
+    let (pieces, changed) = erase_strokes_partial(&[stroke], 100.0, 75.0, 1.0, make_id, None);
+    assert!(changed, "Highlighter edge within half-width must be cut");
+    assert_eq!(pieces.len(), 2, "Highlighter should be split into 2 pieces");
+}
+
+#[test]
+fn test_arrow_partial_erase_preserves_wings() {
+    let stroke = Stroke {
+        id: "arrow1".to_string(),
+        tool: "pen".to_string(),
+        color: "#000".to_string(),
+        width: 2.0,
+        opacity: 1.0,
+        points: vec![
+            Point { x: 10.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 85.0, y: 40.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point { x: 85.0, y: 60.0, pressure: 0.5, t: None, alt: None, az: None },
+        ],
+        line_style: None,
+        pen_style: None,
+        is_shape: Some(true),
+        closed: Some(false),
+        shape_kind: Some(model::ShapeKind::Arrow),
+        fill: None,
+        fill_color: None,
+        fill_opacity: None,
+        arrow: Some(true),
+        modeled: None,
+        pen_end: None,
+        rotation: None,
+        created_at: Some(0.0),
+        highlight_alpha: None,
+        dash_offset: None,
+        fill_only: None,
+    };
+
+    let mut id_counter = 0;
+    let make_id = move || {
+        id_counter += 1;
+        format!("arr_{id_counter}")
+    };
+
+    // Erase on the shaft at x=40, y=50 with radius 5
+    let (pieces, changed) = erase_strokes_partial(&[stroke], 40.0, 50.0, 5.0, make_id, None);
+    assert!(changed);
+    assert_eq!(pieces.len(), 2);
+    // First piece is shaft before cut: became a Line
+    assert_eq!(pieces[0].shape_kind, Some(model::ShapeKind::Line));
+    // Second piece is shaft from cut to tip: remains Arrow with wings
+    assert_eq!(pieces[1].shape_kind, Some(model::ShapeKind::Arrow));
+    assert_eq!(pieces[1].points.len(), 5);
+    assert_eq!(pieces[1].points[1].x, 100.0);
+}

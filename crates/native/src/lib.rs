@@ -79,7 +79,7 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
@@ -88,6 +88,9 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "selectInLasso" => select_in_lasso(meta),
         "selectionBounds" => selection_bounds(meta),
         "transformPageItems" => transform_page_items(meta),
+        "shapeHandles" => shape_handles(meta),
+        "moveShapeHandle" => move_shape_handle(meta),
+        "snapStroke" => snap_stroke(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -263,8 +266,14 @@ fn select_in_rect(meta: &str) -> Result<(String, Vec<u8>), String> {
         max_x: r.rect[2],
         max_y: r.rect[3],
     };
-    let stroke_ids = shapes::selection::rect_select_strokes(bounds, &r.page);
-    Ok((json!({ "strokeIds": stroke_ids }).to_string(), Vec::new()))
+    let sel = shapes::selection::rect_select_page(bounds, &r.page);
+    Ok((json!({
+        "strokeIds": sel.stroke_ids,
+        "latexIds": sel.latex_ids,
+        "textIds": sel.text_ids,
+        "imageIds": sel.image_ids,
+        "bounds": sel.bounds
+    }).to_string(), Vec::new()))
 }
 
 fn select_in_lasso(meta: &str) -> Result<(String, Vec<u8>), String> {
@@ -275,8 +284,14 @@ fn select_in_lasso(meta: &str) -> Result<(String, Vec<u8>), String> {
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("selectInLasso request: {e}"))?;
     let pts: Vec<nib::geometry::XY> = r.lasso.into_iter().map(|p| nib::geometry::XY { x: p[0], y: p[1] }).collect();
-    let stroke_ids = shapes::selection::lasso_select_strokes(&pts, &r.page);
-    Ok((json!({ "strokeIds": stroke_ids }).to_string(), Vec::new()))
+    let sel = shapes::selection::lasso_select_page(&pts, &r.page);
+    Ok((json!({
+        "strokeIds": sel.stroke_ids,
+        "latexIds": sel.latex_ids,
+        "textIds": sel.text_ids,
+        "imageIds": sel.image_ids,
+        "bounds": sel.bounds
+    }).to_string(), Vec::new()))
 }
 
 fn selection_bounds(meta: &str) -> Result<(String, Vec<u8>), String> {
@@ -316,6 +331,46 @@ fn transform_page_items(meta: &str) -> Result<(String, Vec<u8>), String> {
         nib::geometry::XY { x: r.origin[0], y: r.origin[1] },
     );
     Ok((json!({ "page": r.page }).to_string(), Vec::new()))
+}
+
+fn shape_handles(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        stroke: model::Stroke,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("shapeHandles request: {e}"))?;
+    let handles = shapes::edit::shape_handles(&r.stroke);
+    Ok((json!({ "handles": handles }).to_string(), Vec::new()))
+}
+
+fn move_shape_handle(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        stroke: model::Stroke,
+        handle: shapes::edit::ShapeHandle,
+        target: [f64; 2],
+        page: Option<model::NotePage>,
+        options: Option<shapes::recognition::SnapOptions>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("moveShapeHandle request: {e}"))?;
+    let target_xy = nib::geometry::XY { x: r.target[0], y: r.target[1] };
+    let (st, guide) = shapes::edit::move_shape_handle(&r.stroke, &r.handle, target_xy, r.page.as_ref(), r.options.as_ref());
+    Ok((json!({ "stroke": st, "guide": guide }).to_string(), Vec::new()))
+}
+
+fn snap_stroke(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        stroke: model::Stroke,
+        page: Option<model::NotePage>,
+        options: Option<shapes::recognition::SnapOptions>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("snapStroke request: {e}"))?;
+    let opts = r.options.unwrap_or_default();
+    let (st, guides) = shapes::recognition::snap_stroke_with_context(&r.stroke, r.page.as_ref(), opts);
+    Ok((json!({ "stroke": st, "guides": guides }).to_string(), Vec::new()))
 }
 
 #[derive(Deserialize)]

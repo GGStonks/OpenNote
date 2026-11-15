@@ -153,21 +153,156 @@ fn stroke_touches_rect(s: &Stroke, rect: &RectBounds) -> bool {
     false
 }
 
-/// Select strokes intersecting or enclosed by a rectangular selection bounds.
-pub fn rect_select_strokes(rect: RectBounds, page: &NotePage) -> Vec<String> {
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageSelection {
+    pub page_id: String,
+    pub stroke_ids: Vec<String>,
+    pub latex_ids: Vec<String>,
+    pub text_ids: Vec<String>,
+    pub image_ids: Vec<String>,
+    pub bounds: Option<RectBounds>,
+}
+
+pub fn box_corners(x: f64, y: f64, w: f64, h: f64, deg: f64) -> [XY; 4] {
+    let cx = x + w * 0.5;
+    let cy = y + h * 0.5;
+    let rad = deg.to_radians();
+    let c = rad.cos();
+    let s = rad.sin();
+    let hw = w * 0.5;
+    let hh = h * 0.5;
+    let offsets = [
+        (-hw, -hh),
+        (hw, -hh),
+        (hw, hh),
+        (-hw, hh),
+    ];
+    let mut out = [XY { x: 0.0, y: 0.0 }; 4];
+    for (i, (u, v)) in offsets.iter().enumerate() {
+        out[i] = XY {
+            x: cx + u * c - v * s,
+            y: cy + u * s + v * c,
+        };
+    }
+    out
+}
+
+pub fn box_touches_rect(corners: &[XY; 4], rect: &RectBounds) -> bool {
+    for p in corners {
+        if p.x >= rect.min_x && p.x <= rect.max_x && p.y >= rect.min_y && p.y <= rect.max_y {
+            return true;
+        }
+    }
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        if segment_intersects_aabb(a, b, rect) {
+            return true;
+        }
+    }
+    let center_x = (rect.min_x + rect.max_x) * 0.5;
+    let center_y = (rect.min_y + rect.max_y) * 0.5;
+    if inside_polygon(center_x, center_y, corners) {
+        return true;
+    }
+    false
+}
+
+pub fn box_touches_lasso(corners: &[XY; 4], lasso: &[XY], lasso_rect: &RectBounds) -> bool {
+    for p in corners {
+        if p.x >= lasso_rect.min_x
+            && p.x <= lasso_rect.max_x
+            && p.y >= lasso_rect.min_y
+            && p.y <= lasso_rect.max_y
+            && inside_polygon(p.x, p.y, lasso)
+        {
+            return true;
+        }
+    }
+    for i in 0..4 {
+        let a = corners[i];
+        let b = corners[(i + 1) % 4];
+        if a.x.max(b.x) < lasso_rect.min_x
+            || a.x.min(b.x) > lasso_rect.max_x
+            || a.y.max(b.y) < lasso_rect.min_y
+            || a.y.min(b.y) > lasso_rect.max_y
+        {
+            continue;
+        }
+        for j in 0..lasso.len() {
+            if segments_meet(a, b, lasso[j], lasso[(j + 1) % lasso.len()]) {
+                return true;
+            }
+        }
+    }
+    if !lasso.is_empty() && inside_polygon(lasso[0].x, lasso[0].y, corners) {
+        return true;
+    }
+    false
+}
+
+/// Select strokes and blocks intersecting or enclosed by a rectangular selection bounds.
+pub fn rect_select_page(rect: RectBounds, page: &NotePage) -> PageSelection {
     let norm_rect = RectBounds {
         min_x: rect.min_x.min(rect.max_x),
         min_y: rect.min_y.min(rect.max_y),
         max_x: rect.min_x.max(rect.max_x),
         max_y: rect.min_y.max(rect.max_y),
     };
-    let mut selected = Vec::new();
+    let mut stroke_ids = Vec::new();
     for s in &page.strokes {
         if stroke_touches_rect(s, &norm_rect) {
-            selected.push(s.id.clone());
+            stroke_ids.push(s.id.clone());
         }
     }
-    selected
+    let mut latex_ids = Vec::new();
+    for b in &page.latex_blocks {
+        let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+        if box_touches_rect(&cs, &norm_rect) {
+            latex_ids.push(b.id.clone());
+        }
+    }
+    let mut text_ids = Vec::new();
+    if let Some(text_blocks) = &page.text_blocks {
+        for b in text_blocks {
+            let h = b.height.unwrap_or(b.font_size * 1.4);
+            let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+            if box_touches_rect(&cs, &norm_rect) {
+                text_ids.push(b.id.clone());
+            }
+        }
+    }
+    let mut image_ids = Vec::new();
+    if let Some(image_blocks) = &page.image_blocks {
+        for b in image_blocks {
+            let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+            if box_touches_rect(&cs, &norm_rect) {
+                image_ids.push(b.id.clone());
+            }
+        }
+    }
+
+    let mut all_ids = Vec::new();
+    all_ids.extend(stroke_ids.clone());
+    all_ids.extend(latex_ids.clone());
+    all_ids.extend(text_ids.clone());
+    all_ids.extend(image_ids.clone());
+    let bounds = selection_bounds(page, &all_ids);
+
+    PageSelection {
+        page_id: page.id.clone(),
+        stroke_ids,
+        latex_ids,
+        text_ids,
+        image_ids,
+        bounds,
+    }
+}
+
+/// Select strokes intersecting or enclosed by a rectangular selection bounds.
+pub fn rect_select_strokes(rect: RectBounds, page: &NotePage) -> Vec<String> {
+    rect_select_page(rect, page).stroke_ids
 }
 
 /// Tests whether stroke `s` touches or intersects the lasso polygon.
@@ -283,10 +418,13 @@ pub fn points_in_lasso(lasso: &[XY], item_points: &[Point]) -> bool {
     false
 }
 
-/// Select strokes intersecting or enclosed by a freeform lasso polygon.
-pub fn lasso_select_strokes(lasso: &[XY], page: &NotePage) -> Vec<String> {
+/// Select strokes and blocks intersecting or enclosed by a freeform lasso polygon.
+pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
     if lasso.len() < 3 {
-        return Vec::new();
+        return PageSelection {
+            page_id: page.id.clone(),
+            ..Default::default()
+        };
     }
     let mut min_x = f64::INFINITY;
     let mut min_y = f64::INFINITY;
@@ -300,13 +438,59 @@ pub fn lasso_select_strokes(lasso: &[XY], page: &NotePage) -> Vec<String> {
     }
     let lasso_rect = RectBounds { min_x, min_y, max_x, max_y };
 
-    let mut selected = Vec::new();
+    let mut stroke_ids = Vec::new();
     for s in &page.strokes {
         if stroke_touches_lasso(s, lasso, &lasso_rect) {
-            selected.push(s.id.clone());
+            stroke_ids.push(s.id.clone());
         }
     }
-    selected
+    let mut latex_ids = Vec::new();
+    for b in &page.latex_blocks {
+        let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+        if box_touches_lasso(&cs, lasso, &lasso_rect) {
+            latex_ids.push(b.id.clone());
+        }
+    }
+    let mut text_ids = Vec::new();
+    if let Some(text_blocks) = &page.text_blocks {
+        for b in text_blocks {
+            let h = b.height.unwrap_or(b.font_size * 1.4);
+            let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+            if box_touches_lasso(&cs, lasso, &lasso_rect) {
+                text_ids.push(b.id.clone());
+            }
+        }
+    }
+    let mut image_ids = Vec::new();
+    if let Some(image_blocks) = &page.image_blocks {
+        for b in image_blocks {
+            let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+            if box_touches_lasso(&cs, lasso, &lasso_rect) {
+                image_ids.push(b.id.clone());
+            }
+        }
+    }
+
+    let mut all_ids = Vec::new();
+    all_ids.extend(stroke_ids.clone());
+    all_ids.extend(latex_ids.clone());
+    all_ids.extend(text_ids.clone());
+    all_ids.extend(image_ids.clone());
+    let bounds = selection_bounds(page, &all_ids);
+
+    PageSelection {
+        page_id: page.id.clone(),
+        stroke_ids,
+        latex_ids,
+        text_ids,
+        image_ids,
+        bounds,
+    }
+}
+
+/// Select strokes intersecting or enclosed by a freeform lasso polygon.
+pub fn lasso_select_strokes(lasso: &[XY], page: &NotePage) -> Vec<String> {
+    lasso_select_page(lasso, page).stroke_ids
 }
 
 /// Tight bounding box of selected strokes and blocks on a page.
