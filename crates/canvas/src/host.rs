@@ -133,7 +133,13 @@ impl CanvasHost {
 
     /// The scene of page `id`: built from multiple stroke layers (e.g. from `shapes::z_layers` when blocks interleave).
     pub fn set_scene_layers(&mut self, id: &str, layers: &[&[Stroke]]) -> usize {
-        let scene = Scene::build(layers);
+        self.put_scene(id, Scene::build(layers))
+    }
+
+    /// The scene of page `id`, built by the caller. The shells build it outside their host lock
+    /// (`Scene::build` is CPU work only: ~100 ms for a long note on the iPad, which the display
+    /// link's draw waited for under the lock, freezing the screen after every stroke).
+    pub fn put_scene(&mut self, id: &str, scene: Scene) -> usize {
         let n = scene.caps.len();
         let gs = self.canvas.upload(&scene);
         self.scenes.insert(id.to_string(), (gs, n));

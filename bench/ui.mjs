@@ -1554,7 +1554,14 @@ if (ONLY.has('nativecanvas')) {
     window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true };
     window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
   });
+  // BENCH_THEME=dark|oled|…: the UI theme (the desk, toolbars) the canvas must show through.
+  if (process.env.BENCH_THEME) await page.evaluate((t) => { const s = JSON.parse(localStorage.getItem('opennote_settings_v2') || '{}'); s.theme = t; localStorage.setItem('opennote_settings_v2', JSON.stringify(s)); }, process.env.BENCH_THEME);
   await reopen();
+  // --zsteps N: zoomed in N steps (Ctrl+=) first (the owner writes zoomed in; 8 steps: about 500%).
+  for (let i = 0; i < Number(arg('zsteps', 0)); i++) {
+    await page.keyboard.press('Control+Equal');
+    await sleep(150);
+  }
   await sleep(3000);
   const stats = meta(await rust('canvasStats', framed({})));
   const log = await page.evaluate(() => (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'canvas-status' || c.kind === 'canvas-scene'));
@@ -1568,6 +1575,60 @@ if (ONLY.has('nativecanvas')) {
   console.log(`nativecanvas page log ${JSON.stringify(log)}; page ink layers in the DOM: ${strokes}`);
   console.log(`nativecanvas canvas picture ${W}x${H}: ${ink} ink pixels${stats.capsules > 0 && ink > 1000 ? '' : '  FAIL'}`);
   if (!(stats.capsules > 0 && ink > 1000)) process.exitCode = 1;
+
+  // What the user sees: the page (see-through where it lets the canvas show) over the canvas's
+  // picture. `cover`: the part of the note area the page paints opaquely (it hides the canvas).
+  const seen = async (name) => {
+    const s = await rust('canvasSnapshot', framed({}));
+    const pic = Buffer.from(s.subarray(4 + s.readUInt32LE(0))).toString('base64');
+    const shot = (await page.screenshot({ omitBackground: true })).toString('base64');
+    const cpage = await ctx.newPage();
+    const out = await cpage.evaluate(async ([pic, shot, w, h]) => {
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d');
+      const bin = atob(pic), arr = new Uint8ClampedArray(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      const img = new Image(); img.src = 'data:image/png;base64,' + shot; await img.decode();
+      const o = document.createElement('canvas'); o.width = w; o.height = h;
+      const ox = o.getContext('2d'); ox.drawImage(img, 0, 0, w, h);
+      const top = ox.getImageData(0, 0, w, h).data;
+      x.putImageData(new ImageData(arr, w, h), 0, 0);
+      x.drawImage(img, 0, 0, w, h);
+      const d = x.getImageData(0, 0, w, h).data;
+      // The note area: below the toolbar (top 70 css px), the whole width.
+      let cover = 0, n = 0;
+      for (let y = 140; y < h; y += 4) for (let xx = 0; xx < w; xx += 4) { n++; if (top[(y * w + xx) * 4 + 3] > 250) cover++; }
+      return { cover: cover / n, url: c.toDataURL(), px: Array.from(d) };
+    }, [pic, shot, W, H]);
+    await cpage.close();
+    if (arg('shots')) writeFileSync(join(arg('shots'), `nativecanvas-seen-${name}.png`), Buffer.from(out.url.split(',')[1], 'base64'));
+    return out;
+  };
+  const dark = (px, x0, y0, x1, y1) => {
+    let k = 0;
+    for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) { const i = (y * W + x) * 4; if (px[i] < 90 && px[i + 1] < 90 && px[i + 2] < 90) k++; }
+    return k;
+  };
+  const before = await seen('open');
+  const opened = dark(before.px, 0, 140, W, H);
+  console.log(`nativecanvas seen (page over canvas): page covers ${(100 * before.cover).toFixed(1)}% of the note area, ${opened} ink pixels${before.cover < 0.05 && opened > 1000 ? '' : '  FAIL'}`);
+  if (!(before.cover < 0.05 && opened > 1000)) process.exitCode = 1;
+  // A pen stroke written and lifted: the page hides its own copy, so it must show on the canvas.
+  const box = [300, 560, 520, 640]; // css px, a zigzag inside
+  const capsBefore = meta(await rust('canvasStats', framed({}))).capsules;
+  await mouse('mousePressed', box[0], box[1] + 40);
+  for (let i = 1; i <= 40; i++) {
+    await mouse('mouseMoved', box[0] + ((box[2] - box[0]) * i) / 40, box[1] + (i % 2 ? 0 : 80));
+    await sleep(8);
+  }
+  await mouse('mouseReleased', box[2], box[1] + 80);
+  await sleep(2500);
+  const capsAfter = meta(await rust('canvasStats', framed({}))).capsules;
+  const after = await seen('written');
+  const r = box.map((v) => v * dpr);
+  const gained = dark(after.px, r[0], r[1], r[2], r[3]) - dark(before.px, r[0], r[1], r[2], r[3]);
+  console.log(`nativecanvas written stroke: canvas capsules ${capsBefore} -> ${capsAfter}, ${gained} more ink pixels where it was written${capsAfter > capsBefore && gained > 300 ? '' : '  FAIL'}`);
+  if (!(capsAfter > capsBefore && gained > 300)) process.exitCode = 1;
   if (arg('shots')) {
     await page.setContent('<canvas id=c></canvas>');
     await page.evaluate(([b64, w, h]) => {

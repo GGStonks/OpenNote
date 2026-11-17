@@ -42,7 +42,7 @@ public class OpenNoteLaunchPlugin extends Plugin {
         activity.runOnUiThread(() -> {
             // The page is up by now (it sends this at start): plain colour, opaque WebView.
             activity.getWindow().setBackgroundDrawable(new ColorDrawable(color));
-            getBridge().getWebView().setBackgroundColor(color);
+            getBridge().getWebView().setBackgroundColor(webViewBackground(activity, color));
             if (Build.VERSION.SDK_INT >= 33) {
                 activity.getSplashScreen().setSplashScreenTheme(launchStyle(id));
             } else if (Build.VERSION.SDK_INT >= 31) {
@@ -53,6 +53,15 @@ public class OpenNoteLaunchPlugin extends Plugin {
             }
         });
         call.resolve();
+    }
+
+    /**
+     * The WebView's background for the theme's colour once the page is up: see-through with the
+     * native canvas on (the SurfaceView under it draws the desk, pages and ink; coloured, the
+     * WebView covered it and every stroke vanished at lift), else the colour.
+     */
+    static int webViewBackground(Context context, int color) {
+        return OpenNoteRustPlugin.nativeCanvasEnabled(context) ? Color.TRANSPARENT : color;
     }
 
     /** The colour and theme saved by the app, or null before it has sent one. */

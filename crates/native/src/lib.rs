@@ -316,14 +316,11 @@ fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
         layers: Option<Vec<Vec<Stroke>>>,
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasScene request: {e}"))?;
-    let count = with_active_host(|host| {
-        if let Some(layers) = &r.layers {
-            let refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
-            host.set_scene_layers(&r.page, &refs)
-        } else {
-            host.set_scene(&r.page, &r.strokes)
-        }
-    });
+    let scene = match &r.layers {
+        Some(layers) => canvas::Scene::build(&layers.iter().map(|l| l.as_slice()).collect::<Vec<_>>()),
+        None => canvas::Scene::build(&[&r.strokes]),
+    };
+    let count = with_active_host(|host| host.put_scene(&r.page, scene));
     Ok((json!({ "ok": true, "capsules": count.unwrap_or(0), "attached": count.is_some() }).to_string(), Vec::new()))
 }
 
@@ -362,7 +359,9 @@ fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String
             s
         })
         .collect();
-    let count = with_active_host(|host| host.set_scene(&r.page, &strokes));
+    // Built before taking the host lock: the shells' display link draws under it.
+    let scene = canvas::Scene::build(&[&strokes]);
+    let count = with_active_host(|host| host.put_scene(&r.page, scene));
     Ok((json!({ "ok": count.is_some(), "capsules": count.unwrap_or(0), "attached": count.is_some(), "strokes": strokes.len() }).to_string(), Vec::new()))
 }
 

@@ -117,7 +117,7 @@ static void ONInstallCrashCapture(NSString *version) {
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.24";
+static NSString *const kVersion = @"2.9.4-rs.25";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -1382,13 +1382,10 @@ static const double kInkHoldSeconds = 0.06;
         // The Rust canvas under the see-through web view, drawn from a display link at the
         // display's rate when the page changed what it shows.
         UIView *container = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-        container.backgroundColor = ONLaunchColor();
         container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         self.rustCanvasView = [[ONRustCanvasView alloc] initWithFrame:container.bounds];
         self.rustCanvasView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [container addSubview:self.rustCanvasView];
-        self.webView.backgroundColor = [UIColor clearColor];
-        self.webView.scrollView.backgroundColor = [UIColor clearColor];
         self.webView.frame = container.bounds;
         [container addSubview:self.webView];
         self.view = container;
@@ -1410,9 +1407,9 @@ static const double kInkHoldSeconds = 0.06;
         self.pinchRecognizer.delegate = self;
         [container addGestureRecognizer:self.pinchRecognizer];
     } else {
-        self.webView.backgroundColor = ONLaunchColor();
         self.view = self.webView;
     }
+    [self applyLaunchColor];
     self.inkView = [[ONInkView alloc] initWithFrame:self.webView.bounds];
     [self.webView addSubview:self.inkView];
     self.pinchOverlay = [[ONPinchOverlay alloc] initWithHost:self.webView];
@@ -1427,6 +1424,27 @@ static const double kInkHoldSeconds = 0.06;
     sc.waitsForConnectivity = NO;
     self.session = [NSURLSession sessionWithConfiguration:sc];
     self.httpTasks = [NSMutableDictionary dictionary];
+}
+
+/**
+ * The theme's colour (ONLaunchColor) behind the page. Without the native canvas it is the web
+ * view's own background. With it, the web view must stay see-through (the canvas under it draws
+ * the desk, the pages and the ink) and the colour goes behind the canvas, shown until its first
+ * frame. setLaunchTheme, sent by the page at every start, used to paint the web view itself: a
+ * solid sheet over the canvas, black in a dark theme, where every stroke vanished at lift (the
+ * page hides its own copy of what the canvas draws).
+ */
+- (void)applyLaunchColor {
+    UIColor *color = ONLaunchColor();
+    self.view.window.backgroundColor = color;
+    if (self.rustCanvasView) {
+        self.view.backgroundColor = color;
+        self.rustCanvasView.backgroundColor = color;
+        self.webView.backgroundColor = [UIColor clearColor];
+        self.webView.scrollView.backgroundColor = [UIColor clearColor];
+    } else {
+        self.webView.backgroundColor = color;
+    }
 }
 
 - (void)viewDidLoad {
@@ -1660,9 +1678,7 @@ static const double kInkHoldSeconds = 0.06;
         NSString *hex = [msg[@"background"] description];
         if (hex.length == 7 && [hex hasPrefix:@"#"]) {
             [[NSUserDefaults standardUserDefaults] setObject:hex forKey:kLaunchColorKey];
-            UIColor *color = ONLaunchColor();
-            self.webView.backgroundColor = color;
-            self.view.window.backgroundColor = color;
+            [self applyLaunchColor];
         }
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"pageUnlockFailed"]) {

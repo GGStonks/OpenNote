@@ -114,9 +114,18 @@ public class OpenNoteRustPlugin extends Plugin {
 
     static final String PREFS = "opennote_native_canvas";
 
-    /** The native canvas was chosen in Settings > Diagnostics (applies from the next start). */
-    static boolean nativeCanvasEnabled(android.content.Context ctx) {
-        return LOADED && ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean("on", false);
+    private static Boolean nativeCanvasThisRun;
+
+    /**
+     * The native canvas was chosen in Settings > Diagnostics. Read once per run: it applies from the
+     * next start, and everything that depends on it (the SurfaceView, the see-through WebView, the
+     * page's flag, the gestures) must agree for the whole run.
+     */
+    static synchronized boolean nativeCanvasEnabled(android.content.Context ctx) {
+        if (nativeCanvasThisRun == null) {
+            nativeCanvasThisRun = LOADED && ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean("on", false);
+        }
+        return nativeCanvasThisRun;
     }
 
     /** The host is made with the surface's size once it is known (surfaceChanged follows surfaceCreated). */

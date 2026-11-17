@@ -151,7 +151,7 @@ public class MainActivity extends BridgeActivity {
         // web view; without it the web view is the page as before (rs.18 made it see-through
         // always, over a SurfaceView nothing drew into).
         boolean nativeCanvas = OpenNoteRustPlugin.nativeCanvasEnabled(this);
-        if (web != null) web.setBackgroundColor(pagePainted && !nativeCanvas ? color : Color.TRANSPARENT);
+        if (web != null) web.setBackgroundColor(pagePainted ? OpenNoteLaunchPlugin.webViewBackground(this, color) : Color.TRANSPARENT);
         if (nativeCanvas && rustCanvasSurface == null && findViewById(android.R.id.content) != null) {
             SurfaceView surfaceView = new SurfaceView(this);
             surfaceView.setZOrderOnTop(false);

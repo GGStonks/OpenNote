@@ -145,3 +145,11 @@ page's own frame messages through the bridge.
 - Heavy steps (Chromium benches, Gradle, Rust builds) run one at a time with at least 4 GB free
   (`free -m`), from the working copy on disk (`/home/ds/AI/OpenNote-worktrees/rs`), never from
   `/tmp` (tmpfs: the first attempt filled the RAM).
+- With the native canvas on, the web view stays see-through for the whole run, whatever the theme:
+  the theme's colour goes behind the canvas (iOS `applyLaunchColor`, Android
+  `OpenNoteLaunchPlugin.webViewBackground`). Until 2.9.4-rs.25 the theme sent at every start
+  painted the web view over the canvas: a black screen in a dark theme, every stroke gone at lift.
+  `--only nativecanvas [--zsteps N]` (`BENCH_THEME=dark`) checks what the user sees (the page over
+  the canvas, and a stroke written and lifted); the shells' views are not part of it.
+- The canvas's scene is built outside the host lock (`CanvasHost::put_scene`): the shells' display
+  link draws under it.

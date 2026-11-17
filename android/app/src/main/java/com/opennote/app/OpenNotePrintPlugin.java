@@ -79,7 +79,7 @@ public class OpenNotePrintPlugin extends Plugin {
             Runnable restore = () -> {
                 if (!transparent) return;
                 SharedPreferences saved = OpenNoteLaunchPlugin.saved(getContext());
-                webView.setBackgroundColor(saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : Color.WHITE);
+                webView.setBackgroundColor(OpenNoteLaunchPlugin.webViewBackground(getContext(), saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : Color.WHITE));
             };
             if (transparent) webView.setBackgroundColor(Color.TRANSPARENT);
             try {
