@@ -86,6 +86,7 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "renderThumbnail" => render_thumbnail(meta),
         "canvasRender" => canvas_render(meta),
         "canvasScene" => canvas_scene(meta),
+        "canvasSceneBin" => canvas_scene_bin(meta, data),
         "canvasFrame" => canvas_frame(meta),
         "canvasPanZoom" => canvas_pan_zoom(meta),
         "canvasStats" => canvas_stats(),
@@ -324,6 +325,45 @@ fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
         }
     });
     Ok((json!({ "ok": true, "capsules": count.unwrap_or(0), "attached": count.is_some() }).to_string(), Vec::new()))
+}
+
+/// `canvasSceneBin`: the scene as the page sends it from a note (rustCore.ts rustSetCanvasScene):
+/// meta `{ page, strokes: [stroke without points + n] }`, data the points, f64 x, y, pressure, t
+/// (t NaN: none), n per stroke in order.
+fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Head {
+        n: usize,
+        #[serde(flatten)]
+        stroke: Stroke,
+    }
+    #[derive(Deserialize)]
+    struct Req {
+        page: String,
+        strokes: Vec<Head>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasSceneBin request: {e}"))?;
+    let vals = f64s(data)?;
+    let total: usize = r.strokes.iter().map(|h| h.n).sum();
+    if total * 4 != vals.len() {
+        return Err(format!("{} points announced, {} values sent", total, vals.len()));
+    }
+    let mut at = 0;
+    let strokes: Vec<Stroke> = r
+        .strokes
+        .into_iter()
+        .map(|h| {
+            let mut s = h.stroke;
+            s.points = vals[at * 4..(at + h.n) * 4]
+                .chunks_exact(4)
+                .map(|c| model::Point { x: c[0], y: c[1], pressure: c[2], t: if c[3].is_nan() { None } else { Some(c[3]) }, ..Default::default() })
+                .collect();
+            at += h.n;
+            s
+        })
+        .collect();
+    let count = with_active_host(|host| host.set_scene(&r.page, &strokes));
+    Ok((json!({ "ok": count.is_some(), "capsules": count.unwrap_or(0), "attached": count.is_some(), "strokes": strokes.len() }).to_string(), Vec::new()))
 }
 
 fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {

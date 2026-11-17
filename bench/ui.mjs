@@ -1516,6 +1516,71 @@ for (const mode of ['glcompare', 'svgcompare'].filter((m) => ONLY.has(m))) {
 // note must have Rust compute every stroke's drawn line before the GPU ink is prepared
 // (`rust-geometry` in the crash log, then `gl-ready`), and Settings > Diagnostics' Rust check must
 // find Rust's lines equal to TypeScript's (to 1e-4 px).
+// Not in the default run (run it alone: it installs a stand-in iOS shell with a native canvas):
+// --only nativecanvas [--shots <dir>]. The shell's canvas is opennote_native_cli --serve, a running
+// offscreen host as the apps keep one; the page's rust bridge reaches it. With the native canvas
+// on, opening the note must give the canvas the note's ink (canvasStats: capsules), and the
+// canvas's picture must show ink where the page would draw it (the page's own drawing hides).
+if (ONLY.has('nativecanvas')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  const vp = page.viewportSize(), dpr = Number(arg('dpr', 2));
+  const W = vp.width * dpr, H = vp.height * dpr;
+  const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W), String(H)], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let buf = Buffer.alloc(0);
+  const waiting = [];
+  shell.stdout.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+      const n = buf.readUInt32LE(0);
+      waiting.shift()(buf.subarray(4, 4 + n));
+      buf = buf.subarray(4 + n);
+    }
+  });
+  const rust = (method, req) => new Promise((res) => {
+    waiting.push(res);
+    const m = Buffer.from(method), a = Buffer.alloc(4), b = Buffer.alloc(4);
+    a.writeUInt32LE(m.length);
+    b.writeUInt32LE(req.length);
+    shell.stdin.write(Buffer.concat([a, m, b, req]));
+  });
+  const meta = (reply) => JSON.parse(reply.subarray(4, 4 + reply.readUInt32LE(0)).toString());
+  const framed = (obj) => { const m = Buffer.from(JSON.stringify(obj)), h = Buffer.alloc(4); h.writeUInt32LE(m.length); return Buffer.concat([h, m]); };
+  await page.route('**/__rust/*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/octet-stream',
+    body: await rust(route.request().url().split('/__rust/')[1], route.request().postDataBuffer() ?? Buffer.alloc(0)),
+  }));
+  await page.addInitScript(() => {
+    window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true };
+    window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
+  });
+  await reopen();
+  await sleep(3000);
+  const stats = meta(await rust('canvasStats', framed({})));
+  const log = await page.evaluate(() => (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'canvas-status' || c.kind === 'canvas-scene'));
+  const strokes = await page.evaluate(() => document.querySelectorAll('[data-ink-key]').length);
+  const snap = await rust('canvasSnapshot', framed({}));
+  const px = snap.subarray(4 + snap.readUInt32LE(0));
+  // Ink: dark pixels (the bench note is black handwriting on white paper over a grey desk).
+  let ink = 0;
+  for (let i = 0; i < px.length; i += 4) if (px[i] < 90 && px[i + 1] < 90 && px[i + 2] < 90) ink++;
+  console.log(`nativecanvas stats ${JSON.stringify(stats)}`);
+  console.log(`nativecanvas page log ${JSON.stringify(log)}; page ink layers in the DOM: ${strokes}`);
+  console.log(`nativecanvas canvas picture ${W}x${H}: ${ink} ink pixels${stats.capsules > 0 && ink > 1000 ? '' : '  FAIL'}`);
+  if (!(stats.capsules > 0 && ink > 1000)) process.exitCode = 1;
+  if (arg('shots')) {
+    await page.setContent('<canvas id=c></canvas>');
+    await page.evaluate(([b64, w, h]) => {
+      const c = document.getElementById('c'); c.width = w; c.height = h;
+      const bin = atob(b64), arr = new Uint8ClampedArray(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      c.getContext('2d').putImageData(new ImageData(arr, w, h), 0, 0);
+    }, [Buffer.from(px).toString('base64'), W, H]);
+    await page.locator('#c').screenshot({ path: join(arg('shots'), 'nativecanvas.png') });
+  }
+  shell.stdin.end();
+}
+
 if (ONLY.has('rustcore')) {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });

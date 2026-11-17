@@ -375,13 +375,36 @@ export interface CanvasFrameReq {
   pages: CanvasPlacement[];
 }
 
-/** Updates a page's stroke scene in the native Rust CanvasHost. */
+/**
+ * Updates a page's stroke scene in the native Rust CanvasHost. The strokes' style goes as JSON
+ * (each stroke without its points, with their count `n`), the points as raw f64 x, y, pressure, t,
+ * read from the stored packed arrays as `rustGeometry` does: as JSON of every point a large note
+ * was tens of MB to build, send and parse on the device. Logged as `canvas-scene` (crash report).
+ */
 export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
   // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
+  const t0 = performance.now();
+  let total = 0;
   try {
-    const { meta } = await rustCall('canvasScene', { page: pageId, strokes });
+    const parts = strokes.map(pointsOf);
+    total = parts.reduce((n, p) => n + p.n, 0);
+    const vals = new Float64Array(total * 4);
+    let at = 0;
+    parts.forEach((p) => {
+      p.put(vals, at);
+      at += p.n;
+    });
+    const heads = strokes.map((st, i) => {
+      const head: Record<string, unknown> = { n: parts[i].n };
+      // Every field but the points (a packed stroke's `points` is a getter: not touched here).
+      for (const k of Object.keys(st)) if (k !== 'points') head[k] = (st as unknown as Record<string, unknown>)[k];
+      return head;
+    });
+    const { meta } = await rustCall('canvasSceneBin', { page: pageId, strokes: heads }, new Uint8Array(vals.buffer));
+    crashLog.event('canvas-scene', { strokes: strokes.length, points: total, capsules: meta.capsules ?? null, attached: meta.attached ?? null, error: meta.error ?? null, ms: Math.round(performance.now() - t0) });
     return Boolean(meta.ok);
-  } catch {
+  } catch (err) {
+    crashLog.event('canvas-scene', { strokes: strokes.length, points: total, error: err instanceof Error ? err.message : String(err), ms: Math.round(performance.now() - t0) });
     return false;
   }
 }
