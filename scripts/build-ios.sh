@@ -34,7 +34,7 @@ RUST_LIB="$ROOT/target/aarch64-apple-ios/release/libopennote_native.a"
 echo "--> Linking Mach-O executable"
 ld64.lld -arch arm64 -platform_version ios "$MIN_IOS" "$SDK_VERSION" -syslibroot "$IOS_SDK" \
   -dead_strip -lSystem -lobjc -liconv \
-  -framework Foundation -framework UIKit -framework WebKit -framework QuartzCore \
+  -framework Foundation -framework UIKit -framework WebKit -framework QuartzCore -framework Metal -framework MetalKit \
   "$WORK/OpenNoteShell.o" "$RUST_LIB" -o "$APP/OpenNote"
 
 echo "--> Assembling bundle"

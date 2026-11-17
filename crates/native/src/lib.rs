@@ -80,11 +80,15 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasPanZoom", "canvasStats", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
         "canvasRender" => canvas_render(meta),
+        "canvasScene" => canvas_scene(meta),
+        "canvasFrame" => canvas_frame(meta),
+        "canvasPanZoom" => canvas_pan_zoom(meta),
+        "canvasStats" => canvas_stats(),
         "selectInRect" => select_in_rect(meta),
         "selectInLasso" => select_in_lasso(meta),
         "selectionBounds" => selection_bounds(meta),
@@ -92,6 +96,9 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "shapeHandles" => shape_handles(meta),
         "moveShapeHandle" => move_shape_handle(meta),
         "snapStroke" => snap_stroke(meta),
+        "uiThemeTokens" => ui_theme_tokens(meta),
+        "uiLayoutCompute" => ui_layout_compute(meta),
+        "uiFormatPill" => ui_format_pill(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -254,6 +261,94 @@ fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
     Ok((reply_meta.to_string(), px))
 }
 
+pub static ACTIVE_CANVAS_HOST: std::sync::atomic::AtomicPtr<canvas::host::CanvasHost> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        page: String,
+        #[serde(default)]
+        strokes: Vec<Stroke>,
+        #[serde(default)]
+        layers: Option<Vec<Vec<Stroke>>>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasScene request: {e}"))?;
+    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
+    let count = if let Some(host) = unsafe { ptr.as_mut() } {
+        if let Some(layers) = r.layers {
+            let refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
+            host.set_scene_layers(&r.page, &refs)
+        } else {
+            host.set_scene(&r.page, &r.strokes)
+        }
+    } else {
+        0
+    };
+    Ok((json!({ "ok": true, "capsules": count, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+}
+
+fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
+    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
+    let ok = if let Some(host) = unsafe { ptr.as_mut() } {
+        if let Ok(c_str) = std::ffi::CString::new(meta) {
+            unsafe { opennote_canvas_host_set_frame(host, c_str.as_ptr()) }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    Ok((json!({ "ok": ok, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+}
+
+fn canvas_pan_zoom(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        #[serde(default)]
+        pan_dx: f64,
+        #[serde(default)]
+        pan_dy: f64,
+        #[serde(default = "default_factor")]
+        scale_factor: f64,
+        #[serde(default)]
+        cx: f64,
+        #[serde(default)]
+        cy: f64,
+    }
+    fn default_factor() -> f64 { 1.0 }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasPanZoom request: {e}"))?;
+    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(host) = unsafe { ptr.as_mut() } {
+        if r.pan_dx != 0.0 || r.pan_dy != 0.0 {
+            host.pan(r.pan_dx, r.pan_dy);
+        }
+        if (r.scale_factor - 1.0).abs() > 1e-6 {
+            host.zoom_at(r.scale_factor, r.cx, r.cy);
+        }
+    }
+    Ok((json!({ "ok": true, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+}
+
+fn canvas_stats() -> Result<(String, Vec<u8>), String> {
+    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(host) = unsafe { ptr.as_mut() } {
+        let s = host.stats();
+        Ok((json!({
+            "attached": true,
+            "frames": s.frames,
+            "lastDrawMs": s.last_draw_ms,
+            "worstDrawMs": s.worst_draw_ms,
+            "width": s.width,
+            "height": s.height,
+            "scenes": s.scenes,
+            "capsules": s.capsules,
+        }).to_string(), Vec::new()))
+    } else {
+        Ok((json!({ "attached": false }).to_string(), Vec::new()))
+    }
+}
+
 fn select_in_rect(meta: &str) -> Result<(String, Vec<u8>), String> {
     #[derive(Deserialize)]
     struct Req {
@@ -372,6 +467,84 @@ fn snap_stroke(meta: &str) -> Result<(String, Vec<u8>), String> {
     let opts = r.options.unwrap_or_default();
     let (st, guides) = shapes::recognition::snap_stroke_with_context(&r.stroke, r.page.as_ref(), opts);
     Ok((json!({ "stroke": st, "guides": guides }).to_string(), Vec::new()))
+}
+
+fn ui_theme_tokens(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        platform: Option<String>,
+        #[serde(default)]
+        dark: bool,
+    }
+    let r: Req = if meta.trim().is_empty() {
+        Req { platform: None, dark: false }
+    } else {
+        serde_json::from_str(meta).map_err(|e| format!("uiThemeTokens request: {e}"))?
+    };
+    let tokens = match r.platform.as_deref() {
+        Some("apple") | Some("ios") | Some("macos") => {
+            if r.dark { ui::ThemeTokens::apple_dark() } else { ui::ThemeTokens::apple_light() }
+        }
+        Some("android") => {
+            if r.dark { ui::ThemeTokens::android_expressive_dark() } else { ui::ThemeTokens::android_expressive_light() }
+        }
+        _ => ui::ThemeProvider::default_for_target(r.dark),
+    };
+    Ok((serde_json::to_string(&tokens).map_err(|e| e.to_string())?, Vec::new()))
+}
+
+fn ui_layout_compute(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        width: f32,
+        height: f32,
+        #[serde(default)]
+        sidebar_collapsed: bool,
+        platform: Option<String>,
+        #[serde(default)]
+        dark: bool,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("uiLayoutCompute request: {e}"))?;
+    let tokens = match r.platform.as_deref() {
+        Some("apple") | Some("ios") | Some("macos") => {
+            if r.dark { ui::ThemeTokens::apple_dark() } else { ui::ThemeTokens::apple_light() }
+        }
+        Some("android") => {
+            if r.dark { ui::ThemeTokens::android_expressive_dark() } else { ui::ThemeTokens::android_expressive_light() }
+        }
+        _ => ui::ThemeProvider::default_for_target(r.dark),
+    };
+    let mut shell = ui::LayoutShell::new(r.width, r.height);
+    shell.sidebar.set_collapsed(r.sidebar_collapsed);
+    let geom = shell.compute_geometry(&tokens);
+    Ok((serde_json::to_string(&geom).map_err(|e| e.to_string())?, Vec::new()))
+}
+
+fn ui_format_pill(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        selection: Option<ui::TextSelection>,
+        viewport_width: f32,
+        viewport_height: f32,
+        platform: Option<String>,
+        #[serde(default)]
+        dark: bool,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("uiFormatPill request: {e}"))?;
+    let tokens = match r.platform.as_deref() {
+        Some("apple") | Some("ios") | Some("macos") => {
+            if r.dark { ui::ThemeTokens::apple_dark() } else { ui::ThemeTokens::apple_light() }
+        }
+        Some("android") => {
+            if r.dark { ui::ThemeTokens::android_expressive_dark() } else { ui::ThemeTokens::android_expressive_light() }
+        }
+        _ => ui::ThemeProvider::default_for_target(r.dark),
+    };
+    let mut pill = ui::FloatingSelectionPill::default();
+    pill.update_selection(r.selection.as_ref(), r.viewport_width, r.viewport_height, &tokens);
+    Ok((serde_json::to_string(&pill).map_err(|e| e.to_string())?, Vec::new()))
 }
 
 #[derive(Deserialize)]
@@ -682,8 +855,36 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
     }
     let target = canvas::wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
     match canvas::host::CanvasHost::attach(target, w, h) {
-        Ok((host, _name)) => Box::into_raw(Box::new(host)),
+        Ok((host, _name)) => {
+            let ptr = Box::into_raw(Box::new(host));
+            ACTIVE_CANVAS_HOST.store(ptr, std::sync::atomic::Ordering::SeqCst);
+            ptr
+        }
         Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Pans all page placements in the CanvasHost by (dx, dy).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_pan(h: *mut canvas::host::CanvasHost, dx: f64, dy: f64) {
+    if let Some(host) = h.as_mut() {
+        host.pan(dx, dy);
+    }
+}
+
+/// Zooms all page placements in the CanvasHost around anchor (cx, cy).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_zoom_at(h: *mut canvas::host::CanvasHost, factor: f64, cx: f64, cy: f64) {
+    if let Some(host) = h.as_mut() {
+        host.zoom_at(factor, cx, cy);
+    }
+}
+
+/// Clears all scenes in the CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_clear_scenes(h: *mut canvas::host::CanvasHost) {
+    if let Some(host) = h.as_mut() {
+        host.clear_scenes();
     }
 }
 
@@ -710,6 +911,12 @@ pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasH
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasHost) {
     if !h.is_null() {
+        ACTIVE_CANVAS_HOST.compare_exchange(
+            h,
+            std::ptr::null_mut(),
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::Relaxed,
+        ).ok();
         drop(Box::from_raw(h));
     }
 }
@@ -775,5 +982,64 @@ mod android {
         let request = env.convert_byte_array(&input).unwrap_or_default();
         let reply = super::call_framed(&method, &request);
         env.byte_array_from_slice(&reply).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasSurfaceCreated<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        _surface: jni::objects::JObject<'l>,
+        w: jni::sys::jint,
+        h: jni::sys::jint,
+    ) -> jlong {
+        let host = unsafe { super::opennote_canvas_host_offscreen(w.max(1) as u32, h.max(1) as u32) };
+        if !host.is_null() {
+            super::ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
+        }
+        host as jlong
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasSurfaceChanged<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+        w: jni::sys::jint,
+        h: jni::sys::jint,
+    ) {
+        if host != 0 {
+            unsafe { super::opennote_canvas_host_resize(host as *mut canvas::host::CanvasHost, w.max(1) as u32, h.max(1) as u32) };
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasSurfaceDestroyed<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+    ) {
+        if host != 0 {
+            super::ACTIVE_CANVAS_HOST.compare_exchange(
+                host as *mut canvas::host::CanvasHost,
+                std::ptr::null_mut(),
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::Relaxed,
+            ).ok();
+            unsafe { super::opennote_canvas_host_free(host as *mut canvas::host::CanvasHost) };
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasDraw<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+    ) -> jboolean {
+        if host != 0 {
+            let drawn = unsafe { super::opennote_canvas_host_draw(host as *mut canvas::host::CanvasHost) };
+            if drawn { JNI_TRUE } else { JNI_FALSE }
+        } else {
+            JNI_FALSE
+        }
     }
 }

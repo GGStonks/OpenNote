@@ -5,6 +5,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.util.Base64;
+import android.view.Choreographer;
+import android.view.Surface;
 import android.webkit.WebView;
 
 import androidx.webkit.JavaScriptReplyProxy;
@@ -69,6 +71,60 @@ public class OpenNoteRustPlugin extends Plugin {
     static native double[] liveUpdate(long h);
     static native void liveFree(long h);
 
+    // Native GPU Canvas (crates/canvas & crates/native)
+    static native long canvasSurfaceCreated(Surface surface, int width, int height);
+    static native void canvasSurfaceChanged(long host, int width, int height);
+    static native void canvasSurfaceDestroyed(long host);
+    static native boolean canvasDraw(long host);
+
+    private static long canvasHost = 0;
+    private static boolean frameCallbackActive = false;
+
+    private static final Choreographer.FrameCallback frameCallback = new Choreographer.FrameCallback() {
+        @Override
+        public void doFrame(long frameTimeNanos) {
+            if (canvasHost != 0) {
+                canvasDraw(canvasHost);
+                if (frameCallbackActive) {
+                    Choreographer.getInstance().postFrameCallback(this);
+                }
+            }
+        }
+    };
+
+    static void onSurfaceCreated(Surface surface) {
+        if (!LOADED) return;
+        canvasHost = canvasSurfaceCreated(surface, 1080, 1920);
+        startFrameCallback();
+    }
+
+    static void onSurfaceChanged(Surface surface, int width, int height) {
+        if (!LOADED || canvasHost == 0) return;
+        canvasSurfaceChanged(canvasHost, width, height);
+    }
+
+    static void onSurfaceDestroyed() {
+        if (!LOADED || canvasHost == 0) return;
+        stopFrameCallback();
+        canvasSurfaceDestroyed(canvasHost);
+        canvasHost = 0;
+    }
+
+    static void startFrameCallback() {
+        if (frameCallbackActive) return;
+        frameCallbackActive = true;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            Choreographer.getInstance().postFrameCallback(frameCallback);
+        });
+    }
+
+    static void stopFrameCallback() {
+        frameCallbackActive = false;
+        new Handler(Looper.getMainLooper()).post(() -> {
+            Choreographer.getInstance().removeFrameCallback(frameCallback);
+        });
+    }
+
     private final ExecutorService worker = Executors.newSingleThreadExecutor((r) -> new Thread(() -> {
         Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND);
         r.run();
@@ -113,6 +169,7 @@ public class OpenNoteRustPlugin extends Plugin {
         JSObject ret = new JSObject();
         ret.put("available", LOADED);
         ret.put("port", port);
+        ret.put("nativeCanvas", LOADED);
         if (LOAD_ERROR != null) ret.put("error", LOAD_ERROR);
         call.resolve(ret);
     }

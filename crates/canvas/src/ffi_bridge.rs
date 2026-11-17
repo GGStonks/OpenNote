@@ -62,7 +62,13 @@ pub struct CanvasEngine {
     pub spatial_index: SpatialIndex,
     pub pipeline: FramePipeline,
     pub strokes: Vec<Stroke>,
+    pub undo_stack: Vec<Vec<Stroke>>,
+    pub redo_stack: Vec<Vec<Stroke>>,
     pub active_tool: ActiveToolKind,
+    pub tool_color: String,
+    pub tool_width: f64,
+    pub tool_opacity: f64,
+    pub viewport_insets: [f64; 4],
     pub eraser_tool: EraserTool,
     pub lasso_tool: LassoTool,
     pub shape_tool: ShapeTool,
@@ -78,13 +84,82 @@ impl CanvasEngine {
             spatial_index: SpatialIndex::new(),
             pipeline: FramePipeline::new(),
             strokes: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             active_tool: ActiveToolKind::Pen,
+            tool_color: "#000000".to_string(),
+            tool_width: 2.0,
+            tool_opacity: 1.0,
+            viewport_insets: [0.0; 4],
             eraser_tool: EraserTool::default(),
             lasso_tool: LassoTool::default(),
             shape_tool: ShapeTool::default(),
             overlay_pass: VectorOverlayPass::default(),
             last_action_json: None,
         }
+    }
+
+    pub fn push_undo_state(&mut self) {
+        self.undo_stack.push(self.strokes.clone());
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(prev) = self.undo_stack.pop() {
+            let cur = std::mem::replace(&mut self.strokes, prev);
+            self.redo_stack.push(cur);
+            self.rebuild_spatial_index();
+            self.pipeline.mark_dirty(None);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(next) = self.redo_stack.pop() {
+            let cur = std::mem::replace(&mut self.strokes, next);
+            self.undo_stack.push(cur);
+            self.rebuild_spatial_index();
+            self.pipeline.mark_dirty(None);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_tool_config(&mut self, tool: ActiveToolKind, color: &str, width: f64, opacity: f64) {
+        self.active_tool = tool;
+        self.tool_color = color.to_string();
+        self.tool_width = width;
+        self.tool_opacity = opacity;
+        self.pipeline.mark_dirty(None);
+    }
+
+    pub fn set_viewport_insets(&mut self, top: f64, bottom: f64, left: f64, right: f64) {
+        self.viewport_insets = [top, bottom, left, right];
+        self.pipeline.mark_dirty(None);
+    }
+
+    pub fn load_document_strokes(&mut self, strokes: Vec<Stroke>) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.strokes = strokes;
+        self.rebuild_spatial_index();
+        self.pipeline.mark_dirty(None);
+    }
+
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        self.view_matrix.pan(dx, dy);
+        self.pipeline.mark_dirty(None);
+    }
+
+    pub fn zoom_at(&mut self, factor: f64, cx: f64, cy: f64) {
+        self.view_matrix.zoom_at(factor, cx, cy);
+        self.pipeline.mark_dirty(None);
     }
 
     /// Rebuilds spatial index from all active strokes.
@@ -354,4 +429,96 @@ pub unsafe extern "C" fn opennote_canvas_engine_dismiss_selection(engine: *mut C
     e.overlay_pass.selection_bbox = None;
     e.overlay_pass.handles.clear();
     e.pipeline.mark_dirty(None);
+}
+
+/// Undoes the last stroke mutation in CanvasEngine.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_undo(engine: *mut CanvasEngine) -> bool {
+    let Some(e) = engine.as_mut() else { return false };
+    e.undo()
+}
+
+/// Redoes the previously undone stroke mutation in CanvasEngine.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_redo(engine: *mut CanvasEngine) -> bool {
+    let Some(e) = engine.as_mut() else { return false };
+    e.redo()
+}
+
+/// Sets active tool, color hex, stroke width, and opacity.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_set_tool_config(
+    engine: *mut CanvasEngine,
+    tool_kind: u32,
+    color: *const c_char,
+    width: f64,
+    opacity: f64,
+) {
+    let Some(e) = engine.as_mut() else { return };
+    let c_str = if color.is_null() { "#000000" } else { std::ffi::CStr::from_ptr(color).to_str().unwrap_or("#000000") };
+    let kind = match tool_kind {
+        1 => ActiveToolKind::Eraser,
+        2 => ActiveToolKind::Lasso,
+        3 => ActiveToolKind::Shapes,
+        4 => ActiveToolKind::PanZoom,
+        _ => ActiveToolKind::Pen,
+    };
+    e.set_tool_config(kind, c_str, width, opacity);
+}
+
+/// Sets viewport safe area insets (top, bottom, left, right).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_set_viewport_insets(
+    engine: *mut CanvasEngine,
+    top: f64,
+    bottom: f64,
+    left: f64,
+    right: f64,
+) {
+    let Some(e) = engine.as_mut() else { return };
+    e.set_viewport_insets(top, bottom, left, right);
+}
+
+/// Loads document strokes directly into CanvasEngine.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_load_strokes(
+    engine: *mut CanvasEngine,
+    strokes_json: *const c_char,
+) -> usize {
+    let Some(e) = engine.as_mut() else { return 0 };
+    if strokes_json.is_null() { return 0; }
+    let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
+    let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
+    let count = strokes.len();
+    e.load_document_strokes(strokes);
+    count
+}
+
+/// Serializes all active document strokes from CanvasEngine to JSON string.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_get_strokes_json(
+    engine: *mut CanvasEngine,
+) -> *const c_char {
+    let Some(e) = engine.as_mut() else { return std::ptr::null() };
+    if let Ok(json_str) = serde_json::to_string(&e.strokes) {
+        if let Ok(c_str) = CString::new(json_str) {
+            e.last_action_json = Some(c_str);
+            return e.last_action_json.as_ref().unwrap().as_ptr();
+        }
+    }
+    std::ptr::null()
+}
+
+/// Pans CanvasEngine camera.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_pan(engine: *mut CanvasEngine, dx: f64, dy: f64) {
+    let Some(e) = engine.as_mut() else { return };
+    e.pan(dx, dy);
+}
+
+/// Zooms CanvasEngine camera around (cx, cy).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_engine_zoom_at(engine: *mut CanvasEngine, factor: f64, cx: f64, cy: f64) {
+    let Some(e) = engine.as_mut() else { return };
+    e.zoom_at(factor, cx, cy);
 }

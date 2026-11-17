@@ -8,6 +8,8 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -128,6 +130,7 @@ public class MainActivity extends BridgeActivity {
     /** The page has drawn its first frame (until then the launch logo is shown over it). */
     private boolean pagePainted;
     private ImageView launchLogo;
+    private SurfaceView rustCanvasSurface;
 
     /**
      * Until the page has painted, the screen is the launch screen of the app's own theme: its colour
@@ -142,7 +145,34 @@ public class MainActivity extends BridgeActivity {
         int color = saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : getColor(R.color.launch_background);
         getWindow().setBackgroundDrawable(new ColorDrawable(color));
         WebView web = getBridge() != null ? getBridge().getWebView() : null;
-        if (web != null) web.setBackgroundColor(pagePainted ? color : Color.TRANSPARENT);
+        if (web != null) {
+            web.setBackgroundColor(Color.TRANSPARENT);
+            web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+        }
+        if (rustCanvasSurface == null && findViewById(android.R.id.content) != null) {
+            SurfaceView surfaceView = new SurfaceView(this);
+            surfaceView.setZOrderOnTop(false);
+            surfaceView.setZOrderMediaOverlay(false);
+            surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+                @Override
+                public void surfaceCreated(SurfaceHolder holder) {
+                    OpenNoteRustPlugin.onSurfaceCreated(holder.getSurface());
+                }
+                @Override
+                public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                    OpenNoteRustPlugin.onSurfaceChanged(holder.getSurface(), width, height);
+                }
+                @Override
+                public void surfaceDestroyed(SurfaceHolder holder) {
+                    OpenNoteRustPlugin.onSurfaceDestroyed();
+                }
+            });
+            ViewGroup root = (ViewGroup) findViewById(android.R.id.content);
+            if (root != null) {
+                root.addView(surfaceView, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                rustCanvasSurface = surfaceView;
+            }
+        }
         if (!pagePainted && launchLogo == null) {
             launchLogo = new ImageView(this);
             launchLogo.setImageResource(R.drawable.launch_icon);

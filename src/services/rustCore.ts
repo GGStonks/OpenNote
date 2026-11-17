@@ -355,3 +355,100 @@ export async function rustCheckLargestNote(): Promise<RustCheck & { title: strin
   if (!best || !best.n) throw new Error('No note with ink to check');
   return { ...(await rustCheck(best.strokes)), title: best.title };
 }
+
+export interface CanvasPlacement {
+  page: string;
+  tf: [number, number, number, number, number, number];
+  paper?: {
+    width: number;
+    height: number;
+    style: number;
+    base: [number, number, number, number];
+    dark?: boolean;
+    pattern?: [number, number, number];
+    origin?: [number, number];
+  };
+}
+
+export interface CanvasFrameReq {
+  clear?: [number, number, number, number];
+  pages: CanvasPlacement[];
+}
+
+/** Updates a page's stroke scene in the native Rust CanvasHost. */
+export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
+  if (!rustEnabled()) return false;
+  try {
+    const { meta } = await rustCall('canvasScene', { page: pageId, strokes });
+    return Boolean(meta.ok);
+  } catch {
+    return false;
+  }
+}
+
+/** Updates the frame specification (clear color, page placements, paper) in the native Rust CanvasHost. */
+export async function rustSetCanvasFrame(frame: CanvasFrameReq): Promise<boolean> {
+  if (!rustEnabled()) return false;
+  try {
+    const { meta } = await rustCall('canvasFrame', frame);
+    return Boolean(meta.ok);
+  } catch {
+    return false;
+  }
+}
+
+/** Sends pan/zoom camera updates directly to the native Rust CanvasHost. */
+export async function rustSetCanvasPanZoom(opts: {
+  panDx?: number;
+  panDy?: number;
+  scaleFactor?: number;
+  cx?: number;
+  cy?: number;
+}): Promise<boolean> {
+  if (!rustEnabled()) return false;
+  try {
+    const { meta } = await rustCall('canvasPanZoom', {
+      pan_dx: opts.panDx ?? 0,
+      pan_dy: opts.panDy ?? 0,
+      scale_factor: opts.scaleFactor ?? 1,
+      cx: opts.cx ?? 0,
+      cy: opts.cy ?? 0,
+    });
+    return Boolean(meta.ok);
+  } catch {
+    return false;
+  }
+}
+
+/** Fetches native CanvasHost render statistics. */
+export async function rustGetCanvasStats(): Promise<Record<string, unknown> | null> {
+  if (!rustEnabled()) return null;
+  try {
+    const { meta } = await rustCall('canvasStats', {});
+    return meta;
+  } catch {
+    return null;
+  }
+}
+
+/** Registers active floating UI bounding rects with the native shell to ensure hit-testing precision. */
+export function syncNativeUiRects(rects: Array<{ x: number; y: number; w: number; h: number }>): void {
+  try {
+    if (window.webkit?.messageHandlers?.opennoteUI) {
+      window.webkit.messageHandlers.opennoteUI.postMessage({ cmd: 'uiRects', rects });
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Notifies native shell whether a full modal dialog is open. */
+export function setNativeModalOpen(open: boolean): void {
+  try {
+    if (window.webkit?.messageHandlers?.opennoteUI) {
+      window.webkit.messageHandlers.opennoteUI.postMessage({ cmd: 'modal', open });
+    }
+  } catch {
+    /* ignore */
+  }
+}

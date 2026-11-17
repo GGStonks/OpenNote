@@ -34,8 +34,10 @@ declare global {
       /** Low Power Mode, and the thermal state (0 nominal … 3 critical), kept current by the shell. */
       lowPower?: boolean;
       thermal?: number;
+      /** Milestone N2/N3: Native Rust GPU surface (CanvasHost) is mounted beneath transparent WebView. */
+      nativeCanvas?: boolean;
     };
-    webkit?: { messageHandlers?: { opennote?: IosBridge } };
+    webkit?: { messageHandlers?: { opennote?: IosBridge; opennoteUI?: IosBridge } };
   }
 }
 
@@ -46,6 +48,16 @@ export function platformKind(): PlatformKind {
   if (window.OpenNoteNative?.platform === 'ios' && window.webkit?.messageHandlers?.opennote) return 'ios';
   if (Capacitor.isNativePlatform()) return 'capacitor';
   return 'web';
+}
+
+/** Whether the native Rust GPU canvas (CanvasHost) is mounted beneath the WebView. */
+export function hasNativeCanvas(): boolean {
+  if (typeof window === 'undefined') return false;
+  return Boolean(
+    window.OpenNoteNative?.nativeCanvas ||
+    (window as any).OpenNoteRust?.nativeCanvas ||
+    (window as any).__opennoteNativeCanvas
+  );
 }
 
 export interface HttpResponse {

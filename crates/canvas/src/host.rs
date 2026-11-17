@@ -144,6 +144,40 @@ impl CanvasHost {
         }
     }
 
+    pub fn pan(&mut self, dx: f64, dy: f64) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        for page in &mut self.frame.pages {
+            page.tf.ox += dx as f32;
+            page.tf.oy += dy as f32;
+        }
+        self.dirty = true;
+    }
+
+    pub fn zoom_at(&mut self, factor: f64, cx: f64, cy: f64) {
+        if (factor - 1.0).abs() < 1e-6 {
+            return;
+        }
+        for page in &mut self.frame.pages {
+            let prev_a = page.tf.a as f64;
+            let new_a = (prev_a * factor).clamp(0.05, 50.0);
+            let ratio = new_a / prev_a.max(1e-9);
+            page.tf.ox = (cx - (cx - page.tf.ox as f64) * ratio) as f32;
+            page.tf.oy = (cy - (cy - page.tf.oy as f64) * ratio) as f32;
+            page.tf.a = new_a as f32;
+            page.tf.d = new_a as f32;
+        }
+        self.dirty = true;
+    }
+
+    pub fn clear_scenes(&mut self) {
+        if !self.scenes.is_empty() {
+            self.scenes.clear();
+            self.dirty = true;
+        }
+    }
+
     pub fn stats(&self) -> Stats {
         Stats { scenes: self.scenes.len(), capsules: self.scenes.values().map(|s| s.1).sum(), ..self.stats.clone() }
     }

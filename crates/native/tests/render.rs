@@ -200,3 +200,141 @@ fn test_selection_methods_through_bridge() {
     assert_eq!(transformed_stroke["points"][0]["y"].as_f64(), Some(30.0));
 }
 
+#[test]
+fn test_ui_redesign_methods_through_bridge() {
+    // 1. uiThemeTokens Apple Light
+    let (apple_tokens_json, _) = call("uiThemeTokens", &json!({ "platform": "apple", "dark": false }).to_string(), &[]).unwrap();
+    let apple_val: serde_json::Value = serde_json::from_str(&apple_tokens_json).unwrap();
+    assert_eq!(apple_val["platform"], "Apple");
+    assert_eq!(apple_val["colors"]["canvas_background"]["r"].as_f64().is_some(), true);
+    assert_eq!(apple_val["colors"]["floating_chrome"]["is_liquid_glass"], true);
+    assert_eq!(apple_val["spacing"]["reading_column_max_width"], 680.0);
+
+    // 2. uiThemeTokens Android Dark
+    let (android_tokens_json, _) = call("uiThemeTokens", &json!({ "platform": "android", "dark": true }).to_string(), &[]).unwrap();
+    let android_val: serde_json::Value = serde_json::from_str(&android_tokens_json).unwrap();
+    assert_eq!(android_val["platform"], "Android");
+    assert_eq!(android_val["colors"]["floating_chrome"]["is_liquid_glass"], false);
+    assert_eq!(android_val["colors"]["floating_chrome"]["specular_border_width"], 0.0);
+
+    // 3. uiLayoutCompute Desktop
+    let (layout_json, _) = call("uiLayoutCompute", &json!({
+        "width": 1440.0,
+        "height": 900.0,
+        "sidebarCollapsed": false,
+        "platform": "apple",
+        "dark": false
+    }).to_string(), &[]).unwrap();
+    let layout_val: serde_json::Value = serde_json::from_str(&layout_json).unwrap();
+    assert_eq!(layout_val["layout_mode"], "Desktop");
+    assert_eq!(layout_val["reading_column"]["width"], 680.0);
+
+    // 4. uiFormatPill with active selection
+    let (pill_json, _) = call("uiFormatPill", &json!({
+        "selection": {
+            "start": 5,
+            "end": 15,
+            "bounds": [200.0, 300.0, 100.0, 20.0]
+        },
+        "viewportWidth": 1200.0,
+        "viewportHeight": 800.0,
+        "platform": "apple",
+        "dark": false
+    }).to_string(), &[]).unwrap();
+    let pill_val: serde_json::Value = serde_json::from_str(&pill_json).unwrap();
+    assert_eq!(pill_val["is_visible"], true);
+    assert_eq!(pill_val["bounds"][3], 40.0);
+}
+
+#[test]
+fn test_canvas_host_pan_zoom_and_ipc_bridge() {
+    use opennote_native::{
+        call, opennote_canvas_engine_create, opennote_canvas_engine_destroy,
+        opennote_canvas_engine_get_strokes_json, opennote_canvas_engine_load_strokes,
+        opennote_canvas_engine_pan, opennote_canvas_engine_redo, opennote_canvas_engine_set_tool_config,
+        opennote_canvas_engine_set_viewport_insets, opennote_canvas_engine_undo,
+        opennote_canvas_engine_zoom_at, opennote_canvas_host_clear_scenes,
+        opennote_canvas_host_draw, opennote_canvas_host_free, opennote_canvas_host_offscreen,
+        opennote_canvas_host_pan, opennote_canvas_host_zoom_at, ACTIVE_CANVAS_HOST,
+    };
+    use std::ffi::CString;
+
+    unsafe {
+        // 1. Test CanvasEngine methods
+        let engine = opennote_canvas_engine_create(1024.0, 768.0, 2.0);
+        assert!(!engine.is_null());
+
+        let color = CString::new("#FF5500").unwrap();
+        opennote_canvas_engine_set_tool_config(engine, 0, color.as_ptr(), 3.5, 0.9);
+        assert_eq!((*engine).tool_color, "#FF5500");
+        assert_eq!((*engine).tool_width, 3.5);
+
+        opennote_canvas_engine_set_viewport_insets(engine, 44.0, 34.0, 0.0, 0.0);
+        assert_eq!((*engine).viewport_insets, [44.0, 34.0, 0.0, 0.0]);
+
+        let strokes_json = CString::new(r##"[{"id":"s1","tool":"pen","color":"#000000","width":2.0,"opacity":1.0,"points":[{"x":10.0,"y":10.0,"pressure":0.5},{"x":20.0,"y":20.0,"pressure":0.5}]}]"##).unwrap();
+        let loaded = opennote_canvas_engine_load_strokes(engine, strokes_json.as_ptr());
+        assert_eq!(loaded, 1);
+        assert_eq!((*engine).strokes.len(), 1);
+
+        // Test undo/redo
+        (*engine).push_undo_state();
+        (*engine).strokes.clear();
+        assert_eq!((*engine).strokes.len(), 0);
+        let undone = opennote_canvas_engine_undo(engine);
+        assert!(undone);
+        assert_eq!((*engine).strokes.len(), 1);
+        let redone = opennote_canvas_engine_redo(engine);
+        assert!(redone);
+        assert_eq!((*engine).strokes.len(), 0);
+
+        // Test pan/zoom
+        opennote_canvas_engine_pan(engine, 50.0, -25.0);
+        assert_eq!((*engine).view_matrix.offset_x, 50.0);
+        assert_eq!((*engine).view_matrix.offset_y, -25.0);
+
+        opennote_canvas_engine_zoom_at(engine, 2.0, 500.0, 400.0);
+        assert_eq!((*engine).view_matrix.scale, 2.0);
+
+        let strokes_out = opennote_canvas_engine_get_strokes_json(engine);
+        assert!(!strokes_out.is_null());
+
+        opennote_canvas_engine_destroy(engine);
+
+        // 2. Test CanvasHost and IPC bridge methods
+        let host = opennote_canvas_host_offscreen(200, 200);
+        assert!(!host.is_null());
+        ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
+
+        // IPC: canvasFrame
+        let (f_res, _) = call("canvasFrame", r#"{"clear":[0.1,0.2,0.3,1.0],"pages":[{"page":"p1","tf":[1.0,0.0,0.0,1.0,0.0,0.0]}]}"#, &[]).unwrap();
+        let f_val: serde_json::Value = serde_json::from_str(&f_res).unwrap();
+        assert_eq!(f_val["ok"], true);
+        assert_eq!(f_val["attached"], true);
+
+        // IPC: canvasScene
+        let (s_res, _) = call("canvasScene", r#"{"page":"p1","strokes":[]}"#, &[]).unwrap();
+        let s_val: serde_json::Value = serde_json::from_str(&s_res).unwrap();
+        assert_eq!(s_val["ok"], true);
+
+        // IPC: canvasPanZoom
+        let (pz_res, _) = call("canvasPanZoom", r#"{"pan_dx":10.0,"pan_dy":20.0,"scale_factor":1.5,"cx":100.0,"cy":100.0}"#, &[]).unwrap();
+        let pz_val: serde_json::Value = serde_json::from_str(&pz_res).unwrap();
+        assert_eq!(pz_val["ok"], true);
+
+        // IPC: canvasStats
+        let (st_res, _) = call("canvasStats", "{}", &[]).unwrap();
+        let st_val: serde_json::Value = serde_json::from_str(&st_res).unwrap();
+        assert_eq!(st_val["attached"], true);
+
+        // Direct C-ABI pan/zoom
+        opennote_canvas_host_pan(host, 5.0, 5.0);
+        opennote_canvas_host_zoom_at(host, 1.2, 50.0, 50.0);
+        let drawn = opennote_canvas_host_draw(host);
+        assert!(drawn);
+
+        opennote_canvas_host_clear_scenes(host);
+        opennote_canvas_host_free(host);
+    }
+}
+

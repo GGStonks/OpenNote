@@ -133,3 +133,33 @@
 
 /* The colour pickers' eyedropper (Editor colourAt): menus fade and let taps through to the page. */
 .on-eyedropping [data-ui-panel], .on-eyedropping [data-text-format] { opacity: 0.18 !important; pointer-events: none !important; transition: opacity 0.15s; }
+
+/* Milestone N2 & N3: Full Rust Canvas Transition - Native Surface Mounting & WebView Transparency */
+html, body, #root {
+  background: transparent !important;
+}
+
+/* When viewing a note in native canvas mode, desk and page containers become transparent */
+.on-native-canvas-active {
+  background: transparent !important;
+}
+
+.on-native-canvas-active .on-native-transparent {
+  background: transparent !important;
+}
+
+/* Canvas viewport container allows touch pass-through to underlying Rust surface */
+.on-native-canvas-viewport {
+  background: transparent !important;
+  pointer-events: none !important;
+}
+
+.on-native-canvas-viewport [data-ui-control],
+.on-native-canvas-viewport [data-ui-panel],
+.on-native-canvas-viewport [data-no-pan],
+.on-native-canvas-viewport .on-floating-hud,
+.on-native-canvas-viewport button,
+.on-native-canvas-viewport input,
+.on-native-canvas-viewport select {
+  pointer-events: auto !important;
+}

@@ -26,7 +26,8 @@ import {
 import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
-import { haptic } from '../platform';
+import { haptic, hasNativeCanvas } from '../platform';
+import { rustSetCanvasFrame, rustSetCanvasScene, syncNativeUiRects } from '../services/rustCore';
 import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
@@ -1243,6 +1244,46 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   zoomRef.current = zoom;
   /** Paper under the pen (the Draw tool snaps to its lattice). */
   const paperStyleRef = useRef(layout.sheets[0].paperStyle);
+  const isNative = hasNativeCanvas();
+
+  // Milestone N2/N3: Synchronize document strokes to Rust CanvasHost
+  useEffect(() => {
+    if (!isNative) return;
+    rustSetCanvasScene(page.id, page.strokes);
+  }, [isNative, page.id, page.strokes]);
+
+  // Milestone N2/N3: Synchronize viewport transform, desk clear color, and page paper to Rust CanvasHost
+  useEffect(() => {
+    if (!isNative) return;
+    const styleCode = (s: PaperStyle): number => {
+      switch (s) {
+        case 'ruled': return 1;
+        case 'narrow': return 2;
+        case 'lines': return 3;
+        case 'narrowLines': return 4;
+        case 'grid': return 5;
+        case 'graph': return 6;
+        case 'dots': return 7;
+        default: return 0;
+      }
+    };
+    const sheets = layout.sheets;
+    const pages = sheets.map((sh) => ({
+      page: page.id,
+      tf: [zoom, 0, 0, zoom, sh.left * zoom, sh.top * zoom] as [number, number, number, number, number, number],
+      paper: {
+        width: sh.width,
+        height: sh.height,
+        style: styleCode(sh.paperStyle),
+        base: [1.0, 1.0, 1.0, 1.0] as [number, number, number, number],
+        dark: paperIsDark(sh.paperColor),
+      },
+    }));
+    rustSetCanvasFrame({
+      clear: [0.9, 0.9, 0.92, 1.0],
+      pages,
+    });
+  }, [isNative, page.id, zoom, layout]);
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
@@ -2905,7 +2946,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   return (
     <div
       ref={containerRef}
-      className="on-page relative select-none overflow-hidden"
+      className={`on-page relative select-none overflow-hidden ${isNative ? 'on-native-canvas-viewport bg-transparent' : ''}`}
       style={pageStyle}
       data-page-index={pageIndex}
     >
@@ -2914,10 +2955,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         <div
           key={sh.id}
           data-sheet={sh.index}
-          className={`absolute pointer-events-none ${printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]'}`}
+          className={`absolute pointer-events-none ${isNative ? 'bg-transparent shadow-none' : (printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]')}`}
           style={{
             left: sh.left, top: sh.top, width: sh.width, height: sh.height,
-            ...(sh.pdf && printMode && printBare ? {} : paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor)),
+            ...(isNative ? { background: 'transparent', boxShadow: 'none' } : (sh.pdf && printMode && printBare ? {} : paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor))),
           }}
         >
           {sh.pdf && (
@@ -2938,6 +2979,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       */}
       {layers.map((l) => {
         if (l.kind === 'ink') {
+          if (isNative && !printMode) return null;
           if (!printMode) {
             // Canvases always (at the last zoom below sharp ink, kept while zoomed further in), with
             // the sharp ink over the view past it.
@@ -3035,7 +3077,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           />
         );
       })}
-      {layerSel && layerSel.strokeIds.length > 0 && !dragOnGpu && (
+      {layerSel && layerSel.strokeIds.length > 0 && !dragOnGpu && !isNative && (
         <canvas
           ref={floatCanvasRef}
           className="absolute pointer-events-none z-[5]"
@@ -3052,7 +3094,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       )}
 
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
-      {!printMode && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" />}
+      {!printMode && !isNative && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" />}
       {visible && !printMode && (
         <div
           ref={inputRef}

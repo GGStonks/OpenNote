@@ -10,7 +10,7 @@ import {
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
-import { ExportMode, exportFile, listenForOpenedFiles, setLaunchTheme } from './platform';
+import { ExportMode, exportFile, hasNativeCanvas, listenForOpenedFiles, setLaunchTheme } from './platform';
 import { THEMES, applyTheme } from './theme';
 import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
@@ -333,7 +333,7 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className="h-full flex flex-col bg-ui-desk dark:bg-ui-app text-gray-900 dark:text-gray-100 overflow-hidden font-sans">
+    <div className={`h-full flex flex-col ${openNote && hasNativeCanvas() ? 'bg-transparent dark:bg-transparent on-native-canvas-active' : 'bg-ui-desk dark:bg-ui-app'} text-gray-900 dark:text-gray-100 overflow-hidden font-sans`}>
       {loadError && <div className="bg-red-600 text-white text-xs px-3 py-1.5">Storage error: {loadError}</div>}
       {openNote ? (
         <ErrorBoundary key={openNote.id} onBack={() => setOpenNoteId(null)}>
