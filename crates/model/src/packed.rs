@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const PACKED_STRIDE: usize = 6;
 
-fn deserialize_nan_vec<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+pub fn deserialize_nan_vec<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -27,6 +27,22 @@ where
     deserializer.deserialize_seq(NanVecVisitor)
 }
 
+pub fn serialize_nan_vec<S>(vec: &[f64], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(vec.len()))?;
+    for &elem in vec {
+        if elem.is_nan() {
+            seq.serialize_element(&Option::<f64>::None)?;
+        } else {
+            seq.serialize_element(&elem)?;
+        }
+    }
+    seq.end()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredStroke {
@@ -35,7 +51,11 @@ pub struct StoredStroke {
     pub color: String,
     pub width: f64,
     pub opacity: f64,
-    #[serde(default, deserialize_with = "deserialize_nan_vec")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_nan_vec",
+        serialize_with = "serialize_nan_vec"
+    )]
     pub pts: Vec<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<Point>,
