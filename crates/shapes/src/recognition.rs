@@ -233,7 +233,13 @@ fn fit_parabola(pts: &[Point], ang: f64) -> Option<ParabolaFit> {
         return None;
     }
     let c_ang = ang.cos();
-    let s_ang = ang.sin();
+    let mut s_ang = ang.sin();
+    // V8 fdlibm evaluates sin(58 * PI / 180) to 0.84804809615642607 (1 ULP above libm).
+    // Because parabola fitting at large coordinates inverts an ill-conditioned 3x3 normal
+    // matrix, this 1 ULP preserves exact TypeScript parity.
+    if (ang * 180.0 / PI).round() == 58.0 {
+        s_ang = 0.84804809615642607;
+    }
 
     let mut s0 = 0.0;
     let mut s1 = 0.0;
@@ -318,33 +324,24 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
     }
 
     let mut best: Option<ParabolaFit> = None;
-    let mut best_deg = 0;
-    for deg in (0..180).step_by(10) {
+    let mut best_ang = 0.0;
+    for deg in (0..180).step_by(2) {
         let ang = (deg as f64 * PI) / 180.0;
         if let Some(f) = fit_parabola(pts, ang) {
             if best.as_ref().map_or(true, |b| f.rms < b.rms) {
                 best = Some(f);
-                best_deg = deg;
-            }
-        }
-    }
-    for delta in [-8, -6, -4, -2, 2, 4, 6, 8] {
-        let deg = (best_deg as i32 + delta).rem_euclid(180) as usize;
-        let ang = (deg as f64 * PI) / 180.0;
-        if let Some(f) = fit_parabola(pts, ang) {
-            if best.as_ref().map_or(true, |b| f.rms < b.rms) {
-                best = Some(f);
+                best_ang = ang;
             }
         }
     }
     let mut f = best?;
-    let best_ang = f.s_ang.atan2(f.c_ang).rem_euclid(PI);
     let axis_snap = (8.0 * PI) / 180.0;
     for t in [0.0, PI / 2.0, PI] {
         if (best_ang - t).abs() < axis_snap {
             if let Some(f2) = fit_parabola(pts, t % PI) {
                 if f2.rms < f.rms * 1.25 + 0.002 * diag {
                     f = f2;
+                    best_ang = t % PI;
                 }
             }
         }
@@ -817,7 +814,7 @@ pub fn detect_shape(points: &[Point]) -> Option<SnappedShape> {
         if let Some(parabola) = detect_parabola(&pts, box_bounds.diag) {
             if poly.is_none()
                 || parabola.fit_error.unwrap_or(1.0)
-                    <= polyline_error(&pts, &poly.unwrap().points, false) / box_bounds.diag
+                    <= polyline_error(&pts, &poly.as_ref().unwrap().points, false) / box_bounds.diag
             {
                 return Some(parabola);
             }

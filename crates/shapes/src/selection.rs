@@ -1,6 +1,6 @@
+pub use ink::RectBounds;
 use ink::{
     catmull_rom_beziers, flatten_beziers, inside_polygon, stroke_bounds, stroke_geometry,
-    RectBounds,
 };
 use model::{NotePage, Point, ShapeKind, Stroke};
 use nib::geometry::XY;
@@ -9,19 +9,16 @@ use nib::geometry::XY;
 /// - For shapes: uses `s.points`, flattening curves with Catmull-Rom beziers.
 /// - For handwriting: uses `stroke_geometry(s).pts` (matches rendered ink, ignores un-inked lift points).
 pub fn rendered_stroke_points(s: &Stroke) -> Vec<XY> {
-    let is_shape = s.is_shape.unwrap_or(false);
-    if is_shape {
-        if s.shape_kind == Some(ShapeKind::Curve) {
-            let pts_xy: Vec<XY> = s.points.iter().map(|p| XY { x: p.x, y: p.y }).collect();
-            let is_closed = s.closed.unwrap_or(false) && pts_xy.len() > 2;
-            let beziers = catmull_rom_beziers(&pts_xy, is_closed);
-            flatten_beziers(&beziers, 2.0)
-        } else {
-            s.points.iter().map(|p| XY { x: p.x, y: p.y }).collect()
-        }
-    } else {
+    if s.shape_kind == Some(ShapeKind::Curve) {
+        let pts_xy: Vec<XY> = s.points.iter().map(|p| XY { x: p.x, y: p.y }).collect();
+        let is_closed = s.closed.unwrap_or(false) && pts_xy.len() > 2;
+        let beziers = catmull_rom_beziers(&pts_xy, is_closed);
+        flatten_beziers(&beziers, 2.0)
+    } else if !s.is_shape.unwrap_or(false) {
         let g = stroke_geometry(s);
         g.pts.into_iter().map(|p| XY { x: p.x, y: p.y }).collect()
+    } else {
+        s.points.iter().map(|p| XY { x: p.x, y: p.y }).collect()
     }
 }
 
@@ -145,12 +142,31 @@ fn stroke_touches_rect(s: &Stroke, rect: &RectBounds) -> bool {
     if is_filled && n > 2 {
         let center_x = (rect.min_x + rect.max_x) * 0.5;
         let center_y = (rect.min_y + rect.max_y) * 0.5;
-        if inside_polygon(center_x, center_y, &pts) || inside_polygon(rect.min_x, rect.min_y, &pts) {
+        if inside_polygon(center_x, center_y, &pts) {
             return true;
         }
     }
 
     false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+pub fn text_height(t: &model::TextBlock) -> f64 {
+    let pad = t.padding.unwrap_or([0.0, 0.0]);
+    let chars_per_line = ((t.width - 2.0 * pad[0]) / (t.font_size * 0.5)).max(8.0);
+    let lines: usize = t.text.split('\n').map(|l| {
+        (l.len() as f64 / chars_per_line).ceil().max(1.0) as usize
+    }).sum();
+    let line_height = t.line_height.unwrap_or(1.35);
+    let calculated = (lines as f64) * t.font_size * line_height + 2.0 * pad[1];
+    calculated.max(t.height.unwrap_or(0.0))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -266,7 +282,7 @@ pub fn rect_select_page(rect: RectBounds, page: &NotePage) -> PageSelection {
     let mut text_ids = Vec::new();
     if let Some(text_blocks) = &page.text_blocks {
         for b in text_blocks {
-            let h = b.height.unwrap_or(b.font_size * 1.4);
+            let h = text_height(b);
             let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
             if box_touches_rect(&cs, &norm_rect) {
                 text_ids.push(b.id.clone());
@@ -420,7 +436,17 @@ pub fn points_in_lasso(lasso: &[XY], item_points: &[Point]) -> bool {
 
 /// Select strokes and blocks intersecting or enclosed by a freeform lasso polygon.
 pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
-    if lasso.len() < 3 {
+    let mut poly: Vec<XY> = Vec::with_capacity(lasso.len());
+    for p in lasso {
+        let keep = match poly.last() {
+            None => true,
+            Some(last) => (p.x - last.x).hypot(p.y - last.y) >= 2.0,
+        };
+        if keep {
+            poly.push(*p);
+        }
+    }
+    if poly.len() < 2 {
         return PageSelection {
             page_id: page.id.clone(),
             ..Default::default()
@@ -430,7 +456,7 @@ pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
     let mut min_y = f64::INFINITY;
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
-    for p in lasso {
+    for p in &poly {
         if p.x < min_x { min_x = p.x; }
         if p.y < min_y { min_y = p.y; }
         if p.x > max_x { max_x = p.x; }
@@ -440,23 +466,23 @@ pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
 
     let mut stroke_ids = Vec::new();
     for s in &page.strokes {
-        if stroke_touches_lasso(s, lasso, &lasso_rect) {
+        if stroke_touches_lasso(s, &poly, &lasso_rect) {
             stroke_ids.push(s.id.clone());
         }
     }
     let mut latex_ids = Vec::new();
     for b in &page.latex_blocks {
         let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
-        if box_touches_lasso(&cs, lasso, &lasso_rect) {
+        if box_touches_lasso(&cs, &poly, &lasso_rect) {
             latex_ids.push(b.id.clone());
         }
     }
     let mut text_ids = Vec::new();
     if let Some(text_blocks) = &page.text_blocks {
         for b in text_blocks {
-            let h = b.height.unwrap_or(b.font_size * 1.4);
+            let h = text_height(b);
             let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
-            if box_touches_lasso(&cs, lasso, &lasso_rect) {
+            if box_touches_lasso(&cs, &poly, &lasso_rect) {
                 text_ids.push(b.id.clone());
             }
         }
@@ -465,7 +491,7 @@ pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
     if let Some(image_blocks) = &page.image_blocks {
         for b in image_blocks {
             let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
-            if box_touches_lasso(&cs, lasso, &lasso_rect) {
+            if box_touches_lasso(&cs, &poly, &lasso_rect) {
                 image_ids.push(b.id.clone());
             }
         }
@@ -518,10 +544,13 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
 
     for b in &page.latex_blocks {
         if id_set.contains(b.id.as_str()) {
-            if b.x < min_x { min_x = b.x; }
-            if b.y < min_y { min_y = b.y; }
-            if b.x + b.width > max_x { max_x = b.x + b.width; }
-            if b.y + b.height > max_y { max_y = b.y + b.height; }
+            let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+            for c in &cs {
+                if c.x < min_x { min_x = c.x; }
+                if c.y < min_y { min_y = c.y; }
+                if c.x > max_x { max_x = c.x; }
+                if c.y > max_y { max_y = c.y; }
+            }
             found = true;
         }
     }
@@ -529,11 +558,14 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
     if let Some(text_blocks) = &page.text_blocks {
         for b in text_blocks {
             if id_set.contains(b.id.as_str()) {
-                let h = b.height.unwrap_or(b.font_size * 1.4);
-                if b.x < min_x { min_x = b.x; }
-                if b.y < min_y { min_y = b.y; }
-                if b.x + b.width > max_x { max_x = b.x + b.width; }
-                if b.y + h > max_y { max_y = b.y + h; }
+                let h = text_height(b);
+                let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+                for c in &cs {
+                    if c.x < min_x { min_x = c.x; }
+                    if c.y < min_y { min_y = c.y; }
+                    if c.x > max_x { max_x = c.x; }
+                    if c.y > max_y { max_y = c.y; }
+                }
                 found = true;
             }
         }
@@ -542,10 +574,13 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
     if let Some(image_blocks) = &page.image_blocks {
         for b in image_blocks {
             if id_set.contains(b.id.as_str()) {
-                if b.x < min_x { min_x = b.x; }
-                if b.y < min_y { min_y = b.y; }
-                if b.x + b.width > max_x { max_x = b.x + b.width; }
-                if b.y + b.height > max_y { max_y = b.y + b.height; }
+                let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                for c in &cs {
+                    if c.x < min_x { min_x = c.x; }
+                    if c.y < min_y { min_y = c.y; }
+                    if c.x > max_x { max_x = c.x; }
+                    if c.y > max_y { max_y = c.y; }
+                }
                 found = true;
             }
         }
@@ -651,4 +686,236 @@ pub fn transform_page_items(
             }
         }
     }
+}
+
+pub fn compute_bounds(
+    page: &NotePage,
+    stroke_ids: &[String],
+    latex_ids: &[String],
+    text_ids: &[String],
+    image_ids: &[String],
+    pad: f64,
+) -> Option<Rect> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    let mut add = |x0: f64, y0: f64, x1: f64, y1: f64| {
+        if x0 < min_x { min_x = x0; }
+        if y0 < min_y { min_y = y0; }
+        if x1 > max_x { max_x = x1; }
+        if y1 > max_y { max_y = y1; }
+    };
+
+    let stroke_set: std::collections::HashSet<&str> = stroke_ids.iter().map(|s| s.as_str()).collect();
+    for s in &page.strokes {
+        if stroke_set.contains(s.id.as_str()) {
+            let b = ink::stroke_bounds(s);
+            add(b.min_x, b.min_y, b.max_x, b.max_y);
+        }
+    }
+
+    let latex_set: std::collections::HashSet<&str> = latex_ids.iter().map(|s| s.as_str()).collect();
+    for b in &page.latex_blocks {
+        if latex_set.contains(b.id.as_str()) {
+            let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+            for c in &cs {
+                add(c.x, c.y, c.x, c.y);
+            }
+        }
+    }
+
+    if let Some(text_blocks) = &page.text_blocks {
+        let text_set: std::collections::HashSet<&str> = text_ids.iter().map(|s| s.as_str()).collect();
+        for b in text_blocks {
+            if text_set.contains(b.id.as_str()) {
+                let h = text_height(b);
+                let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+                for c in &cs {
+                    add(c.x, c.y, c.x, c.y);
+                }
+            }
+        }
+    }
+
+    if let Some(image_blocks) = &page.image_blocks {
+        let img_set: std::collections::HashSet<&str> = image_ids.iter().map(|s| s.as_str()).collect();
+        for b in image_blocks {
+            if img_set.contains(b.id.as_str()) {
+                let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                for c in &cs {
+                    add(c.x, c.y, c.x, c.y);
+                }
+            }
+        }
+    }
+
+    if min_x.is_finite() {
+        Some(Rect {
+            x: min_x - pad,
+            y: min_y - pad,
+            width: max_x - min_x + pad * 2.0,
+            height: max_y - min_y + pad * 2.0,
+        })
+    } else {
+        None
+    }
+}
+
+pub fn norm_deg(a: f64) -> f64 {
+    let mut d = (((a + 180.0) % 360.0 + 360.0) % 360.0) - 180.0;
+    if (d - -180.0).abs() < 1e-9 {
+        d = 180.0;
+    }
+    (d * 100.0).round() / 100.0
+}
+
+pub fn transform_selection(
+    page: &NotePage,
+    stroke_ids: &[String],
+    latex_ids: &[String],
+    text_ids: &[String],
+    image_ids: &[String],
+    bounds: Rect,
+    dx: f64,
+    dy: f64,
+    factor: f64,
+    rot: f64,
+    fy_opt: Option<f64>,
+) -> NotePage {
+    let fx = factor;
+    let fy = fy_opt.unwrap_or(factor);
+    let ox = bounds.x;
+    let oy = bounds.y;
+    let cx = ox + (bounds.width * fx) * 0.5 + dx;
+    let cy = oy + (bounds.height * fy) * 0.5 + dy;
+    let r = rot.to_radians();
+    let c = r.cos();
+    let s = r.sin();
+
+    let transform_pt = |x: f64, y: f64| -> XY {
+        let big_x = ox + (x - ox) * fx + dx;
+        let big_y = oy + (y - oy) * fy + dy;
+        if rot.abs() < 1e-9 {
+            XY { x: big_x, y: big_y }
+        } else {
+            let u = big_x - cx;
+            let v = big_y - cy;
+            XY {
+                x: cx + u * c - v * s,
+                y: cy + u * s + v * c,
+            }
+        }
+    };
+
+    let turned = |deg: Option<f64>| -> Option<f64> {
+        if rot.abs() > 1e-9 {
+            Some(norm_deg(deg.unwrap_or(0.0) + rot))
+        } else {
+            deg
+        }
+    };
+
+    let transform_box = |bx: f64, by: f64, w: f64, h: f64, nw: f64, nh: f64, rot_deg: Option<f64>| -> (f64, f64, Option<f64>) {
+        let center = transform_pt(bx + w * 0.5, by + h * 0.5);
+        (center.x - nw * 0.5, center.y - nh * 0.5, turned(rot_deg))
+    };
+
+    let stroke_set: std::collections::HashSet<&str> = stroke_ids.iter().map(|s| s.as_str()).collect();
+    let latex_set: std::collections::HashSet<&str> = latex_ids.iter().map(|s| s.as_str()).collect();
+    let text_set: std::collections::HashSet<&str> = text_ids.iter().map(|s| s.as_str()).collect();
+    let image_set: std::collections::HashSet<&str> = image_ids.iter().map(|s| s.as_str()).collect();
+
+    let ink_scale = (fx * fy).sqrt();
+
+    let mut out_page = page.clone();
+
+    out_page.strokes = page.strokes.iter().map(|st| {
+        if !stroke_set.contains(st.id.as_str()) {
+            return st.clone();
+        }
+        let mut out = st.clone();
+        if (ink_scale - 1.0).abs() > 1e-9 {
+            out.width *= ink_scale.sqrt();
+        }
+        out.points = st.points.iter().map(|p| {
+            let transformed = transform_pt(p.x, p.y);
+            let mut pt = p.clone();
+            pt.x = transformed.x;
+            pt.y = transformed.y;
+            pt
+        }).collect();
+        if st.shape_kind == Some(model::ShapeKind::Circle) && (fx - fy).abs() > 1e-4 {
+            out.shape_kind = Some(model::ShapeKind::Ellipse);
+        }
+        out.rotation = turned(st.rotation);
+        out
+    }).collect();
+
+    out_page.latex_blocks = page.latex_blocks.iter().map(|b| {
+        if !latex_set.contains(b.id.as_str()) {
+            return b.clone();
+        }
+        let nw = b.width * fx;
+        let nh = b.height * fy;
+        let (nx, ny, nrot) = transform_box(b.x, b.y, b.width, b.height, nw, nh, b.rotation);
+        let mut out = b.clone();
+        out.x = nx;
+        out.y = ny;
+        out.width = nw;
+        out.height = nh;
+        out.scale = Some(b.scale.unwrap_or(1.0) * fy);
+        if (fx - fy).abs() > 1e-9 {
+            out.stretch_x = Some(b.stretch_x.unwrap_or(1.0) * (fx / fy));
+        }
+        out.rotation = nrot;
+        out
+    }).collect();
+
+    if let Some(text_blocks) = &page.text_blocks {
+        out_page.text_blocks = Some(text_blocks.iter().map(|t| {
+            if !text_set.contains(t.id.as_str()) {
+                return t.clone();
+            }
+            let th = text_height(t);
+            let nw = t.width * fx;
+            let nh = th * fy;
+            let (nx, ny, nrot) = transform_box(t.x, t.y, t.width, th, nw, nh, t.rotation);
+            let mut out = t.clone();
+            out.x = nx;
+            out.y = ny;
+            out.width = nw;
+            if (fx - fy).abs() < 1e-9 {
+                out.font_size *= fx;
+                if let Some(h) = t.height {
+                    out.height = Some(h * fx);
+                }
+            } else {
+                out.height = Some(nh);
+            }
+            out.rotation = nrot;
+            out
+        }).collect());
+    }
+
+    if let Some(image_blocks) = &page.image_blocks {
+        out_page.image_blocks = Some(image_blocks.iter().map(|im| {
+            if !image_set.contains(im.id.as_str()) {
+                return im.clone();
+            }
+            let nw = im.width * fx;
+            let nh = im.height * fy;
+            let (nx, ny, nrot) = transform_box(im.x, im.y, im.width, im.height, nw, nh, im.rotation);
+            let mut out = im.clone();
+            out.x = nx;
+            out.y = ny;
+            out.width = nw;
+            out.height = nh;
+            out.rotation = nrot;
+            out
+        }).collect());
+    }
+
+    out_page
 }

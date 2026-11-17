@@ -143,7 +143,7 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
         }
         Some(ShapeKind::Ellipse) => {
             let c = centroid_points(pts);
-            let b_idx = pts.len() / 4;
+            let b_idx = (pts.len() as f64 / 4.0).round() as usize;
             Some(vec![
                 h(c, HandleRole::Center, -1),
                 h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::AxisA, 0),
@@ -239,9 +239,12 @@ pub fn move_shape_handle(
     }
 
     // 3. Move the handle
+    (drag_handle(orig, handle, to), guide)
+}
+
+pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
     if handle.role == HandleRole::End && handle.anchor.is_some() {
-        let st = swing_about(orig, handle.anchor.unwrap(), XY { x: handle.x, y: handle.y }, to);
-        return (st, guide);
+        return swing_about(orig, handle.anchor.unwrap(), XY { x: handle.x, y: handle.y }, to);
     }
 
     let pts = &orig.points;
@@ -249,7 +252,7 @@ pub fn move_shape_handle(
     let dx = to.x - handle.x;
     let dy = to.y - handle.y;
 
-    let res = match kind {
+    match kind {
         Some(ShapeKind::Point)
         | Some(ShapeKind::Line)
         | Some(ShapeKind::Polyline)
@@ -278,7 +281,10 @@ pub fn move_shape_handle(
                 let tail = if handle.index == 0 { to } else { XY { x: new_pts[0].x, y: new_pts[0].y } };
                 let tip = if handle.index == 1 { to } else { XY { x: new_pts[1].x, y: new_pts[1].y } };
                 let head_len = dist(XY { x: new_pts[2].x, y: new_pts[2].y }, XY { x: new_pts[1].x, y: new_pts[1].y });
-                let spread = (28.0 * std::f64::consts::PI) / 180.0;
+                let dir0 = (pts[1].y - pts[0].y).atan2(pts[1].x - pts[0].x);
+                let rel = (pts[2].y - pts[1].y).atan2(pts[2].x - pts[1].x) - dir0 - std::f64::consts::PI;
+                let spread_cand = rel.sin().atan2(rel.cos()).abs();
+                let spread = if spread_cand > 0.0 { spread_cand } else { (28.0 * std::f64::consts::PI) / 180.0 };
                 let dir = (tip.y - tail.y).atan2(tip.x - tail.x);
                 let pi = std::f64::consts::PI;
 
@@ -310,35 +316,34 @@ pub fn move_shape_handle(
                 st.points = new_pts;
                 st
             } else {
-                let idx = handle.index as usize % 4;
-                let opp_idx = (idx + 2) % 4;
-                let opp = pts[opp_idx];
-
-                let lu = dist(XY { x: pts[1].x, y: pts[1].y }, XY { x: pts[0].x, y: pts[0].y }).max(1e-4);
-                let ux = (pts[1].x - pts[0].x) / lu;
-                let uy = (pts[1].y - pts[0].y) / lu;
-                let vx = -uy;
-                let vy = ux;
-
-                let d_opp_x = to.x - opp.x;
-                let d_opp_y = to.y - opp.y;
-                let du = d_opp_x * ux + d_opp_y * uy;
-                let dv = d_opp_x * vx + d_opp_y * vy;
-
-                let mut new_pts = pts.clone();
-                new_pts[opp_idx] = opp;
-                new_pts[idx] = Point { x: opp.x + du * ux + dv * vx, y: opp.y + du * uy + dv * vy, pressure: 0.5, t: None, alt: None, az: None };
-                let adj1 = (idx + 1) % 4;
-                let adj2 = (idx + 3) % 4;
-                let adj1_is_u = (pts[adj1].x - opp.x) * ux + (pts[adj1].y - opp.y) * uy;
-                if adj1_is_u.abs() > 1e-4 {
-                    new_pts[adj1] = Point { x: opp.x + du * ux, y: opp.y + du * uy, pressure: 0.5, t: None, alt: None, az: None };
-                    new_pts[adj2] = Point { x: opp.x + dv * vx, y: opp.y + dv * vy, pressure: 0.5, t: None, alt: None, az: None };
-                } else {
-                    new_pts[adj1] = Point { x: opp.x + dv * vx, y: opp.y + dv * vy, pressure: 0.5, t: None, alt: None, az: None };
-                    new_pts[adj2] = Point { x: opp.x + du * ux, y: opp.y + du * uy, pressure: 0.5, t: None, alt: None, az: None };
-                }
-
+                let o = XY { x: pts[0].x, y: pts[0].y };
+                let d_01 = dist(XY { x: pts[1].x, y: pts[1].y }, o);
+                let lu = if d_01 > 0.0 { d_01 } else { 1.0 };
+                let u = XY { x: (pts[1].x - o.x) / lu, y: (pts[1].y - o.y) / lu };
+                let v = XY { x: -u.y, y: u.x };
+                let loc = |p: XY| -> XY {
+                    XY {
+                        x: (p.x - o.x) * u.x + (p.y - o.y) * u.y,
+                        y: (p.x - o.x) * v.x + (p.y - o.y) * v.y,
+                    }
+                };
+                let l_pts: Vec<XY> = pts.iter().map(|p| loc(XY { x: p.x, y: p.y })).collect();
+                let h_idx = handle.index as usize;
+                let d = if h_idx < l_pts.len() { l_pts[h_idx] } else { XY { x: 0.0, y: 0.0 } };
+                let n = loc(to);
+                let eps = 1e-6 + 1e-6 * lu;
+                let moved: Vec<XY> = l_pts.iter().map(|q| {
+                    XY {
+                        x: if (q.x - d.x).abs() < eps { n.x } else { q.x },
+                        y: if (q.y - d.y).abs() < eps { n.y } else { q.y },
+                    }
+                }).collect();
+                let new_pts: Vec<Point> = moved.iter().enumerate().map(|(i, q)| {
+                    let mut p = pts[i].clone();
+                    p.x = o.x + q.x * u.x + q.y * v.x;
+                    p.y = o.y + q.x * u.y + q.y * v.y;
+                    p
+                }).collect();
                 let mut st = orig.clone();
                 st.points = new_pts;
                 st
@@ -349,7 +354,8 @@ pub fn move_shape_handle(
             let c = centroid_points(pts);
             let n = pts.len();
             let a = XY { x: pts[0].x - c.x, y: pts[0].y - c.y };
-            let qb = pts[(n / 4) % n];
+            let qb_idx = ((n as f64 / 4.0).round() as usize) % n;
+            let qb = pts[qb_idx];
             let rb = (qb.x - c.x).js_hypot(qb.y - c.y);
 
             let new_points = if handle.role == HandleRole::Center {
@@ -400,11 +406,12 @@ pub fn move_shape_handle(
 
             let pi = std::f64::consts::PI;
             let mut new_pts = pts.clone();
+            let n_half = n as f64 / 2.0;
             for (i, p) in new_pts.iter_mut().enumerate() {
                 let mut off = i as isize - handle.index;
                 if closed {
-                    if off > (n / 2) as isize { off -= n as isize; }
-                    if off < -((n / 2) as isize) { off += n as isize; }
+                    if (off as f64) > n_half { off -= n as isize; }
+                    if (off as f64) < -n_half { off += n as isize; }
                 }
                 let span = if off < 0 { left } else { right };
                 let t = off.abs() as f64 / span;
@@ -420,9 +427,7 @@ pub fn move_shape_handle(
         }
 
         _ => orig.clone(),
-    };
-
-    (res, guide)
+    }
 }
 
 fn swing_about(orig: &Stroke, anchor: XY, from: XY, to: XY) -> Stroke {
