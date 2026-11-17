@@ -117,7 +117,7 @@ static void ONInstallCrashCapture(NSString *version) {
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.23";
+static NSString *const kVersion = @"2.9.4-rs.24";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -2033,7 +2033,10 @@ static void ONRemoveScribble(UIView *view) {
     ONViewController *vc = [[ONViewController alloc] init];
     self.controller = vc;
     window.rootViewController = vc;
-    window.webView = vc.webView ?: (WKWebView *)vc.view;
+    // The web view, never vc.view: with the native canvas on, that is the container holding the
+    // Metal view and the web view, and the first Pencil event sent it evaluateJavaScript (crash).
+    [vc loadViewIfNeeded];
+    window.webView = vc.webView;
     window.booster = [[ONFrameRateBooster alloc] init];
     window.inkView = vc.inkView;
     window.rustCanvasView = vc.rustCanvasView;
