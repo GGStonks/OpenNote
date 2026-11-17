@@ -135,6 +135,14 @@ export const crashLog = {
     }
     session = { id: Math.random().toString(36).slice(2, 10), start: now, lastAt: now, app: __APP_VERSION__, userAgent: navigator.userAgent, dpr: window.devicePixelRatio, crumbs: [] };
     push({ kind: 'start' });
+    // The shell's own record of how the last run ended (iOS: an exception, a fatal signal or a
+    // Rust panic with its backtrace), which the page could not see.
+    const native = (window as unknown as { OpenNoteNative?: { nativeCrash?: string | null } }).OpenNoteNative?.nativeCrash;
+    if (native) {
+      const text = String(native).slice(0, 12000);
+      push({ kind: 'native-crash', text });
+      if (store.crash) store.crash = { ...store.crash, native: text } as typeof store.crash;
+    }
     timer = setInterval(snapshot, SNAPSHOT_MS);
     document.addEventListener('contextlost', () => canvasesLost('contextlost event'), true);
     window.addEventListener('error', (e) => push({ kind: 'js-error', message: String(e.message).slice(0, 400), at: `${e.filename ?? ''}:${e.lineno ?? ''}:${e.colno ?? ''}`, stack: String((e.error as Error | undefined)?.stack ?? '').slice(0, 1500) }));

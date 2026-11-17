@@ -40,10 +40,84 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <objc/message.h>
+#include <execinfo.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#include <mach-o/dyld.h>
+
+#pragma mark - Native crash capture
+
+// A crash in the shell or the Rust library (an Objective-C exception, a fatal signal, a Rust
+// panic) is written to a file as it happens and handed to the page at the next start
+// (OpenNoteNative.nativeCrash): the crash report then names it. The page's own log only saw
+// "the app restarted moments after".
+extern void opennote_set_crash_file(const char *path);
+static int gCrashFd = -1;
+static char gCrashSlide[64];
+
+static NSString *ONCrashPath(void) {
+    NSString *caches = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+    return [caches stringByAppendingPathComponent:@"opennote-native-crash.txt"];
+}
+
+static void ONCrashWrite(const char *str) {
+    if (gCrashFd >= 0 && str) write(gCrashFd, str, strlen(str));
+}
+
+// Async-signal-safe: write, backtrace, backtrace_symbols_fd only.
+static void ONCrashSignal(int sig) {
+    char head[48] = "\nfatal signal ";
+    size_t n = strlen(head);
+    int v = sig;
+    char digits[8];
+    int d = 0;
+    do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v && d < 7);
+    while (d) head[n++] = digits[--d];
+    head[n++] = '\n';
+    head[n] = 0;
+    ONCrashWrite(head);
+    ONCrashWrite(gCrashSlide);
+    void *frames[64];
+    int count = backtrace(frames, 64);
+    if (gCrashFd >= 0) backtrace_symbols_fd(frames, count, gCrashFd);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void ONCrashException(NSException *e) {
+    NSString *text = [NSString stringWithFormat:@"\nexception %@: %@\n%s%@\n", e.name, e.reason, gCrashSlide, [e.callStackSymbols componentsJoinedByString:@"\n"]];
+    ONCrashWrite(text.UTF8String);
+}
+
+/** The last run's crash (or nil), taken once: the file is emptied for this run. */
+static NSString *ONTakeNativeCrash(void) {
+    NSString *path = ONCrashPath();
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+    text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    return text.length ? text : nil;
+}
+
+static void ONInstallCrashCapture(NSString *version) {
+    NSString *path = ONCrashPath();
+    gCrashFd = open(path.fileSystemRepresentation, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    snprintf(gCrashSlide, sizeof gCrashSlide, "app %s slide 0x%lx\n", version.UTF8String, (unsigned long)_dyld_get_image_vmaddr_slide(0));
+    NSSetUncaughtExceptionHandler(ONCrashException);
+    int sigs[] = { SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE, SIGTRAP };
+    for (size_t i = 0; i < sizeof sigs / sizeof sigs[0]; i++) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_handler = ONCrashSignal;
+        sigemptyset(&sa.sa_mask);
+        sigaction(sigs[i], &sa, NULL);
+    }
+    opennote_set_crash_file(path.fileSystemRepresentation);
+}
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.22";
+static NSString *const kVersion = @"2.9.4-rs.23";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -1266,6 +1340,14 @@ static const double kInkHoldSeconds = 0.06;
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     BOOL nativeCanvas = [defaults boolForKey:kNativeCanvasKey];
+    NSString *nativeCrash = ONTakeNativeCrash();
+    ONInstallCrashCapture(kVersion);
+    NSString *nativeCrashJs = @"null";
+    if (nativeCrash) {
+        NSData *json = [NSJSONSerialization dataWithJSONObject:@[ nativeCrash ] options:0 error:nil];
+        NSString *arr = json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : nil;
+        if (arr.length > 2) nativeCrashJs = [arr substringWithRange:NSMakeRange(1, arr.length - 2)];
+    }
     NSString *pageRate = [defaults stringForKey:kPageRateKey];
     if (!pageRate) pageRate = [defaults boolForKey:kPage120Key] ? @"max" : @"auto";
     BOOL unlockFailed = [defaults boolForKey:kPageUnlockFailedKey];
@@ -1274,9 +1356,9 @@ static const double kInkHoldSeconds = 0.06;
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: %@, lowPower: %@, thermal: %ld };",
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: %@, lowPower: %@, thermal: %ld, nativeCrash: %@ };",
                                                      kVersion, fullFrameRate ? @"true" : @"false", pageRate, unlockFailed ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
-                                                     nativeCanvas ? @"true" : @"false", info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
+                                                     nativeCanvas ? @"true" : @"false", info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState, nativeCrashJs];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
     // Native live ink (fire and forget: no reply, so no round trip).

@@ -1046,6 +1046,30 @@ pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasH
     })
 }
 
+/// The iOS shell's crash file (ONInstallCrashCapture): a Rust panic is appended there with its
+/// thread, message, place and backtrace, before it unwinds or aborts, and the next start puts it
+/// in the crash report. Panics `catch_unwind` stops are written too.
+///
+/// # Safety
+/// `path` must be a valid C string.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_set_crash_file(path: *const std::os::raw::c_char) {
+    if path.is_null() {
+        return;
+    }
+    let Ok(p) = std::ffi::CStr::from_ptr(path).to_str().map(str::to_string) else { return };
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&p) {
+            let thread = std::thread::current();
+            let bt = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(f, "\nrust panic on thread {}: {info}\n{bt}", thread.name().unwrap_or("?"));
+        }
+        prev(info);
+    }));
+}
+
 /// Frees a CanvasHost; the page's bridge calls no longer reach it once this returns.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasHost) {
