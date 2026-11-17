@@ -1629,6 +1629,12 @@ if (ONLY.has('nativecanvas')) {
   const gained = dark(after.px, r[0], r[1], r[2], r[3]) - dark(before.px, r[0], r[1], r[2], r[3]);
   console.log(`nativecanvas written stroke: canvas capsules ${capsBefore} -> ${capsAfter}, ${gained} more ink pixels where it was written${capsAfter > capsBefore && gained > 300 ? '' : '  FAIL'}`);
   if (!(capsAfter > capsBefore && gained > 300)) process.exitCode = 1;
+  // The lift sends the new stroke alone: the canvas keeps the others' geometry (rs.22-25 sent and
+  // rebuilt the whole note at every stroke).
+  const scenes = await page.evaluate(() => (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'canvas-scene'));
+  const lift = scenes[scenes.length - 1];
+  console.log(`nativecanvas scenes: open ${scenes[0]?.sent} strokes sent in ${scenes[0]?.ms} ms; the lift ${lift?.sent} of ${lift?.strokes} in ${lift?.ms} ms${scenes.length > 1 && lift.sent <= 2 ? '' : '  FAIL'}`);
+  if (!(scenes.length > 1 && lift.sent <= 2)) process.exitCode = 1;
   if (arg('shots')) {
     await page.setContent('<canvas id=c></canvas>');
     await page.evaluate(([b64, w, h]) => {

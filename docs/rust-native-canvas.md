@@ -89,9 +89,13 @@ page's own frame messages through the bridge.
 - The page stops drawing ink (vector SVG, canvases, SharpInk, WebGL pinch ink) when the shell
   has the canvas; its live ink (`live.rs`) draws straight into the same canvas at the end of
   each frame (no separate `ONInkView` layer).
-- Pinch: the shell applies the gesture to the scene on every touch event it sees (before the web
-  view), the page's `useViewport` keeps the gesture's logic and commits as now; scroll likewise
-  from the page's scroll events in N3, from the shell's own gesture in N5.
+- Pinch and scroll: the canvas is placed by the page's frames only (`canvasFrame`, every
+  animation frame it changed, from the page's own box), drawn on the display's next refresh.
+  rs.21-25 also moved it from the shells' own pinch and pan recognisers, which ignored the page's
+  frames meanwhile: the ink parted from the page's text, selection and live ink while the fingers
+  moved (no zoom limits, its own momentum) and jumped back after; nothing on the page read the
+  shells' camera. Removed in rs.26. Should the shell lead the gesture one day (N5), the page must
+  follow the shell's camera, never the two each run their own.
 - Memory: no page canvases, no tiles; the scene's GPU buffers are the only ink memory.
 - **Acceptance**: `--only pinch`, `zpinch`, `longpinch`, `hlshots`, `zorder` keep their checks
   with the native canvas (a stand-in shell on the PC renders through `opennote_canvas_cli`);
@@ -153,3 +157,13 @@ page's own frame messages through the bridge.
   the canvas, and a stroke written and lifted); the shells' views are not part of it.
 - The canvas's scene is built outside the host lock (`CanvasHost::put_scene`): the shells' display
   link draws under it.
+- Scenes are sent by difference (rs.26): each stroke object has a key (rustCore.ts `sceneKey`), its
+  style and points go once, then the key alone; Rust keeps each stroke's ops (crates/native
+  `SCENE_OPS`, the costly part: its drawn line) and assembles the scene from them
+  (`Scene::from_ops`, the same as `Scene::build`). A key the canvas does not hold is answered
+  `missing` and the page sends them all. A host made later (Android's surface, back from the
+  background) is given the scenes and the last frame at once (`set_active_host`). The shell's live
+  copy of a stroke is cleared only once the canvas has its scene (CanvasPage `finishStroke`).
+  `crates/native/tests/canvas_cache.rs`; `--only nativecanvas` checks the lift sends one stroke.
+- Over the native canvas the page draws no ink of its own, also while pinching (no WebGL pinch ink:
+  usePinchInk is off) and in Low Power Mode (no shell snapshot pinch: it covered the canvas).

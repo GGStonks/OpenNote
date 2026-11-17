@@ -375,18 +375,42 @@ export interface CanvasFrameReq {
   pages: CanvasPlacement[];
 }
 
+/** A key per stroke object for the native canvas: a changed stroke is a new object, so a new key. */
+const sceneKeys = new WeakMap<Stroke, number>();
+let nextSceneKey = 1;
+const sceneKey = (s: Stroke) => {
+  let k = sceneKeys.get(s);
+  if (k === undefined) sceneKeys.set(s, (k = nextSceneKey++));
+  return k;
+};
+/** The keys the canvas holds for each page: those of the page's last scene (crates/native SCENE_OPS). */
+const canvasHolds = new Map<string, Set<number>>();
+
 /**
- * Updates a page's stroke scene in the native Rust CanvasHost. The strokes' style goes as JSON
- * (each stroke without its points, with their count `n`), the points as raw f64 x, y, pressure, t,
- * read from the stored packed arrays as `rustGeometry` does: as JSON of every point a large note
- * was tens of MB to build, send and parse on the device. Logged as `canvas-scene` (crash report).
+ * Updates a page's stroke scene in the native Rust CanvasHost. Only strokes the canvas does not
+ * hold yet go with their style (JSON, without the points) and points (raw f64 x, y, pressure, t,
+ * read from the stored packed arrays); the others by their key alone, and Rust reuses their
+ * geometry. rs.22-25 sent and rebuilt the whole note at every lift: 140-200 ms on the iPad for a
+ * 6,000-stroke note, the new stroke missing from the screen meanwhile. No strokes: the page's
+ * scene goes (the note closed). Logged as `canvas-scene` (crash report).
  */
-export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
+export function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
+  // One after the other, in the page's order: what the canvas holds is then known when each is
+  // made, and an older scene never lands after a newer one.
+  const run = sceneTail.then(() => setCanvasScene(pageId, strokes));
+  sceneTail = run.catch(() => undefined);
+  return run;
+}
+let sceneTail: Promise<unknown> = Promise.resolve();
+
+async function setCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
   // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   const t0 = performance.now();
   let total = 0;
-  try {
-    const parts = strokes.map(pointsOf);
+  const send = async (held: ReadonlySet<number>) => {
+    const keys = strokes.map(sceneKey);
+    const fresh = strokes.filter((_, i) => !held.has(keys[i]));
+    const parts = fresh.map(pointsOf);
     total = parts.reduce((n, p) => n + p.n, 0);
     const vals = new Float64Array(total * 4);
     let at = 0;
@@ -394,16 +418,29 @@ export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Pro
       p.put(vals, at);
       at += p.n;
     });
+    let f = 0;
     const heads = strokes.map((st, i) => {
-      const head: Record<string, unknown> = { n: parts[i].n };
+      if (held.has(keys[i])) return { k: keys[i] };
+      const head: Record<string, unknown> = {};
       // Every field but the points (a packed stroke's `points` is a getter: not touched here).
       for (const k of Object.keys(st)) if (k !== 'points') head[k] = (st as unknown as Record<string, unknown>)[k];
-      return head;
+      return { k: keys[i], n: parts[f++].n, s: head };
     });
     const { meta } = await rustCall('canvasSceneBin', { page: pageId, strokes: heads }, new Uint8Array(vals.buffer));
-    crashLog.event('canvas-scene', { strokes: strokes.length, points: total, capsules: meta.capsules ?? null, attached: meta.attached ?? null, error: meta.error ?? null, ms: Math.round(performance.now() - t0) });
+    if (!meta.missing) {
+      if (strokes.length) canvasHolds.set(pageId, new Set(keys));
+      else canvasHolds.delete(pageId);
+    }
+    return meta;
+  };
+  try {
+    let meta = await send(canvasHolds.get(pageId) ?? new Set());
+    // The canvas lost strokes the page thought it held (an earlier call failed): all of them again.
+    if (meta.missing) meta = await send(new Set());
+    crashLog.event('canvas-scene', { strokes: strokes.length, sent: meta.built ?? null, points: total, capsules: meta.capsules ?? null, attached: meta.attached ?? null, error: meta.error ?? null, ms: Math.round(performance.now() - t0) });
     return Boolean(meta.ok);
   } catch (err) {
+    canvasHolds.delete(pageId);
     crashLog.event('canvas-scene', { strokes: strokes.length, points: total, error: err instanceof Error ? err.message : String(err), ms: Math.round(performance.now() - t0) });
     return false;
   }
@@ -414,29 +451,6 @@ export async function rustSetCanvasFrame(frame: CanvasFrameReq): Promise<boolean
   // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   try {
     const { meta } = await rustCall('canvasFrame', frame);
-    return Boolean(meta.ok);
-  } catch {
-    return false;
-  }
-}
-
-/** Sends pan/zoom camera updates directly to the native Rust CanvasHost. */
-export async function rustSetCanvasPanZoom(opts: {
-  panDx?: number;
-  panDy?: number;
-  scaleFactor?: number;
-  cx?: number;
-  cy?: number;
-}): Promise<boolean> {
-  if (!rustEnabled()) return false;
-  try {
-    const { meta } = await rustCall('canvasPanZoom', {
-      pan_dx: opts.panDx ?? 0,
-      pan_dy: opts.panDy ?? 0,
-      scale_factor: opts.scaleFactor ?? 1,
-      cx: opts.cx ?? 0,
-      cy: opts.cy ?? 0,
-    });
     return Boolean(meta.ok);
   } catch {
     return false;

@@ -69,7 +69,9 @@ const REBASE_MIN_MS = 250;
  * (nativePinch.ts: fluid, but only what was on screen, scaled). A rule, not a measurement: one slow
  * pinch (the first after a start) must not hand every later one to the snapshot.
  */
-const shellDrawsPinch = () => !!window.OpenNoteNative?.lowPower;
+// Not over the native canvas (App's `on-native-canvas`): it follows the page's pinch itself, and
+// the shell's snapshot of the see-through web view would cover it (no ink while pinching).
+const shellDrawsPinch = () => !!window.OpenNoteNative?.lowPower && !document.documentElement.classList.contains('on-native-canvas');
 export const PULL_THRESHOLD = 110;
 /** Pull distance per px of finger travel past the end (rubber band). */
 const PULL_RESISTANCE = 0.5;

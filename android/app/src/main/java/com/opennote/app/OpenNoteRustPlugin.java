@@ -76,26 +76,6 @@ public class OpenNoteRustPlugin extends Plugin {
     static native void canvasSurfaceChanged(long host, int width, int height);
     static native void canvasSurfaceDestroyed(long host);
     static native boolean canvasDraw(long host);
-    static native void canvasBeginGesture(long host);
-    static native void canvasEndGesture(long host, double vx, double vy);
-    static native void canvasPanZoom(long host, double dx, double dy, double scale, double cx, double cy);
-    static native double[] canvasGetCamera(long host);
-
-    public static void beginGesture() {
-        if (canvasHost != 0) canvasBeginGesture(canvasHost);
-    }
-
-    public static void endGesture(double vx, double vy) {
-        if (canvasHost != 0) canvasEndGesture(canvasHost, vx, vy);
-    }
-
-    public static void panZoom(double dx, double dy, double scale, double cx, double cy) {
-        if (canvasHost != 0) canvasPanZoom(canvasHost, dx, dy, scale, cx, cy);
-    }
-
-    public static double[] getCamera() {
-        return canvasHost != 0 ? canvasGetCamera(canvasHost) : null;
-    }
 
     private static long canvasHost = 0;
     private static boolean frameCallbackActive = false;

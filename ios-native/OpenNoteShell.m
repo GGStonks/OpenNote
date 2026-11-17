@@ -117,7 +117,7 @@ static void ONInstallCrashCapture(NSString *version) {
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.25";
+static NSString *const kVersion = @"2.9.4-rs.26";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -292,11 +292,6 @@ typedef struct CanvasHost CanvasHost;
 extern CanvasHost *opennote_canvas_host_attach_layer(void *layer, uint32_t w, uint32_t h);
 extern void opennote_canvas_host_resize(CanvasHost *h, uint32_t w, uint32_t height);
 extern bool opennote_canvas_host_draw(CanvasHost *h);
-extern void opennote_canvas_host_pan(CanvasHost *h, double dx, double dy);
-extern void opennote_canvas_host_zoom_at(CanvasHost *h, double factor, double cx, double cy);
-extern void opennote_canvas_host_begin_gesture(CanvasHost *h);
-extern void opennote_canvas_host_end_gesture(CanvasHost *h, double vx, double vy);
-extern bool opennote_canvas_host_get_camera(CanvasHost *h, double *out_scale, double *out_ox, double *out_oy);
 extern void opennote_canvas_host_clear_scenes(CanvasHost *h);
 extern void opennote_canvas_host_free(CanvasHost *h);
 
@@ -1308,12 +1303,10 @@ static const double kInkHoldSeconds = 0.06;
 
 #pragma mark - View controller
 
-@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIDocumentPickerDelegate, UIGestureRecognizerDelegate>
+@interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONRustCanvasView *rustCanvasView;
 @property (nonatomic, strong) CADisplayLink *displayLink;
-@property (nonatomic, strong) UIPanGestureRecognizer *twoFingerPanRecognizer;
-@property (nonatomic, strong) UIPinchGestureRecognizer *pinchRecognizer;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) ONInkView *inkView;
@@ -1394,18 +1387,6 @@ static const double kInkHoldSeconds = 0.06;
             self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60, ONMaxFramesPerSecond(), ONMaxFramesPerSecond());
         }
         [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-
-        self.twoFingerPanRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleNative2FingerPan:)];
-        self.twoFingerPanRecognizer.minimumNumberOfTouches = 2;
-        self.twoFingerPanRecognizer.maximumNumberOfTouches = 2;
-        self.twoFingerPanRecognizer.cancelsTouchesInView = NO;
-        self.twoFingerPanRecognizer.delegate = self;
-        [container addGestureRecognizer:self.twoFingerPanRecognizer];
-
-        self.pinchRecognizer = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handleNativePinch:)];
-        self.pinchRecognizer.cancelsTouchesInView = NO;
-        self.pinchRecognizer.delegate = self;
-        [container addGestureRecognizer:self.pinchRecognizer];
     } else {
         self.view = self.webView;
     }
@@ -1463,77 +1444,6 @@ static const double kInkHoldSeconds = 0.06;
 - (void)onDisplayFrame:(CADisplayLink *)link {
     if (self.rustCanvasView.canvasHost) {
         opennote_canvas_host_draw(self.rustCanvasView.canvasHost);
-    }
-}
-
-#pragma mark - Native 120 Hz Camera Gestures (Milestone N3)
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldRecognizeSimultaneouslyWithGestureRecognizer:(UIGestureRecognizer *)otherGestureRecognizer {
-    return YES;
-}
-
-- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    // 1. NEVER intercept Apple Pencil! Pencil touches must go 100% to WebKit and sendEvent!
-    if (touch.type == UITouchTypePencil) {
-        return NO;
-    }
-    // 2. Do not intercept if inside top toolbar (y < topSafe + 58)
-    CGPoint loc = [touch locationInView:self.view];
-    CGFloat topSafe = 0;
-    if (@available(iOS 11.0, *)) {
-        topSafe = self.view.safeAreaInsets.top;
-    }
-    if (loc.y < topSafe + 58.0) {
-        return NO;
-    }
-    return YES;
-}
-
-- (void)handleNative2FingerPan:(UIPanGestureRecognizer *)pan {
-    if (!self.rustCanvasView.canvasHost) return;
-    CGFloat scale = [UIScreen mainScreen].scale;
-    if (pan.state == UIGestureRecognizerStateBegan) {
-        opennote_canvas_host_begin_gesture(self.rustCanvasView.canvasHost);
-        [pan setTranslation:CGPointZero inView:self.view];
-    } else if (pan.state == UIGestureRecognizerStateChanged) {
-        CGPoint d = [pan translationInView:self.view];
-        [pan setTranslation:CGPointZero inView:self.view];
-        opennote_canvas_host_pan(self.rustCanvasView.canvasHost, d.x * scale, d.y * scale);
-    } else if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
-        CGPoint v = [pan velocityInView:self.view];
-        opennote_canvas_host_end_gesture(self.rustCanvasView.canvasHost, v.x * scale, v.y * scale);
-        [self syncNativeCameraToWeb];
-    }
-}
-
-- (void)handleNativePinch:(UIPinchGestureRecognizer *)pinch {
-    if (!self.rustCanvasView.canvasHost) return;
-    CGFloat scale = [UIScreen mainScreen].scale;
-    if (pinch.state == UIGestureRecognizerStateBegan) {
-        opennote_canvas_host_begin_gesture(self.rustCanvasView.canvasHost);
-    } else if (pinch.state == UIGestureRecognizerStateChanged) {
-        CGFloat factor = pinch.scale;
-        CGPoint loc = [pinch locationInView:self.view];
-        pinch.scale = 1.0;
-        opennote_canvas_host_zoom_at(self.rustCanvasView.canvasHost, factor, loc.x * scale, loc.y * scale);
-    } else if (pinch.state == UIGestureRecognizerStateEnded || pinch.state == UIGestureRecognizerStateCancelled) {
-        opennote_canvas_host_end_gesture(self.rustCanvasView.canvasHost, 0, 0);
-        [self syncNativeCameraToWeb];
-    }
-}
-
-- (void)syncNativeCameraToWeb {
-    if (!self.rustCanvasView.canvasHost) return;
-    double scale = 1.0, ox = 0.0, oy = 0.0;
-    if (opennote_canvas_host_get_camera(self.rustCanvasView.canvasHost, &scale, &ox, &oy)) {
-        CGFloat dpr = [UIScreen mainScreen].scale;
-        double cssZoom = scale / dpr;
-        double cssLeft = ox / dpr;
-        double cssTop = oy / dpr;
-        if (isfinite(cssZoom) && isfinite(cssLeft) && isfinite(cssTop)) {
-            NSString *js = [NSString stringWithFormat:@"window.dispatchEvent(new CustomEvent('opennote-native-camera', { detail: { zoom: %f, left: %f, top: %f } }));", cssZoom, cssLeft, cssTop];
-            [self.webView evaluateJavaScript:js completionHandler:nil];
-        }
     }
 }
 

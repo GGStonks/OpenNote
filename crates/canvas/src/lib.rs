@@ -19,7 +19,7 @@ pub use wgpu;
 
 use bytemuck::{Pod, Zeroable};
 use model::Stroke;
-use renderer::builder::{build_stroke_ops, FillMode, RenderOpKind};
+use renderer::builder::{build_stroke_ops, FillMode, RenderOp, RenderOpKind};
 use renderer::capsule::Capsule;
 use renderer::color::Rgba;
 use wgpu::util::DeviceExt;
@@ -105,6 +105,16 @@ impl Scene {
     /// The scene of `layers` (bottom first, strokes in page order within a layer), drawn per
     /// layer in drawStrokes' order: highlighters, fills, ink, arrowheads.
     pub fn build(layers: &[&[Stroke]]) -> Scene {
+        let ops: Vec<Vec<Vec<RenderOp>>> = layers.iter().map(|l| l.iter().map(build_stroke_ops).collect()).collect();
+        let refs: Vec<Vec<&[RenderOp]>> = ops.iter().map(|l| l.iter().map(|o| o.as_slice()).collect()).collect();
+        Scene::from_ops(&refs)
+    }
+
+    /// The scene of strokes whose ops (`build_stroke_ops`, the costly part: each stroke's drawn
+    /// line) are already made: `layers` of strokes, each stroke its ops. The shells keep each
+    /// stroke's ops between scenes (crates/native `canvasSceneBin`), so a new stroke on a long
+    /// note costs its own geometry, not the note's.
+    pub fn from_ops(layers: &[Vec<&[RenderOp]>]) -> Scene {
         let mut sc = Scene::default();
         for layer in layers {
             let mut hl: Vec<Op> = Vec::new();
@@ -114,12 +124,12 @@ impl Scene {
             // The open opaque run: its op index in `ink`, its colour, and whether the capsules
             // pushed since are still contiguous with it.
             let mut run: Option<(usize, [f32; 4])> = None;
-            for s in layer.iter() {
-                for op in build_stroke_ops(s) {
-                    match op.kind {
+            for stroke in layer.iter() {
+                for op in stroke.iter() {
+                    match &op.kind {
                         RenderOpKind::Highlighter { caps } => {
                             run = None;
-                            hl.push(Op::See { first: sc.push_caps(&caps, op.color), count: caps.len() as u32, col: rgba(op.color), bx: box_of_caps(&caps) });
+                            hl.push(Op::See { first: sc.push_caps(caps, op.color), count: caps.len() as u32, col: rgba(op.color), bx: box_of_caps(caps) });
                         }
                         RenderOpKind::Fill { area, mode, hatch_caps } => {
                             run = None;
@@ -128,7 +138,7 @@ impl Scene {
                             }
                             let bx = {
                                 let mut b = PageBox { x0: f32::INFINITY, y0: f32::INFINITY, x1: f32::NEG_INFINITY, y1: f32::NEG_INFINITY };
-                                for p in &area {
+                                for p in area {
                                     b.x0 = b.x0.min(p.x as f32);
                                     b.y0 = b.y0.min(p.y as f32);
                                     b.x1 = b.x1.max(p.x as f32);
@@ -149,13 +159,13 @@ impl Scene {
                             for (x, y) in [(bx.x0, bx.y0), (bx.x1, bx.y0), (bx.x0, bx.y1), (bx.x1, bx.y0), (bx.x1, bx.y1), (bx.x0, bx.y1)] {
                                 sc.flat.push([x, y]);
                             }
-                            let hatch_first = sc.push_caps(&hatch_caps, op.color);
-                            fills.push(Op::Fill { first, count, mode, col: rgba(op.color), bx, box_first, hatch_first, hatch_count: hatch_caps.len() as u32 });
+                            let hatch_first = sc.push_caps(hatch_caps, op.color);
+                            fills.push(Op::Fill { first, count, mode: mode.clone(), col: rgba(op.color), bx, box_first, hatch_first, hatch_count: hatch_caps.len() as u32 });
                         }
                         RenderOpKind::Ink { caps } => {
                             let col = rgba(op.color);
-                            let first = sc.push_caps(&caps, op.color);
-                            let bx = box_of_caps(&caps);
+                            let first = sc.push_caps(caps, op.color);
+                            let bx = box_of_caps(caps);
                             match run {
                                 Some((i, rc)) if rc == col && col[3] >= 1.0 => {
                                     if let Op::See { count, bx: b, .. } = &mut ink[i] {
@@ -178,7 +188,7 @@ impl Scene {
                             }
                             let bx = {
                                 let mut b = PageBox { x0: f32::INFINITY, y0: f32::INFINITY, x1: f32::NEG_INFINITY, y1: f32::NEG_INFINITY };
-                                for p in &points {
+                                for p in points {
                                     b.x0 = b.x0.min(p.x as f32);
                                     b.y0 = b.y0.min(p.y as f32);
                                     b.x1 = b.x1.max(p.x as f32);

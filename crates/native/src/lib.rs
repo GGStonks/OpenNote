@@ -80,7 +80,7 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasPanZoom", "canvasStats", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
@@ -88,7 +88,6 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "canvasScene" => canvas_scene(meta),
         "canvasSceneBin" => canvas_scene_bin(meta, data),
         "canvasFrame" => canvas_frame(meta),
-        "canvasPanZoom" => canvas_pan_zoom(meta),
         "canvasStats" => canvas_stats(),
         "selectInRect" => select_in_rect(meta),
         "selectInLasso" => select_in_lasso(meta),
@@ -324,15 +323,37 @@ fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
     Ok((json!({ "ok": true, "capsules": count.unwrap_or(0), "attached": count.is_some() }).to_string(), Vec::new()))
 }
 
+/// Each page's strokes as the canvas last got them: the page's key for a stroke object
+/// (rustCore.ts `sceneKey`) to its ops (`build_stroke_ops`, its drawn line: the costly part).
+/// rs.22-25 rebuilt every stroke of the note at each lift (140-200 ms on the iPad for a
+/// 6,000-stroke note, the stroke missing from the screen meanwhile).
+/// Kept apart from the host: a host made later (Android makes a new one each time its surface
+/// comes back, after the app was in the background) is given the scenes and the last frame at
+/// once (`set_active_host`), as the page sends them only when they change.
+type StrokeOps = std::sync::Arc<Vec<renderer::builder::RenderOp>>;
+type PageOps = Vec<(u64, StrokeOps)>;
+static SCENE_OPS: std::sync::Mutex<Option<std::collections::HashMap<String, PageOps>>> = std::sync::Mutex::new(None);
+static LAST_FRAME: std::sync::Mutex<Option<canvas::host::FrameSpec>> = std::sync::Mutex::new(None);
+
+fn scene_of(ops: &PageOps) -> canvas::Scene {
+    let layer: Vec<&[renderer::builder::RenderOp]> = ops.iter().map(|(_, o)| o.as_slice()).collect();
+    canvas::Scene::from_ops(&[layer])
+}
+
 /// `canvasSceneBin`: the scene as the page sends it from a note (rustCore.ts rustSetCanvasScene):
-/// meta `{ page, strokes: [stroke without points + n] }`, data the points, f64 x, y, pressure, t
-/// (t NaN: none), n per stroke in order.
+/// meta `{ page, strokes: [{ k, s?, n? }] }` in page order, `s` the stroke without its points and
+/// `n` their count, sent only for a stroke the canvas does not have yet (else its key `k` alone);
+/// data the points of those, f64 x, y, pressure, t (t NaN: none), n per stroke in order. A key
+/// the canvas does not hold is answered `missing` (nothing changes; the page sends them all).
+/// No strokes: the page's scene goes.
 fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     #[derive(Deserialize)]
     struct Head {
+        k: u64,
+        #[serde(default)]
         n: usize,
-        #[serde(flatten)]
-        stroke: Stroke,
+        #[serde(default)]
+        s: Option<Stroke>,
     }
     #[derive(Deserialize)]
     struct Req {
@@ -341,32 +362,61 @@ fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasSceneBin request: {e}"))?;
     let vals = f64s(data)?;
-    let total: usize = r.strokes.iter().map(|h| h.n).sum();
+    let total: usize = r.strokes.iter().filter(|h| h.s.is_some()).map(|h| h.n).sum();
     if total * 4 != vals.len() {
         return Err(format!("{} points announced, {} values sent", total, vals.len()));
     }
+    if r.strokes.is_empty() {
+        SCENE_OPS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).remove(&r.page);
+        let attached = with_active_host(|host| host.remove_scene(&r.page)).is_some();
+        return Ok((json!({ "ok": attached, "capsules": 0, "attached": attached, "strokes": 0, "built": 0 }).to_string(), Vec::new()));
+    }
+    let held: std::collections::HashMap<u64, StrokeOps> = SCENE_OPS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .get(&r.page)
+        .map(|v| v.iter().cloned().collect())
+        .unwrap_or_default();
+    let missing: Vec<u64> = r.strokes.iter().filter(|h| h.s.is_none() && !held.contains_key(&h.k)).map(|h| h.k).collect();
+    if !missing.is_empty() {
+        return Ok((json!({ "ok": false, "missing": missing }).to_string(), Vec::new()));
+    }
+    // The new strokes' ops, built before taking any lock (the shells' display link draws under
+    // the host's).
     let mut at = 0;
-    let strokes: Vec<Stroke> = r
+    let mut built = 0;
+    let ops: PageOps = r
         .strokes
         .into_iter()
         .map(|h| {
-            let mut s = h.stroke;
-            s.points = vals[at * 4..(at + h.n) * 4]
-                .chunks_exact(4)
-                .map(|c| model::Point { x: c[0], y: c[1], pressure: c[2], t: if c[3].is_nan() { None } else { Some(c[3]) }, ..Default::default() })
-                .collect();
-            at += h.n;
-            s
+            let o = match h.s {
+                Some(mut st) => {
+                    st.points = vals[at * 4..(at + h.n) * 4]
+                        .chunks_exact(4)
+                        .map(|c| model::Point { x: c[0], y: c[1], pressure: c[2], t: if c[3].is_nan() { None } else { Some(c[3]) }, ..Default::default() })
+                        .collect();
+                    at += h.n;
+                    built += 1;
+                    std::sync::Arc::new(renderer::builder::build_stroke_ops(&st))
+                }
+                None => held[&h.k].clone(),
+            };
+            (h.k, o)
         })
         .collect();
-    // Built before taking the host lock: the shells' display link draws under it.
-    let scene = canvas::Scene::build(&[&strokes]);
+    let scene = scene_of(&ops);
+    let strokes = ops.len();
+    SCENE_OPS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(r.page.clone(), ops);
     let count = with_active_host(|host| host.put_scene(&r.page, scene));
-    Ok((json!({ "ok": count.is_some(), "capsules": count.unwrap_or(0), "attached": count.is_some(), "strokes": strokes.len() }).to_string(), Vec::new()))
+    Ok((json!({ "ok": count.is_some(), "capsules": count.unwrap_or(0), "attached": count.is_some(), "strokes": strokes, "built": built }).to_string(), Vec::new()))
 }
 
 fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
     let frame = parse_frame(meta);
+    if let Some(f) = &frame {
+        *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(f.clone());
+    }
     let attached = with_active_host(|host| {
         if let Some(f) = frame.clone() {
             host.set_frame(f);
@@ -374,34 +424,6 @@ fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
     })
     .is_some();
     Ok((json!({ "ok": attached && frame.is_some(), "attached": attached }).to_string(), Vec::new()))
-}
-
-fn canvas_pan_zoom(meta: &str) -> Result<(String, Vec<u8>), String> {
-    #[derive(Deserialize)]
-    struct Req {
-        #[serde(default)]
-        pan_dx: f64,
-        #[serde(default)]
-        pan_dy: f64,
-        #[serde(default = "default_factor")]
-        scale_factor: f64,
-        #[serde(default)]
-        cx: f64,
-        #[serde(default)]
-        cy: f64,
-    }
-    fn default_factor() -> f64 { 1.0 }
-    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasPanZoom request: {e}"))?;
-    let attached = with_active_host(|host| {
-        if r.pan_dx != 0.0 || r.pan_dy != 0.0 {
-            host.pan(r.pan_dx, r.pan_dy);
-        }
-        if (r.scale_factor - 1.0).abs() > 1e-6 {
-            host.zoom_at(r.scale_factor, r.cx, r.cy);
-        }
-    })
-    .is_some();
-    Ok((json!({ "ok": true, "attached": attached }).to_string(), Vec::new()))
 }
 
 fn canvas_stats() -> Result<(String, Vec<u8>), String> {
@@ -917,6 +939,24 @@ pub unsafe extern "C" fn opennote_canvas_host_set_frame(
 
 /// Makes `host` the one the page's bridge calls reach (under the lock).
 pub fn set_active_host(host: *mut canvas::host::CanvasHost) {
+    // A new host (not shared yet) gets what the page has sent so far: else it stayed empty until
+    // the page's next change (Android: a blank canvas after each return from the background).
+    // Built before the lock (CPU work only).
+    if let Some(h) = unsafe { host.as_mut() } {
+        let scenes: Vec<(String, canvas::Scene)> = SCENE_OPS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .iter()
+            .map(|(page, ops)| (page.clone(), scene_of(ops)))
+            .collect();
+        for (page, scene) in scenes {
+            h.put_scene(&page, scene);
+        }
+        if let Some(f) = LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            h.set_frame(f);
+        }
+    }
     let _g = host_lock();
     ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
 }
@@ -948,61 +988,6 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
         }
     }))
     .unwrap_or(std::ptr::null_mut())
-}
-
-/// Pans all page placements in the CanvasHost by (dx, dy).
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_pan(h: *mut canvas::host::CanvasHost, dx: f64, dy: f64) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        with_host(h, |host| host.pan(dx, dy));
-    }));
-}
-
-/// Zooms all page placements in the CanvasHost around anchor (cx, cy).
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_zoom_at(h: *mut canvas::host::CanvasHost, factor: f64, cx: f64, cy: f64) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        with_host(h, |host| host.zoom_at(factor, cx, cy));
-    }));
-}
-
-/// Marks the start of a native two-finger camera gesture (suspends incoming canvasFrame transforms).
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_begin_gesture(h: *mut canvas::host::CanvasHost) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        with_host(h, |host| host.begin_gesture());
-    }));
-}
-
-/// Marks the end of a native two-finger camera gesture with velocity (px/sec), initiating momentum if any.
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_end_gesture(h: *mut canvas::host::CanvasHost, vx: f64, vy: f64) {
-    let _ = catch_unwind(AssertUnwindSafe(|| {
-        with_host(h, |host| host.end_gesture(vx, vy));
-    }));
-}
-
-/// Returns the primary page's current scale (device px) and offsets (ox, oy).
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_get_camera(
-    h: *mut canvas::host::CanvasHost,
-    out_scale: *mut f64,
-    out_ox: *mut f64,
-    out_oy: *mut f64,
-) -> bool {
-    catch_unwind(AssertUnwindSafe(|| {
-        with_host(h, |host| {
-            if let Some((scale, ox, oy)) = host.get_primary_transform() {
-                if !out_scale.is_null() { *out_scale = scale; }
-                if !out_ox.is_null() { *out_ox = ox; }
-                if !out_oy.is_null() { *out_oy = oy; }
-                true
-            } else {
-                false
-            }
-        }).unwrap_or(false)
-    }))
-    .unwrap_or(false)
 }
 
 /// Clears all scenes in the CanvasHost.
@@ -1252,85 +1237,5 @@ mod android {
         } else {
             JNI_FALSE
         }
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasBeginGesture<'l>(
-        _env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        host: jlong,
-    ) {
-        if host != 0 {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                unsafe { super::opennote_canvas_host_begin_gesture(host as *mut canvas::host::CanvasHost) };
-            }));
-        }
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasEndGesture<'l>(
-        _env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        host: jlong,
-        vx: jdouble,
-        vy: jdouble,
-    ) {
-        if host != 0 {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                unsafe { super::opennote_canvas_host_end_gesture(host as *mut canvas::host::CanvasHost, vx, vy) };
-            }));
-        }
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasPanZoom<'l>(
-        _env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        host: jlong,
-        dx: jdouble,
-        dy: jdouble,
-        scale: jdouble,
-        cx: jdouble,
-        cy: jdouble,
-    ) {
-        if host != 0 {
-            let _ = catch_unwind(AssertUnwindSafe(|| {
-                let h = host as *mut canvas::host::CanvasHost;
-                if dx != 0.0 || dy != 0.0 {
-                    unsafe { super::opennote_canvas_host_pan(h, dx, dy) };
-                }
-                if (scale - 1.0).abs() > 1e-6 {
-                    unsafe { super::opennote_canvas_host_zoom_at(h, scale, cx, cy) };
-                }
-            }));
-        }
-    }
-
-    #[no_mangle]
-    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasGetCamera<'l>(
-        env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        host: jlong,
-    ) -> jdoubleArray {
-        catch_unwind(AssertUnwindSafe(|| {
-            let mut scale = 1.0;
-            let mut ox = 0.0;
-            let mut oy = 0.0;
-            let ok = if host != 0 {
-                unsafe { super::opennote_canvas_host_get_camera(host as *mut canvas::host::CanvasHost, &mut scale, &mut ox, &mut oy) }
-            } else {
-                false
-            };
-            if ok {
-                let Ok(arr) = env.new_double_array(3) else { return std::ptr::null_mut() };
-                if env.set_double_array_region(&arr, 0, &[scale, ox, oy]).is_err() {
-                    return std::ptr::null_mut();
-                }
-                arr.into_raw()
-            } else {
-                std::ptr::null_mut()
-            }
-        }))
-        .unwrap_or(std::ptr::null_mut())
     }
 }

@@ -247,7 +247,7 @@ fn test_ui_redesign_methods_through_bridge() {
 }
 
 #[test]
-fn test_canvas_host_pan_zoom_and_ipc_bridge() {
+fn test_canvas_engine_and_ipc_bridge() {
     use opennote_native::{
         call, opennote_canvas_engine_create, opennote_canvas_engine_destroy,
         opennote_canvas_engine_get_strokes_json, opennote_canvas_engine_load_strokes,
@@ -255,7 +255,7 @@ fn test_canvas_host_pan_zoom_and_ipc_bridge() {
         opennote_canvas_engine_set_viewport_insets, opennote_canvas_engine_undo,
         opennote_canvas_engine_zoom_at, opennote_canvas_host_clear_scenes,
         opennote_canvas_host_draw, opennote_canvas_host_free, opennote_canvas_host_offscreen,
-        opennote_canvas_host_pan, opennote_canvas_host_zoom_at, ACTIVE_CANVAS_HOST,
+        ACTIVE_CANVAS_HOST,
     };
     use std::ffi::CString;
 
@@ -317,19 +317,11 @@ fn test_canvas_host_pan_zoom_and_ipc_bridge() {
         let s_val: serde_json::Value = serde_json::from_str(&s_res).unwrap();
         assert_eq!(s_val["ok"], true);
 
-        // IPC: canvasPanZoom
-        let (pz_res, _) = call("canvasPanZoom", r#"{"pan_dx":10.0,"pan_dy":20.0,"scale_factor":1.5,"cx":100.0,"cy":100.0}"#, &[]).unwrap();
-        let pz_val: serde_json::Value = serde_json::from_str(&pz_res).unwrap();
-        assert_eq!(pz_val["ok"], true);
-
         // IPC: canvasStats
         let (st_res, _) = call("canvasStats", "{}", &[]).unwrap();
         let st_val: serde_json::Value = serde_json::from_str(&st_res).unwrap();
         assert_eq!(st_val["attached"], true);
 
-        // Direct C-ABI pan/zoom
-        opennote_canvas_host_pan(host, 5.0, 5.0);
-        opennote_canvas_host_zoom_at(host, 1.2, 50.0, 50.0);
         let drawn = opennote_canvas_host_draw(host);
         assert!(drawn);
 

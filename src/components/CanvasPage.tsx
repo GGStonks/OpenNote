@@ -1311,10 +1311,21 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
   // The page's strokes for the native canvas, once per change (surface px: all sheets in one
   // scene), without those being moved or reshaped (the floating and live layers draw them).
+  // `sceneSent` counts the scenes sent and `sceneIn` is the last one's arrival: a finished stroke's
+  // live copy (the shell's) stays until the canvas has it (finishStroke).
+  const sceneSent = useRef(0);
+  const sceneIn = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => {
     if (!isNative) return;
-    void rustSetCanvasScene(page.id, hiddenIds ? page.strokes.filter((st) => !hiddenIds.has(st.id)) : page.strokes);
+    sceneSent.current++;
+    sceneIn.current = rustSetCanvasScene(page.id, hiddenIds ? page.strokes.filter((st) => !hiddenIds.has(st.id)) : page.strokes);
   }, [isNative, page.id, page.strokes, hiddenIds]);
+  // The note closed: its scene and the strokes' geometry the canvas kept go.
+  useEffect(() => {
+    if (!isNative) return;
+    const id = page.id;
+    return () => void rustSetCanvasScene(id, []);
+  }, [isNative, page.id]);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
 
@@ -2420,8 +2431,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const ink = d.ink;
       // The finished stroke is painted with React's commit below; the shell's layer is cleared
       // once a frame showing it has been drawn, so the ink never blinks.
+      const end = () => { ink.end(); logInkGrid(zoomRef.current); };
+      const sent = sceneSent.current;
       if (cancelled) ink.cancel();
-      else requestAnimationFrame(() => requestAnimationFrame(() => { ink.end(); logInkGrid(zoomRef.current); }));
+      else if (isNative) {
+        // The native canvas draws it once its scene is in (a long note's took 150 ms and more,
+        // and the stroke vanished meanwhile): the shell's copy is cleared a frame after that.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          void (sceneSent.current !== sent ? sceneIn.current : Promise.resolve()).then(() => requestAnimationFrame(end));
+        }));
+      } else requestAnimationFrame(() => requestAnimationFrame(end));
     }
 
     if (!cancelled && d.smart && d.snapped) {
@@ -2772,7 +2791,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   );
   /** The ink layers bottom first: the GPU draws a pinch's ink in the page's stacking order. */
   const inkLayers = useMemo(() => layers.flatMap((l) => (l.kind === 'ink' ? [l.strokes] : [])), [layers]);
-  usePinchInk(containerRef, scrollRoot ?? null, inkLayers, PAGE_W, !printMode);
+  // Not over the native canvas: it draws the ink while pinching (two copies, and the WebGL
+  // context's memory on top of the canvas's).
+  usePinchInk(containerRef, scrollRoot ?? null, inkLayers, PAGE_W, !printMode && !isNative);
   /** The ink layer the idle selection glow goes under: the lowest one with selected strokes. */
   const glowLayerKey = useMemo(() => {
     if (!glowSel) return null;
