@@ -474,17 +474,30 @@ impl GpuCanvas {
 
     /// The device rect (x, y, w, h) of a page box padded by `pad` device px, clipped to the target; None when empty.
     fn scissor(&self, b: &PageBox, tf: &Transform, pad: f32) -> Option<(u32, u32, u32, u32)> {
+        if self.size.0 == 0 || self.size.1 == 0 {
+            return None;
+        }
         let (w, h) = (self.size.0 as f32, self.size.1 as f32);
         let corners = [tf.apply(b.x0, b.y0), tf.apply(b.x1, b.y0), tf.apply(b.x0, b.y1), tf.apply(b.x1, b.y1)];
         let x0 = corners.iter().map(|c| c.0).fold(f32::INFINITY, f32::min) - pad;
         let y0 = corners.iter().map(|c| c.1).fold(f32::INFINITY, f32::min) - pad;
         let x1 = corners.iter().map(|c| c.0).fold(f32::NEG_INFINITY, f32::max) + pad;
         let y1 = corners.iter().map(|c| c.1).fold(f32::NEG_INFINITY, f32::max) + pad;
+        if !x0.is_finite() || !y0.is_finite() || !x1.is_finite() || !y1.is_finite() {
+            return None;
+        }
         let (x0, y0, x1, y1) = (x0.floor().max(0.0), y0.floor().max(0.0), x1.ceil().min(w), y1.ceil().min(h));
         if x1 <= x0 || y1 <= y0 {
             return None;
         }
-        Some((x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+        let sx = (x0 as u32).min(self.size.0);
+        let sy = (y0 as u32).min(self.size.1);
+        let sw = ((x1 - x0) as u32).min(self.size.0.saturating_sub(sx));
+        let sh = ((y1 - y0) as u32).min(self.size.1.saturating_sub(sy));
+        if sw == 0 || sh == 0 {
+            return None;
+        }
+        Some((sx, sy, sw, sh))
     }
 
     /// Draws `scene` onto `target` (`w` x `h` device px) through `tf`, over `paper` (None: a

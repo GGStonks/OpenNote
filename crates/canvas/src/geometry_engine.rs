@@ -1,7 +1,5 @@
 //! Geometry Engine: High-precision 2D math, clipping, polygon testing, and transformations.
 
-use std::f64::consts::PI;
-
 /// A 2D point / vector in double precision.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Vec2d {
@@ -272,24 +270,6 @@ impl OrientedBoundingBox {
     }
 }
 
-/// Tests whether point p is inside polygon `poly` via ray-casting.
-pub fn point_in_polygon(p: Vec2d, poly: &[Vec2d]) -> bool {
-    if poly.len() < 3 {
-        return false;
-    }
-    let mut inside = false;
-    let mut j = poly.len() - 1;
-    for i in 0..poly.len() {
-        let a = poly[i];
-        let b = poly[j];
-        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
 /// Distance from point p to line segment (a, b).
 pub fn distance_to_segment(p: Vec2d, a: Vec2d, b: Vec2d) -> f64 {
     let ab = b.sub(a);
@@ -299,94 +279,4 @@ pub fn distance_to_segment(p: Vec2d, a: Vec2d, b: Vec2d) -> f64 {
     }
     let t = (p.sub(a).dot(ab) / l2).clamp(0.0, 1.0);
     p.distance(a.add(ab.scale(t)))
-}
-
-/// Tests whether two line segments (a, b) and (c, d) intersect.
-pub fn segments_intersect(a: Vec2d, b: Vec2d, c: Vec2d, d: Vec2d) -> bool {
-    let ccw = |p: Vec2d, q: Vec2d, r: Vec2d| -> f64 {
-        (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
-    };
-
-    let d1 = ccw(a, b, c);
-    let d2 = ccw(a, b, d);
-    let d3 = ccw(c, d, a);
-    let d4 = ccw(c, d, b);
-
-    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
-        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
-    {
-        return true;
-    }
-
-    // Collinear checks
-    let on_seg = |p: Vec2d, q: Vec2d, r: Vec2d| -> bool {
-        r.x >= p.x.min(q.x) - 1e-9 && r.x <= p.x.max(q.x) + 1e-9 &&
-        r.y >= p.y.min(q.y) - 1e-9 && r.y <= p.y.max(q.y) + 1e-9
-    };
-
-    if d1.abs() < 1e-9 && on_seg(a, b, c) { return true; }
-    if d2.abs() < 1e-9 && on_seg(a, b, d) { return true; }
-    if d3.abs() < 1e-9 && on_seg(c, d, a) { return true; }
-    if d4.abs() < 1e-9 && on_seg(c, d, b) { return true; }
-
-    false
-}
-
-/// Liang-Barsky line segment clipping against an axis-aligned bounding box.
-pub fn segment_intersects_aabb(a: Vec2d, b: Vec2d, aabb: &RectBounds) -> bool {
-    if aabb.contains_point(a) || aabb.contains_point(b) {
-        return true;
-    }
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let mut t0 = 0.0;
-    let mut t1 = 1.0;
-
-    let checks = [
-        (-dx, a.x - aabb.min_x),
-        (dx, aabb.max_x - a.x),
-        (-dy, a.y - aabb.min_y),
-        (dy, aabb.max_y - a.y),
-    ];
-
-    for (p, q) in checks {
-        if p == 0.0 {
-            if q < 0.0 {
-                return false;
-            }
-        } else {
-            let r = q / p;
-            if p < 0.0 {
-                if r > t1 { return false; }
-                if r > t0 { t0 = r; }
-            } else {
-                if r < t0 { return false; }
-                if r < t1 { t1 = r; }
-            }
-        }
-    }
-    t0 <= t1
-}
-
-/// Snaps an angle (in radians) to cardinal directions (0°, 45°, 90°, etc.) if within tolerance.
-pub fn snap_angle_cardinal(rad: f64, tolerance_rad: f64) -> f64 {
-    let snap_targets = [
-        0.0,
-        PI * 0.25,
-        PI * 0.5,
-        PI * 0.75,
-        PI,
-        -PI * 0.75,
-        -PI * 0.5,
-        -PI * 0.25,
-    ];
-    let norm = (rad + PI) % (2.0 * PI) - PI;
-    for target in snap_targets {
-        let diff = (norm - target).abs();
-        let diff = diff.min(2.0 * PI - diff);
-        if diff <= tolerance_rad {
-            return target;
-        }
-    }
-    rad
 }

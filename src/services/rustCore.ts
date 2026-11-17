@@ -436,8 +436,11 @@ export async function rustGetCanvasStats(): Promise<Record<string, unknown> | nu
  * notes with PDF pages or pictures: those, in the web view, would cover the native ink (N4).
  * Made separately, a note with a picture got a see-through desk over a canvas nobody drew: black.
  */
-export function nativeCanvasFor(note: Pick<NoteDocument, 'sheets' | 'pages'>): boolean {
-  return hasNativeCanvas() && !note.sheets.some((s) => s.pdf) && !note.pages.some((p) => (p.imageBlocks ?? []).length > 0);
+export function nativeCanvasFor(note?: Pick<NoteDocument, 'sheets' | 'pages'> | null): boolean {
+  if (!note || !hasNativeCanvas()) return false;
+  const sheets = note.sheets ?? [];
+  const pages = note.pages ?? [];
+  return !sheets.some((s) => s?.pdf) && !pages.some((p) => (p?.imageBlocks ?? []).length > 0);
 }
 
 /** The theme's desk colour (index.css --ui-desk: "r g b"), 0..1, for the native canvas. */

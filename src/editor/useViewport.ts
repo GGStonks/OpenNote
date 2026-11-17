@@ -743,6 +743,21 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       touchPullY = null;
       if (pullRaw.current > 0) releasePull();
     };
+    const onNativeCamera = (ev: Event) => {
+      const e = ev as CustomEvent<{ zoom: number; left: number; top: number }>;
+      if (!e.detail) return;
+      const { zoom: targetZoom, left, top } = e.detail;
+      const cur = el.getBoundingClientRect();
+      if (Math.abs(targetZoom - zoomRef.current) > 1e-4) {
+        setFitMode(null);
+        zoomRef.current = targetZoom;
+        setZoomState(targetZoom);
+      }
+      el.scrollLeft = Math.max(0, cur.left - left);
+      el.scrollTop = Math.max(0, cur.top - top);
+    };
+    window.addEventListener('opennote-native-camera', onNativeCamera);
+
     el.addEventListener('touchstart', onTouchStart, { passive: false, capture: true });
     el.addEventListener('touchmove', onTouchMove, { passive: true });
     el.addEventListener('touchend', onTouchEnd, { passive: true });
@@ -754,6 +769,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     el.addEventListener('wheel', onWheel, { passive: false });
     document.addEventListener('gesturestart', noZoom, { passive: false } as AddEventListenerOptions);
     return () => {
+      window.removeEventListener('opennote-native-camera', onNativeCamera);
       el.removeEventListener('touchstart', onTouchStart, { capture: true });
       el.removeEventListener('touchmove', onTouchMove);
       el.removeEventListener('touchend', onTouchEnd);

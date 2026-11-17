@@ -163,53 +163,133 @@ fn over(dst: vec4<f32>, src: vec4<f32>, a: f32) -> vec4<f32> {
   return vec4<f32>(src.rgb * sa + dst.rgb * (1.0 - sa), sa + dst.a * (1.0 - sa));
 }
 
-// Coverage of the band [s, e) over this pixel's extent in page px (the page px per device px).
-fn band(v: f32, s: f32, e: f32, hw: f32, px: f32) -> f32 {
-  return clamp((min(e, v + hw) - max(s, v - hw)) * px, 0.0, 1.0);
-}
-
-// Coverage of the bands [k * period + off, k * period + off + lw) around v.
-fn rep(v: f32, period: f32, lw: f32, off: f32, hw: f32, px: f32) -> f32 {
-  let s = v - ((v - off) - floor((v - off) / period) * period);
-  return min(1.0, band(v, s, s + lw, hw, px) + band(v, s + period, s + period + lw, hw, px) + band(v, s - period, s - period + lw, hw, px));
-}
-
 @fragment
 fn fs_paper(i: PageOut) -> @location(0) vec4<f32> {
-  let px = u.px;
-  let hw = 0.5 / px;
-  let lw = u.p_lw;
+  let scale = u.px;
   var c = u.p_base;
-  let x = i.p.x;
-  let y = i.p.y;
   let st = u.p_style;
+  if (st == 0u) {
+    return vec4<f32>(c.rgb * c.a, c.a);
+  }
+
+  // Device pixel coordinates within the page
+  let dpos = floor(i.pos.xy) - floor(u.t);
+  let dev_px = dpos.x;
+  let dev_py = dpos.y;
+
   if (st >= 1u && st <= 4u) {
-    // Ruled / narrow / lines / narrow lines: lines every gap from y = 80, under a plain top band
-    // of 79 px; ruled and narrow keep a margin line at x = 79.
+    // Ruled (1), Narrow (2), Lines (3), NarrowLines (4)
     var gap = 32.0;
     if (st == 2u || st == 4u) { gap = 24.0; }
-    let lines = rep(y, gap, lw, 80.0 - lw, hw, px) * band(y, 79.0, 1e9, hw, px);
-    c = over(c, u.p_line, lines);
-    if (st <= 2u) { c = over(c, u.p_margin, band(x, 79.0, 79.0 + lw, hw, px)); }
+
+    // Ruled lines start after top margin (80px in page coordinates)
+    let y_float = dev_py / scale;
+    let k = round((y_float - 80.0) / gap);
+    if (k >= 0.0) {
+      let y_page = 80.0 + k * gap;
+      if (y_page * scale < u.size.y) {
+        let py = round(y_page * scale);
+        if (dev_py == py && py < u.size.y) {
+          c = over(c, u.p_line, 1.0);
+        }
+      }
+    }
+
+    // Margin line (only for Ruled and Narrow, not Lines / NarrowLines)
+    if (st == 1u || st == 2u) {
+      let margin_x = round(79.0 * scale);
+      if (dev_px == margin_x && margin_x < u.size.x) {
+        c = over(c, u.p_margin, 1.0);
+      }
+    }
   } else if (st == 5u) {
-    let ox = x + u.p_origin.x;
-    let oy = y + u.p_origin.y;
-    c = over(c, u.p_grid, rep(oy, 24.0, lw, 0.0, hw, px));
-    c = over(c, u.p_grid, rep(ox, 24.0, lw, 0.0, hw, px));
+    // Grid (5): 24px step
+    let step = 24.0;
+    let x0 = ((u.p_origin.x % step) + step) % step;
+    let y0 = ((u.p_origin.y % step) + step) % step;
+
+    // Vertical lines
+    let kx = round((dev_px / scale - x0) / step);
+    if (kx >= 0.0) {
+      let x_page = x0 + kx * step;
+      if (x_page * scale < u.size.x) {
+        let px = round(x_page * scale);
+        if (dev_px == px && px < u.size.x) {
+          c = over(c, u.p_grid, 1.0);
+        }
+      }
+    }
+
+    // Horizontal lines
+    let ky = round((dev_py / scale - y0) / step);
+    if (ky >= 0.0) {
+      let y_page = y0 + ky * step;
+      if (y_page * scale < u.size.y) {
+        let py = round(y_page * scale);
+        if (dev_py == py && py < u.size.y) {
+          c = over(c, u.p_grid, 1.0);
+        }
+      }
+    }
   } else if (st == 6u) {
-    let ox = x + u.p_origin.x;
-    let oy = y + u.p_origin.y;
-    c = over(c, u.p_minor, rep(oy, 12.0, 1.0, 0.0, hw, px));
-    c = over(c, u.p_minor, rep(ox, 12.0, 1.0, 0.0, hw, px));
-    c = over(c, u.p_major, rep(oy, 60.0, lw, 0.0, hw, px));
-    c = over(c, u.p_major, rep(ox, 60.0, lw, 0.0, hw, px));
+    // Graph (6): 12px step, major line every 60px
+    let step = 12.0;
+    let x0 = ((u.p_origin.x % step) + step) % step;
+    let y0 = ((u.p_origin.y % step) + step) % step;
+
+    // Vertical lines
+    let kx = round((dev_px / scale - x0) / step);
+    if (kx >= 0.0) {
+      let x_page = x0 + kx * step;
+      if (x_page * scale < u.size.x) {
+        let px = round(x_page * scale);
+        if (dev_px == px && px < u.size.x) {
+          let is_major = (i32(round(x_page)) % 60) == 0;
+          let col = select(u.p_minor, u.p_major, is_major);
+          c = over(c, col, 1.0);
+        }
+      }
+    }
+
+    // Horizontal lines
+    let ky = round((dev_py / scale - y0) / step);
+    if (ky >= 0.0) {
+      let y_page = y0 + ky * step;
+      if (y_page * scale < u.size.y) {
+        let py = round(y_page * scale);
+        if (dev_py == py && py < u.size.y) {
+          let is_major = (i32(round(y_page)) % 60) == 0;
+          let col = select(u.p_minor, u.p_major, is_major);
+          c = over(c, col, 1.0);
+        }
+      }
+    }
   } else if (st == 7u) {
-    // Dots of radius 1.3 (fading to 0 over 0.4 px) on the 24 px lattice, centred at 12.
-    let ox = x + u.p_origin.x - 12.0;
-    let oy = y + u.p_origin.y - 12.0;
-    let d = length(vec2<f32>(ox - round(ox / 24.0) * 24.0, oy - round(oy / 24.0) * 24.0));
-    let r = u.p_pad.x;
-    c = over(c, u.p_dot, 1.0 - clamp((d - r) / 0.4, 0.0, 1.0));
+    // Dots (7): radius 1.3 * scale on 24px lattice
+    let step = 24.0;
+    let x0 = 12.0 + (((u.p_origin.x % step) + step) % step);
+    let y0 = 12.0 + (((u.p_origin.y % step) + step) % step);
+
+    let kx = round((dev_px / scale - x0) / step);
+    let ky = round((dev_py / scale - y0) / step);
+    if (kx >= 0.0 && ky >= 0.0) {
+      let x_page = x0 + kx * step;
+      let y_page = y0 + ky * step;
+      let cx = x_page * scale;
+      let cy = y_page * scale;
+      if (cx < u.size.x && cy < u.size.y) {
+        let r = 1.3 * scale;
+        let dx = dev_px - cx;
+        let dy = dev_py - cy;
+        let dist2 = dx * dx + dy * dy;
+        if (dist2 <= r * r) {
+          let dist = sqrt(dist2);
+          let alpha = 1.0 - clamp(dist - r + 0.5, 0.0, 1.0);
+          c = over(c, u.p_dot, alpha);
+        }
+      }
+    }
   }
+
   return vec4<f32>(c.rgb * c.a, c.a);
 }

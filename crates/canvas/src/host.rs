@@ -40,6 +40,13 @@ enum Target {
     Offscreen { texture: wgpu::Texture },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct Momentum {
+    vx: f64,
+    vy: f64,
+    last_time: Instant,
+}
+
 pub struct CanvasHost {
     canvas: GpuCanvas,
     target: Target,
@@ -48,6 +55,8 @@ pub struct CanvasHost {
     empty: GpuScene,
     frame: FrameSpec,
     pub dirty: bool,
+    pub in_gesture: bool,
+    momentum: Option<Momentum>,
     stats: Stats,
 }
 
@@ -80,7 +89,7 @@ impl CanvasHost {
         let empty = canvas.upload(&Scene::default());
         // Nothing is presented before the page's first frame: an empty frame cleared the surface
         // to see-through black, a black flash at every start (the view's launch colour shows meanwhile).
-        Ok((CanvasHost { canvas, target: Target::Surface { surface, config }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: false, stats: Stats { width: w, height: h, ..Default::default() } }, name))
+        Ok((CanvasHost { canvas, target: Target::Surface { surface, config }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: false, in_gesture: false, momentum: None, stats: Stats { width: w, height: h, ..Default::default() } }, name))
     }
 
     /// A host drawing into an offscreen RGBA8 texture on the PC's GPU.
@@ -89,7 +98,7 @@ impl CanvasHost {
         let canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
         let texture = Self::offscreen_texture(&canvas.device, w, h);
         let empty = canvas.upload(&Scene::default());
-        Ok((CanvasHost { canvas, target: Target::Offscreen { texture }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: true, stats: Stats { width: w, height: h, ..Default::default() } }, name))
+        Ok((CanvasHost { canvas, target: Target::Offscreen { texture }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: true, in_gesture: false, momentum: None, stats: Stats { width: w, height: h, ..Default::default() } }, name))
     }
 
     fn offscreen_texture(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
@@ -143,7 +152,41 @@ impl CanvasHost {
         }
     }
 
-    pub fn set_frame(&mut self, frame: FrameSpec) {
+    pub fn begin_gesture(&mut self) {
+        self.in_gesture = true;
+        self.momentum = None;
+    }
+
+    pub fn end_gesture(&mut self, vx: f64, vy: f64) {
+        if vx.hypot(vy) > 30.0 {
+            self.momentum = Some(Momentum { vx, vy, last_time: Instant::now() });
+            self.in_gesture = true;
+            self.dirty = true;
+        } else {
+            self.momentum = None;
+            self.in_gesture = false;
+        }
+    }
+
+    pub fn get_primary_transform(&self) -> Option<(f64, f64, f64)> {
+        self.frame.pages.first().map(|p| (p.tf.a as f64, p.tf.ox as f64, p.tf.oy as f64))
+    }
+
+    pub fn set_frame(&mut self, mut frame: FrameSpec) {
+        if self.in_gesture {
+            // While a native 2-finger gesture or momentum is active, don't let lagging
+            // incoming frames from the WebView snap the camera back. Preserve the live transforms.
+            if self.frame.pages.len() == frame.pages.len() {
+                for (cur, incoming) in self.frame.pages.iter().zip(frame.pages.iter_mut()) {
+                    incoming.tf = cur.tf;
+                }
+            }
+            if frame != self.frame {
+                self.frame = frame;
+                self.dirty = true;
+            }
+            return;
+        }
         if frame != self.frame {
             self.frame = frame;
             self.dirty = true;
@@ -190,6 +233,26 @@ impl CanvasHost {
 
     /// Draws the frame (and presents it on a surface). Ok(true) when something was drawn.
     pub fn draw(&mut self) -> Result<bool, String> {
+        if let Some(m) = &mut self.momentum {
+            let dt = m.last_time.elapsed().as_secs_f64().clamp(0.001, 0.05);
+            m.last_time = Instant::now();
+            let dx = m.vx * dt;
+            let dy = m.vy * dt;
+            for page in &mut self.frame.pages {
+                page.tf.ox += dx as f32;
+                page.tf.oy += dy as f32;
+            }
+            let decay = 0.92f64.powf(dt * 60.0);
+            m.vx *= decay;
+            m.vy *= decay;
+            if m.vx.hypot(m.vy) < 15.0 {
+                self.momentum = None;
+                self.in_gesture = false;
+            } else {
+                self.dirty = true;
+            }
+        }
+
         if !self.dirty {
             return Ok(false);
         }
@@ -233,7 +296,8 @@ impl CanvasHost {
                     }
                 };
                 let view = st.texture.create_view(&Default::default());
-                self.canvas.draw_frame(&view, w, h, &frame);
+                let (tw, th) = (st.texture.width(), st.texture.height());
+                self.canvas.draw_frame(&view, tw, th, &frame);
                 st.present();
             }
             Target::Offscreen { texture } => {

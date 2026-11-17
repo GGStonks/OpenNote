@@ -8,8 +8,10 @@ import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -211,11 +213,108 @@ public class MainActivity extends BridgeActivity {
         launchColors();
     }
 
+    private ScaleGestureDetector scaleDetector;
+    private float lastFocusX, lastFocusY;
+    private VelocityTracker velocityTracker;
+    private boolean inNativeGesture = false;
+
+    private void initGestureDetector() {
+        if (scaleDetector != null) return;
+        scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            @Override
+            public boolean onScaleBegin(ScaleGestureDetector detector) {
+                OpenNoteRustPlugin.beginGesture();
+                inNativeGesture = true;
+                lastFocusX = detector.getFocusX();
+                lastFocusY = detector.getFocusY();
+                return true;
+            }
+
+            @Override
+            public boolean onScale(ScaleGestureDetector detector) {
+                float factor = detector.getScaleFactor();
+                float cx = detector.getFocusX();
+                float cy = detector.getFocusY();
+                float dx = cx - lastFocusX;
+                float dy = cy - lastFocusY;
+                lastFocusX = cx;
+                lastFocusY = cy;
+                OpenNoteRustPlugin.panZoom(dx, dy, factor, cx, cy);
+                return true;
+            }
+
+            @Override
+            public void onScaleEnd(ScaleGestureDetector detector) {
+            }
+        });
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            scaleDetector.setQuickScaleEnabled(false);
+        }
+    }
+
     /** Native live ink: the stylus's newest position reaches the ink overlay before the WebView. */
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         OpenNoteInkPlugin.onTouch(ev);
+        boolean nativeCanvas = OpenNoteRustPlugin.nativeCanvasEnabled(this);
+        if (nativeCanvas) {
+            initGestureDetector();
+            boolean isStylus = false;
+            for (int i = 0; i < ev.getPointerCount(); i++) {
+                if (ev.getToolType(i) == MotionEvent.TOOL_TYPE_STYLUS) {
+                    isStylus = true;
+                    break;
+                }
+            }
+            float density = getResources().getDisplayMetrics().density;
+            boolean inToolbar = ev.getY() < 58f * density;
+            if (!isStylus && !inToolbar && ev.getPointerCount() >= 2) {
+                if (velocityTracker == null) velocityTracker = VelocityTracker.obtain();
+                velocityTracker.addMovement(ev);
+
+                int action = ev.getActionMasked();
+                if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                    lastFocusX = (ev.getX(0) + ev.getX(1)) / 2f;
+                    lastFocusY = (ev.getY(0) + ev.getY(1)) / 2f;
+                    OpenNoteRustPlugin.beginGesture();
+                    inNativeGesture = true;
+                }
+                scaleDetector.onTouchEvent(ev);
+                if (action == MotionEvent.ACTION_POINTER_UP && ev.getPointerCount() == 2) {
+                    velocityTracker.computeCurrentVelocity(1000);
+                    float vx = velocityTracker.getXVelocity();
+                    float vy = velocityTracker.getYVelocity();
+                    OpenNoteRustPlugin.endGesture(vx, vy);
+                    inNativeGesture = false;
+                    syncNativeCameraToWeb();
+                    velocityTracker.recycle();
+                    velocityTracker = null;
+                }
+            } else if (inNativeGesture && (ev.getActionMasked() == MotionEvent.ACTION_UP || ev.getActionMasked() == MotionEvent.ACTION_CANCEL)) {
+                OpenNoteRustPlugin.endGesture(0, 0);
+                inNativeGesture = false;
+                syncNativeCameraToWeb();
+                if (velocityTracker != null) {
+                    velocityTracker.recycle();
+                    velocityTracker = null;
+                }
+            }
+        }
         return super.dispatchTouchEvent(ev);
+    }
+
+    private void syncNativeCameraToWeb() {
+        double[] cam = OpenNoteRustPlugin.getCamera();
+        if (cam != null && cam.length >= 3 && getBridge() != null && getBridge().getWebView() != null) {
+            float dpr = getResources().getDisplayMetrics().density;
+            double cssZoom = cam[0] / dpr;
+            double cssLeft = cam[1] / dpr;
+            double cssTop = cam[2] / dpr;
+            if (Double.isFinite(cssZoom) && Double.isFinite(cssLeft) && Double.isFinite(cssTop)) {
+                String js = String.format(java.util.Locale.US, "window.dispatchEvent(new CustomEvent('opennote-native-camera', { detail: { zoom: %f, left: %f, top: %f } }));", cssZoom, cssLeft, cssTop);
+                getBridge().getWebView().evaluateJavascript(js, null);
+            }
+        }
     }
 
     @Override

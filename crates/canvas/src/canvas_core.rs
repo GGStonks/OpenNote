@@ -2,6 +2,43 @@
 
 use crate::geometry_engine::{RectBounds, Vec2d};
 use crate::Transform;
+use crate::Paper;
+use model::{PaperColor, PaperStyle};
+use renderer::color::Rgba;
+
+impl Paper {
+    /// Builds a `Paper` from model `PaperStyle` and `PaperColor`.
+    pub fn from_style_and_color(
+        style: PaperStyle,
+        color: &PaperColor,
+        width: f32,
+        height: f32,
+        origin: [f32; 2],
+        pattern: Option<[f32; 3]>,
+    ) -> Self {
+        let base_rgba = Rgba::parse(color.hex(), 1.0);
+        let dark = color.is_dark();
+        let style_code = match style {
+            PaperStyle::Blank => 0,
+            PaperStyle::Ruled => 1,
+            PaperStyle::Narrow => 2,
+            PaperStyle::Lines => 3,
+            PaperStyle::NarrowLines => 4,
+            PaperStyle::Grid => 5,
+            PaperStyle::Graph => 6,
+            PaperStyle::Dots => 7,
+        };
+        Paper {
+            width,
+            height,
+            style: style_code,
+            base: [base_rgba.r, base_rgba.g, base_rgba.b, base_rgba.a],
+            dark,
+            pattern,
+            origin,
+        }
+    }
+}
 
 /// Affine 2D camera transformation in double precision (f64) to eliminate jitter at extreme zoom.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]

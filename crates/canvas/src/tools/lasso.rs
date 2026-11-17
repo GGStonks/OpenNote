@@ -1,13 +1,11 @@
 //! Lasso Tool: Vector marching-ants tracing, on_pointer_up selection, oriented bounding box, and exclusive outside-tap dismissal.
 
 use crate::canvas_core::ViewMatrix;
-use crate::geometry_engine::{
-    point_in_polygon, segment_intersects_aabb, segments_intersect, OrientedBoundingBox,
-    RectBounds, Vec2d,
-};
+use crate::geometry_engine::{OrientedBoundingBox, RectBounds, Vec2d};
 use crate::spatial_index::SpatialIndex;
 use crate::vector_renderer::VectorOverlayPass;
-use model::Stroke;
+use model::{NotePage, Stroke};
+use nib::geometry::XY;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LassoPhase {
@@ -145,46 +143,70 @@ impl LassoTool {
         match self.phase {
             LassoPhase::Tracking => {
                 if self.raw_path.len() >= 3 {
-                    // 1. Automatically close the lasso polygon
-                    let mut polygon = self.raw_path.clone();
-                    if polygon.first() != polygon.last() {
-                        polygon.push(polygon[0]);
-                    }
-
-                    // 2. Inclusion test: pre-cull with polygon AABB from spatial index
-                    let poly_aabb = RectBounds::from_points(&polygon);
+                    // Pre-cull candidate strokes using the lasso polygon AABB from spatial index
+                    let poly_aabb = RectBounds::from_points(&self.raw_path);
                     let candidate_ids = spatial_index.query_intersects(&poly_aabb);
                     let candidate_set: std::collections::HashSet<&str> =
                         candidate_ids.iter().map(|s| s.as_str()).collect();
 
-                    let mut captured_ids = Vec::new();
-                    let mut captured_bounds = RectBounds::default();
+                    let candidate_strokes: Vec<Stroke> = strokes
+                        .iter()
+                        .filter(|s| candidate_set.contains(s.id.as_str()))
+                        .cloned()
+                        .collect();
 
-                    for stroke in strokes {
-                        let id = stroke.id.as_str();
-                        if !candidate_set.contains(id) {
-                            continue;
-                        }
+                    let candidate_page = NotePage {
+                        id: String::new(),
+                        page_number: 0,
+                        strokes: candidate_strokes,
+                        latex_blocks: Vec::new(),
+                        text_blocks: None,
+                        image_blocks: None,
+                    };
 
-                        // Detailed Point-in-Polygon & Segment intersection test
-                        if is_stroke_captured_by_lasso(stroke, &polygon, &poly_aabb) {
-                            captured_ids.push(id.to_string());
-                            let sb = crate::geometry_engine::RectBounds::new(
-                                stroke.points.iter().map(|p| p.x).fold(f64::INFINITY, f64::min),
-                                stroke.points.iter().map(|p| p.y).fold(f64::INFINITY, f64::min),
-                                stroke.points.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max),
-                                stroke.points.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max),
-                            );
-                            captured_bounds = captured_bounds.union(&sb);
-                        }
+                    let lasso_xy: Vec<XY> = self
+                        .raw_path
+                        .iter()
+                        .map(|p| XY { x: p.x, y: p.y })
+                        .collect();
+
+                    let selection = shapes::selection::lasso_select_page(&lasso_xy, &candidate_page);
+
+                    #[cfg(debug_assertions)]
+                    {
+                        let full_page = NotePage {
+                            id: String::new(),
+                            page_number: 0,
+                            strokes: strokes.to_vec(),
+                            latex_blocks: Vec::new(),
+                            text_blocks: None,
+                            image_blocks: None,
+                        };
+                        let unfiltered = shapes::selection::lasso_select_page(&lasso_xy, &full_page);
+                        debug_assert_eq!(
+                            selection.stroke_ids, unfiltered.stroke_ids,
+                            "prefiltered lasso selection must equal unfiltered call"
+                        );
                     }
 
-                    if !captured_ids.is_empty() {
-                        // 3. Calculate orientable/scalable bounding box
+                    if !selection.stroke_ids.is_empty() {
+                        let captured_bounds = if let Some(b) = selection.bounds {
+                            RectBounds::new(b.min_x, b.min_y, b.max_x, b.max_y)
+                        } else {
+                            let mut cb = RectBounds::default();
+                            for id in &selection.stroke_ids {
+                                if let Some(s) = strokes.iter().find(|s| &s.id == id) {
+                                    for p in &s.points {
+                                        cb.include(Vec2d::new(p.x, p.y));
+                                    }
+                                }
+                            }
+                            cb
+                        };
                         let obb = OrientedBoundingBox::from_aabb(&captured_bounds);
-                        self.selected_ids = captured_ids;
+                        self.selected_ids = selection.stroke_ids;
                         self.selection_bbox = Some(obb);
-                        // 4. Show contextual interaction menu and vector handles
+                        // Show contextual interaction menu and vector handles
                         self.is_menu_open = true;
                         self.phase = LassoPhase::Selected;
                         return true;
@@ -227,37 +249,4 @@ impl LassoTool {
             LassoPhase::Idle => {}
         }
     }
-}
-
-/// Tests whether a stroke is captured by a closed lasso polygon.
-fn is_stroke_captured_by_lasso(stroke: &Stroke, polygon: &[Vec2d], poly_aabb: &RectBounds) -> bool {
-    let pts: Vec<Vec2d> = stroke.points.iter().map(|p| Vec2d::new(p.x, p.y)).collect();
-    if pts.is_empty() {
-        return false;
-    }
-
-    // Fast check: if any stroke point is inside the polygon
-    for p in &pts {
-        if poly_aabb.contains_point(*p) && point_in_polygon(*p, polygon) {
-            return true;
-        }
-    }
-
-    // Edge intersection check: if stroke line segments cross polygon edges
-    for i in 1..pts.len() {
-        let p1 = pts[i - 1];
-        let p2 = pts[i];
-        if !segment_intersects_aabb(p1, p2, poly_aabb) {
-            continue;
-        }
-        for j in 1..polygon.len() {
-            let q1 = polygon[j - 1];
-            let q2 = polygon[j];
-            if segments_intersect(p1, p2, q1, q2) {
-                return true;
-            }
-        }
-    }
-
-    false
 }

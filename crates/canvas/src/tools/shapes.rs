@@ -1,22 +1,17 @@
-//! Interactive Shapes: Hold-to-Shape (~350ms) detection, vertex handles, magnetic angle snap, and live vector deformation.
+//! Interactive Shapes: Hold-to-Shape (~350ms) detection via SmartPen (T4), vertex handles, magnetic angle snap, and live vector deformation.
 
 use crate::canvas_core::ViewMatrix;
-use crate::geometry_engine::{snap_angle_cardinal, Vec2d};
+use crate::geometry_engine::Vec2d;
 use crate::vector_renderer::{SnapGuideSdf, TransformHandleSdf, VectorOverlayPass};
-use model::{Point, ShapeKind, Stroke};
-use std::f64::consts::PI;
+use model::Stroke;
+use nib::geometry::XY;
+use shapes::edit::{drag_handle, move_shape_handle, HandleRole, ShapeHandle};
+use shapes::smart_pen::{ShapeMode, SmartPen, SmartPenConfig, SmartPenTool};
 
-const HOLD_TO_SHAPE_THRESHOLD_MS: f64 = 350.0;
-const STANDSTILL_RADIUS_SQ: f64 = 16.0; // 4px standstill tolerance squared
-
-#[derive(Clone, Debug, PartialEq)]
 pub enum ShapeToolState {
     Idle,
     Drawing {
-        start_time_ms: f64,
-        last_move_time_ms: f64,
-        anchor_pos: Vec2d,
-        raw_points: Vec<Point>,
+        smart_pen: SmartPen,
         snapped_preview: Option<Stroke>,
     },
     Editing {
@@ -25,10 +20,82 @@ pub enum ShapeToolState {
     },
 }
 
-#[derive(Clone, Debug)]
+impl std::fmt::Debug for ShapeToolState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Idle => write!(f, "Idle"),
+            Self::Drawing { snapped_preview, .. } => f
+                .debug_struct("Drawing")
+                .field("snapped_preview", snapped_preview)
+                .finish(),
+            Self::Editing {
+                selected_stroke,
+                active_handle,
+            } => f
+                .debug_struct("Editing")
+                .field("selected_stroke", selected_stroke)
+                .field("active_handle", active_handle)
+                .finish(),
+        }
+    }
+}
+
+impl Clone for ShapeToolState {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Idle => Self::Idle,
+            Self::Drawing {
+                smart_pen,
+                snapped_preview,
+            } => {
+                let mut sp = SmartPen::new(SmartPenConfig {
+                    tool: SmartPenTool::Shape(ShapeMode::Curve),
+                    hold_threshold_ms: Some(350.0),
+                    ..Default::default()
+                });
+                for s in smart_pen.samples() {
+                    sp.add_sample(s.x, s.y, s.t, s.pressure);
+                }
+                Self::Drawing {
+                    smart_pen: sp,
+                    snapped_preview: snapped_preview.clone(),
+                }
+            }
+            Self::Editing {
+                selected_stroke,
+                active_handle,
+            } => Self::Editing {
+                selected_stroke: selected_stroke.clone(),
+                active_handle: *active_handle,
+            },
+        }
+    }
+}
+
 pub struct ShapeTool {
     pub state: ShapeToolState,
     pub magnetic_angle_snap_enabled: bool,
+    pub active_snap_guide: Option<[Vec2d; 2]>,
+}
+
+impl std::fmt::Debug for ShapeTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShapeTool")
+            .field("state", &self.state)
+            .field("magnetic_angle_snap_enabled", &self.magnetic_angle_snap_enabled)
+            .field("active_snap_guide", &self.active_snap_guide)
+            .finish()
+    }
+}
+
+impl Clone for ShapeTool {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            magnetic_angle_snap_enabled: self.magnetic_angle_snap_enabled,
+            active_snap_guide: self.active_snap_guide,
+        }
+    }
 }
 
 impl Default for ShapeTool {
@@ -36,6 +103,7 @@ impl Default for ShapeTool {
         ShapeTool {
             state: ShapeToolState::Idle,
             magnetic_angle_snap_enabled: true,
+            active_snap_guide: None,
         }
     }
 }
@@ -47,6 +115,7 @@ impl ShapeTool {
 
     /// Handles pointer down: initiates drawing or selects handle.
     pub fn on_pointer_down(&mut self, pos: Vec2d, timestamp_ms: f64) {
+        self.active_snap_guide = None;
         if let ShapeToolState::Editing { selected_stroke, .. } = &self.state {
             // Check if tapped a vertex handle
             if let Some(handle_idx) = hit_test_shape_vertices(selected_stroke, pos, 14.0) {
@@ -58,98 +127,52 @@ impl ShapeTool {
             }
         }
 
+        let mut smart_pen = SmartPen::new(SmartPenConfig {
+            tool: SmartPenTool::Shape(ShapeMode::Curve),
+            hold_threshold_ms: Some(350.0),
+            ..Default::default()
+        });
+        smart_pen.add_sample(pos.x, pos.y, timestamp_ms, 1.0);
         self.state = ShapeToolState::Drawing {
-            start_time_ms: timestamp_ms,
-            last_move_time_ms: timestamp_ms,
-            anchor_pos: pos,
-            raw_points: vec![Point {
-                x: pos.x,
-                y: pos.y,
-                pressure: 1.0,
-                t: Some(timestamp_ms),
-                alt: None,
-                az: None,
-            }],
+            smart_pen,
             snapped_preview: None,
         };
     }
 
-    /// Handles pointer move: tracks standstill for Hold-to-Shape (~350ms) or updates dragged vertex.
+    /// Handles pointer move: tracks standstill via SmartPen (~350ms) or updates dragged vertex.
     pub fn on_pointer_move(&mut self, pos: Vec2d, timestamp_ms: f64) {
         match &mut self.state {
             ShapeToolState::Drawing {
-                last_move_time_ms,
-                anchor_pos,
-                raw_points,
+                smart_pen,
                 snapped_preview,
-                ..
             } => {
-                let dist_sq = pos.distance_sq(*anchor_pos);
-                if dist_sq > STANDSTILL_RADIUS_SQ {
-                    // Pen is moving: reset standstill anchor
-                    *anchor_pos = pos;
-                    *last_move_time_ms = timestamp_ms;
-                    *snapped_preview = None;
-                } else if timestamp_ms - *last_move_time_ms >= HOLD_TO_SHAPE_THRESHOLD_MS {
-                    // User held pen still for >= 350ms: Trigger Hold-to-Shape recognition!
-                    if snapped_preview.is_none() && raw_points.len() >= 2 {
-                        let proto = Stroke {
-                            points: raw_points.clone(),
-                            tool: "pen".to_string(),
-                            width: 3.0,
-                            ..Default::default()
-                        };
-                        let recognized = shapes::recognition::detect_shape(raw_points);
-                        if let Some(snapped) = recognized {
-                            let mut converted = proto.clone();
-                            converted.is_shape = Some(true);
-                            converted.shape_kind = Some(snapped.kind);
-                            converted.points = snapped.points;
-                            converted.closed = Some(snapped.closed);
-                            *snapped_preview = Some(converted);
-                        }
-                    }
+                smart_pen.add_sample(pos.x, pos.y, timestamp_ms, 1.0);
+                if smart_pen.is_snapped() {
+                    *snapped_preview = smart_pen.snapped_stroke().cloned();
                 }
-                raw_points.push(Point {
-                    x: pos.x,
-                    y: pos.y,
-                    pressure: 1.0,
-                    t: Some(timestamp_ms),
-                    alt: None,
-                    az: None,
-                });
             }
             ShapeToolState::Editing {
                 selected_stroke,
                 active_handle: Some(handle_idx),
             } => {
-                // Dragging vertex: live dynamic shape deformation
-                let target_pos = if self.magnetic_angle_snap_enabled
-                    && selected_stroke.shape_kind == Some(ShapeKind::Line)
-                    && selected_stroke.points.len() == 2
-                {
-                    let other_idx = 1 - *handle_idx;
-                    let other = Vec2d::new(
-                        selected_stroke.points[other_idx].x,
-                        selected_stroke.points[other_idx].y,
-                    );
-                    let delta = pos.sub(other);
-                    let angle = delta.y.atan2(delta.x);
-                    let snapped_angle = snap_angle_cardinal(angle, 5.0 * PI / 180.0);
-                    let length = delta.length();
-                    other.add(Vec2d::new(snapped_angle.cos() * length, snapped_angle.sin() * length))
-                } else {
-                    pos
+                let target = XY { x: pos.x, y: pos.y };
+                let handle = ShapeHandle {
+                    x: selected_stroke.points.get(*handle_idx).map(|p| p.x).unwrap_or(pos.x),
+                    y: selected_stroke.points.get(*handle_idx).map(|p| p.y).unwrap_or(pos.y),
+                    role: HandleRole::Vertex,
+                    index: *handle_idx as isize,
+                    anchor: None,
                 };
 
-                if *handle_idx < selected_stroke.points.len() {
-                    selected_stroke.points[*handle_idx].x = target_pos.x;
-                    selected_stroke.points[*handle_idx].y = target_pos.y;
-                }
-
-                // If arrow, dynamically update wings
-                if selected_stroke.shape_kind == Some(ShapeKind::Arrow) && selected_stroke.points.len() >= 2 {
-                    update_arrow_wings(selected_stroke);
+                if self.magnetic_angle_snap_enabled {
+                    let (new_stroke, guide) = move_shape_handle(selected_stroke, &handle, target, None, None);
+                    *selected_stroke = new_stroke;
+                    self.active_snap_guide = guide.and_then(|g| {
+                        g.line.map(|[a, b]| [Vec2d::new(a.x, a.y), Vec2d::new(b.x, b.y)])
+                    });
+                } else {
+                    *selected_stroke = drag_handle(selected_stroke, &handle, target);
+                    self.active_snap_guide = None;
                 }
             }
             _ => {}
@@ -158,11 +181,11 @@ impl ShapeTool {
 
     /// Handles pointer up: finalizes stroke creation or handle edit.
     pub fn on_pointer_up(&mut self) -> Option<Stroke> {
+        self.active_snap_guide = None;
         match std::mem::replace(&mut self.state, ShapeToolState::Idle) {
             ShapeToolState::Drawing {
+                smart_pen,
                 snapped_preview,
-                raw_points,
-                ..
             } => {
                 if let Some(snapped) = snapped_preview {
                     self.state = ShapeToolState::Editing {
@@ -170,15 +193,8 @@ impl ShapeTool {
                         active_handle: None,
                     };
                     Some(snapped)
-                } else if raw_points.len() >= 2 {
-                    let s = Stroke {
-                        id: format!("st-{}", nanoid_short()),
-                        points: raw_points,
-                        tool: "pen".to_string(),
-                        width: 3.0,
-                        ..Default::default()
-                    };
-                    Some(s)
+                } else if let Some(st) = smart_pen.finish() {
+                    Some(st)
                 } else {
                     None
                 }
@@ -230,19 +246,17 @@ impl ShapeTool {
                     });
                 }
 
-                // If dragging a line endpoint with angle snap, show magnetic alignment guide
-                if selected_stroke.shape_kind == Some(ShapeKind::Line) && active_handle.is_some() {
-                    if let (Some(p0), Some(p1)) = (selected_stroke.points.first(), selected_stroke.points.last()) {
-                        let sp0 = vm.world_to_screen(p0.x, p0.y);
-                        let sp1 = vm.world_to_screen(p1.x, p1.y);
-                        overlay.snap_guides.push(SnapGuideSdf {
-                            start: [sp0.x as f32, sp0.y as f32],
-                            end: [sp1.x as f32, sp1.y as f32],
-                            thickness_px: 1.5,
-                            is_dashed: 1,
-                            color: [0.2, 0.7, 0.3, 0.9],
-                        });
-                    }
+                // If dragging with snap, show magnetic alignment guide
+                if let Some([p0, p1]) = self.active_snap_guide {
+                    let sp0 = vm.world_to_screen(p0.x, p0.y);
+                    let sp1 = vm.world_to_screen(p1.x, p1.y);
+                    overlay.snap_guides.push(SnapGuideSdf {
+                        start: [sp0.x as f32, sp0.y as f32],
+                        end: [sp1.x as f32, sp1.y as f32],
+                        thickness_px: 1.5,
+                        is_dashed: 1,
+                        color: [0.2, 0.7, 0.3, 0.9],
+                    });
                 }
             }
             _ => {}
@@ -259,34 +273,4 @@ fn hit_test_shape_vertices(stroke: &Stroke, pos: Vec2d, tolerance: f64) -> Optio
         }
     }
     None
-}
-
-fn update_arrow_wings(stroke: &mut Stroke) {
-    if stroke.points.len() < 2 {
-        return;
-    }
-    let p_start = Vec2d::new(stroke.points[0].x, stroke.points[0].y);
-    let p_tip = Vec2d::new(stroke.points[1].x, stroke.points[1].y);
-    let dir = p_tip.sub(p_start).normalize();
-    if dir.length_sq() < 1e-6 {
-        return;
-    }
-    let wing_len = 16.0;
-    let wing_angle = 25.0 * PI / 180.0;
-    let w1 = p_tip.sub(dir.rotate(wing_angle).scale(wing_len));
-    let w2 = p_tip.sub(dir.rotate(-wing_angle).scale(wing_len));
-
-    stroke.points = vec![
-        Point { x: p_start.x, y: p_start.y, pressure: 1.0, t: None, alt: None, az: None },
-        Point { x: p_tip.x, y: p_tip.y, pressure: 1.0, t: None, alt: None, az: None },
-        Point { x: w1.x, y: w1.y, pressure: 1.0, t: None, alt: None, az: None },
-        Point { x: p_tip.x, y: p_tip.y, pressure: 1.0, t: None, alt: None, az: None },
-        Point { x: w2.x, y: w2.y, pressure: 1.0, t: None, alt: None, az: None },
-    ];
-}
-
-fn nanoid_short() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(100);
-    format!("{:x}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }

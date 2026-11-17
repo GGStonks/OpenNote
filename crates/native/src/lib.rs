@@ -762,16 +762,19 @@ pub unsafe extern "C" fn opennote_live_free(h: *mut LiveHandle) {
 /// Creates an offscreen CanvasHost on the PC or test harness.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_offscreen(w: u32, h: u32) -> *mut canvas::host::CanvasHost {
-    match canvas::host::CanvasHost::offscreen(w, h) {
+    catch_unwind(AssertUnwindSafe(|| match canvas::host::CanvasHost::offscreen(w, h) {
         Ok((host, _name)) => Box::into_raw(Box::new(host)),
         Err(_) => std::ptr::null_mut(),
-    }
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Resizes the CanvasHost viewport.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_resize(h: *mut canvas::host::CanvasHost, w: u32, height: u32) {
-    with_host(h, |host| host.resize(w, height));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.resize(w, height));
+    }));
 }
 
 /// Sets or updates a page's scene of strokes in the CanvasHost.
@@ -781,13 +784,16 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene(
     page_id: *const std::os::raw::c_char,
     strokes_json: *const std::os::raw::c_char,
 ) -> usize {
-    if page_id.is_null() || strokes_json.is_null() {
-        return 0;
-    }
-    let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
-    let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
-    let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
-    with_host(h, |host| host.set_scene(id, &strokes)).unwrap_or(0)
+    catch_unwind(AssertUnwindSafe(|| {
+        if page_id.is_null() || strokes_json.is_null() {
+            return 0;
+        }
+        let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
+        let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
+        let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
+        with_host(h, |host| host.set_scene(id, &strokes)).unwrap_or(0)
+    }))
+    .unwrap_or(0)
 }
 
 /// Sets or updates a page's scene from multiple stroke layers (z-layers) in the CanvasHost.
@@ -797,14 +803,17 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene_layers(
     page_id: *const std::os::raw::c_char,
     layers_json: *const std::os::raw::c_char,
 ) -> usize {
-    if page_id.is_null() || layers_json.is_null() {
-        return 0;
-    }
-    let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
-    let Ok(json_str) = std::ffi::CStr::from_ptr(layers_json).to_str() else { return 0 };
-    let Ok(layers) = serde_json::from_str::<Vec<Vec<Stroke>>>(json_str) else { return 0 };
-    let layer_refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
-    with_host(h, |host| host.set_scene_layers(id, &layer_refs)).unwrap_or(0)
+    catch_unwind(AssertUnwindSafe(|| {
+        if page_id.is_null() || layers_json.is_null() {
+            return 0;
+        }
+        let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
+        let Ok(json_str) = std::ffi::CStr::from_ptr(layers_json).to_str() else { return 0 };
+        let Ok(layers) = serde_json::from_str::<Vec<Vec<Stroke>>>(json_str) else { return 0 };
+        let layer_refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
+        with_host(h, |host| host.set_scene_layers(id, &layer_refs)).unwrap_or(0)
+    }))
+    .unwrap_or(0)
 }
 
 /// A frame as the page sends it: `{ clear: [r,g,b,a] | null, pages: [{ page, tf: [a,b,c,d,ox,oy],
@@ -856,12 +865,15 @@ pub unsafe extern "C" fn opennote_canvas_host_set_frame(
     h: *mut canvas::host::CanvasHost,
     frame_json: *const std::os::raw::c_char,
 ) -> bool {
-    if frame_json.is_null() {
-        return false;
-    }
-    let Ok(json_str) = std::ffi::CStr::from_ptr(frame_json).to_str() else { return false };
-    let Some(frame) = parse_frame(json_str) else { return false };
-    with_host(h, |host| host.set_frame(frame)).is_some()
+    catch_unwind(AssertUnwindSafe(|| {
+        if frame_json.is_null() {
+            return false;
+        }
+        let Ok(json_str) = std::ffi::CStr::from_ptr(frame_json).to_str() else { return false };
+        let Some(frame) = parse_frame(json_str) else { return false };
+        with_host(h, |host| host.set_frame(frame)).is_some()
+    }))
+    .unwrap_or(false)
 }
 
 /// Makes `host` the one the page's bridge calls reach (under the lock).
@@ -878,75 +890,133 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
     w: u32,
     h: u32,
 ) -> *mut canvas::host::CanvasHost {
-    if layer.is_null() {
-        return std::ptr::null_mut();
-    }
-    let target = canvas::wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
-    match canvas::host::CanvasHost::attach(target, w, h) {
-        Ok((host, name)) => {
-            canvas_note(Some(name), None);
-            let ptr = Box::into_raw(Box::new(host));
-            set_active_host(ptr);
-            ptr
+    catch_unwind(AssertUnwindSafe(|| {
+        if layer.is_null() {
+            return std::ptr::null_mut();
         }
-        Err(e) => {
-            canvas_note(None, Some(format!("attach: {e}")));
-            std::ptr::null_mut()
+        let target = canvas::wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
+        match canvas::host::CanvasHost::attach(target, w, h) {
+            Ok((host, name)) => {
+                canvas_note(Some(name), None);
+                let ptr = Box::into_raw(Box::new(host));
+                set_active_host(ptr);
+                ptr
+            }
+            Err(e) => {
+                canvas_note(None, Some(format!("attach: {e}")));
+                std::ptr::null_mut()
+            }
         }
-    }
+    }))
+    .unwrap_or(std::ptr::null_mut())
 }
 
 /// Pans all page placements in the CanvasHost by (dx, dy).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_pan(h: *mut canvas::host::CanvasHost, dx: f64, dy: f64) {
-    with_host(h, |host| host.pan(dx, dy));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.pan(dx, dy));
+    }));
 }
 
 /// Zooms all page placements in the CanvasHost around anchor (cx, cy).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_zoom_at(h: *mut canvas::host::CanvasHost, factor: f64, cx: f64, cy: f64) {
-    with_host(h, |host| host.zoom_at(factor, cx, cy));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.zoom_at(factor, cx, cy));
+    }));
+}
+
+/// Marks the start of a native two-finger camera gesture (suspends incoming canvasFrame transforms).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_begin_gesture(h: *mut canvas::host::CanvasHost) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.begin_gesture());
+    }));
+}
+
+/// Marks the end of a native two-finger camera gesture with velocity (px/sec), initiating momentum if any.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_end_gesture(h: *mut canvas::host::CanvasHost, vx: f64, vy: f64) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.end_gesture(vx, vy));
+    }));
+}
+
+/// Returns the primary page's current scale (device px) and offsets (ox, oy).
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_get_camera(
+    h: *mut canvas::host::CanvasHost,
+    out_scale: *mut f64,
+    out_ox: *mut f64,
+    out_oy: *mut f64,
+) -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| {
+            if let Some((scale, ox, oy)) = host.get_primary_transform() {
+                if !out_scale.is_null() { *out_scale = scale; }
+                if !out_ox.is_null() { *out_ox = ox; }
+                if !out_oy.is_null() { *out_oy = oy; }
+                true
+            } else {
+                false
+            }
+        }).unwrap_or(false)
+    }))
+    .unwrap_or(false)
 }
 
 /// Clears all scenes in the CanvasHost.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_clear_scenes(h: *mut canvas::host::CanvasHost) {
-    with_host(h, |host| host.clear_scenes());
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| host.clear_scenes());
+    }));
 }
 
 /// Removes a page's scene from the CanvasHost.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_remove_scene(h: *mut canvas::host::CanvasHost, page_id: *const std::os::raw::c_char) {
-    if page_id.is_null() {
-        return;
-    }
-    if let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() {
-        with_host(h, |host| host.remove_scene(id));
-    }
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if page_id.is_null() {
+            return;
+        }
+        if let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() {
+            with_host(h, |host| host.remove_scene(id));
+        }
+    }));
 }
 
 /// Draws the current frame in CanvasHost (nothing when it is not dirty).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasHost) -> bool {
-    with_host(h, |host| match host.draw() {
-        Ok(drawn) => drawn,
-        Err(e) => {
-            canvas_note(None, Some(format!("draw: {e}")));
-            false
-        }
+    catch_unwind(AssertUnwindSafe(|| {
+        with_host(h, |host| match host.draw() {
+            Ok(drawn) => drawn,
+            Err(e) => {
+                canvas_note(None, Some(format!("draw: {e}")));
+                false
+            }
+        })
+        .unwrap_or(false)
+    }))
+    .unwrap_or_else(|_| {
+        canvas_note(None, Some("draw panicked".to_string()));
+        false
     })
-    .unwrap_or(false)
 }
 
 /// Frees a CanvasHost; the page's bridge calls no longer reach it once this returns.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasHost) {
-    if h.is_null() {
-        return;
-    }
-    let _g = host_lock();
-    let _ = ACTIVE_CANVAS_HOST.compare_exchange(h, std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::Relaxed);
-    drop(Box::from_raw(h));
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if h.is_null() {
+            return;
+        }
+        let _g = host_lock();
+        let _ = ACTIVE_CANVAS_HOST.compare_exchange(h, std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::Relaxed);
+        drop(Box::from_raw(h));
+    }));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -954,6 +1024,7 @@ pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasH
 
 #[cfg(feature = "jni")]
 mod android {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use jni::objects::{JByteArray, JClass, JDoubleArray, JString};
     use jni::sys::{jboolean, jbyteArray, jdouble, jdoubleArray, jlong, JNI_FALSE, JNI_TRUE};
     use jni::JNIEnv;
@@ -1028,40 +1099,43 @@ mod android {
         h: jni::sys::jint,
     ) -> jlong {
         let (w, h) = (w.max(1) as u32, h.max(1) as u32);
-        #[cfg(target_os = "android")]
-        let host = unsafe {
-            use canvas::wgpu::rwh::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
-            let window = ndk_sys::ANativeWindow_fromSurface(env.get_raw() as *mut _, surface.as_raw() as *mut _);
-            let Some(nn) = std::ptr::NonNull::new(window as *mut std::ffi::c_void) else { return 0 };
-            let target = canvas::wgpu::SurfaceTargetUnsafe::RawHandle {
-                raw_display_handle: RawDisplayHandle::Android(AndroidDisplayHandle::new()),
-                raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(nn)),
-            };
-            match canvas::host::CanvasHost::attach(target, w, h) {
-                Ok((host, name)) => {
-                    super::canvas_note(Some(name), None);
-                    let old = WINDOW.swap(window, std::sync::atomic::Ordering::SeqCst);
-                    if !old.is_null() {
-                        ndk_sys::ANativeWindow_release(old);
+        catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(target_os = "android")]
+            let host = unsafe {
+                use canvas::wgpu::rwh::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
+                let window = ndk_sys::ANativeWindow_fromSurface(env.get_raw() as *mut _, surface.as_raw() as *mut _);
+                let Some(nn) = std::ptr::NonNull::new(window as *mut std::ffi::c_void) else { return 0 };
+                let target = canvas::wgpu::SurfaceTargetUnsafe::RawHandle {
+                    raw_display_handle: RawDisplayHandle::Android(AndroidDisplayHandle::new()),
+                    raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(nn)),
+                };
+                match canvas::host::CanvasHost::attach(target, w, h) {
+                    Ok((host, name)) => {
+                        super::canvas_note(Some(name), None);
+                        let old = WINDOW.swap(window, std::sync::atomic::Ordering::SeqCst);
+                        if !old.is_null() {
+                            ndk_sys::ANativeWindow_release(old);
+                        }
+                        Box::into_raw(Box::new(host))
                     }
-                    Box::into_raw(Box::new(host))
+                    Err(e) => {
+                        super::canvas_note(None, Some(format!("attach: {e}")));
+                        ndk_sys::ANativeWindow_release(window);
+                        std::ptr::null_mut()
+                    }
                 }
-                Err(e) => {
-                    super::canvas_note(None, Some(format!("attach: {e}")));
-                    ndk_sys::ANativeWindow_release(window);
-                    std::ptr::null_mut()
-                }
+            };
+            #[cfg(not(target_os = "android"))]
+            let host = {
+                let _ = (env, surface);
+                unsafe { super::opennote_canvas_host_offscreen(w, h) }
+            };
+            if !host.is_null() {
+                super::set_active_host(host);
             }
-        };
-        #[cfg(not(target_os = "android"))]
-        let host = {
-            let _ = (env, surface);
-            unsafe { super::opennote_canvas_host_offscreen(w, h) }
-        };
-        if !host.is_null() {
-            super::set_active_host(host);
-        }
-        host as jlong
+            host as jlong
+        }))
+        .unwrap_or(0)
     }
 
     #[no_mangle]
@@ -1073,7 +1147,9 @@ mod android {
         h: jni::sys::jint,
     ) {
         if host != 0 {
-            unsafe { super::opennote_canvas_host_resize(host as *mut canvas::host::CanvasHost, w.max(1) as u32, h.max(1) as u32) };
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                unsafe { super::opennote_canvas_host_resize(host as *mut canvas::host::CanvasHost, w.max(1) as u32, h.max(1) as u32) };
+            }));
         }
     }
 
@@ -1084,16 +1160,18 @@ mod android {
         _class: JClass<'l>,
         host: jlong,
     ) {
-        if host != 0 {
-            unsafe { super::opennote_canvas_host_free(host as *mut canvas::host::CanvasHost) };
-        }
-        #[cfg(target_os = "android")]
-        {
-            let window = WINDOW.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
-            if !window.is_null() {
-                unsafe { ndk_sys::ANativeWindow_release(window) };
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            if host != 0 {
+                unsafe { super::opennote_canvas_host_free(host as *mut canvas::host::CanvasHost) };
             }
-        }
+            #[cfg(target_os = "android")]
+            {
+                let window = WINDOW.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+                if !window.is_null() {
+                    unsafe { ndk_sys::ANativeWindow_release(window) };
+                }
+            }
+        }));
     }
 
     #[no_mangle]
@@ -1103,10 +1181,93 @@ mod android {
         host: jlong,
     ) -> jboolean {
         if host != 0 {
-            let drawn = unsafe { super::opennote_canvas_host_draw(host as *mut canvas::host::CanvasHost) };
-            if drawn { JNI_TRUE } else { JNI_FALSE }
+            catch_unwind(AssertUnwindSafe(|| {
+                let drawn = unsafe { super::opennote_canvas_host_draw(host as *mut canvas::host::CanvasHost) };
+                if drawn { JNI_TRUE } else { JNI_FALSE }
+            }))
+            .unwrap_or(JNI_FALSE)
         } else {
             JNI_FALSE
         }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasBeginGesture<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+    ) {
+        if host != 0 {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                unsafe { super::opennote_canvas_host_begin_gesture(host as *mut canvas::host::CanvasHost) };
+            }));
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasEndGesture<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+        vx: jdouble,
+        vy: jdouble,
+    ) {
+        if host != 0 {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                unsafe { super::opennote_canvas_host_end_gesture(host as *mut canvas::host::CanvasHost, vx, vy) };
+            }));
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasPanZoom<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+        dx: jdouble,
+        dy: jdouble,
+        scale: jdouble,
+        cx: jdouble,
+        cy: jdouble,
+    ) {
+        if host != 0 {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                let h = host as *mut canvas::host::CanvasHost;
+                if dx != 0.0 || dy != 0.0 {
+                    unsafe { super::opennote_canvas_host_pan(h, dx, dy) };
+                }
+                if (scale - 1.0).abs() > 1e-6 {
+                    unsafe { super::opennote_canvas_host_zoom_at(h, scale, cx, cy) };
+                }
+            }));
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasGetCamera<'l>(
+        env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        host: jlong,
+    ) -> jdoubleArray {
+        catch_unwind(AssertUnwindSafe(|| {
+            let mut scale = 1.0;
+            let mut ox = 0.0;
+            let mut oy = 0.0;
+            let ok = if host != 0 {
+                unsafe { super::opennote_canvas_host_get_camera(host as *mut canvas::host::CanvasHost, &mut scale, &mut ox, &mut oy) }
+            } else {
+                false
+            };
+            if ok {
+                let Ok(arr) = env.new_double_array(3) else { return std::ptr::null_mut() };
+                if env.set_double_array_region(&arr, 0, &[scale, ox, oy]).is_err() {
+                    return std::ptr::null_mut();
+                }
+                arr.into_raw()
+            } else {
+                std::ptr::null_mut()
+            }
+        }))
+        .unwrap_or(std::ptr::null_mut())
     }
 }

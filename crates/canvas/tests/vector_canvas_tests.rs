@@ -8,9 +8,7 @@ use canvas::ffi_bridge::{
     opennote_canvas_engine_set_camera, opennote_canvas_engine_set_tool,
     opennote_canvas_engine_world_to_screen, RawInputEvent,
 };
-use canvas::geometry_engine::{
-    snap_angle_cardinal, OrientedBoundingBox, RectBounds, Vec2d,
-};
+use canvas::geometry_engine::{OrientedBoundingBox, RectBounds, Vec2d};
 use canvas::spatial_index::SpatialIndex;
 use canvas::tools::eraser::{EraserMode, EraserTool};
 use canvas::tools::lasso::{LassoPhase, LassoTool, LASSO_CONTEXT_MENU_ACTIONS};
@@ -213,12 +211,37 @@ fn test_hold_to_shape_and_interactive_editing() {
     assert!(committed.is_some());
     assert!(matches!(shape_tool.state, ShapeToolState::Editing { .. }));
 
-    // 2. Drag endpoint with magnetic cardinal angle snap
-    let angle_near_45 = snap_angle_cardinal(46.0 * PI / 180.0, 5.0 * PI / 180.0);
-    assert!((angle_near_45 - 45.0 * PI / 180.0).abs() < 1e-6);
+    // 2. Drag endpoint with shapes magnetic cardinal angle snap
+    shape_tool.on_pointer_down(Vec2d::new(190.0, 100.0), 2000.0);
+    assert!(matches!(shape_tool.state, ShapeToolState::Editing { active_handle: Some(1), .. }));
 
-    let angle_far = snap_angle_cardinal(65.0 * PI / 180.0, 5.0 * PI / 180.0);
-    assert!((angle_far - 65.0 * PI / 180.0).abs() < 1e-6);
+    // Drag near 45°: (100.0, 100.0) -> length 100 at 46° should snap to 45°
+    let rad_46 = 46.0 * PI / 180.0;
+    let near_45_pos = Vec2d::new(100.0 + 100.0 * rad_46.cos(), 100.0 + 100.0 * rad_46.sin());
+    shape_tool.on_pointer_move(near_45_pos, 2020.0);
+
+    if let ShapeToolState::Editing { selected_stroke, .. } = &shape_tool.state {
+        let p0 = &selected_stroke.points[0];
+        let p1 = &selected_stroke.points[1];
+        let angle = (p1.y - p0.y).atan2(p1.x - p0.x);
+        assert!((angle - 45.0 * PI / 180.0).abs() < 1e-6, "Should snap near-45 angle to 45 deg");
+    } else {
+        panic!("Expected Editing state");
+    }
+    assert!(shape_tool.active_snap_guide.is_some());
+
+    // Drag far from 45°: 65° should not snap
+    let rad_65 = 65.0 * PI / 180.0;
+    let far_45_pos = Vec2d::new(100.0 + 100.0 * rad_65.cos(), 100.0 + 100.0 * rad_65.sin());
+    shape_tool.on_pointer_move(far_45_pos, 2040.0);
+
+    if let ShapeToolState::Editing { selected_stroke, .. } = &shape_tool.state {
+        let p0 = &selected_stroke.points[0];
+        let p1 = &selected_stroke.points[1];
+        let angle = (p1.y - p0.y).atan2(p1.x - p0.x);
+        assert!((angle - rad_65).abs() < 1e-6, "Should not snap angle far from cardinal");
+    }
+    assert!(shape_tool.active_snap_guide.is_none());
 }
 
 #[test]

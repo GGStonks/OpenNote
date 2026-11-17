@@ -146,3 +146,161 @@ fn canvas_host_renders_paper_and_strokes() {
     assert!(dark_count > 10000, "expected dark pixels for paper and ink, got {dark_count}");
 }
 
+#[test]
+fn gpu_paper_patterns_match_cpu_renderer() {
+    use canvas::{render_frame_offscreen, Frame, PageDraw, Paper};
+    use model::{PaperColor, PaperStyle};
+    use renderer::paper::render_paper_background;
+
+    let (device, queue, name) = pc_device().expect("a GPU or software Vulkan on the PC");
+    println!("Paper GPU: {name}");
+    let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
+    let empty_scene = canvas.upload(&Scene { caps: vec![], flat: vec![], ops: vec![] });
+
+    let patterns = [
+        PaperStyle::Ruled,
+        PaperStyle::Narrow,
+        PaperStyle::Lines,
+        PaperStyle::NarrowLines,
+        PaperStyle::Grid,
+        PaperStyle::Graph,
+        PaperStyle::Dots,
+        PaperStyle::Blank,
+    ];
+
+    let colors = [
+        PaperColor::Name("cream".to_string()),
+        PaperColor::Name("dark".to_string()),
+        PaperColor::Hex("#E6F0FB".to_string()),
+    ];
+
+    for scale in [1.0f32, 4.0f32] {
+        let (w, h) = (200u32 * scale as u32, 200u32 * scale as u32);
+        for &style in &patterns {
+            for color in &colors {
+                let mut cpu = PixelBuffer::new(w as usize, h as usize);
+                render_paper_background(
+                    &mut cpu.data,
+                    w as usize,
+                    h as usize,
+                    (w * 4) as usize,
+                    style,
+                    color,
+                    scale as f64,
+                    0.0,
+                    0.0,
+                );
+
+                let paper = Paper::from_style_and_color(
+                    style,
+                    color,
+                    w as f32 / scale,
+                    h as f32 / scale,
+                    [0.0, 0.0],
+                    None,
+                );
+
+                let frame = Frame {
+                    clear: None,
+                    pages: vec![PageDraw {
+                        scene: &empty_scene,
+                        tf: Transform::scale(scale, 0.0, 0.0),
+                        paper: Some(paper),
+                    }],
+                };
+
+                let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
+
+                assert_eq!(cpu.data.len(), gpu.len());
+                let mut max_diff = 0;
+                let mut mismatches = 0;
+                for i in 0..cpu.data.len() {
+                    let diff = (cpu.data[i] as i32 - gpu[i] as i32).abs();
+                    if diff > max_diff {
+                        max_diff = diff;
+                    }
+                    if diff > 1 {
+                        mismatches += 1;
+                    }
+                }
+                assert!(
+                    mismatches == 0,
+                    "Pattern {style:?} color={:?} at {scale}x: {mismatches} pixels exceeded 1 level difference (max_diff={max_diff})",
+                    color.hex(),
+                );
+
+                // Verify line positions are identical
+                let base_rgba = renderer::color::Rgba::parse(color.hex(), 1.0);
+                let base_bytes = base_rgba.to_u8_array();
+                if style != PaperStyle::Blank {
+                    let mut cpu_line_pixels = 0;
+                    let mut gpu_line_pixels = 0;
+                    let mut identical_positions = true;
+                    for y in 0..h as usize {
+                        for x in 0..w as usize {
+                            let idx = (y * w as usize + x) * 4;
+                            let cpu_is_line = (cpu.data[idx] as i32 - base_bytes[0] as i32).abs() > 2
+                                || (cpu.data[idx + 1] as i32 - base_bytes[1] as i32).abs() > 2
+                                || (cpu.data[idx + 2] as i32 - base_bytes[2] as i32).abs() > 2;
+                            let gpu_is_line = (gpu[idx] as i32 - base_bytes[0] as i32).abs() > 2
+                                || (gpu[idx + 1] as i32 - base_bytes[1] as i32).abs() > 2
+                                || (gpu[idx + 2] as i32 - base_bytes[2] as i32).abs() > 2;
+                            if cpu_is_line { cpu_line_pixels += 1; }
+                            if gpu_is_line { gpu_line_pixels += 1; }
+                            if cpu_is_line != gpu_is_line {
+                                identical_positions = false;
+                            }
+                        }
+                    }
+                    assert!(
+                        identical_positions,
+                        "Line positions mismatch for {style:?} at {scale}x: cpu={cpu_line_pixels}, gpu={gpu_line_pixels}"
+                    );
+                    assert_eq!(cpu_line_pixels, gpu_line_pixels);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn gpu_paper_custom_pattern_color() {
+    use canvas::{render_frame_offscreen, Frame, PageDraw, Paper};
+    use model::{PaperColor, PaperStyle};
+
+    let (device, queue, name) = pc_device().expect("a GPU or software Vulkan on the PC");
+    println!("Paper Pattern Color GPU: {name}");
+    let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
+    let empty_scene = canvas.upload(&Scene { caps: vec![], flat: vec![], ops: vec![] });
+
+    let (w, h) = (200u32, 200u32);
+    let color = PaperColor::Name("white".to_string());
+    let pattern_col = [0.0f32, 1.0f32, 0.0f32];
+    for &style in &[PaperStyle::Ruled, PaperStyle::Grid, PaperStyle::Graph, PaperStyle::Dots] {
+        let paper = Paper::from_style_and_color(
+            style,
+            &color,
+            w as f32,
+            h as f32,
+            [0.0, 0.0],
+            Some(pattern_col),
+        );
+        let frame = Frame {
+            clear: None,
+            pages: vec![PageDraw {
+                scene: &empty_scene,
+                tf: Transform::scale(1.0, 0.0, 0.0),
+                paper: Some(paper),
+            }],
+        };
+        let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
+        let mut green_line_pixels = 0;
+        for chunk in gpu.chunks_exact(4) {
+            if chunk[1] > chunk[0] && chunk[1] > chunk[2] {
+                green_line_pixels += 1;
+            }
+        }
+        assert!(green_line_pixels > 0, "Expected green pattern lines for {style:?}");
+    }
+}
+

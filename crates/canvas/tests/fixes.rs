@@ -80,3 +80,57 @@ fn a_fully_dirty_frame_stays_fully_dirty() {
     p.mark_dirty(Some(RectBounds::new(0.0, 0.0, 10.0, 10.0)));
     assert!(p.dirty_rect.is_some());
 }
+
+#[test]
+fn native_gesture_authority_and_momentum_physics() {
+    let (mut host, _) = CanvasHost::offscreen(400, 400).expect("GPU host");
+    let initial_frame = FrameSpec {
+        clear: Some(Rgba::WHITE),
+        pages: vec![PagePlacement {
+            page: "p1".into(),
+            tf: Transform::scale(1.0, 10.0, 20.0),
+            paper: None,
+        }],
+    };
+    host.set_frame(initial_frame);
+    assert!(!host.in_gesture);
+
+    // 1. Begin gesture
+    host.begin_gesture();
+    assert!(host.in_gesture);
+
+    // 2. Pan and Zoom directly in Rust
+    host.pan(15.0, 25.0);
+    host.zoom_at(1.5, 200.0, 200.0);
+    let (scale, ox, oy) = host.get_primary_transform().expect("camera transform");
+    assert!((scale - 1.5).abs() < 1e-4);
+    assert!((ox - (200.0 - (200.0 - 25.0) * 1.5)).abs() < 1e-4);
+
+    // 3. Stale incoming frame from WebView should NOT overwrite the live native transform
+    let stale_web_frame = FrameSpec {
+        clear: Some(Rgba::BLACK),
+        pages: vec![PagePlacement {
+            page: "p1".into(),
+            tf: Transform::scale(1.0, 0.0, 0.0), // Old zoom & scroll
+            paper: None,
+        }],
+    };
+    host.set_frame(stale_web_frame);
+    let (scale2, ox2, oy2) = host.get_primary_transform().expect("camera transform preserved");
+    assert_eq!(scale2, scale, "scale preserved during gesture");
+    assert_eq!(ox2, ox, "ox preserved during gesture");
+    assert_eq!(oy2, oy, "oy preserved during gesture");
+    assert_eq!(host.stats().width, 400);
+
+    // 4. End gesture with velocity initiates momentum
+    host.end_gesture(500.0, 0.0);
+    assert!(host.in_gesture, "momentum keeps gesture authority active");
+    assert!(host.dirty);
+
+    // 5. Draw advances momentum
+    let ox_before = host.get_primary_transform().unwrap().1;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    assert!(host.draw().unwrap());
+    let ox_after = host.get_primary_transform().unwrap().1;
+    assert!(ox_after > ox_before, "momentum moved the camera forward: {ox_after} > {ox_before}");
+}
