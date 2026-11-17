@@ -65,6 +65,12 @@ its committed ink. Notes with PDF pages or pictures keep the page's drawing (the
 native ink until N4). rs.18 had made this the default with the page's touches handed to a Rust
 view that ignored the pen, a frame that ignored scrolling and pixel density, every sheet
 repeating all the ink, and Android drawing offscreen: rs.19 fixed those and made it opt-in.
+rs.20: one decision for the whole note (rustCore `nativeCanvasFor`, used by App, Editor and
+CanvasPage). In rs.19 a note with a picture or a PDF page kept the page's drawing but still got a
+see-through desk over a canvas nobody drew: black. Whenever no note is drawn natively the canvas
+shows the desk. The canvas reports its GPU, frames and errors (`canvasStats`; Diagnostics under
+its switch, `canvas-status` in the crash report); `crates/native/tests/canvas_frame.rs` draws the
+page's own frame messages through the bridge.
 
 - iOS: a `CAMetalLayer` view under the `WKWebView` (`opaque = NO`, clear background);
   Android: a `SurfaceView` under the `WebView` (transparent). wgpu surfaces from both.

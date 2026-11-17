@@ -26,8 +26,8 @@ import {
 import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
-import { haptic, hasNativeCanvas } from '../platform';
-import { rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
+import { haptic } from '../platform';
+import { deskRgba, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
 import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
@@ -85,6 +85,8 @@ interface CanvasPageProps {
   setEditingTextId: (id: string | null) => void;
   onEditLatex: (pageId: string, block: LatexBlock) => void;
   printMode: boolean;
+  /** The native canvas draws this page's ink and paper (services/rustCore.ts nativeCanvasFor). */
+  nativeCanvas?: boolean;
   /**
    * Print layout for the PDF export: pages showing a PDF are printed without it and without their
    * paper (the export lays the original PDF page under them, pdfExport.ts).
@@ -1250,7 +1252,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * hides only its own committed ink. Not for print pages, nor for pages whose blocks it cannot
    * draw yet: a PDF page or a picture in the web view would cover the native ink (N4).
    */
-  const isNative = hasNativeCanvas() && !printMode && !layout.sheets.some((sh) => sh.pdf) && !(page.imageBlocks ?? []).length;
+  const isNative = !!props.nativeCanvas && !printMode;
 
   // Where the canvas draws them: read from the page's own box every animation frame, so scrolling,
   // zooming, a pinch's CSS transform and the sub-pixel placement are all followed (device px; the
@@ -1261,11 +1263,6 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const rgb01 = (hex: string): [number, number, number] => {
       const n = parseInt(hex.slice(1, 7), 16) || 0;
       return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
-    };
-    // The desk behind the pages, from the theme (index.css --ui-desk: "r g b").
-    const desk = (): [number, number, number, number] => {
-      const v = getComputedStyle(document.documentElement).getPropertyValue('--ui-desk').trim().split(/\s+/).map(Number);
-      return v.length === 3 && v.every((x) => Number.isFinite(x)) ? [v[0] / 255, v[1] / 255, v[2] / 255, 1] : [0.9, 0.9, 0.92, 1];
     };
     let raf = 0;
     let last = '';
@@ -1291,7 +1288,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         },
       }));
       const frame = {
-        clear: desk(),
+        clear: deskRgba(),
         pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], paper: null }],
       };
       const key = JSON.stringify(frame);
@@ -1300,7 +1297,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       void rustSetCanvasFrame(frame);
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    // What the canvas did with it, for the crash report (Send to PC): attached, frames drawn, GPU, errors.
+    const status = setTimeout(() => {
+      void rustGetCanvasStats().then((st) => crashLog.event('canvas-status', st ?? { bridge: 'no reply' }));
+    }, 2000);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(status);
+    };
   }, [isNative, page.id, layout]);
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.

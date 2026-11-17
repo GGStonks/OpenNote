@@ -12,7 +12,7 @@ import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
 import { ExportMode, PageRate, exportOffersBoth, hasNativeCanvas, platformKind, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 import { useBack } from '../services/backStack';
-import { rustCheckLargestNote, rustEnabled, setNativeCanvas, setRustEnabled } from '../services/rustCore';
+import { rustCheckLargestNote, rustEnabled, rustGetCanvasStats, setNativeCanvas, setRustEnabled } from '../services/rustCore';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -38,6 +38,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   const [rustOn, setRustOn] = useState(rustEnabled);
   const [nativeCanvasOn, setNativeCanvasOn] = useState(hasNativeCanvas);
+  // The native canvas's state in this run (shown under its switch): GPU, frames drawn, or why none.
+  const [canvasState, setCanvasState] = useState<string | null>(null);
+  useEffect(() => {
+    if (!hasNativeCanvas()) return;
+    void rustGetCanvasStats().then((st) => {
+      if (!st) return setCanvasState('The app\'s Rust library did not answer.');
+      const parts = [st.attached ? `Running on ${st.adapter ?? 'the GPU'}, ${st.frames ?? 0} frames drawn` : 'Not running'];
+      if (st.error) parts.push(`last error: ${st.error}`);
+      setCanvasState(parts.join('; ') + '.');
+    });
+  }, []);
   const [rustMsg, setRustMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -315,6 +326,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
                 sub="The page's ink and paper are drawn by Rust on the GPU under the page. Notes with PDF pages or pictures still use the page's own drawing."
               />
             )}
+            {canvasState && <p className="text-[11px] text-gray-400 break-all">{canvasState}</p>}
             <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
               <button
                 onClick={async () => {

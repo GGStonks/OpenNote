@@ -36,7 +36,8 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { ExportMode, canMakePdf, haptic, hasNativeCanvas, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
+import { nativeCanvasFor } from '../services/rustCore';
+import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
 import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
@@ -1359,7 +1360,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           <div
             ref={scrollRefCallback}
             onScroll={onScroll}
-            className={`absolute inset-0 overflow-auto ${hasNativeCanvas() ? 'bg-transparent dark:bg-transparent on-native-canvas-active' : 'bg-ui-desk dark:bg-ui-desk'}`}
+            className={`absolute inset-0 overflow-auto ${nativeCanvasFor(note) ? 'bg-transparent dark:bg-transparent on-native-canvas-active' : 'bg-ui-desk dark:bg-ui-desk'}`}
             style={{ touchAction: 'pan-x pan-y', overscrollBehavior: 'contain' }}
           >
             <div ref={outerRef} data-note-content style={{ width: contentWidth * zoom, height: totalHeight * zoom, margin: '0 auto', position: 'relative' }}>
@@ -1380,6 +1381,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                     setEditingTextId={setEditingTextId}
                     onEditLatex={onEditLatex}
                     printMode={false}
+                    nativeCanvas={nativeCanvasFor(note)}
                     scrollRoot={scrollEl}
                   />
                 </div>

@@ -11,8 +11,8 @@
  * The live line while writing stays TypeScript.
  */
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import { Stroke } from '../types';
-import { bytesToBase64, fromBase64, platformKind } from '../platform';
+import { NoteDocument, Stroke } from '../types';
+import { bytesToBase64, fromBase64, hasNativeCanvas, platformKind } from '../platform';
 import { computeStrokeGeometry, hasStrokeGeometry, setStrokeGeometry, type InkGeometry } from '../ink/strokeRenderer';
 import { packedPoints, PACKED_STRIDE } from '../storage/packedPoints';
 import { crashLog } from './crashLog';
@@ -422,13 +422,28 @@ export async function rustSetCanvasPanZoom(opts: {
 
 /** Fetches native CanvasHost render statistics. */
 export async function rustGetCanvasStats(): Promise<Record<string, unknown> | null> {
-  if (!rustEnabled()) return null;
   try {
     const { meta } = await rustCall('canvasStats', {});
     return meta;
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether the native canvas draws this note (the one decision App, Editor and CanvasPage share:
+ * the desk and pages are see-through exactly when the canvas draws what is under them). Not for
+ * notes with PDF pages or pictures: those, in the web view, would cover the native ink (N4).
+ * Made separately, a note with a picture got a see-through desk over a canvas nobody drew: black.
+ */
+export function nativeCanvasFor(note: Pick<NoteDocument, 'sheets' | 'pages'>): boolean {
+  return hasNativeCanvas() && !note.sheets.some((s) => s.pdf) && !note.pages.some((p) => (p.imageBlocks ?? []).length > 0);
+}
+
+/** The theme's desk colour (index.css --ui-desk: "r g b"), 0..1, for the native canvas. */
+export function deskRgba(): [number, number, number, number] {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--ui-desk').trim().split(/\s+/).map(Number);
+  return v.length === 3 && v.every((x) => Number.isFinite(x)) ? [v[0] / 255, v[1] / 255, v[2] / 255, 1] : [0.9, 0.9, 0.92, 1];
 }
 
 /**

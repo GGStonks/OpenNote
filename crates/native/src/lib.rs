@@ -270,6 +270,21 @@ pub static ACTIVE_CANVAS_HOST: std::sync::atomic::AtomicPtr<canvas::host::Canvas
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 static HOST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// What the canvas last reported (Settings > Diagnostics, the crash report's `canvas-status`): the
+/// GPU it got, or why it has none; the last draw error. Attach and draw errors were dropped before,
+/// so a black canvas said nothing about why.
+static CANVAS_INFO: std::sync::Mutex<(Option<String>, Option<String>)> = std::sync::Mutex::new((None, None));
+
+fn canvas_note(adapter: Option<String>, error: Option<String>) {
+    let mut g = CANVAS_INFO.lock().unwrap_or_else(|e| e.into_inner());
+    if adapter.is_some() {
+        g.0 = adapter;
+    }
+    if error.is_some() {
+        g.1 = error;
+    }
+}
+
 fn host_lock() -> std::sync::MutexGuard<'static, ()> {
     HOST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -351,6 +366,7 @@ fn canvas_pan_zoom(meta: &str) -> Result<(String, Vec<u8>), String> {
 }
 
 fn canvas_stats() -> Result<(String, Vec<u8>), String> {
+    let (adapter, error) = CANVAS_INFO.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let reply = with_active_host(|host| {
         let s = host.stats();
         json!({
@@ -362,9 +378,11 @@ fn canvas_stats() -> Result<(String, Vec<u8>), String> {
             "height": s.height,
             "scenes": s.scenes,
             "capsules": s.capsules,
+            "adapter": adapter,
+            "error": error,
         })
     });
-    Ok((reply.unwrap_or_else(|| json!({ "attached": false })).to_string(), Vec::new()))
+    Ok((reply.unwrap_or_else(|| json!({ "attached": false, "adapter": adapter, "error": error })).to_string(), Vec::new()))
 }
 
 fn select_in_rect(meta: &str) -> Result<(String, Vec<u8>), String> {
@@ -847,7 +865,7 @@ pub unsafe extern "C" fn opennote_canvas_host_set_frame(
 }
 
 /// Makes `host` the one the page's bridge calls reach (under the lock).
-fn set_active_host(host: *mut canvas::host::CanvasHost) {
+pub fn set_active_host(host: *mut canvas::host::CanvasHost) {
     let _g = host_lock();
     ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
 }
@@ -865,12 +883,16 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
     }
     let target = canvas::wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer);
     match canvas::host::CanvasHost::attach(target, w, h) {
-        Ok((host, _name)) => {
+        Ok((host, name)) => {
+            canvas_note(Some(name), None);
             let ptr = Box::into_raw(Box::new(host));
             set_active_host(ptr);
             ptr
         }
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => {
+            canvas_note(None, Some(format!("attach: {e}")));
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -906,7 +928,14 @@ pub unsafe extern "C" fn opennote_canvas_host_remove_scene(h: *mut canvas::host:
 /// Draws the current frame in CanvasHost (nothing when it is not dirty).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasHost) -> bool {
-    with_host(h, |host| host.draw().unwrap_or(false)).unwrap_or(false)
+    with_host(h, |host| match host.draw() {
+        Ok(drawn) => drawn,
+        Err(e) => {
+            canvas_note(None, Some(format!("draw: {e}")));
+            false
+        }
+    })
+    .unwrap_or(false)
 }
 
 /// Frees a CanvasHost; the page's bridge calls no longer reach it once this returns.
@@ -1009,14 +1038,16 @@ mod android {
                 raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(nn)),
             };
             match canvas::host::CanvasHost::attach(target, w, h) {
-                Ok((host, _name)) => {
+                Ok((host, name)) => {
+                    super::canvas_note(Some(name), None);
                     let old = WINDOW.swap(window, std::sync::atomic::Ordering::SeqCst);
                     if !old.is_null() {
                         ndk_sys::ANativeWindow_release(old);
                     }
                     Box::into_raw(Box::new(host))
                 }
-                Err(_) => {
+                Err(e) => {
+                    super::canvas_note(None, Some(format!("attach: {e}")));
                     ndk_sys::ANativeWindow_release(window);
                     std::ptr::null_mut()
                 }
