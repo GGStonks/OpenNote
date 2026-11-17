@@ -9,6 +9,12 @@
 //! glInk's `draw` and `layOn` on wgpu. `render_offscreen` is the PC path (tests, the CLI).
 
 pub mod host;
+pub mod canvas_core;
+pub mod geometry_engine;
+pub mod spatial_index;
+pub mod vector_renderer;
+pub mod tools;
+pub mod ffi_bridge;
 pub use wgpu;
 
 use bytemuck::{Pod, Zeroable};

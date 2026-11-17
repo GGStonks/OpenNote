@@ -19,6 +19,7 @@
 //! the work in TypeScript.
 
 pub mod live;
+pub use canvas::ffi_bridge::*;
 
 use ink::stroke_geometry;
 use model::{ModeledKind, PenStyle, Point, Stroke};
