@@ -55,6 +55,17 @@ no hand-off and no re-rasterisation. The existing pieces it builds on:
 
 ### N2. The shells host the canvas under a transparent web view
 
+State (2.9.4-rs.19): an opt-in test, Settings > Diagnostics > "Native canvas" (next start; iOS
+`OpenNoteNativeCanvas`, Android SharedPreferences `opennote_native_canvas`). The shells host the
+canvas (iOS CAMetalLayer, Android SurfaceView through ANativeWindow) under a see-through web
+view; the page keeps every touch and all logic, sends its strokes (`canvasScene`) and, every
+animation frame it changed, where they are (`canvasFrame`: from the page's own box, so scroll,
+zoom and pinch are followed, device px; each sheet's paper as its own placement) and hides only
+its committed ink. Notes with PDF pages or pictures keep the page's drawing (they would cover the
+native ink until N4). rs.18 had made this the default with the page's touches handed to a Rust
+view that ignored the pen, a frame that ignored scrolling and pixel density, every sheet
+repeating all the ink, and Android drawing offscreen: rs.19 fixed those and made it opt-in.
+
 - iOS: a `CAMetalLayer` view under the `WKWebView` (`opaque = NO`, clear background);
   Android: a `SurfaceView` under the `WebView` (transparent). wgpu surfaces from both.
 - The page sends the open note's strokes once (the binary bridge, from the packed arrays) and

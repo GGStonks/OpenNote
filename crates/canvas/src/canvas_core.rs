@@ -156,12 +156,14 @@ impl FramePipeline {
 
     /// Marks the pipeline dirty with an optional incremental dirty-rect.
     pub fn mark_dirty(&mut self, rect: Option<RectBounds>) {
+        let was_dirty = self.is_dirty;
         self.is_dirty = true;
         match (self.dirty_rect, rect) {
             (Some(existing), Some(new_rect)) => {
                 self.dirty_rect = Some(existing.union(&new_rect));
             }
-            (None, Some(new_rect)) => {
+            // Already dirty in full: a rect must not shrink that to the rect.
+            (None, Some(new_rect)) if !was_dirty => {
                 self.dirty_rect = Some(new_rect);
             }
             _ => {

@@ -27,7 +27,7 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
 import { haptic, hasNativeCanvas } from '../platform';
-import { rustSetCanvasFrame, rustSetCanvasScene, syncNativeUiRects } from '../services/rustCore';
+import { rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
 import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
@@ -1244,49 +1244,73 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   zoomRef.current = zoom;
   /** Paper under the pen (the Draw tool snaps to its lattice). */
   const paperStyleRef = useRef(layout.sheets[0].paperStyle);
-  const isNative = hasNativeCanvas();
+  /**
+   * The native canvas (opt-in, Settings > Diagnostics; docs/rust-native-canvas.md N2) draws this
+   * page's ink and paper under the see-through web view; the page keeps all input and logic and
+   * hides only its own committed ink. Not for print pages, nor for pages whose blocks it cannot
+   * draw yet: a PDF page or a picture in the web view would cover the native ink (N4).
+   */
+  const isNative = hasNativeCanvas() && !printMode && !layout.sheets.some((sh) => sh.pdf) && !(page.imageBlocks ?? []).length;
 
-  // Milestone N2/N3: Synchronize document strokes to Rust CanvasHost
+  // Where the canvas draws them: read from the page's own box every animation frame, so scrolling,
+  // zooming, a pinch's CSS transform and the sub-pixel placement are all followed (device px; the
+  // shell's view covers the web view from its origin). Sent only when it changes.
   useEffect(() => {
     if (!isNative) return;
-    rustSetCanvasScene(page.id, page.strokes);
-  }, [isNative, page.id, page.strokes]);
-
-  // Milestone N2/N3: Synchronize viewport transform, desk clear color, and page paper to Rust CanvasHost
-  useEffect(() => {
-    if (!isNative) return;
-    const styleCode = (s: PaperStyle): number => {
-      switch (s) {
-        case 'ruled': return 1;
-        case 'narrow': return 2;
-        case 'lines': return 3;
-        case 'narrowLines': return 4;
-        case 'grid': return 5;
-        case 'graph': return 6;
-        case 'dots': return 7;
-        default: return 0;
-      }
+    const styleCode: Record<string, number> = { ruled: 1, narrow: 2, lines: 3, narrowLines: 4, grid: 5, graph: 6, dots: 7 };
+    const rgb01 = (hex: string): [number, number, number] => {
+      const n = parseInt(hex.slice(1, 7), 16) || 0;
+      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
     };
-    const sheets = layout.sheets;
-    const pages = sheets.map((sh) => ({
-      page: page.id,
-      tf: [zoom, 0, 0, zoom, sh.left * zoom, sh.top * zoom] as [number, number, number, number, number, number],
-      paper: {
-        width: sh.width,
-        height: sh.height,
-        style: styleCode(sh.paperStyle),
-        base: [1.0, 1.0, 1.0, 1.0] as [number, number, number, number],
-        dark: paperIsDark(sh.paperColor),
-      },
-    }));
-    rustSetCanvasFrame({
-      clear: [0.9, 0.9, 0.92, 1.0],
-      pages,
-    });
-  }, [isNative, page.id, zoom, layout]);
+    // The desk behind the pages, from the theme (index.css --ui-desk: "r g b").
+    const desk = (): [number, number, number, number] => {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--ui-desk').trim().split(/\s+/).map(Number);
+      return v.length === 3 && v.every((x) => Number.isFinite(x)) ? [v[0] / 255, v[1] / 255, v[2] / 255, 1] : [0.9, 0.9, 0.92, 1];
+    };
+    let raf = 0;
+    let last = '';
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const el = containerRef.current;
+      if (!el || !layout.width) return;
+      const r = el.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const k = (r.width / layout.width) * dpr;
+      const x0 = r.left * dpr, y0 = r.top * dpr;
+      const pages = layout.sheets.map((sh) => ({
+        page: '',
+        tf: [k, 0, 0, k, x0 + sh.left * k, y0 + sh.top * k] as [number, number, number, number, number, number],
+        paper: {
+          width: sh.width,
+          height: sh.height,
+          style: styleCode[sh.paperStyle] ?? 0,
+          base: [...rgb01(paperHex(sh.paperColor)), 1] as [number, number, number, number],
+          dark: paperIsDark(sh.paperColor),
+          pattern: sh.patternColor && /^#[0-9a-f]{6}$/i.test(sh.patternColor) ? rgb01(sh.patternColor) : null,
+          origin: [sh.left, sh.top] as [number, number],
+        },
+      }));
+      const frame = {
+        clear: desk(),
+        pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], paper: null }],
+      };
+      const key = JSON.stringify(frame);
+      if (key === last) return;
+      last = key;
+      void rustSetCanvasFrame(frame);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isNative, page.id, layout]);
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
+  // The page's strokes for the native canvas, once per change (surface px: all sheets in one
+  // scene), without those being moved or reshaped (the floating and live layers draw them).
+  useEffect(() => {
+    if (!isNative) return;
+    void rustSetCanvasScene(page.id, hiddenIds ? page.strokes.filter((st) => !hiddenIds.has(st.id)) : page.strokes);
+  }, [isNative, page.id, page.strokes, hiddenIds]);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
 
@@ -2946,7 +2970,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   return (
     <div
       ref={containerRef}
-      className={`on-page relative select-none overflow-hidden ${isNative ? 'on-native-canvas-viewport bg-transparent' : ''}`}
+      className={`on-page relative select-none overflow-hidden ${isNative ? 'bg-transparent' : ''}`}
       style={pageStyle}
       data-page-index={pageIndex}
     >
@@ -3077,7 +3101,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           />
         );
       })}
-      {layerSel && layerSel.strokeIds.length > 0 && !dragOnGpu && !isNative && (
+      {layerSel && layerSel.strokeIds.length > 0 && !dragOnGpu && (
         <canvas
           ref={floatCanvasRef}
           className="absolute pointer-events-none z-[5]"
@@ -3094,7 +3118,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       )}
 
       {/* Input layer (pen, highlighter, eraser, lasso, text placement) */}
-      {!printMode && !isNative && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" />}
+      {!printMode && <canvas ref={activeCanvasRef} className="absolute z-10 pointer-events-none" />}
       {visible && !printMode && (
         <div
           ref={inputRef}

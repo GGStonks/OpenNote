@@ -43,7 +43,7 @@
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.18";
+static NSString *const kVersion = @"2.9.4-rs.19";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -52,6 +52,10 @@ static NSString *const kPageUnlockFailedKey = @"OpenNotePageUnlockFailed";
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 /** NSUserDefaults: the UI theme's background ("#RRGGBB", setLaunchTheme), shown until the page paints. */
 static NSString *const kLaunchColorKey = @"OpenNoteLaunchColor";
+// The native canvas (Rust, under a see-through web view): off unless chosen in Settings >
+// Diagnostics ("setNativeCanvas", next start). It is a test of N2 (docs/rust-native-canvas.md):
+// the page keeps all input and drawing logic, the shell only draws the page's ink and paper.
+static NSString *const kNativeCanvasKey = @"OpenNoteNativeCanvas";
 
 /** The app's theme background (the system's before the app has sent one): window and web view at start. */
 static UIColor *ONLaunchColor(void) {
@@ -210,18 +214,6 @@ extern void opennote_live_free(LiveHandle *h);
 
 // Native GPU Canvas (crates/canvas & crates/native)
 typedef struct CanvasHost CanvasHost;
-typedef struct CanvasEngine CanvasEngine;
-
-typedef struct {
-    double x;
-    double y;
-    double pressure;
-    double tilt_x;
-    double tilt_y;
-    double timestamp_ms;
-    uint32_t phase;
-    uint32_t pointer_type;
-} ONInputEvent;
 
 extern CanvasHost *opennote_canvas_host_attach_layer(void *layer, uint32_t w, uint32_t h);
 extern void opennote_canvas_host_resize(CanvasHost *h, uint32_t w, uint32_t height);
@@ -231,15 +223,6 @@ extern void opennote_canvas_host_zoom_at(CanvasHost *h, double factor, double cx
 extern void opennote_canvas_host_clear_scenes(CanvasHost *h);
 extern void opennote_canvas_host_free(CanvasHost *h);
 
-extern CanvasEngine *opennote_canvas_engine_create(double width, double height, double native_scale);
-extern void opennote_canvas_engine_destroy(CanvasEngine *engine);
-extern const char *opennote_canvas_engine_dispatch_input(CanvasEngine *engine, const ONInputEvent *event);
-extern void opennote_canvas_engine_set_tool(CanvasEngine *engine, uint32_t tool_kind);
-extern void opennote_canvas_engine_set_camera(CanvasEngine *engine, double scale, double offset_x, double offset_y);
-extern void opennote_canvas_engine_pan(CanvasEngine *engine, double dx, double dy);
-extern void opennote_canvas_engine_zoom_at(CanvasEngine *engine, double factor, double cx, double cy);
-extern bool opennote_canvas_engine_undo(CanvasEngine *engine);
-extern bool opennote_canvas_engine_redo(CanvasEngine *engine);
 
 // One Rust call at a time, in order, never on the main thread.
 static dispatch_queue_t ONRustQueue(void) {
@@ -1191,16 +1174,17 @@ static const double kInkHoldSeconds = 0.06;
 
 @interface ONRustCanvasView : UIView
 @property (nonatomic, assign) CanvasHost *canvasHost;
-@property (nonatomic, assign) CanvasEngine *canvasEngine;
-@property (nonatomic, assign) BOOL isAttached;
 - (void)attachIfReady;
-- (void)handlePanDx:(CGFloat)dx dy:(CGFloat)dy scale:(CGFloat)scale cx:(CGFloat)cx cy:(CGFloat)cy;
 @end
 
-@implementation ONRustCanvasView {
-    CGPoint _lastPinchCenter;
-    CGFloat _lastPinchDist;
-}
+/**
+ * The Rust GPU canvas (crates/canvas CanvasHost on a CAMetalLayer) under the see-through web view.
+ * It takes no touches: the page keeps writing, selecting, scrolling and pinching, and tells the
+ * canvas what to draw (`canvasScene`, `canvasFrame` through the rust bridge, src/services/rustCore.ts).
+ * In rs.18 the web view handed the page's touches to this view, whose engine had no strokes and
+ * did nothing for the pen: nothing could be written.
+ */
+@implementation ONRustCanvasView
 
 + (Class)layerClass {
     return [CAMetalLayer class];
@@ -1209,10 +1193,9 @@ static const double kInkHoldSeconds = 0.06;
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor clearColor];
+        self.backgroundColor = ONLaunchColor();
         self.opaque = YES;
-        self.userInteractionEnabled = YES;
-        self.multipleTouchEnabled = YES;
+        self.userInteractionEnabled = NO;
     }
     return self;
 }
@@ -1231,91 +1214,10 @@ static const double kInkHoldSeconds = 0.06;
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     metalLayer.framebufferOnly = YES;
     metalLayer.opaque = YES;
-
     uint32_t w = (uint32_t)(sz.width * scale);
     uint32_t h = (uint32_t)(sz.height * scale);
-
-    if (!self.canvasHost) {
-        self.canvasHost = opennote_canvas_host_attach_layer((__bridge void *)metalLayer, w, h);
-    } else {
-        opennote_canvas_host_resize(self.canvasHost, w, h);
-    }
-
-    if (!self.canvasEngine) {
-        self.canvasEngine = opennote_canvas_engine_create(sz.width, sz.height, scale);
-    }
-    self.isAttached = (self.canvasHost != NULL);
-}
-
-- (void)handlePanDx:(CGFloat)dx dy:(CGFloat)dy scale:(CGFloat)scale cx:(CGFloat)cx cy:(CGFloat)cy {
-    if (self.canvasHost) {
-        if (dx != 0 || dy != 0) opennote_canvas_host_pan(self.canvasHost, dx, dy);
-        if (scale != 1.0) opennote_canvas_host_zoom_at(self.canvasHost, scale, cx, cy);
-    }
-    if (self.canvasEngine) {
-        if (dx != 0 || dy != 0) opennote_canvas_engine_pan(self.canvasEngine, dx, dy);
-        if (scale != 1.0) opennote_canvas_engine_zoom_at(self.canvasEngine, scale, cx, cy);
-    }
-}
-
-- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self handleTouches:touches withEvent:event phase:0];
-}
-
-- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self handleTouches:touches withEvent:event phase:1];
-}
-
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self handleTouches:touches withEvent:event phase:2];
-}
-
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
-    [self handleTouches:touches withEvent:event phase:3];
-}
-
-- (void)handleTouches:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event phase:(uint32_t)phase {
-    NSSet<UITouch *> *allTouches = event.allTouches;
-    if (allTouches.count == 2) {
-        NSArray<UITouch *> *arr = [allTouches allObjects];
-        CGPoint p1 = [arr[0] locationInView:self];
-        CGPoint p2 = [arr[1] locationInView:self];
-        CGPoint center = CGPointMake((p1.x + p2.x) * 0.5, (p1.y + p2.y) * 0.5);
-        CGFloat dist = hypot(p2.x - p1.x, p2.y - p1.y);
-
-        if (phase == 0 || _lastPinchDist <= 0) {
-            _lastPinchCenter = center;
-            _lastPinchDist = dist;
-        } else {
-            CGFloat scale = (dist > 1.0 && _lastPinchDist > 1.0) ? (dist / _lastPinchDist) : 1.0;
-            CGFloat dx = center.x - _lastPinchCenter.x;
-            CGFloat dy = center.y - _lastPinchCenter.y;
-            [self handlePanDx:dx dy:dy scale:scale cx:center.x cy:center.y];
-            _lastPinchCenter = center;
-            _lastPinchDist = dist;
-        }
-        if (phase >= 2) {
-            _lastPinchDist = 0;
-        }
-        return;
-    }
-
-    if (self.canvasEngine) {
-        for (UITouch *touch in touches) {
-            CGPoint p = [touch preciseLocationInView:self];
-            CGFloat maxF = touch.maximumPossibleForce > 0 ? touch.maximumPossibleForce : 1.0;
-            ONInputEvent ev;
-            ev.x = p.x;
-            ev.y = p.y;
-            ev.pressure = touch.force / maxF;
-            ev.tilt_x = touch.altitudeAngle;
-            ev.tilt_y = [touch azimuthAngleInView:self];
-            ev.timestamp_ms = touch.timestamp * 1000.0;
-            ev.phase = phase;
-            ev.pointer_type = (touch.type == UITouchTypePencil) ? 0 : 1;
-            opennote_canvas_engine_dispatch_input(self.canvasEngine, &ev);
-        }
-    }
+    if (!self.canvasHost) self.canvasHost = opennote_canvas_host_attach_layer((__bridge void *)metalLayer, w, h);
+    else opennote_canvas_host_resize(self.canvasHost, w, h);
 }
 
 - (void)dealloc {
@@ -1323,38 +1225,6 @@ static const double kInkHoldSeconds = 0.06;
         opennote_canvas_host_free(self.canvasHost);
         self.canvasHost = NULL;
     }
-    if (self.canvasEngine) {
-        opennote_canvas_engine_destroy(self.canvasEngine);
-        self.canvasEngine = NULL;
-    }
-}
-
-@end
-
-@interface ONTransparentWebView : WKWebView
-@property (nonatomic, copy) NSArray<NSValue *> *activeUiRects;
-@property (nonatomic, assign) BOOL modalOpen;
-@end
-
-@implementation ONTransparentWebView
-
-- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
-    if (self.modalOpen) {
-        return [super hitTest:point withEvent:event];
-    }
-    for (NSValue *v in self.activeUiRects) {
-        if (CGRectContainsPoint([v CGRectValue], point)) {
-            return [super hitTest:point withEvent:event];
-        }
-    }
-    CGFloat topSafe = 0;
-    if (@available(iOS 11.0, *)) {
-        topSafe = self.safeAreaInsets.top;
-    }
-    if (point.y < topSafe + 58.0) {
-        return [super hitTest:point withEvent:event];
-    }
-    return nil;
 }
 
 @end
@@ -1390,6 +1260,7 @@ static const double kInkHoldSeconds = 0.06;
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL nativeCanvas = [defaults boolForKey:kNativeCanvasKey];
     NSString *pageRate = [defaults stringForKey:kPageRateKey];
     if (!pageRate) pageRate = [defaults boolForKey:kPage120Key] ? @"max" : @"auto";
     BOOL unlockFailed = [defaults boolForKey:kPageUnlockFailedKey];
@@ -1398,28 +1269,16 @@ static const double kInkHoldSeconds = 0.06;
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: true, lowPower: %@, thermal: %ld };",
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: %@, lowPower: %@, thermal: %ld };",
                                                      kVersion, fullFrameRate ? @"true" : @"false", pageRate, unlockFailed ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
-                                                     info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
+                                                     nativeCanvas ? @"true" : @"false", info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
     // Native live ink (fire and forget: no reply, so no round trip).
     [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennoteInk"];
     [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennotePinch"];
-    [ucc addScriptMessageHandler:self contentWorld:[WKContentWorld pageWorld] name:@"opennoteUI"];
 
-    // Root container holding Rust CAMetalLayer canvas beneath and transparent WebView on top
-    UIView *container = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    container.backgroundColor = [UIColor clearColor];
-    container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-
-    // 1. Mount Rust GPU Metal surface beneath WebView
-    self.rustCanvasView = [[ONRustCanvasView alloc] initWithFrame:container.bounds];
-    self.rustCanvasView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    [container addSubview:self.rustCanvasView];
-
-    // 2. Configure transparent WebView hosting only floating UI chrome
-    self.webView = [[ONTransparentWebView alloc] initWithFrame:container.bounds configuration:config];
+    self.webView = [[WKWebView alloc] initWithFrame:[UIScreen mainScreen].bounds configuration:config];
     self.webView.UIDelegate = self;
     self.webView.navigationDelegate = self;
     self.webView.allowsLinkPreview = NO;
@@ -1428,25 +1287,36 @@ static const double kInkHoldSeconds = 0.06;
     self.webView.scrollView.bounces = NO;
     self.webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
     self.webView.opaque = NO;
-    self.webView.backgroundColor = [UIColor clearColor];
-    self.webView.scrollView.backgroundColor = [UIColor clearColor];
     self.webView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    // Safari > Develop for debugging (iOS 16.4+). respondsToSelector instead of @available: the
+    // Linux toolchain has no compiler-rt for ___isPlatformVersionAtLeast.
     if ([self.webView respondsToSelector:@selector(setInspectable:)]) self.webView.inspectable = YES;
-    [container addSubview:self.webView];
-    self.view = container;
-
-    // 3. Connect live ink overlay
-    self.inkView = [[ONInkView alloc] initWithFrame:container.bounds];
-    self.inkView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    if (nativeCanvas) {
+        // The Rust canvas under the see-through web view, drawn from a display link at the
+        // display's rate when the page changed what it shows.
+        UIView *container = [[UIView alloc] initWithFrame:[UIScreen mainScreen].bounds];
+        container.backgroundColor = ONLaunchColor();
+        container.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.rustCanvasView = [[ONRustCanvasView alloc] initWithFrame:container.bounds];
+        self.rustCanvasView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        [container addSubview:self.rustCanvasView];
+        self.webView.backgroundColor = [UIColor clearColor];
+        self.webView.scrollView.backgroundColor = [UIColor clearColor];
+        self.webView.frame = container.bounds;
+        [container addSubview:self.webView];
+        self.view = container;
+        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onDisplayFrame:)];
+        if ([self.displayLink respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
+            self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60, ONMaxFramesPerSecond(), ONMaxFramesPerSecond());
+        }
+        [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    } else {
+        self.webView.backgroundColor = ONLaunchColor();
+        self.view = self.webView;
+    }
+    self.inkView = [[ONInkView alloc] initWithFrame:self.webView.bounds];
     [self.webView addSubview:self.inkView];
     self.pinchOverlay = [[ONPinchOverlay alloc] initWithHost:self.webView];
-
-    // 4. Start 120 Hz display link driving Rust CanvasHost frame loop
-    self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onDisplayFrame:)];
-    if (@available(iOS 15.0, *)) {
-        self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60, 120, 120);
-    }
-    [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
 
     UIPencilInteraction *pencil = [[UIPencilInteraction alloc] init];
     pencil.delegate = self;
@@ -1538,29 +1408,6 @@ static const double kInkHoldSeconds = 0.06;
 #pragma mark Bridge
 
 - (void)userContentController:(WKUserContentController *)ucc didReceiveScriptMessage:(WKScriptMessage *)message {
-    if ([message.name isEqualToString:@"opennoteUI"]) {
-        NSDictionary *msg = [message.body isKindOfClass:[NSDictionary class]] ? message.body : @{};
-        if ([msg[@"cmd"] isEqualToString:@"uiRects"]) {
-            NSArray *rects = [msg[@"rects"] isKindOfClass:[NSArray class]] ? msg[@"rects"] : @[];
-            NSMutableArray<NSValue *> *m = [NSMutableArray arrayWithCapacity:rects.count];
-            for (NSDictionary *r in rects) {
-                CGFloat x = [r[@"x"] doubleValue];
-                CGFloat y = [r[@"y"] doubleValue];
-                CGFloat w = [r[@"w"] doubleValue];
-                CGFloat h = [r[@"h"] doubleValue];
-                [m addObject:[NSValue valueWithCGRect:CGRectMake(x, y, w, h)]];
-            }
-            if ([self.webView isKindOfClass:[ONTransparentWebView class]]) {
-                ((ONTransparentWebView *)self.webView).activeUiRects = m;
-            }
-        } else if ([msg[@"cmd"] isEqualToString:@"modal"]) {
-            BOOL open = [msg[@"open"] boolValue];
-            if ([self.webView isKindOfClass:[ONTransparentWebView class]]) {
-                ((ONTransparentWebView *)self.webView).modalOpen = open;
-            }
-        }
-        return;
-    }
     if (![message.body isKindOfClass:[NSString class]]) return;
     if ([message.name isEqualToString:@"opennoteInk"]) [self.inkView handleMessage:message.body];
     else if ([message.name isEqualToString:@"opennotePinch"]) [self.pinchOverlay handleMessage:message.body];
@@ -1660,26 +1507,10 @@ static const double kInkHoldSeconds = 0.06;
             [g impactOccurred];
         }
         replyHandler(@{}, nil);
-    } else if ([cmd isEqualToString:@"uiRects"]) {
-        NSArray *rects = [msg[@"rects"] isKindOfClass:[NSArray class]] ? msg[@"rects"] : @[];
-        NSMutableArray<NSValue *> *m = [NSMutableArray arrayWithCapacity:rects.count];
-        for (NSDictionary *r in rects) {
-            CGFloat x = [r[@"x"] doubleValue];
-            CGFloat y = [r[@"y"] doubleValue];
-            CGFloat w = [r[@"w"] doubleValue];
-            CGFloat h = [r[@"h"] doubleValue];
-            [m addObject:[NSValue valueWithCGRect:CGRectMake(x, y, w, h)]];
-        }
-        if ([self.webView isKindOfClass:[ONTransparentWebView class]]) {
-            ((ONTransparentWebView *)self.webView).activeUiRects = m;
-        }
-        replyHandler(@{ @"ok": @YES }, nil);
-    } else if ([cmd isEqualToString:@"modal"]) {
-        BOOL open = [msg[@"open"] boolValue];
-        if ([self.webView isKindOfClass:[ONTransparentWebView class]]) {
-            ((ONTransparentWebView *)self.webView).modalOpen = open;
-        }
-        replyHandler(@{ @"ok": @YES }, nil);
+    } else if ([cmd isEqualToString:@"setNativeCanvas"]) {
+        // Settings > Diagnostics: the native canvas from the next start.
+        [[NSUserDefaults standardUserDefaults] setBool:[msg[@"on"] boolValue] forKey:kNativeCanvasKey];
+        replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"rust"]) {
         [self handleRust:msg reply:replyHandler];
     } else {

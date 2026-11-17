@@ -12,7 +12,6 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 
 /// Touch / Pointer phases.
-#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TouchPhase {
     Down = 0,
@@ -22,7 +21,6 @@ pub enum TouchPhase {
 }
 
 /// Pointer source types.
-#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PointerType {
     Stylus = 0,
@@ -30,8 +28,25 @@ pub enum PointerType {
     Mouse = 2,
 }
 
-/// Zero-copy input event packet passed directly from UIKit (iOS) or Android NDK without serialization overhead.
+/// An input event as the shells pass it (C layout). `phase` and `pointer_type` are plain integers
+/// here: a Rust enum read from C memory holding any other value is undefined behaviour, so they
+/// are checked in `InputEvent::from_raw` (an unknown value drops the event).
 #[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RawInputEvent {
+    pub x: f64,
+    pub y: f64,
+    pub pressure: f64,
+    pub tilt_x: f64,
+    pub tilt_y: f64,
+    pub timestamp_ms: f64,
+    /// 0 down, 1 move, 2 ended, 3 cancelled.
+    pub phase: u32,
+    /// 0 stylus, 1 touch, 2 mouse.
+    pub pointer_type: u32,
+}
+
+/// A checked input event.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InputEvent {
     pub x: f64,
@@ -42,6 +57,17 @@ pub struct InputEvent {
     pub timestamp_ms: f64,
     pub phase: TouchPhase,
     pub pointer_type: PointerType,
+}
+
+impl InputEvent {
+    pub fn from_raw(r: &RawInputEvent) -> Option<InputEvent> {
+        let phase = match r.phase { 0 => TouchPhase::Down, 1 => TouchPhase::Move, 2 => TouchPhase::Ended, 3 => TouchPhase::Cancelled, _ => return None };
+        let pointer_type = match r.pointer_type { 0 => PointerType::Stylus, 1 => PointerType::Touch, 2 => PointerType::Mouse, _ => return None };
+        if !(r.x.is_finite() && r.y.is_finite()) {
+            return None;
+        }
+        Some(InputEvent { x: r.x, y: r.y, pressure: r.pressure, tilt_x: r.tilt_x, tilt_y: r.tilt_y, timestamp_ms: r.timestamp_ms, phase, pointer_type })
+    }
 }
 
 /// Active tool mode in CanvasEngine.
@@ -167,11 +193,7 @@ impl CanvasEngine {
         self.spatial_index.clear();
         for s in &self.strokes {
             if !s.id.is_empty() {
-                let mut b = crate::geometry_engine::RectBounds::default();
-                for p in &s.points {
-                    b.include(Vec2d::new(p.x, p.y));
-                }
-                self.spatial_index.insert(s.id.clone(), b);
+                self.spatial_index.insert(s.id.clone(), ink_bounds(s));
             }
         }
     }
@@ -221,6 +243,8 @@ impl CanvasEngine {
             ActiveToolKind::Eraser => {
                 match event.phase {
                     TouchPhase::Down => {
+                        // One undo step per eraser gesture (dropped at the lift if nothing was erased).
+                        self.push_undo_state();
                         self.eraser_tool.on_pointer_down(world_pos);
                         let res = self.eraser_tool.erase_step(
                             world_pos,
@@ -242,6 +266,9 @@ impl CanvasEngine {
                         self.pipeline.mark_dirty(None);
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
+                        if self.undo_stack.last().is_some_and(|prev| prev.len() == self.strokes.len() && prev.iter().zip(&self.strokes).all(|(a, b)| a.id == b.id)) {
+                            self.undo_stack.pop();
+                        }
                         self.eraser_tool.on_pointer_up();
                         self.overlay_pass.eraser_cursor = None;
                         self.pipeline.mark_dirty(None);
@@ -261,13 +288,14 @@ impl CanvasEngine {
                         self.pipeline.mark_dirty(None);
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
-                        if let Some(new_stroke) = self.shape_tool.on_pointer_up() {
-                            let id = if new_stroke.id.is_empty() { "shape".to_string() } else { new_stroke.id.clone() };
-                            let mut b = crate::geometry_engine::RectBounds::default();
-                            for p in &new_stroke.points {
-                                b.include(Vec2d::new(p.x, p.y));
+                        if let Some(mut new_stroke) = self.shape_tool.on_pointer_up() {
+                            self.push_undo_state();
+                            // The index finds strokes by id: one shared fallback id made later shapes
+                            // shadow each other there.
+                            if new_stroke.id.is_empty() {
+                                new_stroke.id = format!("shape-{}", self.strokes.len() + self.undo_stack.len());
                             }
-                            self.spatial_index.insert(id, b);
+                            self.spatial_index.insert(new_stroke.id.clone(), ink_bounds(&new_stroke));
                             self.strokes.push(new_stroke);
                         }
                         self.shape_tool.update_overlay(&mut self.overlay_pass, &self.view_matrix);
@@ -294,16 +322,30 @@ impl CanvasEngine {
             self.strokes.retain(|s| s.id != orig_id);
             for piece in pieces {
                 if !piece.id.is_empty() {
-                    let mut b = crate::geometry_engine::RectBounds::default();
-                    for p in &piece.points {
-                        b.include(Vec2d::new(p.x, p.y));
-                    }
-                    self.spatial_index.insert(piece.id.clone(), b);
+                    self.spatial_index.insert(piece.id.clone(), ink_bounds(&piece));
                 }
                 self.strokes.push(piece);
             }
         }
     }
+}
+
+/// A stroke's box in page px, including its ink around the points: highlighters are 5.5x their
+/// width, the fountain pen up to 1.55 x 1.4x (strokeWidth x pressure), so half of 5.5 covers all.
+/// Built from the points alone, the eraser and lasso missed ink the circle touched beyond them.
+pub fn ink_bounds(s: &Stroke) -> crate::geometry_engine::RectBounds {
+    let mut b = crate::geometry_engine::RectBounds::default();
+    for p in &s.points {
+        b.include(Vec2d::new(p.x, p.y));
+    }
+    let pad = s.width.max(0.0) * 2.75 + 0.5;
+    if b.min_x.is_finite() {
+        b.min_x -= pad;
+        b.min_y -= pad;
+        b.max_x += pad;
+        b.max_y += pad;
+    }
+    b
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -331,13 +373,10 @@ pub unsafe extern "C" fn opennote_canvas_engine_destroy(engine: *mut CanvasEngin
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_engine_dispatch_input(
     engine: *mut CanvasEngine,
-    event: *const InputEvent,
+    event: *const RawInputEvent,
 ) -> *const c_char {
     let Some(e) = engine.as_mut() else { return std::ptr::null() };
-    if event.is_null() {
-        return std::ptr::null();
-    }
-    let ev = *event;
+    let Some(ev) = event.as_ref().and_then(InputEvent::from_raw) else { return std::ptr::null() };
     if let Some(action_json) = e.dispatch_input(ev) {
         if let Ok(c_str) = CString::new(action_json) {
             e.last_action_json = Some(c_str);

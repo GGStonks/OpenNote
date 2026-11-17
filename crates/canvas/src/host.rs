@@ -44,6 +44,8 @@ pub struct CanvasHost {
     canvas: GpuCanvas,
     target: Target,
     scenes: HashMap<String, (GpuScene, usize)>,
+    /// Drawn for a placement with paper but no scene (a sheet's paper, the ink placed apart).
+    empty: GpuScene,
     frame: FrameSpec,
     pub dirty: bool,
     stats: Stats,
@@ -75,7 +77,10 @@ impl CanvasHost {
         };
         surface.configure(&device, &config);
         let canvas = GpuCanvas::new(device, queue, format);
-        Ok((CanvasHost { canvas, target: Target::Surface { surface, config }, scenes: HashMap::new(), frame: FrameSpec::default(), dirty: true, stats: Stats { width: w, height: h, ..Default::default() } }, name))
+        let empty = canvas.upload(&Scene::default());
+        // Nothing is presented before the page's first frame: an empty frame cleared the surface
+        // to see-through black, a black flash at every start (the view's launch colour shows meanwhile).
+        Ok((CanvasHost { canvas, target: Target::Surface { surface, config }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: false, stats: Stats { width: w, height: h, ..Default::default() } }, name))
     }
 
     /// A host drawing into an offscreen RGBA8 texture on the PC's GPU.
@@ -83,7 +88,8 @@ impl CanvasHost {
         let (device, queue, name) = pc_device()?;
         let canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
         let texture = Self::offscreen_texture(&canvas.device, w, h);
-        Ok((CanvasHost { canvas, target: Target::Offscreen { texture }, scenes: HashMap::new(), frame: FrameSpec::default(), dirty: true, stats: Stats { width: w, height: h, ..Default::default() } }, name))
+        let empty = canvas.upload(&Scene::default());
+        Ok((CanvasHost { canvas, target: Target::Offscreen { texture }, scenes: HashMap::new(), empty, frame: FrameSpec::default(), dirty: true, stats: Stats { width: w, height: h, ..Default::default() } }, name))
     }
 
     fn offscreen_texture(device: &wgpu::Device, w: u32, h: u32) -> wgpu::Texture {
@@ -187,16 +193,20 @@ impl CanvasHost {
         if !self.dirty {
             return Ok(false);
         }
+        // No frame from the page yet (also after a resize): leave the surface as it is.
+        if self.frame == FrameSpec::default() && matches!(self.target, Target::Surface { .. }) {
+            return Ok(false);
+        }
         let t0 = Instant::now();
         let (w, h) = (self.stats.width, self.stats.height);
         let pages: Vec<PageDraw> = self
             .frame
             .pages
             .iter()
-            .filter_map(|p| {
-                self.scenes
-                    .get(&p.page)
-                    .map(|(scene, _)| PageDraw { scene, tf: p.tf, paper: p.paper })
+            .filter_map(|p| match self.scenes.get(&p.page) {
+                Some((scene, _)) => Some(PageDraw { scene, tf: p.tf, paper: p.paper }),
+                // A sheet's paper is drawn even though its ink is a scene placed apart.
+                None => p.paper.map(|_| PageDraw { scene: &self.empty, tf: p.tf, paper: p.paper }),
             })
             .collect();
         let frame = Frame {

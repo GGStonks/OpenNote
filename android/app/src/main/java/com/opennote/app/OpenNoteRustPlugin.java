@@ -92,18 +92,34 @@ public class OpenNoteRustPlugin extends Plugin {
         }
     };
 
+    static final String PREFS = "opennote_native_canvas";
+
+    /** The native canvas was chosen in Settings > Diagnostics (applies from the next start). */
+    static boolean nativeCanvasEnabled(android.content.Context ctx) {
+        return LOADED && ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean("on", false);
+    }
+
+    /** The host is made with the surface's size once it is known (surfaceChanged follows surfaceCreated). */
+    private static Surface pendingSurface;
+
     static void onSurfaceCreated(Surface surface) {
         if (!LOADED) return;
-        canvasHost = canvasSurfaceCreated(surface, 1080, 1920);
-        startFrameCallback();
+        pendingSurface = surface;
     }
 
     static void onSurfaceChanged(Surface surface, int width, int height) {
-        if (!LOADED || canvasHost == 0) return;
+        if (!LOADED) return;
+        if (canvasHost == 0) {
+            canvasHost = canvasSurfaceCreated(surface, width, height);
+            pendingSurface = null;
+            if (canvasHost != 0) startFrameCallback();
+            return;
+        }
         canvasSurfaceChanged(canvasHost, width, height);
     }
 
     static void onSurfaceDestroyed() {
+        pendingSurface = null;
         if (!LOADED || canvasHost == 0) return;
         stopFrameCallback();
         canvasSurfaceDestroyed(canvasHost);
@@ -135,6 +151,12 @@ public class OpenNoteRustPlugin extends Plugin {
     @Override
     public void load() {
         if (!LOADED) return;
+        // The page asks window.__opennoteNativeCanvas (platform.ts hasNativeCanvas) before it draws.
+        if (nativeCanvasEnabled(getContext()) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            Uri page = Uri.parse(getBridge().getLocalUrl());
+            WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), "window.__opennoteNativeCanvas = true;",
+                    Collections.singleton(page.getScheme() + "://" + page.getAuthority()));
+        }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
                 || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_ARRAY_BUFFER)) return;
         WebView webView = getBridge().getWebView();
@@ -164,12 +186,20 @@ public class OpenNoteRustPlugin extends Plugin {
         });
     }
 
+    /** Settings > Diagnostics: the native canvas from the next start. */
+    @PluginMethod
+    public void setNativeCanvas(PluginCall call) {
+        getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+                .putBoolean("on", Boolean.TRUE.equals(call.getBoolean("on", false))).apply();
+        call.resolve();
+    }
+
     @PluginMethod
     public void available(PluginCall call) {
         JSObject ret = new JSObject();
         ret.put("available", LOADED);
         ret.put("port", port);
-        ret.put("nativeCanvas", LOADED);
+        ret.put("nativeCanvas", nativeCanvasEnabled(getContext()));
         if (LOAD_ERROR != null) ret.put("error", LOAD_ERROR);
         call.resolve(ret);
     }

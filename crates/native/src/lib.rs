@@ -261,8 +261,34 @@ fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
     Ok((reply_meta.to_string(), px))
 }
 
+// The shell's host (iOS: attach_layer, Android: canvasSurfaceCreated), reached by the page's
+// bridge calls (canvasScene / canvasFrame / ...) on the Rust worker thread while the shell draws it
+// from its display link on the UI thread. Every access to a host, through this pointer or a handle
+// the shell holds, takes HOST_LOCK: unguarded, a scene upload raced a draw, and a host freed when
+// the surface went was still used by a bridge call in flight.
 pub static ACTIVE_CANVAS_HOST: std::sync::atomic::AtomicPtr<canvas::host::CanvasHost> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static HOST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn host_lock() -> std::sync::MutexGuard<'static, ()> {
+    HOST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Runs `f` on the active host under the lock; None when no host is attached.
+fn with_active_host<R>(f: impl FnOnce(&mut canvas::host::CanvasHost) -> R) -> Option<R> {
+    let _g = host_lock();
+    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
+    unsafe { ptr.as_mut() }.map(f)
+}
+
+/// Runs `f` on the host behind a shell's handle under the lock.
+///
+/// # Safety
+/// `h` must be null or a live host from this library.
+unsafe fn with_host<R>(h: *mut canvas::host::CanvasHost, f: impl FnOnce(&mut canvas::host::CanvasHost) -> R) -> Option<R> {
+    let _g = host_lock();
+    h.as_mut().map(f)
+}
 
 fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
     #[derive(Deserialize)]
@@ -274,32 +300,26 @@ fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
         layers: Option<Vec<Vec<Stroke>>>,
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasScene request: {e}"))?;
-    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
-    let count = if let Some(host) = unsafe { ptr.as_mut() } {
-        if let Some(layers) = r.layers {
+    let count = with_active_host(|host| {
+        if let Some(layers) = &r.layers {
             let refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
             host.set_scene_layers(&r.page, &refs)
         } else {
             host.set_scene(&r.page, &r.strokes)
         }
-    } else {
-        0
-    };
-    Ok((json!({ "ok": true, "capsules": count, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+    });
+    Ok((json!({ "ok": true, "capsules": count.unwrap_or(0), "attached": count.is_some() }).to_string(), Vec::new()))
 }
 
 fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
-    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
-    let ok = if let Some(host) = unsafe { ptr.as_mut() } {
-        if let Ok(c_str) = std::ffi::CString::new(meta) {
-            unsafe { opennote_canvas_host_set_frame(host, c_str.as_ptr()) }
-        } else {
-            false
+    let frame = parse_frame(meta);
+    let attached = with_active_host(|host| {
+        if let Some(f) = frame.clone() {
+            host.set_frame(f);
         }
-    } else {
-        false
-    };
-    Ok((json!({ "ok": ok, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+    })
+    .is_some();
+    Ok((json!({ "ok": attached && frame.is_some(), "attached": attached }).to_string(), Vec::new()))
 }
 
 fn canvas_pan_zoom(meta: &str) -> Result<(String, Vec<u8>), String> {
@@ -318,23 +338,22 @@ fn canvas_pan_zoom(meta: &str) -> Result<(String, Vec<u8>), String> {
     }
     fn default_factor() -> f64 { 1.0 }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasPanZoom request: {e}"))?;
-    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
-    if let Some(host) = unsafe { ptr.as_mut() } {
+    let attached = with_active_host(|host| {
         if r.pan_dx != 0.0 || r.pan_dy != 0.0 {
             host.pan(r.pan_dx, r.pan_dy);
         }
         if (r.scale_factor - 1.0).abs() > 1e-6 {
             host.zoom_at(r.scale_factor, r.cx, r.cy);
         }
-    }
-    Ok((json!({ "ok": true, "attached": !ptr.is_null() }).to_string(), Vec::new()))
+    })
+    .is_some();
+    Ok((json!({ "ok": true, "attached": attached }).to_string(), Vec::new()))
 }
 
 fn canvas_stats() -> Result<(String, Vec<u8>), String> {
-    let ptr = ACTIVE_CANVAS_HOST.load(std::sync::atomic::Ordering::SeqCst);
-    if let Some(host) = unsafe { ptr.as_mut() } {
+    let reply = with_active_host(|host| {
         let s = host.stats();
-        Ok((json!({
+        json!({
             "attached": true,
             "frames": s.frames,
             "lastDrawMs": s.last_draw_ms,
@@ -343,10 +362,9 @@ fn canvas_stats() -> Result<(String, Vec<u8>), String> {
             "height": s.height,
             "scenes": s.scenes,
             "capsules": s.capsules,
-        }).to_string(), Vec::new()))
-    } else {
-        Ok((json!({ "attached": false }).to_string(), Vec::new()))
-    }
+        })
+    });
+    Ok((reply.unwrap_or_else(|| json!({ "attached": false })).to_string(), Vec::new()))
 }
 
 fn select_in_rect(meta: &str) -> Result<(String, Vec<u8>), String> {
@@ -735,9 +753,7 @@ pub unsafe extern "C" fn opennote_canvas_host_offscreen(w: u32, h: u32) -> *mut 
 /// Resizes the CanvasHost viewport.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_resize(h: *mut canvas::host::CanvasHost, w: u32, height: u32) {
-    if let Some(host) = h.as_mut() {
-        host.resize(w, height);
-    }
+    with_host(h, |host| host.resize(w, height));
 }
 
 /// Sets or updates a page's scene of strokes in the CanvasHost.
@@ -747,14 +763,13 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene(
     page_id: *const std::os::raw::c_char,
     strokes_json: *const std::os::raw::c_char,
 ) -> usize {
-    let Some(host) = h.as_mut() else { return 0 };
     if page_id.is_null() || strokes_json.is_null() {
         return 0;
     }
     let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() else { return 0 };
     let Ok(json_str) = std::ffi::CStr::from_ptr(strokes_json).to_str() else { return 0 };
     let Ok(strokes) = serde_json::from_str::<Vec<Stroke>>(json_str) else { return 0 };
-    host.set_scene(id, &strokes)
+    with_host(h, |host| host.set_scene(id, &strokes)).unwrap_or(0)
 }
 
 /// Sets or updates a page's scene from multiple stroke layers (z-layers) in the CanvasHost.
@@ -764,7 +779,6 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene_layers(
     page_id: *const std::os::raw::c_char,
     layers_json: *const std::os::raw::c_char,
 ) -> usize {
-    let Some(host) = h.as_mut() else { return 0 };
     if page_id.is_null() || layers_json.is_null() {
         return 0;
     }
@@ -772,21 +786,12 @@ pub unsafe extern "C" fn opennote_canvas_host_set_scene_layers(
     let Ok(json_str) = std::ffi::CStr::from_ptr(layers_json).to_str() else { return 0 };
     let Ok(layers) = serde_json::from_str::<Vec<Vec<Stroke>>>(json_str) else { return 0 };
     let layer_refs: Vec<&[Stroke]> = layers.iter().map(|l| l.as_slice()).collect();
-    host.set_scene_layers(id, &layer_refs)
+    with_host(h, |host| host.set_scene_layers(id, &layer_refs)).unwrap_or(0)
 }
 
-/// Sets the frame specification (clear color, visible pages, transforms, and paper) in CanvasHost.
-#[no_mangle]
-pub unsafe extern "C" fn opennote_canvas_host_set_frame(
-    h: *mut canvas::host::CanvasHost,
-    frame_json: *const std::os::raw::c_char,
-) -> bool {
-    let Some(host) = h.as_mut() else { return false };
-    if frame_json.is_null() {
-        return false;
-    }
-    let Ok(json_str) = std::ffi::CStr::from_ptr(frame_json).to_str() else { return false };
-
+/// A frame as the page sends it: `{ clear: [r,g,b,a] | null, pages: [{ page, tf: [a,b,c,d,ox,oy],
+/// paper: { width, height, style, base, dark, pattern, origin } | null }] }` (device px).
+fn parse_frame(json_str: &str) -> Option<canvas::host::FrameSpec> {
     #[derive(Deserialize)]
     struct JsonPaper {
         width: f32,
@@ -813,33 +818,38 @@ pub unsafe extern "C" fn opennote_canvas_host_set_frame(
         pages: Vec<JsonPlacement>,
     }
 
-    let Ok(jf) = serde_json::from_str::<JsonFrame>(json_str) else { return false };
+    let jf = serde_json::from_str::<JsonFrame>(json_str).ok()?;
     let clear = jf.clear.map(|c| renderer::color::Rgba { r: c[0], g: c[1], b: c[2], a: c[3] });
-    let pages = jf.pages.into_iter().map(|jp| {
-        let paper = jp.paper.map(|p| canvas::Paper {
-            width: p.width,
-            height: p.height,
-            style: p.style,
-            base: p.base,
-            dark: p.dark,
-            pattern: p.pattern,
-            origin: p.origin,
-        });
-        canvas::host::PagePlacement {
+    let pages = jf
+        .pages
+        .into_iter()
+        .map(|jp| canvas::host::PagePlacement {
             page: jp.page,
-            tf: canvas::Transform {
-                a: jp.tf[0],
-                b: jp.tf[1],
-                c: jp.tf[2],
-                d: jp.tf[3],
-                ox: jp.tf[4],
-                oy: jp.tf[5],
-            },
-            paper,
-        }
-    }).collect();
-    host.set_frame(canvas::host::FrameSpec { clear, pages });
-    true
+            tf: canvas::Transform { a: jp.tf[0], b: jp.tf[1], c: jp.tf[2], d: jp.tf[3], ox: jp.tf[4], oy: jp.tf[5] },
+            paper: jp.paper.map(|p| canvas::Paper { width: p.width, height: p.height, style: p.style, base: p.base, dark: p.dark, pattern: p.pattern, origin: p.origin }),
+        })
+        .collect();
+    Some(canvas::host::FrameSpec { clear, pages })
+}
+
+/// Sets the frame specification (clear color, visible pages, transforms, and paper) in CanvasHost.
+#[no_mangle]
+pub unsafe extern "C" fn opennote_canvas_host_set_frame(
+    h: *mut canvas::host::CanvasHost,
+    frame_json: *const std::os::raw::c_char,
+) -> bool {
+    if frame_json.is_null() {
+        return false;
+    }
+    let Ok(json_str) = std::ffi::CStr::from_ptr(frame_json).to_str() else { return false };
+    let Some(frame) = parse_frame(json_str) else { return false };
+    with_host(h, |host| host.set_frame(frame)).is_some()
+}
+
+/// Makes `host` the one the page's bridge calls reach (under the lock).
+fn set_active_host(host: *mut canvas::host::CanvasHost) {
+    let _g = host_lock();
+    ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Attaches CanvasHost to a native CoreAnimation layer (CAMetalLayer on iOS/macOS).
@@ -857,7 +867,7 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
     match canvas::host::CanvasHost::attach(target, w, h) {
         Ok((host, _name)) => {
             let ptr = Box::into_raw(Box::new(host));
-            ACTIVE_CANVAS_HOST.store(ptr, std::sync::atomic::Ordering::SeqCst);
+            set_active_host(ptr);
             ptr
         }
         Err(_) => std::ptr::null_mut(),
@@ -867,58 +877,47 @@ pub unsafe extern "C" fn opennote_canvas_host_attach_layer(
 /// Pans all page placements in the CanvasHost by (dx, dy).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_pan(h: *mut canvas::host::CanvasHost, dx: f64, dy: f64) {
-    if let Some(host) = h.as_mut() {
-        host.pan(dx, dy);
-    }
+    with_host(h, |host| host.pan(dx, dy));
 }
 
 /// Zooms all page placements in the CanvasHost around anchor (cx, cy).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_zoom_at(h: *mut canvas::host::CanvasHost, factor: f64, cx: f64, cy: f64) {
-    if let Some(host) = h.as_mut() {
-        host.zoom_at(factor, cx, cy);
-    }
+    with_host(h, |host| host.zoom_at(factor, cx, cy));
 }
 
 /// Clears all scenes in the CanvasHost.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_clear_scenes(h: *mut canvas::host::CanvasHost) {
-    if let Some(host) = h.as_mut() {
-        host.clear_scenes();
-    }
+    with_host(h, |host| host.clear_scenes());
 }
 
 /// Removes a page's scene from the CanvasHost.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_remove_scene(h: *mut canvas::host::CanvasHost, page_id: *const std::os::raw::c_char) {
-    let Some(host) = h.as_mut() else { return };
     if page_id.is_null() {
         return;
     }
     if let Ok(id) = std::ffi::CStr::from_ptr(page_id).to_str() {
-        host.remove_scene(id);
+        with_host(h, |host| host.remove_scene(id));
     }
 }
 
-/// Draws the current frame in CanvasHost.
+/// Draws the current frame in CanvasHost (nothing when it is not dirty).
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasHost) -> bool {
-    let Some(host) = h.as_mut() else { return false };
-    host.draw().unwrap_or(false)
+    with_host(h, |host| host.draw().unwrap_or(false)).unwrap_or(false)
 }
 
-/// Frees a CanvasHost.
+/// Frees a CanvasHost; the page's bridge calls no longer reach it once this returns.
 #[no_mangle]
 pub unsafe extern "C" fn opennote_canvas_host_free(h: *mut canvas::host::CanvasHost) {
-    if !h.is_null() {
-        ACTIVE_CANVAS_HOST.compare_exchange(
-            h,
-            std::ptr::null_mut(),
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::Relaxed,
-        ).ok();
-        drop(Box::from_raw(h));
+    if h.is_null() {
+        return;
     }
+    let _g = host_lock();
+    let _ = ACTIVE_CANVAS_HOST.compare_exchange(h, std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::Relaxed);
+    drop(Box::from_raw(h));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -984,17 +983,52 @@ mod android {
         env.byte_array_from_slice(&reply).map(|a| a.into_raw()).unwrap_or(std::ptr::null_mut())
     }
 
+    /// The window behind the SurfaceView's surface, released when the surface goes (Android).
+    #[cfg(target_os = "android")]
+    static WINDOW: std::sync::atomic::AtomicPtr<ndk_sys::ANativeWindow> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+    /// A host drawing into the SurfaceView's surface (Vulkan / GLES through wgpu). It used to be
+    /// an offscreen texture, so nothing it drew reached the screen and the SurfaceView stayed
+    /// black. On the PC (the JVM test) there is no window: an offscreen host.
     #[no_mangle]
     pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasSurfaceCreated<'l>(
-        _env: JNIEnv<'l>,
+        env: JNIEnv<'l>,
         _class: JClass<'l>,
-        _surface: jni::objects::JObject<'l>,
+        surface: jni::objects::JObject<'l>,
         w: jni::sys::jint,
         h: jni::sys::jint,
     ) -> jlong {
-        let host = unsafe { super::opennote_canvas_host_offscreen(w.max(1) as u32, h.max(1) as u32) };
+        let (w, h) = (w.max(1) as u32, h.max(1) as u32);
+        #[cfg(target_os = "android")]
+        let host = unsafe {
+            use canvas::wgpu::rwh::{AndroidDisplayHandle, AndroidNdkWindowHandle, RawDisplayHandle, RawWindowHandle};
+            let window = ndk_sys::ANativeWindow_fromSurface(env.get_raw() as *mut _, surface.as_raw() as *mut _);
+            let Some(nn) = std::ptr::NonNull::new(window as *mut std::ffi::c_void) else { return 0 };
+            let target = canvas::wgpu::SurfaceTargetUnsafe::RawHandle {
+                raw_display_handle: RawDisplayHandle::Android(AndroidDisplayHandle::new()),
+                raw_window_handle: RawWindowHandle::AndroidNdk(AndroidNdkWindowHandle::new(nn)),
+            };
+            match canvas::host::CanvasHost::attach(target, w, h) {
+                Ok((host, _name)) => {
+                    let old = WINDOW.swap(window, std::sync::atomic::Ordering::SeqCst);
+                    if !old.is_null() {
+                        ndk_sys::ANativeWindow_release(old);
+                    }
+                    Box::into_raw(Box::new(host))
+                }
+                Err(_) => {
+                    ndk_sys::ANativeWindow_release(window);
+                    std::ptr::null_mut()
+                }
+            }
+        };
+        #[cfg(not(target_os = "android"))]
+        let host = {
+            let _ = (env, surface);
+            unsafe { super::opennote_canvas_host_offscreen(w, h) }
+        };
         if !host.is_null() {
-            super::ACTIVE_CANVAS_HOST.store(host, std::sync::atomic::Ordering::SeqCst);
+            super::set_active_host(host);
         }
         host as jlong
     }
@@ -1012,6 +1046,7 @@ mod android {
         }
     }
 
+    /// The surface goes: the host first (it draws into the window), then the window.
     #[no_mangle]
     pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasSurfaceDestroyed<'l>(
         _env: JNIEnv<'l>,
@@ -1019,13 +1054,14 @@ mod android {
         host: jlong,
     ) {
         if host != 0 {
-            super::ACTIVE_CANVAS_HOST.compare_exchange(
-                host as *mut canvas::host::CanvasHost,
-                std::ptr::null_mut(),
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::Relaxed,
-            ).ok();
             unsafe { super::opennote_canvas_host_free(host as *mut canvas::host::CanvasHost) };
+        }
+        #[cfg(target_os = "android")]
+        {
+            let window = WINDOW.swap(std::ptr::null_mut(), std::sync::atomic::Ordering::SeqCst);
+            if !window.is_null() {
+                unsafe { ndk_sys::ANativeWindow_release(window) };
+            }
         }
     }
 

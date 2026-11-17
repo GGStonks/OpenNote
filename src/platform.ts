@@ -37,7 +37,7 @@ declare global {
       /** Milestone N2/N3: Native Rust GPU surface (CanvasHost) is mounted beneath transparent WebView. */
       nativeCanvas?: boolean;
     };
-    webkit?: { messageHandlers?: { opennote?: IosBridge; opennoteUI?: IosBridge } };
+    webkit?: { messageHandlers?: { opennote?: IosBridge } };
   }
 }
 
@@ -55,8 +55,7 @@ export function hasNativeCanvas(): boolean {
   if (typeof window === 'undefined') return false;
   return Boolean(
     window.OpenNoteNative?.nativeCanvas ||
-    (window as any).OpenNoteRust?.nativeCanvas ||
-    (window as any).__opennoteNativeCanvas
+    (window as unknown as { __opennoteNativeCanvas?: boolean }).__opennoteNativeCanvas
   );
 }
 

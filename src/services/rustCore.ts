@@ -365,9 +365,9 @@ export interface CanvasPlacement {
     style: number;
     base: [number, number, number, number];
     dark?: boolean;
-    pattern?: [number, number, number];
+    pattern?: [number, number, number] | null;
     origin?: [number, number];
-  };
+  } | null;
 }
 
 export interface CanvasFrameReq {
@@ -377,7 +377,7 @@ export interface CanvasFrameReq {
 
 /** Updates a page's stroke scene in the native Rust CanvasHost. */
 export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
-  if (!rustEnabled()) return false;
+  // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   try {
     const { meta } = await rustCall('canvasScene', { page: pageId, strokes });
     return Boolean(meta.ok);
@@ -388,7 +388,7 @@ export async function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Pro
 
 /** Updates the frame specification (clear color, page placements, paper) in the native Rust CanvasHost. */
 export async function rustSetCanvasFrame(frame: CanvasFrameReq): Promise<boolean> {
-  if (!rustEnabled()) return false;
+  // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   try {
     const { meta } = await rustCall('canvasFrame', frame);
     return Boolean(meta.ok);
@@ -431,24 +431,14 @@ export async function rustGetCanvasStats(): Promise<Record<string, unknown> | nu
   }
 }
 
-/** Registers active floating UI bounding rects with the native shell to ensure hit-testing precision. */
-export function syncNativeUiRects(rects: Array<{ x: number; y: number; w: number; h: number }>): void {
-  try {
-    if (window.webkit?.messageHandlers?.opennoteUI) {
-      window.webkit.messageHandlers.opennoteUI.postMessage({ cmd: 'uiRects', rects });
-    }
-  } catch {
-    /* ignore */
-  }
-}
-
-/** Notifies native shell whether a full modal dialog is open. */
-export function setNativeModalOpen(open: boolean): void {
-  try {
-    if (window.webkit?.messageHandlers?.opennoteUI) {
-      window.webkit.messageHandlers.opennoteUI.postMessage({ cmd: 'modal', open });
-    }
-  } catch {
-    /* ignore */
+/**
+ * Settings > Diagnostics: the native canvas (docs/rust-native-canvas.md N2) from the next start.
+ * The shells keep the choice (iOS NSUserDefaults, Android SharedPreferences).
+ */
+export async function setNativeCanvas(on: boolean): Promise<void> {
+  if (platformKind() === 'ios') {
+    await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setNativeCanvas', on });
+  } else if (platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android') {
+    await registerPlugin<{ setNativeCanvas(o: { on: boolean }): Promise<void> }>('OpenNoteRust').setNativeCanvas({ on });
   }
 }

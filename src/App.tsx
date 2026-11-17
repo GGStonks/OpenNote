@@ -320,6 +320,12 @@ export const App: React.FC = () => {
   };
 
   const openNote = notes?.find((n) => n.id === openNoteId) ?? null;
+  // The native canvas under the web view shows only where the page is see-through: index.html
+  // gives <html> the theme's colour inline, so it is lifted while a note is open (index.css).
+  const nativeCanvasShown = !!openNote && hasNativeCanvas();
+  useEffect(() => {
+    document.documentElement.classList.toggle('on-native-canvas', nativeCanvasShown);
+  }, [nativeCanvasShown]);
 
   if (notes === null) {
     // The start-up logo, where and as large as the launch screens draw it (index.html, Android's
@@ -333,7 +339,7 @@ export const App: React.FC = () => {
   }
 
   return (
-    <div className={`h-full flex flex-col ${openNote && hasNativeCanvas() ? 'bg-transparent dark:bg-transparent on-native-canvas-active' : 'bg-ui-desk dark:bg-ui-app'} text-gray-900 dark:text-gray-100 overflow-hidden font-sans`}>
+    <div className={`h-full flex flex-col ${nativeCanvasShown ? 'bg-transparent dark:bg-transparent on-native-canvas-active' : 'bg-ui-desk dark:bg-ui-app'} text-gray-900 dark:text-gray-100 overflow-hidden font-sans`}>
       {loadError && <div className="bg-red-600 text-white text-xs px-3 py-1.5">Storage error: {loadError}</div>}
       {openNote ? (
         <ErrorBoundary key={openNote.id} onBack={() => setOpenNoteId(null)}>

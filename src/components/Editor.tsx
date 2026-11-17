@@ -37,7 +37,6 @@ import {
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
 import { ExportMode, canMakePdf, haptic, hasNativeCanvas, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
-import { setNativeModalOpen, syncNativeUiRects } from '../services/rustCore';
 import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
@@ -1287,34 +1286,6 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   useBack(pagesOpen, () => setPagesOpen(false));
   useBack(!!selection, () => setSelectionState(null));
   useBack(!!busy, cancelConversion);
-
-  useEffect(() => {
-    if (!hasNativeCanvas()) return;
-    const isModalOpen = pagesOpen || exportOpen || !!editingText || !!selection;
-    setNativeModalOpen(isModalOpen);
-  }, [pagesOpen, exportOpen, editingText, selection]);
-
-  useEffect(() => {
-    if (!hasNativeCanvas()) return;
-    const syncRects = () => {
-      const nodes = document.querySelectorAll('[data-no-pan], [data-cutout-clear], header, nav, dialog, [role="dialog"], button');
-      const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
-      nodes.forEach((el) => {
-        const r = el.getBoundingClientRect();
-        if (r.width > 0 && r.height > 0) {
-          rects.push({ x: r.left, y: r.top, w: r.width, h: r.height });
-        }
-      });
-      syncNativeUiRects(rects);
-    };
-    syncRects();
-    const interval = setInterval(syncRects, 500);
-    window.addEventListener('resize', syncRects);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('resize', syncRects);
-    };
-  }, []);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">

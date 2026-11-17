@@ -9,10 +9,10 @@ import { AppSettings, DEFAULT_SERVER, resolveChatUrl } from '../settings';
 import { testConnection } from '../services/vlmService';
 import { autoDeviceName } from '../services/serverAuth';
 import { setVectorInk, vectorInkEnabled } from '../ink/vectorInk';
-import { ExportMode, PageRate, exportOffersBoth, platformKind, setPageRate, shareFile } from '../platform';
+import { ExportMode, PageRate, exportOffersBoth, hasNativeCanvas, platformKind, setPageRate, shareFile } from '../platform';
 import { frameRate } from '../services/frameRate';
 import { useBack } from '../services/backStack';
-import { rustCheckLargestNote, rustEnabled, setRustEnabled } from '../services/rustCore';
+import { rustCheckLargestNote, rustEnabled, setNativeCanvas, setRustEnabled } from '../services/rustCore';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -37,6 +37,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   const [vectorInk, setVectorInkState] = useState(vectorInkEnabled);
   const [crashMsg, setCrashMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   const [rustOn, setRustOn] = useState(rustEnabled);
+  const [nativeCanvasOn, setNativeCanvasOn] = useState(hasNativeCanvas);
   const [rustMsg, setRustMsg] = useState<{ ok: boolean; msg: string } | null>(null);
   useEffect(() => crashLog.subscribe(() => setCrash(crashLog.lastCrash)), []);
   useEffect(() => penRecorder.subscribe(() => setRec({ on: penRecorder.enabled, count: penRecorder.count })), []);
@@ -303,6 +304,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
               title="Rust ink preparation"
               sub="The app's Rust library computes the ink's lines for pinching and thumbnails, off the main thread (this test build). Off: TypeScript, as in the regular app."
             />
+            {platformKind() !== 'web' && (
+              <Toggle
+                checked={nativeCanvasOn}
+                onChange={(v) => {
+                  setNativeCanvasOn(v);
+                  void setNativeCanvas(v);
+                }}
+                title="Native canvas (experimental, from the next start)"
+                sub="The page's ink and paper are drawn by Rust on the GPU under the page. Notes with PDF pages or pictures still use the page's own drawing."
+              />
+            )}
             <div className="flex flex-wrap gap-3 text-sm font-semibold text-blue-600 dark:text-blue-400 pt-1">
               <button
                 onClick={async () => {

@@ -145,11 +145,12 @@ public class MainActivity extends BridgeActivity {
         int color = saved != null ? saved.getInt(OpenNoteLaunchPlugin.BACKGROUND, Color.WHITE) : getColor(R.color.launch_background);
         getWindow().setBackgroundDrawable(new ColorDrawable(color));
         WebView web = getBridge() != null ? getBridge().getWebView() : null;
-        if (web != null) {
-            web.setBackgroundColor(Color.TRANSPARENT);
-            web.setLayerType(View.LAYER_TYPE_HARDWARE, null);
-        }
-        if (rustCanvasSurface == null && findViewById(android.R.id.content) != null) {
+        // The native canvas (Settings > Diagnostics, from the next start) draws under a see-through
+        // web view; without it the web view is the page as before (rs.18 made it see-through
+        // always, over a SurfaceView nothing drew into).
+        boolean nativeCanvas = OpenNoteRustPlugin.nativeCanvasEnabled(this);
+        if (web != null) web.setBackgroundColor(pagePainted && !nativeCanvas ? color : Color.TRANSPARENT);
+        if (nativeCanvas && rustCanvasSurface == null && findViewById(android.R.id.content) != null) {
             SurfaceView surfaceView = new SurfaceView(this);
             surfaceView.setZOrderOnTop(false);
             surfaceView.setZOrderMediaOverlay(false);

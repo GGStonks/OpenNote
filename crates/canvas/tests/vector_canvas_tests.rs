@@ -6,8 +6,7 @@ use canvas::ffi_bridge::{
     opennote_canvas_engine_create, opennote_canvas_engine_destroy,
     opennote_canvas_engine_dispatch_input, opennote_canvas_engine_screen_to_world,
     opennote_canvas_engine_set_camera, opennote_canvas_engine_set_tool,
-    opennote_canvas_engine_world_to_screen, InputEvent, PointerType,
-    TouchPhase,
+    opennote_canvas_engine_world_to_screen, RawInputEvent,
 };
 use canvas::geometry_engine::{
     snap_angle_cardinal, OrientedBoundingBox, RectBounds, Vec2d,
@@ -246,19 +245,27 @@ fn test_ffi_bridge_canvas_engine_lifecycle() {
         opennote_canvas_engine_set_tool(engine, 2);
 
         // Dispatch pointer down
-        let ev_down = InputEvent {
+        let ev_down = RawInputEvent {
             x: 100.0,
             y: 100.0,
             pressure: 1.0,
             tilt_x: 0.0,
             tilt_y: 0.0,
             timestamp_ms: 100.0,
-            phase: TouchPhase::Down,
-            pointer_type: PointerType::Stylus,
+            phase: 0,
+            pointer_type: 0,
         };
         let res = opennote_canvas_engine_dispatch_input(engine, &ev_down);
         // During down, no action response expected
         assert!(res.is_null());
+
+        // Values the C side may send that no enum holds are dropped, not read as an enum.
+        for (phase, pointer_type) in [(7u32, 0u32), (0, 9), (u32::MAX, u32::MAX)] {
+            let bad = RawInputEvent { phase, pointer_type, ..ev_down };
+            assert!(opennote_canvas_engine_dispatch_input(engine, &bad).is_null());
+        }
+        let nan = RawInputEvent { x: f64::NAN, ..ev_down };
+        assert!(opennote_canvas_engine_dispatch_input(engine, &nan).is_null());
 
         opennote_canvas_engine_destroy(engine);
     }
