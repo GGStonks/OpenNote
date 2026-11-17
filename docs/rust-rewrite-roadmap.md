@@ -143,8 +143,8 @@ Crates, in `crates/` (`cargo test --workspace` passes):
   The drawn line equals the TypeScript app's point for point (see differential testing).
 - [x] `model`: the types in `types.ts`, sheets, migrations, packed points, the `.opennote` codec.
 - [x] `store`: SQLite (notes, folders, tags, files, thumbnails, audio, backup).
-- [ ] `shapes`: recognition (lines, arrows, polygons and regular polygons, ellipses, circles,
-  parabolas), shape edit, selection and z-order are written. Not yet: the smart pen.
+- [x] `shapes`: recognition (lines, arrows, polygons and regular polygons, ellipses, circles,
+  parabolas), the smart pen, shape edit, selection and z-order, each checked against the TypeScript app.
 - [ ] `import`: text, LaTeX, Word (`.docx`), Notability `.note` (zip and plist) and `.ntb`
   (FlatBuffers) are written. Tests use made-up inputs only (text, LaTeX, a made-up `.docx`, the
   FlatBuffers reader); `.note` has no test, and none runs on the sample notes and documents.
@@ -156,15 +156,14 @@ Crates, in `crates/` (`cargo test --workspace` passes):
   `cargo test` compares the Rust results with them. Done for the ink pipeline on the
   recordings (`npm run bench:rustref`), read by `crates/ink/tests/reference.rs`: engine points,
   modelled line, widths and drawn line match to 1e-4 px (the live line, dash runs and eraser
-  pieces are in the file but not compared yet). No other module has a reference yet.
+  pieces are in the file but not compared yet). Since 2026-11-17 also `--module shapes`, `selection`, `smartpen` and `svg` (read by the `shapes` and `svg` crates' reference tests), and the storage round trip; the importers have none yet (they need the sample notes and documents).
 - **Gate:**
   - [x] `engine-golden.json` matches to 1e-4 px (`crates/nib/tests/golden.rs`: finished line,
     `nibStroke`, and the live line hash for hash, all asserted).
   - [x] `bench:look`, `bench:hooks`, `bench:overshoot` and `bench:leadend` give the same numbers on
     the recordings: 2.9.4's, on the October recordings (`crates/ink/tests/benches.rs`).
-  - [ ] The storage round-trip test passes. Rust's own round trip passes (the recordings, packed
-    and unpacked, exactly); not yet run on data written by the TypeScript app.
-  - [ ] A backup written by 2.9.x reads back identically, and the other way round.
+  - [x] The storage round-trip test passes: Rust reads what the TypeScript app writes (`npm run test:storage`, `crates/model/tests/ts_roundtrip.rs`), exactly.
+  - [x] A backup written by 2.9.x reads back identically, and the other way round (the same test, both directions).
 
 ### Phase 2: one renderer
 
