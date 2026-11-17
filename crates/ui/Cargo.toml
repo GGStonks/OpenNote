@@ -1,0 +1,13 @@
+[package]
+name = "ui"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform native UI architecture, theme tokens, fluid layout shell, and contextual editor widgets for OpenNote"
+
+[dependencies]
+model = { path = "../model" }
+renderer = { path = "../renderer" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
