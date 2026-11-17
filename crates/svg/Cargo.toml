@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 model = { path = "../model" }
 ink = { path = "../ink" }
+nib = { path = "../nib" }
 shapes = { path = "../shapes" }
 quick-xml = "0.37"
 serde = { version = "1.0", features = ["derive"] }

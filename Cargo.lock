@@ -2420,6 +2420,7 @@ version = "0.1.0"
 dependencies = [
  "ink",
  "model",
+ "nib",
  "quick-xml 0.37.5",
  "serde",
  "serde_json",

@@ -95,11 +95,13 @@ fn test_stroke_closed_polygon_fill_svg() {
     s.fill_opacity = Some(0.5);
 
     let svg = stroke_to_svg(&s, 0.0);
-    assert!(svg.contains("<polygon"));
-    assert!(svg.contains(r#"points="0.00,0.00 100.00,0.00 50.00,100.00""#));
+    // Fills are paths, as the TypeScript export writes them (strokeRenderer.ts fillSvg).
+    assert!(svg.contains("<path"), "{svg}");
+    assert!(svg.contains(r##"fill="#FF0000""##), "{svg}");
+    assert!(svg.contains(r#"fill-opacity="0.5""#), "{svg}");
     assert!(svg.contains(r##"fill="#FF0000""##));
     assert!(svg.contains(r#"fill-opacity="0.5""#));
-    assert!(svg.contains(r#"<path d="M 0.00 0.00 L 100.00 0.00 L 50.00 100.00 Z""#));
+    assert!(svg.contains(r#"<path d="M0.00 0.00 L100.00 0.00 L50.00 100.00 Z""#));
 }
 
 #[test]
@@ -203,7 +205,9 @@ fn test_page_and_document_to_svg() {
     };
 
     let svg = page_to_svg(&page, 800.0, 1000.0);
-    assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" width="800.00" height="1000.00""#));
+    // Numbers as JavaScript prints them (800, not 800.00), as svgHead writes them.
+    assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg""#), "{svg}");
+    assert!(svg.contains(r#"width="800""#) && svg.contains(r#"height="1000""#), "{svg}");
     assert!(svg.contains("Hello &lt;World&gt; &amp; Co."));
     assert!(svg.contains(r#"<image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="#));
     assert!(svg.ends_with("</svg>"));
