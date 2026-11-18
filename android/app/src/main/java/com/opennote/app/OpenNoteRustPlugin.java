@@ -75,20 +75,34 @@ public class OpenNoteRustPlugin extends Plugin {
     static native long canvasSurfaceCreated(Surface surface, int width, int height);
     static native void canvasSurfaceChanged(long host, int width, int height);
     static native void canvasSurfaceDestroyed(long host);
-    static native boolean canvasDraw(long host);
+    /** Draws the active host's frame when it changed; on the render thread only. */
+    static native boolean canvasDrawActive();
 
     private static long canvasHost = 0;
-    private static boolean frameCallbackActive = false;
+    private static volatile boolean frameCallbackActive = false;
+
+    /**
+     * The canvas is drawn on a thread of its own ("opennote-canvas", display priority, its own
+     * Choreographer). Drawing waits for the surface's next buffer; on the UI thread that wait held
+     * up the touches and the WebView's frames.
+     */
+    private static Handler render;
+
+    private static synchronized Handler render() {
+        if (render == null) {
+            android.os.HandlerThread t = new android.os.HandlerThread("opennote-canvas", Process.THREAD_PRIORITY_DISPLAY);
+            t.start();
+            render = new Handler(t.getLooper());
+        }
+        return render;
+    }
 
     private static final Choreographer.FrameCallback frameCallback = new Choreographer.FrameCallback() {
         @Override
         public void doFrame(long frameTimeNanos) {
-            if (canvasHost != 0) {
-                canvasDraw(canvasHost);
-                if (frameCallbackActive) {
-                    Choreographer.getInstance().postFrameCallback(this);
-                }
-            }
+            if (!frameCallbackActive) return;
+            canvasDrawActive();
+            Choreographer.getInstance().postFrameCallback(this);
         }
     };
 
@@ -138,16 +152,15 @@ public class OpenNoteRustPlugin extends Plugin {
     static void startFrameCallback() {
         if (frameCallbackActive) return;
         frameCallbackActive = true;
-        new Handler(Looper.getMainLooper()).post(() -> {
+        render().post(() -> {
+            Choreographer.getInstance().removeFrameCallback(frameCallback);
             Choreographer.getInstance().postFrameCallback(frameCallback);
         });
     }
 
     static void stopFrameCallback() {
         frameCallbackActive = false;
-        new Handler(Looper.getMainLooper()).post(() -> {
-            Choreographer.getInstance().removeFrameCallback(frameCallback);
-        });
+        render().post(() -> Choreographer.getInstance().removeFrameCallback(frameCallback));
     }
 
     private final ExecutorService worker = Executors.newSingleThreadExecutor((r) -> new Thread(() -> {

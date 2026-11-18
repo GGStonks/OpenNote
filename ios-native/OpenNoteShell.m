@@ -117,7 +117,7 @@ static void ONInstallCrashCapture(NSString *version) {
 
 static NSString *const kScheme = @"opennote";
 static NSString *const kHost = @"app";
-static NSString *const kVersion = @"2.9.4-rs.26";
+static NSString *const kVersion = @"2.9.4-rs.27";
 /** NSUserDefaults: the page's frame rate, "auto" (default), "60" or "max" (Settings > Diagnostics; next start). */
 static NSString *const kPageRateKey = @"OpenNotePageRate";
 /** NSUserDefaults: lifting the cap left the page under 50 fps here ("auto" keeps the cap since). */
@@ -291,7 +291,7 @@ typedef struct CanvasHost CanvasHost;
 
 extern CanvasHost *opennote_canvas_host_attach_layer(void *layer, uint32_t w, uint32_t h);
 extern void opennote_canvas_host_resize(CanvasHost *h, uint32_t w, uint32_t height);
-extern bool opennote_canvas_host_draw(CanvasHost *h);
+extern bool opennote_canvas_draw_active(void);
 extern void opennote_canvas_host_clear_scenes(CanvasHost *h);
 extern void opennote_canvas_host_free(CanvasHost *h);
 
@@ -1244,6 +1244,40 @@ static const double kInkHoldSeconds = 0.06;
 
 #pragma mark - Native Rust Canvas & Transparent WebView
 
+// The canvas is drawn on a thread of its own, at the display's rate. Drawing waits for the Metal
+// layer's next drawable (two of them, display-synced); on the main thread, as until rs.26, that
+// wait held up the touches and the web view's own frames: the whole note at 60 fps on a 120 Hz
+// iPad. The thread draws the active host under the library's lock (opennote_canvas_draw_active),
+// so a host freed meanwhile is never drawn.
+@interface ONCanvasTicker : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+
+@implementation ONCanvasTicker
+- (void)tick:(CADisplayLink *)link {
+    @autoreleasepool { opennote_canvas_draw_active(); }
+}
+@end
+
+static void ONStartCanvasThread(void) {
+    static NSThread *thread;
+    if (thread) return;
+    NSInteger fps = ONMaxFramesPerSecond();
+    thread = [[NSThread alloc] initWithBlock:^{
+        CADisplayLink *link = [CADisplayLink displayLinkWithTarget:[ONCanvasTicker new] selector:@selector(tick:)];
+        if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
+            link.preferredFrameRateRange = CAFrameRateRangeMake(60, fps, fps);
+        }
+        [link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
+        for (;;) {
+            @autoreleasepool { [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode beforeDate:[NSDate distantFuture]]; }
+        }
+    }];
+    thread.name = @"opennote-canvas";
+    thread.qualityOfService = NSQualityOfServiceUserInteractive;
+    [thread start];
+}
+
 @interface ONRustCanvasView : UIView
 @property (nonatomic, assign) CanvasHost *canvasHost;
 - (void)attachIfReady;
@@ -1306,7 +1340,6 @@ static const double kInkHoldSeconds = 0.06;
 @interface ONViewController : UIViewController <WKScriptMessageHandlerWithReply, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate, UIPencilInteractionDelegate, UIDocumentPickerDelegate>
 @property (nonatomic, strong) WKWebView *webView;
 @property (nonatomic, strong) ONRustCanvasView *rustCanvasView;
-@property (nonatomic, strong) CADisplayLink *displayLink;
 @property (nonatomic, strong) ONSchemeHandler *schemeHandler;
 @property (nonatomic, strong) NSURLSession *session;
 @property (nonatomic, strong) ONInkView *inkView;
@@ -1382,11 +1415,7 @@ static const double kInkHoldSeconds = 0.06;
         self.webView.frame = container.bounds;
         [container addSubview:self.webView];
         self.view = container;
-        self.displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(onDisplayFrame:)];
-        if ([self.displayLink respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
-            self.displayLink.preferredFrameRateRange = CAFrameRateRangeMake(60, ONMaxFramesPerSecond(), ONMaxFramesPerSecond());
-        }
-        [self.displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        ONStartCanvasThread();
     } else {
         self.view = self.webView;
     }
@@ -1439,12 +1468,6 @@ static const double kInkHoldSeconds = 0.06;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     [self.rustCanvasView attachIfReady];
-}
-
-- (void)onDisplayFrame:(CADisplayLink *)link {
-    if (self.rustCanvasView.canvasHost) {
-        opennote_canvas_host_draw(self.rustCanvasView.canvasHost);
-    }
 }
 
 - (UIStatusBarStyle)preferredStatusBarStyle {

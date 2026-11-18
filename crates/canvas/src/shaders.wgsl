@@ -163,133 +163,64 @@ fn over(dst: vec4<f32>, src: vec4<f32>, a: f32) -> vec4<f32> {
   return vec4<f32>(src.rgb * sa + dst.rgb * (1.0 - sa), sa + dst.a * (1.0 - sa));
 }
 
+// How much of the pixel around `p` (half a pixel `h` either side, page px) the band
+// [a, a + w) covers along one axis.
+fn band(p: f32, a: f32, w: f32, h: f32) -> f32 {
+  return clamp((min(p + h, a + w) - max(p - h, a)) / (2.0 * h), 0.0, 1.0);
+}
+
+// Lines of width `w` repeating every `step` from `phase`, along one axis.
+fn lines(p: f32, phase: f32, step: f32, w: f32, h: f32) -> f32 {
+  let a = phase + floor((p - phase) / step) * step;
+  return min(1.0, band(p, a, w, h) + band(p, a - step, w, h) + band(p, a + step, w, h));
+}
+
+// The paper as paperBackground (CanvasPage.tsx) paints it with CSS, in page px and scaled with
+// the zoom as the page's paper is: 1 px lines (ruled from 79-80 every gap under a blank 79 px top
+// band, the margin at x 79-80 over all; grid and graph on the surface's lattice, `p_origin` being
+// where the sheet sits on it; graph's majors over its minors), dots of radius 1.3 fading to 0 at
+// 1.7 on the surface's 24 px lattice. Each pixel takes the share of it a line covers, so lines
+// keep their place and weight at every zoom and sub-pixel offset. Until rs.26 this was the
+// thumbnails' bitmap painter: 1 device px lines at rounded places, and only within the screen's
+// size of the page's corner (the pattern vanished zoomed in).
 @fragment
 fn fs_paper(i: PageOut) -> @location(0) vec4<f32> {
-  let scale = u.px;
   var c = u.p_base;
   let st = u.p_style;
-  if (st == 0u) {
-    return vec4<f32>(c.rgb * c.a, c.a);
-  }
-
-  // Device pixel coordinates within the page
-  let dpos = floor(i.pos.xy) - floor(u.t);
-  let dev_px = dpos.x;
-  let dev_py = dpos.y;
-
+  let h = 0.5 / u.px;
+  let p = i.p;
+  let s = i.p + u.p_origin;
   if (st >= 1u && st <= 4u) {
-    // Ruled (1), Narrow (2), Lines (3), NarrowLines (4)
-    var gap = 32.0;
-    if (st == 2u || st == 4u) { gap = 24.0; }
-
-    // Ruled lines start after top margin (80px in page coordinates)
-    let y_float = dev_py / scale;
-    let k = round((y_float - 80.0) / gap);
-    if (k >= 0.0) {
-      let y_page = 80.0 + k * gap;
-      if (y_page * scale < u.size.y) {
-        let py = round(y_page * scale);
-        if (dev_py == py && py < u.size.y) {
-          c = over(c, u.p_line, 1.0);
-        }
-      }
+    let gap = select(32.0, 24.0, st == 2u || st == 4u);
+    // The lines from 79 down (the blank top band covers those above).
+    let a0 = 79.0 + floor((p.y - 79.0) / gap) * gap;
+    var cov = 0.0;
+    for (var k = -1; k <= 1; k++) {
+      let a = a0 + f32(k) * gap;
+      if (a >= 79.0) { cov += band(p.y, a, 1.0, h); }
     }
-
-    // Margin line (only for Ruled and Narrow, not Lines / NarrowLines)
+    c = over(c, u.p_line, min(cov, 1.0));
     if (st == 1u || st == 2u) {
-      let margin_x = round(79.0 * scale);
-      if (dev_px == margin_x && margin_x < u.size.x) {
-        c = over(c, u.p_margin, 1.0);
-      }
+      c = over(c, u.p_margin, band(p.x, 79.0, 1.0, h));
     }
   } else if (st == 5u) {
-    // Grid (5): 24px step
-    let step = 24.0;
-    let x0 = ((u.p_origin.x % step) + step) % step;
-    let y0 = ((u.p_origin.y % step) + step) % step;
-
-    // Vertical lines
-    let kx = round((dev_px / scale - x0) / step);
-    if (kx >= 0.0) {
-      let x_page = x0 + kx * step;
-      if (x_page * scale < u.size.x) {
-        let px = round(x_page * scale);
-        if (dev_px == px && px < u.size.x) {
-          c = over(c, u.p_grid, 1.0);
-        }
-      }
-    }
-
-    // Horizontal lines
-    let ky = round((dev_py / scale - y0) / step);
-    if (ky >= 0.0) {
-      let y_page = y0 + ky * step;
-      if (y_page * scale < u.size.y) {
-        let py = round(y_page * scale);
-        if (dev_py == py && py < u.size.y) {
-          c = over(c, u.p_grid, 1.0);
-        }
-      }
-    }
+    c = over(c, u.p_grid, lines(s.y, 0.0, 24.0, 1.0, h));
+    c = over(c, u.p_grid, lines(s.x, 0.0, 24.0, 1.0, h));
   } else if (st == 6u) {
-    // Graph (6): 12px step, major line every 60px
-    let step = 12.0;
-    let x0 = ((u.p_origin.x % step) + step) % step;
-    let y0 = ((u.p_origin.y % step) + step) % step;
-
-    // Vertical lines
-    let kx = round((dev_px / scale - x0) / step);
-    if (kx >= 0.0) {
-      let x_page = x0 + kx * step;
-      if (x_page * scale < u.size.x) {
-        let px = round(x_page * scale);
-        if (dev_px == px && px < u.size.x) {
-          let is_major = (i32(round(x_page)) % 60) == 0;
-          let col = select(u.p_minor, u.p_major, is_major);
-          c = over(c, col, 1.0);
-        }
-      }
-    }
-
-    // Horizontal lines
-    let ky = round((dev_py / scale - y0) / step);
-    if (ky >= 0.0) {
-      let y_page = y0 + ky * step;
-      if (y_page * scale < u.size.y) {
-        let py = round(y_page * scale);
-        if (dev_py == py && py < u.size.y) {
-          let is_major = (i32(round(y_page)) % 60) == 0;
-          let col = select(u.p_minor, u.p_major, is_major);
-          c = over(c, col, 1.0);
-        }
-      }
-    }
+    c = over(c, u.p_minor, lines(s.y, 0.0, 12.0, 1.0, h));
+    c = over(c, u.p_minor, lines(s.x, 0.0, 12.0, 1.0, h));
+    c = over(c, u.p_major, lines(s.y, 0.0, 60.0, 1.0, h));
+    c = over(c, u.p_major, lines(s.x, 0.0, 60.0, 1.0, h));
   } else if (st == 7u) {
-    // Dots (7): radius 1.3 * scale on 24px lattice
-    let step = 24.0;
-    let x0 = 12.0 + (((u.p_origin.x % step) + step) % step);
-    let y0 = 12.0 + (((u.p_origin.y % step) + step) % step);
-
-    let kx = round((dev_px / scale - x0) / step);
-    let ky = round((dev_py / scale - y0) / step);
-    if (kx >= 0.0 && ky >= 0.0) {
-      let x_page = x0 + kx * step;
-      let y_page = y0 + ky * step;
-      let cx = x_page * scale;
-      let cy = y_page * scale;
-      if (cx < u.size.x && cy < u.size.y) {
-        let r = 1.3 * scale;
-        let dx = dev_px - cx;
-        let dy = dev_py - cy;
-        let dist2 = dx * dx + dy * dy;
-        if (dist2 <= r * r) {
-          let dist = sqrt(dist2);
-          let alpha = 1.0 - clamp(dist - r + 0.5, 0.0, 1.0);
-          c = over(c, u.p_dot, alpha);
-        }
-      }
+    // The CSS ramp sampled 4 x 4 over the pixel (it is narrower than a pixel at low zoom).
+    let r = u.p_pad.x;
+    let q = s - round(s / 24.0) * 24.0;
+    var a = 0.0;
+    for (var k = 0; k < 16; k++) {
+      let o = (vec2<f32>(f32(k % 4), f32(k / 4)) + 0.5) / 4.0 * 2.0 - 1.0;
+      a += clamp((r + 0.4 - length(q + o * h)) / 0.4, 0.0, 1.0);
     }
+    c = over(c, u.p_dot, a / 16.0);
   }
-
   return vec4<f32>(c.rgb * c.a, c.a);
 }

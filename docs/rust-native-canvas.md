@@ -167,3 +167,12 @@ page's own frame messages through the bridge.
   `crates/native/tests/canvas_cache.rs`; `--only nativecanvas` checks the lift sends one stroke.
 - Over the native canvas the page draws no ink of its own, also while pinching (no WebGL pinch ink:
   usePinchInk is off) and in Low Power Mode (no shell snapshot pinch: it covered the canvas).
+- The canvas is drawn on a thread of its own in both shells (iOS `ONStartCanvasThread`, a display
+  link on its own run loop; Android's "opennote-canvas" HandlerThread with its own Choreographer),
+  through `opennote_canvas_draw_active` (the active host, under the lock). Never on the main / UI
+  thread: drawing waits for the surface's next image, and there that wait held the touches and
+  the web view's frames to 60 fps on a 120 Hz iPad (rs.18-26).
+- The paper is the page's CSS paper (`paperBackground`) in page px, scaled with the zoom, each
+  pixel covered by its share of a line (`fs_paper`); `compare.rs` checks it against the CSS rules
+  sampled 8 x 8 per pixel at 1x-23.7x, deep inside a page larger than the screen. The CPU painter
+  (`renderer::paper`, thumbnails) is not the reference: its lines are 1 device px at rounded places.

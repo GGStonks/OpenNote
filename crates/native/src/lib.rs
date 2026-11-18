@@ -1030,6 +1030,29 @@ pub unsafe extern "C" fn opennote_canvas_host_draw(h: *mut canvas::host::CanvasH
     })
 }
 
+/// Draws the frame of the active host, if any (nothing when it is not dirty): the shells' render
+/// threads call this, never the main thread. Drawing waits for the surface's next image (CAMetalLayer
+/// `nextDrawable`, Android's buffer queue); on the main thread that wait held up the touches and
+/// the web view's own frames (rs.18-26: the whole note at 60 fps on a 120 Hz iPad). Through the
+/// active host under the lock, a host the main thread frees meanwhile is never drawn.
+#[no_mangle]
+pub extern "C" fn opennote_canvas_draw_active() -> bool {
+    catch_unwind(AssertUnwindSafe(|| {
+        with_active_host(|host| match host.draw() {
+            Ok(drawn) => drawn,
+            Err(e) => {
+                canvas_note(None, Some(format!("draw: {e}")));
+                false
+            }
+        })
+        .unwrap_or(false)
+    }))
+    .unwrap_or_else(|_| {
+        canvas_note(None, Some("draw panicked".to_string()));
+        false
+    })
+}
+
 /// The iOS shell's crash file (ONInstallCrashCapture): a Rust panic is appended there with its
 /// thread, message, place and backtrace, before it unwinds or aborts, and the next start puts it
 /// in the crash report. Panics `catch_unwind` stops are written too.
@@ -1222,20 +1245,9 @@ mod android {
         }));
     }
 
+    /// The render thread's draw (OpenNoteRustPlugin's "opennote-canvas" thread): the active host.
     #[no_mangle]
-    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasDraw<'l>(
-        _env: JNIEnv<'l>,
-        _class: JClass<'l>,
-        host: jlong,
-    ) -> jboolean {
-        if host != 0 {
-            catch_unwind(AssertUnwindSafe(|| {
-                let drawn = unsafe { super::opennote_canvas_host_draw(host as *mut canvas::host::CanvasHost) };
-                if drawn { JNI_TRUE } else { JNI_FALSE }
-            }))
-            .unwrap_or(JNI_FALSE)
-        } else {
-            JNI_FALSE
-        }
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasDrawActive<'l>(_env: JNIEnv<'l>, _class: JClass<'l>) -> jboolean {
+        if super::opennote_canvas_draw_active() { JNI_TRUE } else { JNI_FALSE }
     }
 }

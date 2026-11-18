@@ -146,118 +146,104 @@ fn canvas_host_renders_paper_and_strokes() {
     assert!(dark_count > 10000, "expected dark pixels for paper and ink, got {dark_count}");
 }
 
+/// The paper as the page paints it (CanvasPage.tsx paperBackground, CSS gradients in page px,
+/// scaled with the zoom), point-sampled 8 x 8 per device pixel: lined papers have a 1 px line at
+/// 79 + k gap (k >= 0) and ruled ones the margin at x 79-80 over all; grid and graph lines are
+/// 1 px on the surface's lattice (graph's majors over its minors); dots are 1.3 px fading to 0 at
+/// 1.7 on the surface's 24 px lattice. The GPU paper must give the same picture at every zoom,
+/// also far inside a page much larger than the screen (until rs.26 the pattern vanished past the
+/// screen's size of the page's corner, and its 1 device px lines jumped as the zoom changed).
 #[test]
-fn gpu_paper_patterns_match_cpu_renderer() {
+fn gpu_paper_follows_the_pages_css_paper() {
     use canvas::{render_frame_offscreen, Frame, PageDraw, Paper};
     use model::{PaperColor, PaperStyle};
-    use renderer::paper::render_paper_background;
 
     let (device, queue, name) = pc_device().expect("a GPU or software Vulkan on the PC");
     println!("Paper GPU: {name}");
     let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
     let empty_scene = canvas.upload(&Scene { caps: vec![], flat: vec![], ops: vec![] });
+    type C = [f64; 4];
+    let over = |c: [f64; 3], s: C, on: bool| if on { [0, 1, 2].map(|i| s[i] * s[3] + c[i] * (1.0 - s[3])) } else { c };
+    let over_a = |c: [f64; 3], s: C, a: f64| [0, 1, 2].map(|i| s[i] * s[3] * a + c[i] * (1.0 - s[3] * a));
+    let md = |v: f64, m: f64| v - (v / m).floor() * m;
+    let (sheet_w, sheet_h, origin) = (816.0f32, 1056.0f32, [0.0f32, 1100.0f32]);
+    let (w, h) = (160u32, 120u32);
+    let n = 8;
 
-    let patterns = [
-        PaperStyle::Ruled,
-        PaperStyle::Narrow,
-        PaperStyle::Lines,
-        PaperStyle::NarrowLines,
-        PaperStyle::Grid,
-        PaperStyle::Graph,
-        PaperStyle::Dots,
-        PaperStyle::Blank,
-    ];
-
-    let colors = [
-        PaperColor::Name("cream".to_string()),
-        PaperColor::Name("dark".to_string()),
-        PaperColor::Hex("#E6F0FB".to_string()),
-    ];
-
-    for scale in [1.0f32, 4.0f32] {
-        let (w, h) = (200u32 * scale as u32, 200u32 * scale as u32);
-        for &style in &patterns {
-            for color in &colors {
-                let mut cpu = PixelBuffer::new(w as usize, h as usize);
-                render_paper_background(
-                    &mut cpu.data,
-                    w as usize,
-                    h as usize,
-                    (w * 4) as usize,
-                    style,
-                    color,
-                    scale as f64,
-                    0.0,
-                    0.0,
-                );
-
-                let paper = Paper::from_style_and_color(
-                    style,
-                    color,
-                    w as f32 / scale,
-                    h as f32 / scale,
-                    [0.0, 0.0],
-                    None,
-                );
-
-                let frame = Frame {
-                    clear: None,
-                    pages: vec![PageDraw {
-                        scene: &empty_scene,
-                        tf: Transform::scale(scale, 0.0, 0.0),
-                        paper: Some(paper),
-                    }],
-                };
-
-                let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
-
-                assert_eq!(cpu.data.len(), gpu.len());
-                let mut max_diff = 0;
-                let mut mismatches = 0;
-                for i in 0..cpu.data.len() {
-                    let diff = (cpu.data[i] as i32 - gpu[i] as i32).abs();
-                    if diff > max_diff {
-                        max_diff = diff;
-                    }
-                    if diff > 1 {
-                        mismatches += 1;
-                    }
-                }
-                assert!(
-                    mismatches == 0,
-                    "Pattern {style:?} color={:?} at {scale}x: {mismatches} pixels exceeded 1 level difference (max_diff={max_diff})",
-                    color.hex(),
-                );
-
-                // Verify line positions are identical
-                let base_rgba = renderer::color::Rgba::parse(color.hex(), 1.0);
-                let base_bytes = base_rgba.to_u8_array();
-                if style != PaperStyle::Blank {
-                    let mut cpu_line_pixels = 0;
-                    let mut gpu_line_pixels = 0;
-                    let mut identical_positions = true;
-                    for y in 0..h as usize {
-                        for x in 0..w as usize {
-                            let idx = (y * w as usize + x) * 4;
-                            let cpu_is_line = (cpu.data[idx] as i32 - base_bytes[0] as i32).abs() > 2
-                                || (cpu.data[idx + 1] as i32 - base_bytes[1] as i32).abs() > 2
-                                || (cpu.data[idx + 2] as i32 - base_bytes[2] as i32).abs() > 2;
-                            let gpu_is_line = (gpu[idx] as i32 - base_bytes[0] as i32).abs() > 2
-                                || (gpu[idx + 1] as i32 - base_bytes[1] as i32).abs() > 2
-                                || (gpu[idx + 2] as i32 - base_bytes[2] as i32).abs() > 2;
-                            if cpu_is_line { cpu_line_pixels += 1; }
-                            if gpu_is_line { gpu_line_pixels += 1; }
-                            if cpu_is_line != gpu_is_line {
-                                identical_positions = false;
-                            }
+    for (color, dark) in [(PaperColor::Name("cream".into()), false), (PaperColor::Name("dark".into()), true)] {
+        let base = { let r = renderer::color::Rgba::parse(color.hex(), 1.0); [r.r as f64 * 255.0, r.g as f64 * 255.0, r.b as f64 * 255.0] };
+        let k = |r: f64, g: f64, b: f64, a: f64| -> C { [r, g, b, a] };
+        let (line, margin, grid, major, minor, dot) = if dark {
+            (k(255., 255., 255., 0.13), k(239., 68., 68., 0.35), k(255., 255., 255., 0.09), k(255., 255., 255., 0.16), k(255., 255., 255., 0.06), k(255., 255., 255., 0.28))
+        } else {
+            (k(59., 130., 246., 0.22), k(239., 68., 68., 0.4), k(0., 0., 0., 0.08), k(0., 0., 0., 0.13), k(0., 0., 0., 0.05), k(0., 0., 0., 0.22))
+        };
+        for style in [PaperStyle::Ruled, PaperStyle::Narrow, PaperStyle::Lines, PaperStyle::NarrowLines, PaperStyle::Grid, PaperStyle::Graph, PaperStyle::Dots] {
+            let narrow = matches!(style, PaperStyle::Narrow | PaperStyle::NarrowLines);
+            let gap = if narrow { 24.0 } else { 32.0 };
+            // A spot with the pattern in view at every zoom (a line, the margin, a lattice point).
+            let at: (f64, f64) = match style {
+                PaperStyle::Ruled | PaperStyle::Lines => (76.2, 493.3),
+                PaperStyle::Narrow | PaperStyle::NarrowLines => (76.2, 485.3),
+                _ => (70.3, 480.6),
+            };
+            let css = |px: f64, py: f64| -> [f64; 3] {
+                let (sx, sy) = (px + origin[0] as f64, py + origin[1] as f64);
+                let mut c = base;
+                match style {
+                    PaperStyle::Ruled | PaperStyle::Narrow | PaperStyle::Lines | PaperStyle::NarrowLines => {
+                        c = over(c, line, py >= 79.0 && md(py - 79.0, gap) < 1.0);
+                        if matches!(style, PaperStyle::Ruled | PaperStyle::Narrow) {
+                            c = over(c, margin, (79.0..80.0).contains(&px));
                         }
                     }
-                    assert!(
-                        identical_positions,
-                        "Line positions mismatch for {style:?} at {scale}x: cpu={cpu_line_pixels}, gpu={gpu_line_pixels}"
-                    );
-                    assert_eq!(cpu_line_pixels, gpu_line_pixels);
+                    PaperStyle::Grid => {
+                        c = over(c, grid, md(sy, 24.0) < 1.0);
+                        c = over(c, grid, md(sx, 24.0) < 1.0);
+                    }
+                    PaperStyle::Graph => {
+                        c = over(c, minor, md(sy, 12.0) < 1.0);
+                        c = over(c, minor, md(sx, 12.0) < 1.0);
+                        c = over(c, major, md(sy, 60.0) < 1.0);
+                        c = over(c, major, md(sx, 60.0) < 1.0);
+                    }
+                    _ => {
+                        let (qx, qy) = (sx - (sx / 24.0).round() * 24.0, sy - (sy / 24.0).round() * 24.0);
+                        c = over_a(c, dot, ((1.7 - qx.hypot(qy)) / 0.4).clamp(0.0, 1.0));
+                    }
                 }
+                c
+            };
+            for zoom in [1.0f64, 1.5, 2.0, 4.33, 9.1, 23.7] {
+                let ox = -at.0 * zoom + 0.37;
+                let oy = -at.1 * zoom + 0.61;
+                let paper = Paper::from_style_and_color(style, &color, sheet_w, sheet_h, origin, None);
+                let frame = Frame { clear: None, pages: vec![PageDraw { scene: &empty_scene, tf: Transform::scale(zoom as f32, ox as f32, oy as f32), paper: Some(paper) }] };
+                let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
+                let (mut worst, mut marked) = (0.0f64, 0usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        let mut acc = [0.0; 3];
+                        for j in 0..n {
+                            for i in 0..n {
+                                let dx = x as f64 + (i as f64 + 0.5) / n as f64;
+                                let dy = y as f64 + (j as f64 + 0.5) / n as f64;
+                                let c = css((dx - ox) / zoom, (dy - oy) / zoom);
+                                (0..3).for_each(|q| acc[q] += c[q]);
+                            }
+                        }
+                        let o = ((y * w + x) * 4) as usize;
+                        let mut on = false;
+                        for q in 0..3 {
+                            let want = acc[q] / (n * n) as f64;
+                            worst = worst.max((gpu[o + q] as f64 - want).abs());
+                            on |= (gpu[o + q] as f64 - base[q]).abs() > 2.0;
+                        }
+                        marked += on as usize;
+                    }
+                }
+                assert!(marked > 0, "{style:?} {} at {zoom}x: no pattern in view", color.hex());
+                assert!(worst <= 6.0, "{style:?} {} at {zoom}x: a pixel {worst:.1} levels off the page's paper", color.hex());
             }
         }
     }
