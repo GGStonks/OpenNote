@@ -155,21 +155,49 @@ page's own frame messages through the bridge.
   painted the web view over the canvas: a black screen in a dark theme, every stroke gone at lift.
   `--only nativecanvas [--zsteps N]` (`BENCH_THEME=dark`) checks what the user sees (the page over
   the canvas, and a stroke written and lifted); the shells' views are not part of it.
-- The canvas's scene is built outside the host lock (`CanvasHost::put_scene`): the shells' display
-  link draws under it.
+- One owner of the canvas (C1, rust/DECISIONS.md ADR-002): crates/native `canvas_service.rs`. The
+  GPU objects (`HOST`: the host, its layer or window) are locked only by the render thread for a
+  draw and by the surface's lifecycle (`opennote_canvas_attach_layer` / `_resize` / `_detach`,
+  Android `canvasSurfaceCreated` / `Changed` / `Destroyed`); what the page sends (`PAGE`: each
+  page's scene, the last frame) has a lock of its own that the bridge holds only to swap a value
+  in, and the draw takes what changed at its start. The bridge never waits for a draw (a draw
+  waits for the surface's next image), and builds each scene on its own thread first. The shells
+  hold no host pointer: until rs.27 they held raw `CanvasHost` pointers, shared through an
+  `AtomicPtr` by the UI thread, the render thread and the bridge. Detach is synchronous: when it
+  returns no draw uses the layer or window, and Android's `ANativeWindow` reference is released
+  after the host. `crates/native/tests/canvas_stress.rs` runs the three threads at once.
+- Errors never panic. wgpu's default handler panics on any validation error, and a panic inside a
+  render pass (its drop panics again while unwinding) aborts the app past every `catch_unwind`:
+  each device gets its own handler (crates/canvas `GpuHealth`), which records the error for
+  `canvasStats` (Diagnostics, the crash report's `canvas-status`: `errors`, `error`,
+  `failedFrames`, `skippedFrames`, `skippedPages`, `lost`, `backend`, `fallback`). Before any GPU
+  call: a placement whose transform is not finite or is degenerate is skipped, a paper that is not
+  a finite positive box dropped; every texture is sized from its target, never from the zoom,
+  within `max_texture_dimension_2d`; no buffer is empty or above `max_buffer_size`; scissors are
+  clamped to the pass's own target. The device asks for the adapter's own limits, never wgpu's
+  defaults; format, alpha and present mode come from the surface's capabilities. A surface image
+  that is outdated or lost reconfigures and skips the frame, a late one skips it. A lost device,
+  or a panic caught anyway, drops the host, made again from the same layer or window at a later
+  tick. Android: a Vulkan driver that fails to make a device, loses it, or reports errors in its
+  first frames is replaced by GLES for the rest of the run (Mali). A driver's segfault ends the
+  process past all of that: a run with the canvas on that ended abnormally (Android's exit
+  record) makes OpenNoteRustPlugin start every later run on GLES (`canvasPreferGl`, preference
+  `gl`), until the canvas is switched in Diagnostics. The release profile keeps
+  `panic = unwind`, and every C and JNI entry point wraps `catch_unwind`.
 - Scenes are sent by difference (rs.26): each stroke object has a key (rustCore.ts `sceneKey`), its
   style and points go once, then the key alone; Rust keeps each stroke's ops (crates/native
   `SCENE_OPS`, the costly part: its drawn line) and assembles the scene from them
   (`Scene::from_ops`, the same as `Scene::build`). A key the canvas does not hold is answered
   `missing` and the page sends them all. A host made later (Android's surface, back from the
-  background) is given the scenes and the last frame at once (`set_active_host`). The shell's live
+  background; a host made again after its device was lost) is given every scene and the last
+  frame at its first draw (`canvas_service` keeps them). The shell's live
   copy of a stroke is cleared only once the canvas has its scene (CanvasPage `finishStroke`).
   `crates/native/tests/canvas_cache.rs`; `--only nativecanvas` checks the lift sends one stroke.
 - Over the native canvas the page draws no ink of its own, also while pinching (no WebGL pinch ink:
   usePinchInk is off) and in Low Power Mode (no shell snapshot pinch: it covered the canvas).
 - The canvas is drawn on a thread of its own in both shells (iOS `ONStartCanvasThread`, a display
   link on its own run loop; Android's "opennote-canvas" HandlerThread with its own Choreographer),
-  through `opennote_canvas_draw_active` (the active host, under the lock). Never on the main / UI
+  through `opennote_canvas_draw_active` (`canvasDrawActive` on Android). Never on the main / UI
   thread: drawing waits for the surface's next image, and there that wait held the touches and
   the web view's frames to 60 fps on a 120 Hz iPad (rs.18-26).
 - The paper is the page's CSS paper (`paperBackground`) in page px, scaled with the zoom, each

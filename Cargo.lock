@@ -243,14 +243,11 @@ name = "canvas"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "ink",
  "model",
- "nib",
  "pollster",
  "renderer",
  "serde",
  "serde_json",
- "shapes",
  "wgpu",
 ]
 

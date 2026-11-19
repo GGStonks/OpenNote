@@ -135,9 +135,11 @@ export const crashLog = {
     }
     session = { id: Math.random().toString(36).slice(2, 10), start: now, lastAt: now, app: __APP_VERSION__, userAgent: navigator.userAgent, dpr: window.devicePixelRatio, crumbs: [] };
     push({ kind: 'start' });
-    // The shell's own record of how the last run ended (iOS: an exception, a fatal signal or a
-    // Rust panic with its backtrace), which the page could not see.
-    const native = (window as unknown as { OpenNoteNative?: { nativeCrash?: string | null } }).OpenNoteNative?.nativeCrash;
+    // The shell's own record of how the last run ended, which the page could not see. iOS: an
+    // exception, a fatal signal or a Rust panic with its backtrace. Android (OpenNoteCrashCapture):
+    // the system's exit record (a native crash's backtrace), a Rust panic, a Java exception.
+    const w = window as unknown as { OpenNoteNative?: { nativeCrash?: string | null }; __opennoteNativeCrash?: string };
+    const native = w.OpenNoteNative?.nativeCrash ?? w.__opennoteNativeCrash;
     if (native) {
       const text = String(native).slice(0, 12000);
       push({ kind: 'native-crash', text });

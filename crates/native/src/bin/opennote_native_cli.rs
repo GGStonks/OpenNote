@@ -17,10 +17,14 @@ fn read_u32(r: &mut impl Read) -> Option<u32> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--serve") {
-        let (w, h): (u32, u32) = (args[2].parse().expect("width"), args[3].parse().expect("height"));
-        let host = unsafe { opennote_native::opennote_canvas_host_offscreen(w, h) };
-        assert!(!host.is_null(), "no GPU for the canvas");
-        opennote_native::set_active_host(host);
+        let (w, h): (u32, u32) = (
+            args[2].parse().expect("width"),
+            args[3].parse().expect("height"),
+        );
+        assert!(
+            opennote_native::canvas_service::attach_offscreen(w, h),
+            "no GPU for the canvas"
+        );
         let (mut input, mut output) = (std::io::stdin().lock(), std::io::stdout().lock());
         while let Some(n) = read_u32(&mut input) {
             let mut method = vec![0u8; n as usize];
@@ -30,15 +34,15 @@ fn main() {
             input.read_exact(&mut request).expect("request");
             let method = String::from_utf8_lossy(&method).to_string();
             let reply = if method == "canvasSnapshot" {
-                let px = unsafe {
-                    opennote_native::opennote_canvas_host_draw(host);
-                    (*host).pixels()
-                };
+                opennote_native::canvas_service::draw_active();
+                let px = opennote_native::canvas_service::offscreen_pixels();
                 opennote_native::frame(&format!("{{\"width\":{w},\"height\":{h}}}"), &px)
             } else {
                 opennote_native::call_framed(&method, &request)
             };
-            output.write_all(&(reply.len() as u32).to_le_bytes()).expect("out");
+            output
+                .write_all(&(reply.len() as u32).to_le_bytes())
+                .expect("out");
             output.write_all(&reply).expect("out");
             output.flush().expect("flush");
         }

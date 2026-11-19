@@ -64,7 +64,14 @@ fn js_round(x: f64) -> f64 {
 
 impl Live {
     pub fn new(p: LiveParams) -> Self {
-        Live { p, started: false, real: false, dense: SampleDensifier::new(), model: SmoothLiveStroke::new(), sent: 0 }
+        Live {
+            p,
+            started: false,
+            real: false,
+            dense: SampleDensifier::new(),
+            model: SmoothLiveStroke::new(),
+            sent: 0,
+        }
     }
 
     /// The page's time for a sample (shell clock `t` in s), as nativePencil + toPoint compute it.
@@ -105,7 +112,11 @@ impl Live {
         let fresh = line.final_pts.len().saturating_sub(self.sent);
         for i in self.sent.min(line.final_pts.len())..line.final_pts.len() {
             let q = &line.final_pts[i];
-            out.extend([p.ox + q.x * p.k, p.oy + q.y * p.k, (line.final_w[i] / 2.0) * p.k]);
+            out.extend([
+                p.ox + q.x * p.k,
+                p.oy + q.y * p.k,
+                (line.final_w[i] / 2.0) * p.k,
+            ]);
         }
         self.sent = line.final_pts.len();
         for (q, w) in line.rest_pts.iter().zip(&line.rest_w) {

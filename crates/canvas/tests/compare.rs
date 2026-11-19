@@ -14,21 +14,70 @@ use serde_json::Value;
 /// The reference strokes on an 816 x 1056 page: rows 0-3 fountain pen, 4 ballpoint, 5 highlighter.
 pub fn reference_page() -> Vec<Stroke> {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/ink.json");
-    let refs: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("run npm run bench:rustref -- bench/rust-ref/ink.json")).unwrap();
+    let refs: Value = serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .expect("run npm run bench:rustref -- bench/rust-ref/ink.json"),
+    )
+    .unwrap();
     let mut out = Vec::new();
     for (i, r) in refs["strokes"].as_array().unwrap().iter().enumerate() {
-        let pts: Vec<[f64; 4]> = r["points"].as_array().unwrap().iter().map(|p| { let v: Vec<f64> = p.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect(); [v[0], v[1], v[2], v[3]] }).collect();
-        let (min_x, min_y) = pts.iter().fold((f64::INFINITY, f64::INFINITY), |m, p| (m.0.min(p[0]), m.1.min(p[1])));
-        let (max_x, max_y) = pts.iter().fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |m, p| (m.0.max(p[0]), m.1.max(p[1])));
-        let s = 1f64.min(120.0 / (max_x - min_x).max(1.0)).min(150.0 / (max_y - min_y).max(1.0));
+        let pts: Vec<[f64; 4]> = r["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let v: Vec<f64> = p
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|x| x.as_f64().unwrap())
+                    .collect();
+                [v[0], v[1], v[2], v[3]]
+            })
+            .collect();
+        let (min_x, min_y) = pts.iter().fold((f64::INFINITY, f64::INFINITY), |m, p| {
+            (m.0.min(p[0]), m.1.min(p[1]))
+        });
+        let (max_x, max_y) = pts
+            .iter()
+            .fold((f64::NEG_INFINITY, f64::NEG_INFINITY), |m, p| {
+                (m.0.max(p[0]), m.1.max(p[1]))
+            });
+        let s = 1f64
+            .min(120.0 / (max_x - min_x).max(1.0))
+            .min(150.0 / (max_y - min_y).max(1.0));
         let (col, row) = (i % 6, i / 6);
         let (ox, oy) = (15.0 + col as f64 * 133.0, 20.0 + row as f64 * 172.0);
-        let points = pts.iter().map(|p| Point { x: ox + (p[0] - min_x) * s, y: oy + (p[1] - min_y) * s, pressure: p[3], t: Some(p[2]), ..Default::default() }).collect();
-        let (tool, pen_style, color) = match row { 4 => ("pen", Some(PenStyle::Ballpoint), "#1a3d8f"), 5 => ("highlighter", None, "#f5c400"), _ => ("pen", Some(PenStyle::Fountain), "#000000") };
+        let points = pts
+            .iter()
+            .map(|p| Point {
+                x: ox + (p[0] - min_x) * s,
+                y: oy + (p[1] - min_y) * s,
+                pressure: p[3],
+                t: Some(p[2]),
+                ..Default::default()
+            })
+            .collect();
+        let (tool, pen_style, color) = match row {
+            4 => ("pen", Some(PenStyle::Ballpoint), "#1a3d8f"),
+            5 => ("highlighter", None, "#f5c400"),
+            _ => ("pen", Some(PenStyle::Fountain), "#000000"),
+        };
         out.push(Stroke {
-            id: format!("s{i}"), tool: tool.into(), color: color.into(), width: r["width"].as_f64().unwrap(), opacity: 1.0, points, pen_style,
-            pen_end: if r["penEndFlag"].as_bool() == Some(true) && tool == "pen" { Some(true) } else { None },
-            created_at: Some(i as f64), ..Default::default()
+            id: format!("s{i}"),
+            tool: tool.into(),
+            color: color.into(),
+            width: r["width"].as_f64().unwrap(),
+            opacity: 1.0,
+            points,
+            pen_style,
+            pen_end: if r["penEndFlag"].as_bool() == Some(true) && tool == "pen" {
+                Some(true)
+            } else {
+                None
+            },
+            created_at: Some(i as f64),
+            ..Default::default()
         });
     }
     out
@@ -40,13 +89,22 @@ fn luma(p: &[u8]) -> f32 {
 
 /// `name`: share of a's ink pixels with b's ink within `r` px, total darkness ratio b / a.
 fn compare(a: &[u8], b: &[u8], w: usize, h: usize, r: isize) -> (f32, f32, f32, usize, usize) {
-    let mask = |img: &[u8]| -> Vec<bool> { (0..w * h).map(|i| luma(&img[i * 4..i * 4 + 4]) < 245.0).collect() };
+    let mask = |img: &[u8]| -> Vec<bool> {
+        (0..w * h)
+            .map(|i| luma(&img[i * 4..i * 4 + 4]) < 245.0)
+            .collect()
+    };
     let (ma, mb) = (mask(a), mask(b));
     let near = |m: &[bool], x: isize, y: isize| -> bool {
         for dy in -r..=r {
             for dx in -r..=r {
                 let (xx, yy) = (x + dx, y + dy);
-                if xx >= 0 && yy >= 0 && (xx as usize) < w && (yy as usize) < h && m[yy as usize * w + xx as usize] {
+                if xx >= 0
+                    && yy >= 0
+                    && (xx as usize) < w
+                    && (yy as usize) < h
+                    && m[yy as usize * w + xx as usize]
+                {
                     return true;
                 }
             }
@@ -57,12 +115,32 @@ fn compare(a: &[u8], b: &[u8], w: usize, h: usize, r: isize) -> (f32, f32, f32, 
     for y in 0..h as isize {
         for x in 0..w as isize {
             let i = y as usize * w + x as usize;
-            if ma[i] { na += 1; if near(&mb, x, y) { ha += 1; } }
-            if mb[i] { nb += 1; if near(&ma, x, y) { hb += 1; } }
+            if ma[i] {
+                na += 1;
+                if near(&mb, x, y) {
+                    ha += 1;
+                }
+            }
+            if mb[i] {
+                nb += 1;
+                if near(&ma, x, y) {
+                    hb += 1;
+                }
+            }
         }
     }
-    let dark = |img: &[u8]| -> f64 { (0..w * h).map(|i| 255.0 - luma(&img[i * 4..i * 4 + 4]) as f64).sum() };
-    (ha as f32 / na.max(1) as f32, hb as f32 / nb.max(1) as f32, (dark(b) / dark(a).max(1.0)) as f32, na, nb)
+    let dark = |img: &[u8]| -> f64 {
+        (0..w * h)
+            .map(|i| 255.0 - luma(&img[i * 4..i * 4 + 4]) as f64)
+            .sum()
+    };
+    (
+        ha as f32 / na.max(1) as f32,
+        hb as f32 / nb.max(1) as f32,
+        (dark(b) / dark(a).max(1.0)) as f32,
+        na,
+        nb,
+    )
 }
 
 #[test]
@@ -72,11 +150,22 @@ fn gpu_canvas_matches_cpu_renderer() {
     let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
     let strokes = reference_page();
     let scene = Scene::build(&[&strokes]);
-    assert!(scene.caps.len() > 1000, "only {} capsules", scene.caps.len());
+    assert!(
+        scene.caps.len() > 1000,
+        "only {} capsules",
+        scene.caps.len()
+    );
     let mut failures = Vec::new();
     for (scale, w, h) in [(1.0f32, 816u32, 1056u32), (4.0, 816 * 4, 300 * 4)] {
         let paper = Rgba::WHITE;
-        let gpu = render_offscreen(&mut canvas, &scene, w, h, &Transform::scale(scale, 0.0, 0.0), Some(paper));
+        let gpu = render_offscreen(
+            &mut canvas,
+            &scene,
+            w,
+            h,
+            &Transform::scale(scale, 0.0, 0.0),
+            Some(paper),
+        );
         let mut cpu = PixelBuffer::new(w as usize, h as usize);
         cpu.clear(paper);
         let ops: Vec<_> = strokes.iter().flat_map(build_stroke_ops).collect();
@@ -84,10 +173,18 @@ fn gpu_canvas_matches_cpu_renderer() {
         let (a_in_b, b_in_a, dark, na, nb) = compare(&cpu.data, &gpu, w as usize, h as usize, 1);
         println!("{scale}x: ink px cpu {na} gpu {nb}; within 1 px: {:.2}% of cpu's, {:.2}% of gpu's; darkness gpu/cpu {dark:.3}", a_in_b * 100.0, b_in_a * 100.0);
         if a_in_b < 0.995 || b_in_a < 0.995 || (dark - 1.0).abs() > 0.02 {
-            failures.push(format!("{scale}x: within 1 px {:.2}% / {:.2}%, darkness {dark:.3}", a_in_b * 100.0, b_in_a * 100.0));
+            failures.push(format!(
+                "{scale}x: within 1 px {:.2}% / {:.2}%, darkness {dark:.3}",
+                a_in_b * 100.0,
+                b_in_a * 100.0
+            ));
         }
     }
-    assert!(failures.is_empty(), "GPU canvas differs from the CPU renderer:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "GPU canvas differs from the CPU renderer:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -138,12 +235,15 @@ fn canvas_host_renders_paper_and_strokes() {
 
     // Verify non-empty, contains ink and paper pixels
     let mut dark_count = 0;
-    for chunk in pixels.chunks_exact(4) {
+    for chunk in pixels.as_chunks::<4>().0 {
         if luma(chunk) < 240.0 {
             dark_count += 1;
         }
     }
-    assert!(dark_count > 10000, "expected dark pixels for paper and ink, got {dark_count}");
+    assert!(
+        dark_count > 10000,
+        "expected dark pixels for paper and ink, got {dark_count}"
+    );
 }
 
 /// The paper as the page paints it (CanvasPage.tsx paperBackground, CSS gradients in page px,
@@ -161,24 +261,63 @@ fn gpu_paper_follows_the_pages_css_paper() {
     let (device, queue, name) = pc_device().expect("a GPU or software Vulkan on the PC");
     println!("Paper GPU: {name}");
     let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
-    let empty_scene = canvas.upload(&Scene { caps: vec![], flat: vec![], ops: vec![] });
+    let empty_scene = canvas.upload(&Scene {
+        caps: vec![],
+        flat: vec![],
+        ops: vec![],
+    });
     type C = [f64; 4];
-    let over = |c: [f64; 3], s: C, on: bool| if on { [0, 1, 2].map(|i| s[i] * s[3] + c[i] * (1.0 - s[3])) } else { c };
-    let over_a = |c: [f64; 3], s: C, a: f64| [0, 1, 2].map(|i| s[i] * s[3] * a + c[i] * (1.0 - s[3] * a));
+    let over = |c: [f64; 3], s: C, on: bool| {
+        if on {
+            [0, 1, 2].map(|i| s[i] * s[3] + c[i] * (1.0 - s[3]))
+        } else {
+            c
+        }
+    };
+    let over_a =
+        |c: [f64; 3], s: C, a: f64| [0, 1, 2].map(|i| s[i] * s[3] * a + c[i] * (1.0 - s[3] * a));
     let md = |v: f64, m: f64| v - (v / m).floor() * m;
     let (sheet_w, sheet_h, origin) = (816.0f32, 1056.0f32, [0.0f32, 1100.0f32]);
     let (w, h) = (160u32, 120u32);
     let n = 8;
 
-    for (color, dark) in [(PaperColor::Name("cream".into()), false), (PaperColor::Name("dark".into()), true)] {
-        let base = { let r = renderer::color::Rgba::parse(color.hex(), 1.0); [r.r as f64 * 255.0, r.g as f64 * 255.0, r.b as f64 * 255.0] };
+    for (color, dark) in [
+        (PaperColor::Name("cream".into()), false),
+        (PaperColor::Name("dark".into()), true),
+    ] {
+        let base = {
+            let r = renderer::color::Rgba::parse(color.hex(), 1.0);
+            [r.r as f64 * 255.0, r.g as f64 * 255.0, r.b as f64 * 255.0]
+        };
         let k = |r: f64, g: f64, b: f64, a: f64| -> C { [r, g, b, a] };
         let (line, margin, grid, major, minor, dot) = if dark {
-            (k(255., 255., 255., 0.13), k(239., 68., 68., 0.35), k(255., 255., 255., 0.09), k(255., 255., 255., 0.16), k(255., 255., 255., 0.06), k(255., 255., 255., 0.28))
+            (
+                k(255., 255., 255., 0.13),
+                k(239., 68., 68., 0.35),
+                k(255., 255., 255., 0.09),
+                k(255., 255., 255., 0.16),
+                k(255., 255., 255., 0.06),
+                k(255., 255., 255., 0.28),
+            )
         } else {
-            (k(59., 130., 246., 0.22), k(239., 68., 68., 0.4), k(0., 0., 0., 0.08), k(0., 0., 0., 0.13), k(0., 0., 0., 0.05), k(0., 0., 0., 0.22))
+            (
+                k(59., 130., 246., 0.22),
+                k(239., 68., 68., 0.4),
+                k(0., 0., 0., 0.08),
+                k(0., 0., 0., 0.13),
+                k(0., 0., 0., 0.05),
+                k(0., 0., 0., 0.22),
+            )
         };
-        for style in [PaperStyle::Ruled, PaperStyle::Narrow, PaperStyle::Lines, PaperStyle::NarrowLines, PaperStyle::Grid, PaperStyle::Graph, PaperStyle::Dots] {
+        for style in [
+            PaperStyle::Ruled,
+            PaperStyle::Narrow,
+            PaperStyle::Lines,
+            PaperStyle::NarrowLines,
+            PaperStyle::Grid,
+            PaperStyle::Graph,
+            PaperStyle::Dots,
+        ] {
             let narrow = matches!(style, PaperStyle::Narrow | PaperStyle::NarrowLines);
             let gap = if narrow { 24.0 } else { 32.0 };
             // A spot with the pattern in view at every zoom (a line, the margin, a lattice point).
@@ -191,7 +330,10 @@ fn gpu_paper_follows_the_pages_css_paper() {
                 let (sx, sy) = (px + origin[0] as f64, py + origin[1] as f64);
                 let mut c = base;
                 match style {
-                    PaperStyle::Ruled | PaperStyle::Narrow | PaperStyle::Lines | PaperStyle::NarrowLines => {
+                    PaperStyle::Ruled
+                    | PaperStyle::Narrow
+                    | PaperStyle::Lines
+                    | PaperStyle::NarrowLines => {
                         c = over(c, line, py >= 79.0 && md(py - 79.0, gap) < 1.0);
                         if matches!(style, PaperStyle::Ruled | PaperStyle::Narrow) {
                             c = over(c, margin, (79.0..80.0).contains(&px));
@@ -208,7 +350,10 @@ fn gpu_paper_follows_the_pages_css_paper() {
                         c = over(c, major, md(sx, 60.0) < 1.0);
                     }
                     _ => {
-                        let (qx, qy) = (sx - (sx / 24.0).round() * 24.0, sy - (sy / 24.0).round() * 24.0);
+                        let (qx, qy) = (
+                            sx - (sx / 24.0).round() * 24.0,
+                            sy - (sy / 24.0).round() * 24.0,
+                        );
                         c = over_a(c, dot, ((1.7 - qx.hypot(qy)) / 0.4).clamp(0.0, 1.0));
                     }
                 }
@@ -217,8 +362,16 @@ fn gpu_paper_follows_the_pages_css_paper() {
             for zoom in [1.0f64, 1.5, 2.0, 4.33, 9.1, 23.7] {
                 let ox = -at.0 * zoom + 0.37;
                 let oy = -at.1 * zoom + 0.61;
-                let paper = Paper::from_style_and_color(style, &color, sheet_w, sheet_h, origin, None);
-                let frame = Frame { clear: None, pages: vec![PageDraw { scene: &empty_scene, tf: Transform::scale(zoom as f32, ox as f32, oy as f32), paper: Some(paper) }] };
+                let paper =
+                    Paper::from_style_and_color(style, &color, sheet_w, sheet_h, origin, None);
+                let frame = Frame {
+                    clear: None,
+                    pages: vec![PageDraw {
+                        scene: &empty_scene,
+                        tf: Transform::scale(zoom as f32, ox as f32, oy as f32),
+                        paper: Some(paper),
+                    }],
+                };
                 let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
                 let (mut worst, mut marked) = (0.0f64, 0usize);
                 for y in 0..h {
@@ -242,8 +395,16 @@ fn gpu_paper_follows_the_pages_css_paper() {
                         marked += on as usize;
                     }
                 }
-                assert!(marked > 0, "{style:?} {} at {zoom}x: no pattern in view", color.hex());
-                assert!(worst <= 6.0, "{style:?} {} at {zoom}x: a pixel {worst:.1} levels off the page's paper", color.hex());
+                assert!(
+                    marked > 0,
+                    "{style:?} {} at {zoom}x: no pattern in view",
+                    color.hex()
+                );
+                assert!(
+                    worst <= 6.0,
+                    "{style:?} {} at {zoom}x: a pixel {worst:.1} levels off the page's paper",
+                    color.hex()
+                );
             }
         }
     }
@@ -257,12 +418,21 @@ fn gpu_paper_custom_pattern_color() {
     let (device, queue, name) = pc_device().expect("a GPU or software Vulkan on the PC");
     println!("Paper Pattern Color GPU: {name}");
     let mut canvas = GpuCanvas::new(device, queue, wgpu::TextureFormat::Rgba8Unorm);
-    let empty_scene = canvas.upload(&Scene { caps: vec![], flat: vec![], ops: vec![] });
+    let empty_scene = canvas.upload(&Scene {
+        caps: vec![],
+        flat: vec![],
+        ops: vec![],
+    });
 
     let (w, h) = (200u32, 200u32);
     let color = PaperColor::Name("white".to_string());
     let pattern_col = [0.0f32, 1.0f32, 0.0f32];
-    for &style in &[PaperStyle::Ruled, PaperStyle::Grid, PaperStyle::Graph, PaperStyle::Dots] {
+    for &style in &[
+        PaperStyle::Ruled,
+        PaperStyle::Grid,
+        PaperStyle::Graph,
+        PaperStyle::Dots,
+    ] {
         let paper = Paper::from_style_and_color(
             style,
             &color,
@@ -281,12 +451,14 @@ fn gpu_paper_custom_pattern_color() {
         };
         let gpu = render_frame_offscreen(&mut canvas, w, h, &frame);
         let mut green_line_pixels = 0;
-        for chunk in gpu.chunks_exact(4) {
+        for chunk in gpu.as_chunks::<4>().0 {
             if chunk[1] > chunk[0] && chunk[1] > chunk[2] {
                 green_line_pixels += 1;
             }
         }
-        assert!(green_line_pixels > 0, "Expected green pattern lines for {style:?}");
+        assert!(
+            green_line_pixels > 0,
+            "Expected green pattern lines for {style:?}"
+        );
     }
 }
-

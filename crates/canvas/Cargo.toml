@@ -10,9 +10,6 @@ edition = "2021"
 [dependencies]
 model = { path = "../model" }
 renderer = { path = "../renderer" }
-ink = { path = "../ink" }
-shapes = { path = "../shapes" }
-nib = { path = "../nib" }
 wgpu = { version = "27", default-features = false, features = ["metal", "vulkan", "gles", "wgsl"] }
 bytemuck = { version = "1.16", features = ["derive"] }
 pollster = "0.4"

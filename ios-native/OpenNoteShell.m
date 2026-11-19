@@ -286,14 +286,13 @@ extern bool opennote_live_add(LiveHandle *h, double x, double y, double force, d
 extern const double *opennote_live_update(LiveHandle *h, size_t *fresh, size_t *n);
 extern void opennote_live_free(LiveHandle *h);
 
-// Native GPU Canvas (crates/canvas & crates/native)
-typedef struct CanvasHost CanvasHost;
-
-extern CanvasHost *opennote_canvas_host_attach_layer(void *layer, uint32_t w, uint32_t h);
-extern void opennote_canvas_host_resize(CanvasHost *h, uint32_t w, uint32_t height);
+// Native GPU Canvas (crates/canvas, crates/native canvas_service.rs). The library owns the canvas:
+// the shell holds no handle, only whether it is attached.
+extern bool opennote_canvas_attach_layer(void *layer, uint32_t w, uint32_t h);
+extern void opennote_canvas_resize(uint32_t w, uint32_t h);
+/** Synchronous: when it returns no draw uses the layer. */
+extern void opennote_canvas_detach(void);
 extern bool opennote_canvas_draw_active(void);
-extern void opennote_canvas_host_clear_scenes(CanvasHost *h);
-extern void opennote_canvas_host_free(CanvasHost *h);
 
 
 // One Rust call at a time, in order, never on the main thread.
@@ -1247,8 +1246,8 @@ static const double kInkHoldSeconds = 0.06;
 // The canvas is drawn on a thread of its own, at the display's rate. Drawing waits for the Metal
 // layer's next drawable (two of them, display-synced); on the main thread, as until rs.26, that
 // wait held up the touches and the web view's own frames: the whole note at 60 fps on a 120 Hz
-// iPad. The thread draws the active host under the library's lock (opennote_canvas_draw_active),
-// so a host freed meanwhile is never drawn.
+// iPad. The library draws its canvas under its own lock (opennote_canvas_draw_active), so a canvas
+// detached meanwhile is never drawn.
 @interface ONCanvasTicker : NSObject
 - (void)tick:(CADisplayLink *)link;
 @end
@@ -1279,7 +1278,7 @@ static void ONStartCanvasThread(void) {
 }
 
 @interface ONRustCanvasView : UIView
-@property (nonatomic, assign) CanvasHost *canvasHost;
+@property (nonatomic, assign) BOOL canvasAttached;
 - (void)attachIfReady;
 @end
 
@@ -1322,14 +1321,14 @@ static void ONStartCanvasThread(void) {
     metalLayer.opaque = YES;
     uint32_t w = (uint32_t)(sz.width * scale);
     uint32_t h = (uint32_t)(sz.height * scale);
-    if (!self.canvasHost) self.canvasHost = opennote_canvas_host_attach_layer((__bridge void *)metalLayer, w, h);
-    else opennote_canvas_host_resize(self.canvasHost, w, h);
+    if (!self.canvasAttached) self.canvasAttached = opennote_canvas_attach_layer((__bridge void *)metalLayer, w, h);
+    else opennote_canvas_resize(w, h);
 }
 
 - (void)dealloc {
-    if (self.canvasHost) {
-        opennote_canvas_host_free(self.canvasHost);
-        self.canvasHost = NULL;
+    if (self.canvasAttached) {
+        opennote_canvas_detach();
+        self.canvasAttached = NO;
     }
 }
 

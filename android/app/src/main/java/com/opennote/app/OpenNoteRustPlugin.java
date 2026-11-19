@@ -71,14 +71,22 @@ public class OpenNoteRustPlugin extends Plugin {
     static native double[] liveUpdate(long h);
     static native void liveFree(long h);
 
-    // Native GPU Canvas (crates/canvas & crates/native)
-    static native long canvasSurfaceCreated(Surface surface, int width, int height);
-    static native void canvasSurfaceChanged(long host, int width, int height);
-    static native void canvasSurfaceDestroyed(long host);
-    /** Draws the active host's frame when it changed; on the render thread only. */
+    // Native GPU Canvas (crates/canvas, crates/native canvas_service.rs). The library owns the
+    // canvas: this class holds no handle, only whether it is attached.
+    /** The canvas draws into this surface; false when no GPU could (the reason in canvasStats). */
+    static native boolean canvasSurfaceCreated(Surface surface, int width, int height);
+    static native void canvasSurfaceChanged(int width, int height);
+    /** Synchronous: when it returns no draw uses the surface's window, and it is released. */
+    static native void canvasSurfaceDestroyed();
+    /** Rust panics (with their backtrace) are appended to this file (crates/native opennote_set_crash_file). */
+    static native void setCrashFile(String path);
+    /** GLES instead of Vulkan for this run; before the surface exists (crates/native canvas_service::prefer_gl). */
+    static native void canvasPreferGl(String why);
+
+    /** Draws the canvas's frame when the page changed it; on the render thread only. */
     static native boolean canvasDrawActive();
 
-    private static long canvasHost = 0;
+    private static boolean canvasAttached = false;
     private static volatile boolean frameCallbackActive = false;
 
     /**
@@ -132,21 +140,22 @@ public class OpenNoteRustPlugin extends Plugin {
 
     static void onSurfaceChanged(Surface surface, int width, int height) {
         if (!LOADED) return;
-        if (canvasHost == 0) {
-            canvasHost = canvasSurfaceCreated(surface, width, height);
+        if (!canvasAttached) {
+            canvasAttached = canvasSurfaceCreated(surface, width, height);
             pendingSurface = null;
-            if (canvasHost != 0) startFrameCallback();
+            if (canvasAttached) startFrameCallback();
             return;
         }
-        canvasSurfaceChanged(canvasHost, width, height);
+        canvasSurfaceChanged(width, height);
     }
 
     static void onSurfaceDestroyed() {
         pendingSurface = null;
-        if (!LOADED || canvasHost == 0) return;
+        if (!LOADED || !canvasAttached) return;
         stopFrameCallback();
-        canvasSurfaceDestroyed(canvasHost);
-        canvasHost = 0;
+        // A frame callback still queued on the render thread finds no canvas and draws nothing.
+        canvasSurfaceDestroyed();
+        canvasAttached = false;
     }
 
     static void startFrameCallback() {
@@ -172,7 +181,27 @@ public class OpenNoteRustPlugin extends Plugin {
 
     @Override
     public void load() {
+        // How the last run ended (a native crash ends the process before the page logs it), for the
+        // crash report: given to the page once per run (a reload keeps the WebView's session storage).
+        String lastEnd = OpenNoteCrashCapture.takeLastEnd(getContext());
+        OpenNoteCrashCapture.install(getContext());
+        if (LOADED) setCrashFile(OpenNoteCrashCapture.file(getContext()).getAbsolutePath());
+        if (!lastEnd.isEmpty() && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            Uri page = Uri.parse(getBridge().getLocalUrl());
+            String js = "try { if (!sessionStorage.getItem('opennote_native_crash')) { sessionStorage.setItem('opennote_native_crash', '1'); window.__opennoteNativeCrash = "
+                    + org.json.JSONObject.quote(lastEnd) + "; } } catch (e) {}";
+            WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), js, Collections.singleton(page.getScheme() + "://" + page.getAuthority()));
+        }
         if (!LOADED) return;
+        // A run with the canvas on that ended abnormally (the system's exit record: a GPU driver's
+        // segfault ends the process past anything Rust catches) makes the canvas use GLES from then
+        // on, else Vulkan on a fragile driver (Mali) would end every run the same way. Reset when
+        // the canvas is switched in Diagnostics.
+        if (nativeCanvasEnabled(getContext())) {
+            android.content.SharedPreferences prefs = getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE);
+            if (lastEnd.contains("android exit:")) prefs.edit().putBoolean("gl", true).apply();
+            if (prefs.getBoolean("gl", false)) canvasPreferGl("the last run with the canvas ended abnormally");
+        }
         // The page asks window.__opennoteNativeCanvas (platform.ts hasNativeCanvas) before it draws.
         if (nativeCanvasEnabled(getContext()) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             Uri page = Uri.parse(getBridge().getLocalUrl());
@@ -212,7 +241,7 @@ public class OpenNoteRustPlugin extends Plugin {
     @PluginMethod
     public void setNativeCanvas(PluginCall call) {
         getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
-                .putBoolean("on", Boolean.TRUE.equals(call.getBoolean("on", false))).apply();
+                .putBoolean("on", Boolean.TRUE.equals(call.getBoolean("on", false))).putBoolean("gl", false).apply();
         call.resolve();
     }
 
