@@ -94,8 +94,8 @@ page's own frame messages through the bridge.
   rs.21-25 also moved it from the shells' own pinch and pan recognisers, which ignored the page's
   frames meanwhile: the ink parted from the page's text, selection and live ink while the fingers
   moved (no zoom limits, its own momentum) and jumped back after; nothing on the page read the
-  shells' camera. Removed in rs.26. Should the shell lead the gesture one day (N5), the page must
-  follow the shell's camera, never the two each run their own.
+  shells' camera. Removed in rs.26. Since N5 (below) Rust leads two-finger gestures and the page
+  follows its camera: still one camera, never the two each running their own.
 - Memory: no page canvases, no tiles; the scene's GPU buffers are the only ink memory.
 - **Acceptance**: `--only pinch`, `zpinch`, `longpinch`, `hlshots`, `zorder` keep their checks
   with the native canvas (a stand-in shell on the PC renders through `opennote_canvas_cli`);
@@ -120,6 +120,26 @@ page's own frame messages through the bridge.
   rich-text editor are kept.
 - Scroll and momentum move to the shell (a native scroll view driving the scene); the page's
   `useViewport` becomes a mirror (fit to width, saved views, pull gestures).
+- State (ADR-006, the camera): `crates/viewport` ports useViewport.ts's two-finger gesture (pan,
+  pinch about the fingers with REBASE_RATIO commits, momentum at UIScrollView's 0.998 per ms, the
+  pull past the last page, fit to width and its FIT_SNAP) and the page's views, constant for
+  constant (`src/editor/viewportMath.ts` is the arithmetic both run, compared to 1e-9). The page
+  scrolls two fingers in its own code on iOS and Android alike (it cancels the web view's scrolling
+  at the second finger; one finger alone scrolls natively, the page's), so that is what the port
+  reproduces; there is no rubber band but the pull. crates/native `viewport_service.rs` owns it
+  beside the scenes: the shells hand it every finger that starts over the note (iOS `ONWindow
+  sendEvent:`, Android `MainActivity.dispatchTouchEvent`, before the web view, which still gets
+  them); the render thread advances it each display frame and places the page's last frame at
+  its camera (the frame carries where the page's surface was, `surface`; `FrameSpec::moved`), so
+  ink follows the fingers at the display's best rate with no page round trip; after each tick the
+  shell pushes the camera to the page (`window.__opennoteCamera`, at most once per page frame),
+  whose `useViewport` mirrors it on its own frames (committed zoom and scroll, the rest as one
+  measured transform on the content) and sends its layout and its own views (`viewportLayout`,
+  `viewportSet`). Each gesture's tick intervals go to the crash report (`pinch`, `gl: 'rust'`,
+  `fps` against the display's `hz`) and to `canvasStats.viewport`. Checks:
+  `bench:ui --native --only rustcamera` (the page's own gestures and the Rust camera on the same
+  finger paths; the DOM against the camera at rest and while moving), `crates/viewport/tests`,
+  `crates/native/tests/viewport_canvas.rs`.
 - Selection frame, lasso, eraser circle, glow: drawn by the canvas.
 - **Acceptance**: the parity list of CLAUDE.md's rendering checks (`selshots`, `dragshots`,
   `tapshots`, `latexshift`, `boxes`, `resize8`) on the native canvas; the owner's notes open
@@ -193,6 +213,15 @@ page's own frame messages through the bridge.
   frame at its first draw (`canvas_service` keeps them). The shell's live
   copy of a stroke is cleared only once the canvas has its scene (CanvasPage `finishStroke`).
   `crates/native/tests/canvas_cache.rs`; `--only nativecanvas` checks the lift sends one stroke.
+- One camera (ADR-006): while Rust owns a note's camera (`nativeViewportFor`: the canvas draws it
+  and the shell says `nativeViewport`), the page never scrolls or zooms the note itself. Its views
+  go to Rust (`viewportSet`: fit to width, fit page, saved views, zoom, the wheel, going to a page),
+  its own scroll (one finger natively, the wheel, the keyboard) is reported to Rust, and it mirrors
+  the camera Rust publishes. A change to useViewport's gestures is made in `crates/viewport` too,
+  and the constants live in viewportMath.ts (`npm run bench:rustref -- bench/rust-ref/viewport.json
+  --module viewport`). The display's rate is asked for, never assumed: iOS the display link's
+  `preferredFrameRateRange` up to `maximumFramesPerSecond`, Android the display mode of the same
+  size with the highest rate and `Surface.setFrameRate`; momentum and animations use elapsed time.
 - Over the native canvas the page draws no ink of its own, also while pinching (no WebGL pinch ink:
   usePinchInk is off) and in Low Power Mode (no shell snapshot pinch: it covered the canvas).
 - The canvas is drawn on a thread of its own in both shells (iOS `ONStartCanvasThread`, a display

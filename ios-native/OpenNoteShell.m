@@ -32,6 +32,11 @@
 //  - Pinch zoom at the display's rate (ONPinchOverlay): WebKit draws the page at 30 fps in Low Power
 //    Mode or when the iPad is hot, so while two fingers zoom the shell shows a snapshot of the
 //    canvas and scales it itself (src/editor/nativePinch.ts).
+//  - With the native canvas, scroll and pinch are Rust's (rust/DECISIONS.md ADR-006): the window
+//    hands every finger touch that starts over the note to crates/viewport (opennote_viewport_touch,
+//    before the web view sees it; the camera moves once two are down), the canvas thread advances
+//    the camera and draws at the display's best rate, then pushes the camera to the page
+//    (window.__opennoteCamera, at most once per page frame), which mirrors it.
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
 #import <UIKit/UIKit.h>
@@ -157,6 +162,14 @@ static UIColor *ONLaunchColor(void) {
 - (void)pencilBatchDone;
 @end
 
+// The Rust camera (crates/native viewport_service.rs): fingers in, the camera out for the page.
+extern bool opennote_viewport_touch(int64_t id, int32_t phase, double x, double y);
+extern void opennote_viewport_display_hz(double hz);
+extern char *opennote_viewport_poll(void);
+extern void opennote_viewport_free(char *p);
+/** The web view the camera is pushed to (the canvas thread evaluates it on the main thread). */
+static __weak WKWebView *gCameraWebView;
+
 #pragma mark - 240 Hz Apple Pencil samples
 
 // The samples are taken in the window's sendEvent:, which every touch event passes through before
@@ -195,8 +208,36 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
     if (event.type == UIEventTypeTouches) {
         [self.booster poke];
         if (self.webView) [self forwardPencil:event];
+        if (self.webView && self.rustCanvasView) [self forwardFingers:event];
     }
     [super sendEvent:event];
+}
+
+// Fingers to the Rust camera (ADR-006), before the web view and every gesture recognizer, without
+// changing the event: the page still gets them (taps, one finger, its own cancelling of a stroke
+// when a second finger lands) but no longer scrolls or zooms with them. Rust takes only touches
+// that start over the note (the page's layout: its scroll view less its controls) and moves the
+// camera only once two are down; a finger landing while the Pencil writes is the hand resting.
+- (void)forwardFingers:(UIEvent *)event {
+    WKWebView *view = self.webView;
+    for (UITouch *touch in event.allTouches) {
+        if (touch.type != UITouchTypeDirect) continue;
+        int phase;
+        switch (touch.phase) {
+            case UITouchPhaseBegan: phase = 0; break;
+            case UITouchPhaseMoved: phase = 1; break;
+            case UITouchPhaseEnded: phase = 2; break;
+            case UITouchPhaseCancelled: phase = 3; break;
+            default: continue; // stationary
+        }
+        if (phase == 0) {
+            if (_pencil) continue;
+            UIView *hit = touch.view ?: [self hitTest:[touch locationInView:self] withEvent:event];
+            if (![hit isDescendantOfView:view] && ![hit isDescendantOfView:(UIView *)self.rustCanvasView]) continue;
+        }
+        CGPoint p = [touch locationInView:view];
+        opennote_viewport_touch((int64_t)(uintptr_t)(__bridge void *)touch, phase, p.x, p.y);
+    }
 }
 
 // phase: 0 began, 1 moved, 2 ended, 3 cancelled. Samples: x, y, force 0..1, time (s), altitude, azimuth.
@@ -1254,7 +1295,23 @@ static const double kInkHoldSeconds = 0.06;
 
 @implementation ONCanvasTicker
 - (void)tick:(CADisplayLink *)link {
-    @autoreleasepool { opennote_canvas_draw_active(); }
+    @autoreleasepool {
+        opennote_canvas_draw_active();
+        // The camera the canvas just drew, for the page to mirror (when it moved and a page frame
+        // has passed since the last push): evaluated on the main thread, the page's next frame
+        // puts its text, selection and live ink there.
+        char *cam = opennote_viewport_poll();
+        if (cam) {
+            NSString *json = [NSString stringWithUTF8String:cam];
+            opennote_viewport_free(cam);
+            if (json) {
+                NSString *js = [NSString stringWithFormat:@"window.__opennoteCamera&&window.__opennoteCamera(%@)", json];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [gCameraWebView evaluateJavaScript:js completionHandler:nil];
+                });
+            }
+        }
+    }
 }
 @end
 
@@ -1262,10 +1319,17 @@ static void ONStartCanvasThread(void) {
     static NSThread *thread;
     if (thread) return;
     NSInteger fps = ONMaxFramesPerSecond();
+    // The display's best rate, whatever it is (60 on most iPads, 120 on ProMotion): asked for, never
+    // assumed; the system may lower it (Low Power Mode, heat) down to half. Recorded with each
+    // gesture beside the rate achieved.
+    opennote_viewport_display_hz((double)fps);
     thread = [[NSThread alloc] initWithBlock:^{
         CADisplayLink *link = [CADisplayLink displayLinkWithTarget:[ONCanvasTicker new] selector:@selector(tick:)];
         if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
-            link.preferredFrameRateRange = CAFrameRateRangeMake(60, fps, fps);
+            float max = (float)fps;
+            link.preferredFrameRateRange = CAFrameRateRangeMake(MAX(30.0f, max / 2.0f), max, max);
+        } else {
+            link.preferredFramesPerSecond = fps;
         }
         [link addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSDefaultRunLoopMode];
         for (;;) {
@@ -1381,9 +1445,9 @@ static void ONStartCanvasThread(void) {
 
     WKUserContentController *ucc = config.userContentController;
     NSProcessInfo *info = [NSProcessInfo processInfo];
-    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: %@, lowPower: %@, thermal: %ld, nativeCrash: %@ };",
+    NSString *bootstrap = [NSString stringWithFormat:@"window.OpenNoteNative = { platform: 'ios', version: '%@', fullFrameRate: %@, pageRate: '%@', unlockFailed: %@, maxFps: %ld, nativePinch: true, rustInk: true, nativeCanvas: %@, nativeViewport: %@, lowPower: %@, thermal: %ld, nativeCrash: %@ };",
                                                      kVersion, fullFrameRate ? @"true" : @"false", pageRate, unlockFailed ? @"true" : @"false", (long)ONMaxFramesPerSecond(),
-                                                     nativeCanvas ? @"true" : @"false", info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState, nativeCrashJs];
+                                                     nativeCanvas ? @"true" : @"false", nativeCanvas ? @"true" : @"false", info.lowPowerModeEnabled ? @"true" : @"false", (long)info.thermalState, nativeCrashJs];
     [ucc addUserScript:[[WKUserScript alloc] initWithSource:bootstrap injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:YES]];
     [ucc addScriptMessageHandlerWithReply:self contentWorld:[WKContentWorld pageWorld] name:@"opennote"];
     // Native live ink (fire and forget: no reply, so no round trip).
@@ -1414,6 +1478,7 @@ static void ONStartCanvasThread(void) {
         self.webView.frame = container.bounds;
         [container addSubview:self.webView];
         self.view = container;
+        gCameraWebView = self.webView;
         ONStartCanvasThread();
     } else {
         self.view = self.webView;

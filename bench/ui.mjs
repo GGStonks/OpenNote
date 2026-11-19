@@ -1648,6 +1648,242 @@ if (ONLY.has('nativecanvas')) {
   shell.stdin.end();
 }
 
+// Not in the default run (run it alone: it installs a stand-in iOS shell with the native canvas and
+// the Rust camera): --native --only rustcamera [--record <file>]. rust/DECISIONS.md ADR-006: two
+// fingers move crates/viewport, the canvas follows at the display's rate, the page mirrors it. The
+// same finger paths run first through the page's own gestures (no canvas: useViewport.ts), then
+// through the Rust camera (the stand-in shell, opennote_native_cli --serve --tick 120, is handed the
+// fingers through the bridge, and the page gets them too, as from the web view). Checked: the page's
+// content lands where the Rust camera says (<= 0.5 px at rest; while the fingers move, at most one
+// page frame behind), the zoom, its limits, the fit snap and the content's place match the page's
+// own gestures, a fit to width from the page goes through Rust, and each gesture reaches the crash
+// report (`pinch`, gl 'rust'). --record writes the paths, the layout and the page's own cameras for
+// crates/viewport/tests/paths.rs (default bench/rust-ref/viewport-paths.json).
+if (ONLY.has('rustcamera')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  // The paths, one after the other from a freshly opened note (fitted to the width at the top):
+  // [name, fingers from, fingers to, ms, 'lift' (together) | 'fling' (one first, the other on alone 24 ms)].
+  const paths = [
+    ['snap', [[300, 600], [520, 600]], [[290, 600], [530, 600]], 120, 'lift'],
+    ['zoom in', [[360, 600], [460, 600]], [[210, 640], [610, 640]], 400, 'lift'],
+    ['pan', [[360, 800], [460, 800]], [[300, 500], [400, 500]], 300, 'lift'],
+    ['zoom out', [[210, 600], [610, 600]], [[380, 600], [440, 600]], 400, 'lift'],
+    ['past max', [[400, 600], [420, 600]], [[110, 600], [710, 600]], 300, 'lift'],
+    ['back to fit', [[110, 600], [710, 600]], [[350, 600], [470, 600]], 400, 'lift'],
+    ['past min', [[110, 600], [710, 600]], [[400, 600], [420, 600]], 300, 'lift'],
+    ['back in', [[350, 600], [470, 600]], [[200, 600], [620, 600]], 300, 'lift'],
+    ['fling', [[360, 900], [460, 900]], [[360, 500], [460, 500]], 100, 'fling'],
+  ];
+  const domCamera = () => page.evaluate(() => {
+    const outer = document.querySelector('[data-note-content]');
+    const el = outer?.parentElement;
+    if (!el || !outer) return null;
+    const r = el.getBoundingClientRect(), o = outer.getBoundingClientRect();
+    const W = parseFloat(outer.firstElementChild.style.width);
+    return { x: o.left - r.left - el.clientLeft, y: o.top - r.top - el.clientTop, ez: o.width / W, fit: document.querySelector('button[title^="Fit the whole page"]') ? 'width' : null };
+  });
+  // A freshly opened note fitted to the width at the top: no saved view (the reload's
+  // visibilitychange saves the open note's view, so it is removed after the reload), and pen mode
+  // (not stylus only: one finger left of two keeps scrolling in JS, and two-finger flings glide).
+  const fresh = async () => {
+    await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    await page.reload();
+    await page.evaluate(() => {
+      localStorage.removeItem('opennote_note_views_v1');
+      const st = JSON.parse(localStorage.getItem('opennote_settings_v2') || '{}');
+      st.stylusOnly = false;
+      localStorage.setItem('opennote_settings_v2', JSON.stringify(st));
+    });
+    await page.reload();
+    await page.getByText('Bench note').first().click();
+    await page.waitForTimeout(2500);
+    await instrument();
+    await sleep(1000);
+  };
+  const touchIds = (type, pts) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([id, x, y]) => ({ x, y, id })) });
+  // One path: CDP touches to the page; with `toRust`, the same fingers to the Rust camera first.
+  const go = async ([, a, b, ms, kind], toRust) => {
+    const send = async (phase, pts, ids) => {
+      if (toRust) await toRust(pts.map(([x, y], i) => [ids ? ids[i] : i, phase, x, y]));
+    };
+    await send(0, a);
+    await touch('touchStart', a);
+    const n = Math.max(1, Math.round(ms / 8));
+    let at = a;
+    for (let i = 1; i <= n; i++) {
+      at = a.map(([x, y], k) => [x + ((b[k][0] - x) * i) / n, y + ((b[k][1] - y) * i) / n]);
+      await send(1, at);
+      await touch('touchMove', at);
+      await sleep(8);
+    }
+    if (kind === 'fling') {
+      // One finger lifts; the other goes on alone for 24 ms (lifted together, two fingers never
+      // fling). CDP's touchEnd lists the points that end.
+      await send(2, [at[1]], [1]);
+      await touchIds('touchEnd', [[1, ...at[1]]]);
+      const v = [(b[0][0] - a[0][0]) / n, (b[0][1] - a[0][1]) / n];
+      for (let i = 1; i <= 3; i++) {
+        const p = [[at[0][0] + v[0] * i, at[0][1] + v[1] * i]];
+        await send(1, p);
+        await touchIds('touchMove', [[0, ...p[0]]]);
+        await sleep(8);
+      }
+      await send(2, [[at[0][0] + v[0] * 3, at[0][1] + v[1] * 3]]);
+    } else await send(2, at);
+    await touch('touchEnd', []);
+  };
+
+  // 1. The page's own gestures (no canvas).
+  await fresh();
+  const ts = [{ name: 'start', ...(await domCamera()) }];
+  for (const p of paths) {
+    await go(p, null);
+    await sleep(p[4] === 'fling' ? 3500 : 1200);
+    ts.push({ name: p[0], ...(await domCamera()) });
+  }
+
+  // 2. The Rust camera.
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  const vp = page.viewportSize(), dpr = Number(arg('dpr', 2));
+  const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(vp.width * dpr), String(vp.height * dpr), '--tick', '120'], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let buf = Buffer.alloc(0);
+  const waiting = [];
+  shell.stdout.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+      const n = buf.readUInt32LE(0);
+      waiting.shift()(buf.subarray(4, 4 + n));
+      buf = buf.subarray(4 + n);
+    }
+  });
+  const rust = (method, req) => new Promise((res) => {
+    waiting.push(res);
+    const m = Buffer.from(method), x = Buffer.alloc(4), y = Buffer.alloc(4);
+    x.writeUInt32LE(m.length);
+    y.writeUInt32LE(req.length);
+    shell.stdin.write(Buffer.concat([x, m, y, req]));
+  });
+  const framed = (obj) => { const m = Buffer.from(JSON.stringify(obj)), h = Buffer.alloc(4); h.writeUInt32LE(m.length); return Buffer.concat([h, m]); };
+  const meta = (reply) => JSON.parse(reply.subarray(4, 4 + reply.readUInt32LE(0)).toString());
+  const call = async (method, obj) => meta(await rust(method, framed(obj)));
+  await page.route('**/__rust/*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/octet-stream',
+    body: await rust(route.request().url().split('/__rust/')[1], route.request().postDataBuffer() ?? Buffer.alloc(0)),
+  }));
+  await page.addInitScript(() => {
+    window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true, nativeViewport: true };
+    window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
+    // The content's corner and scale as painted: read at the start of each frame (this loop's
+    // callback runs before the page's), stamped with the frame before, which painted it.
+    window.__camSamples = [];
+    let prev = 0;
+    const loop = (t) => {
+      requestAnimationFrame(loop);
+      const outer = document.querySelector('[data-note-content]'), el = outer?.parentElement;
+      if (window.__camRec && el && prev) {
+        const r = el.getBoundingClientRect(), o = outer.getBoundingClientRect();
+        window.__camSamples.push([performance.timeOrigin + prev, o.left - r.left - el.clientLeft, o.top - r.top - el.clientTop, o.width / parseFloat(outer.firstElementChild.style.width)]);
+      }
+      prev = t;
+    };
+    requestAnimationFrame(loop);
+  });
+  await fresh();
+  const rustCam = async () => (await call('viewportCamera', { keep: true })).camera;
+  const timeline = [];
+  let watching = false;
+  const watch = async () => {
+    watching = true;
+    while (watching) {
+      const c = await rustCam();
+      const last = timeline[timeline.length - 1];
+      if (!last || last.seq !== c.seq) timeline.push({ t: Date.now(), ...c });
+      await sleep(3);
+    }
+  };
+  const rs = [{ name: 'start', ...(await domCamera()), rust: await rustCam() }];
+  const frameMs = await page.evaluate(() => 1000 / 60);
+  const behind = [];
+  let unmatched = 0, samples = 0;
+  for (const p of paths) {
+    await page.evaluate(() => { window.__camSamples = []; window.__camRec = true; });
+    const w = watch();
+    await go(p, (touches) => call('viewportTouch', { touches }));
+    await sleep(p[4] === 'fling' ? 3500 : 1200);
+    watching = false;
+    await w;
+    const s = await page.evaluate(() => { window.__camRec = false; return window.__camSamples; });
+    // Each painted frame against the Rust camera's timeline: the camera it shows, and how long
+    // before the frame Rust had already moved on from it.
+    for (const [t, x, y, ez] of s) {
+      if (t < timeline[0]?.t) continue;
+      samples++;
+      let j = -1;
+      for (let k = timeline.length - 1; k >= 0; k--) {
+        if (timeline[k].t > t + 2) continue;
+        const c = timeline[k];
+        if (Math.abs(c.x - x) <= 0.5 && Math.abs(c.y - y) <= 0.5 && Math.abs(c.ez / ez - 1) <= 1e-4) { j = k; break; }
+        if (t - c.t > 200) break;
+      }
+      if (j < 0) { unmatched++; continue; }
+      const next = timeline[j + 1];
+      behind.push(next && next.t <= t ? (t - next.t) / frameMs : 0);
+    }
+    timeline.length = 0;
+    rs.push({ name: p[0], ...(await domCamera()), rust: await rustCam() });
+  }
+  // 3. The page's own view through Rust: the fit button (zoomed in by 'back in' and the fling).
+  await page.locator('button[title^="Fit the page width"]').click();
+  await sleep(800);
+  const afterFit = { ...(await domCamera()), rust: await rustCam() };
+  const layout = (await call('viewportCamera', { keep: true, layout: true })).layout;
+  const stats = await call('canvasStats', {});
+  const pinches = await page.evaluate(() => (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'pinch'));
+  watching = false;
+  shell.stdin.end();
+  await page.unroute('**/__rust/*');
+
+  // The report.
+  const f2 = (v) => (v === undefined || v === null ? '-' : v.toFixed(2));
+  let fail = false;
+  const zf = (layout.view[2] - 4) / 816;
+  console.log(`rustcamera layout: view ${layout.view.map((v) => v.toFixed(0)).join('x')}, content ${layout.content.map((v) => v.toFixed(0)).join('x')}, ${layout.sheets.length} pages, fit zoom ${zf.toFixed(4)}`);
+  console.log('rustcamera path          page own: zoom    x        y       | Rust camera: zoom    x        y      fit   | page DOM vs Rust (px)');
+  for (let i = 0; i < rs.length; i++) {
+    const a = ts[i], b = rs[i], c = b.rust;
+    const domErr = Math.max(Math.abs(b.x - c.x), Math.abs(b.y - c.y));
+    const dz = Math.abs(c.ez / a.ez - 1), dx = Math.abs(c.x - a.x), dy = Math.abs(c.y - a.y);
+    // The same zoom (1e-3) and fit on every path; the same place (2 px) where it does not depend
+    // on when events arrive (crates/viewport/tests/paths.rs EXACT: rebases while the content is
+    // narrower than the screen clamp it, a fling's length follows its 80 ms velocity window).
+    const exact = ['start', 'snap', 'zoom in', 'zoom out', 'back to fit', 'past min'].includes(b.name);
+    const okTs = dz < 1e-3 && (!exact || (dx <= 2 && dy <= 2)) && (c.fit === a.fit || (!c.fit && !a.fit));
+    const okDom = domErr <= 0.5 && Math.abs(b.ez / c.ez - 1) < 1e-4;
+    if (!okTs || !okDom) fail = true;
+    console.log(`rustcamera ${b.name.padEnd(13)} ${f2(a.ez).padStart(6)} ${f2(a.x).padStart(8)} ${f2(a.y).padStart(9)}   | ${f2(c.ez).padStart(6)} ${f2(c.x).padStart(8)} ${f2(c.y).padStart(9)}  ${String(c.fit).padEnd(5)} | ${domErr.toFixed(3)}${okTs ? '' : '  FAIL (vs the page\'s own)'}${exact ? '' : `  (place ${(c.x - a.x).toFixed(1)}, ${(c.y - a.y).toFixed(1)} px from the page's: timing-dependent)`}${okDom ? '' : '  FAIL (DOM)'}`);
+  }
+  const limitsOk = Math.abs(rs.find((r) => r.name === 'past max').rust.ez - 5) < 1e-9 && Math.abs(rs.find((r) => r.name === 'past min').rust.ez - Math.min(0.5, layout.view[2] / layout.content[0])) < 1e-9;
+  const snapOk = ['snap', 'back to fit'].every((n) => { const r = rs.find((q) => q.name === n).rust; return r.fit === 'width' && Math.abs(r.ez - zf) < 1e-9; });
+  const fitErr = Math.max(Math.abs(afterFit.x - afterFit.rust.x), Math.abs(afterFit.y - afterFit.rust.y));
+  const fitOk = afterFit.rust.fit === 'width' && Math.abs(afterFit.rust.ez - zf) < 1e-9 && fitErr <= 0.5;
+  console.log(`rustcamera limits ${limitsOk ? 'ok' : 'FAIL'} (max 5, min min(0.5, fit)), snap to fit ${snapOk ? 'ok' : 'FAIL'}, the fit button through Rust: zoom ${afterFit.rust.ez.toFixed(4)} DOM ${fitErr.toFixed(3)} px${fitOk ? '' : '  FAIL'}`);
+  behind.sort((x, y) => x - y);
+  const q = (v) => (behind.length ? behind[Math.min(behind.length - 1, Math.floor(behind.length * v))] : NaN);
+  const lagOk = behind.length > 50 && q(0.95) <= 1 && unmatched <= samples * 0.02;
+  console.log(`rustcamera while moving: ${samples} page frames, the DOM showed a camera Rust had left p50 ${q(0.5).toFixed(2)} p95 ${q(0.95).toFixed(2)} max ${q(1).toFixed(2)} page frames before; ${unmatched} frames matched no camera${lagOk ? '' : '  FAIL'}`);
+  const rp = pinches.filter((c) => c.gl === 'rust');
+  const v = stats.viewport ?? {};
+  console.log(`rustcamera gestures: ${v.gestures} recorded by Rust, ${rp.length} in the crash report; last ${JSON.stringify(v.last)}${rp.length >= paths.length - 1 ? '' : '  FAIL'}`);
+  if (!limitsOk || !snapOk || !fitOk || !lagOk || rp.length < paths.length - 1) fail = true;
+  if (fail) process.exitCode = 1;
+  const ri = process.argv.indexOf('--record');
+  const rec = ri < 0 ? '' : process.argv[ri + 1] && !process.argv[ri + 1].startsWith('--') ? process.argv[ri + 1] : join(root, 'bench/rust-ref/viewport-paths.json');
+  if (rec) {
+    writeFileSync(rec, JSON.stringify({ layout, step: 8, paths: paths.map(([name, a, b, ms, kind]) => ({ name, a, b, ms, kind })), page: ts }));
+    console.log(`rustcamera recorded ${rec}`);
+  }
+}
+
 if (ONLY.has('rustcore')) {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });

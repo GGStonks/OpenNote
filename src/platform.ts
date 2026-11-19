@@ -36,9 +36,21 @@ declare global {
       thermal?: number;
       /** Milestone N2/N3: Native Rust GPU surface (CanvasHost) is mounted beneath transparent WebView. */
       nativeCanvas?: boolean;
+      /** N5: the shell hands two-finger touches to the Rust camera and pushes it to the page (ADR-006). */
+      nativeViewport?: boolean;
     };
     webkit?: { messageHandlers?: { opennote?: IosBridge } };
   }
+}
+
+/**
+ * Whether the shell runs the Rust camera (rust/DECISIONS.md ADR-006): it hands two-finger touches
+ * over the note to crates/viewport and pushes the camera to the page (`window.__opennoteCamera`).
+ * Shells built before it keep the page's own gestures over the native canvas.
+ */
+export function hasNativeViewport(): boolean {
+  if (typeof window === 'undefined' || !hasNativeCanvas()) return false;
+  return Boolean(window.OpenNoteNative?.nativeViewport || (window as unknown as { __opennoteNativeViewport?: boolean }).__opennoteNativeViewport);
 }
 
 /** 'ios' = OpenNote's own WKWebView shell; 'capacitor' = Capacitor runtime (Android, or iOS built with Xcode). */

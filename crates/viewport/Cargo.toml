@@ -1,0 +1,11 @@
+[package]
+name = "viewport"
+version = "0.1.0"
+edition = "2021"
+
+# The camera of a note while the native canvas draws it (rust/DECISIONS.md ADR-006): a port of
+# the page's two-finger gestures (src/editor/useViewport.ts, src/editor/viewportMath.ts). Pure
+# Rust: no GPU, nothing of the app.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

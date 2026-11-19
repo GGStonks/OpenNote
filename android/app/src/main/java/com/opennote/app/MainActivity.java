@@ -172,6 +172,7 @@ public class MainActivity extends BridgeActivity {
             if (root != null) {
                 root.addView(surfaceView, 0, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
                 rustCanvasSurface = surfaceView;
+                preferFastestMode();
             }
         }
         if (!pagePainted && launchLogo == null) {
@@ -215,7 +216,33 @@ public class MainActivity extends BridgeActivity {
     @Override
     public boolean dispatchTouchEvent(MotionEvent ev) {
         OpenNoteInkPlugin.onTouch(ev);
+        // Fingers to the Rust camera (native canvas only), after the stylus is known.
+        if (rustCanvasSurface != null) OpenNoteRustPlugin.onTouch(ev, getBridge() != null ? getBridge().getWebView() : null);
         return super.dispatchTouchEvent(ev);
+    }
+
+    /**
+     * The native canvas asks for the display's best refresh rate at its resolution (never an
+     * assumed 60 or 120): the window's display mode with the same size and the highest rate
+     * (Android 6+), and on Android 11+ the canvas's surface too (OpenNoteRustPlugin). A 60 Hz
+     * display stays at 60. The rate goes to Rust for the gestures' record (achieved vs possible).
+     */
+    private void preferFastestMode() {
+        android.view.Display display = getWindowManager().getDefaultDisplay();
+        if (display == null) return;
+        android.view.Display.Mode current = display.getMode();
+        android.view.Display.Mode best = current;
+        for (android.view.Display.Mode m : display.getSupportedModes()) {
+            if (m.getPhysicalWidth() == current.getPhysicalWidth() && m.getPhysicalHeight() == current.getPhysicalHeight()
+                    && m.getRefreshRate() > best.getRefreshRate() + 0.5f) best = m;
+        }
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        if (lp.preferredDisplayModeId != best.getModeId()) {
+            lp.preferredDisplayModeId = best.getModeId();
+            getWindow().setAttributes(lp);
+        }
+        OpenNoteRustPlugin.setSurfaceRate(best.getRefreshRate());
+        OpenNoteRustPlugin.setDisplayHz(best.getRefreshRate());
     }
 
     @Override

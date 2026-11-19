@@ -25,6 +25,7 @@ pub use canvas_service::{
     opennote_canvas_detach, opennote_canvas_draw_active, opennote_canvas_resize,
 };
 pub mod live;
+pub mod viewport_service;
 
 use ink::stroke_geometry;
 use model::{ModeledKind, PenStyle, Point, Stroke};
@@ -88,7 +89,7 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "viewportLayout", "viewportSet", "viewportCamera", "viewportTouch", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
@@ -97,6 +98,10 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "canvasSceneBin" => canvas_service::canvas_scene_bin(meta, data),
         "canvasFrame" => canvas_service::canvas_frame(meta),
         "canvasStats" => canvas_service::canvas_stats(),
+        "viewportLayout" => viewport_service::viewport_layout(meta),
+        "viewportSet" => viewport_service::viewport_set(meta),
+        "viewportCamera" => viewport_service::viewport_camera(meta),
+        "viewportTouch" => viewport_service::viewport_touch(meta),
         "selectInRect" => select_in_rect(meta),
         "selectInLasso" => select_in_lasso(meta),
         "selectionBounds" => selection_bounds(meta),
@@ -938,6 +943,49 @@ mod android {
             let why = env.get_string(&why).map(String::from).unwrap_or_default();
             crate::canvas_service::prefer_gl(&why);
         }));
+    }
+
+    /// A finger for the camera (OpenNoteRustPlugin.onTouch, UI thread): phase 0 began, 1 moved,
+    /// 2 ended, 3 cancelled; (x, y) WebView CSS px. True when the camera holds it.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_viewportTouch<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        id: jlong,
+        phase: jni::sys::jint,
+        x: jdouble,
+        y: jdouble,
+    ) -> jboolean {
+        if crate::viewport_service::opennote_viewport_touch(id, phase, x, y) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    /// The display's best refresh rate (Hz), for the gestures' record.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_viewportDisplayHz<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        hz: jdouble,
+    ) {
+        crate::viewport_service::opennote_viewport_display_hz(hz);
+    }
+
+    /// The camera for the page when due (render thread, after each tick), else null.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_viewportPoll<'l>(
+        env: JNIEnv<'l>,
+        _class: JClass<'l>,
+    ) -> jni::sys::jstring {
+        let polled = catch_unwind(|| crate::viewport_service::poll(crate::clock_ms()))
+            .ok()
+            .flatten();
+        match polled.and_then(|s| env.new_string(s).ok()) {
+            Some(s) => s.into_raw(),
+            None => std::ptr::null_mut(),
+        }
     }
 
     /// The render thread's draw (OpenNoteRustPlugin's "opennote-canvas" thread).

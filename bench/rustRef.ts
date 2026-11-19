@@ -4,11 +4,12 @@ import { run as runShapes } from './rustref/shapes';
 import { run as runSelection } from './rustref/selection';
 import { run as runSmartpen } from './rustref/smartpen';
 import { run as runSvg } from './rustref/svg';
+import { run as runViewport } from './rustref/viewport';
 
 const args = process.argv.slice(2);
 const out = args[0];
 if (!out || out.startsWith('--')) {
-  console.error('usage: npm run bench:rustref -- <out.json> [--per N] [--module ink|shapes|selection|smartpen|svg] [files…]');
+  console.error('usage: npm run bench:rustref -- <out.json> [--per N] [--module ink|shapes|selection|smartpen|svg|viewport] [files…]');
   process.exit(1);
 }
 
@@ -29,12 +30,13 @@ for (let i = 1; i < args.length; i++) {
   }
 }
 
-const runners: Record<string, (opts: { per: number; files: string[]; out: string }) => unknown> = {
+const runners: Record<string, (opts: { per: number; files: string[]; out: string }) => unknown | Promise<unknown>> = {
   ink: runInk,
   shapes: runShapes,
   selection: runSelection,
   smartpen: runSmartpen,
   svg: runSvg,
+  viewport: runViewport,
 };
 
 const runner = runners[moduleName];
@@ -43,7 +45,7 @@ if (!runner) {
   process.exit(1);
 }
 
-const result = runner({ per, files: named, out });
+const result = await runner({ per, files: named, out });
 const json = JSON.stringify(result);
 writeFileSync(out, json);
 const strokes = (result as { strokes?: unknown[] })?.strokes;

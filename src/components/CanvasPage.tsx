@@ -1290,6 +1290,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const frame = {
         clear: deskRgba(),
         pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], paper: null }],
+        // Where this surface was: while the Rust camera moves the note (ADR-006) the canvas moves
+        // the frame from here to the camera's surface, at the display's rate.
+        surface: [k, x0, y0] as [number, number, number],
       };
       const key = JSON.stringify(frame);
       if (key === last) return;

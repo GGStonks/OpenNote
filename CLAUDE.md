@@ -122,6 +122,15 @@ edges). The page keeps the gesture logic, draws the new zoom when the fingers li
 shell where the content really landed (the snapshot glides there and goes). `npm run bench:ui -- --only nativepinch` (alone) checks the
 messages and that the snapshot's last position matches the drawn page.
 
+Over the native canvas (opennote-rs, Settings > Diagnostics > Native canvas) none of this applies:
+two fingers move the Rust camera (`crates/viewport`, a port of useViewport.ts's gestures and
+viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (iOS `ONWindow
+sendEvent:`, Android `MainActivity.dispatchTouchEvent`) and drawn by the canvas's render thread at
+the display's best rate, in Low Power Mode too (no snapshot); the page mirrors the camera the shell
+pushes (`window.__opennoteCamera`) and sends its own views to it. A change to the page's gestures
+is made in both. `npm run bench:ui -- --native --only rustcamera`; each gesture's crash-log `pinch`
+entry says `gl: 'rust'`, with the frame rate achieved (`fps`) and the display's best (`hz`).
+
 ## Conversion server access
 
 The conversion server requires a per-device API key. The server side is private and lives outside

@@ -54,3 +54,24 @@ finished unchanged.
 Decision: the owner chose to release that ink as it is.
 Consequences: the Rust crates stay checked against this ink; the next engine change is compared
 with these numbers.
+
+## ADR-006: Rust owns scroll and zoom when the canvas draws the note
+Status: accepted (2026-11-19)
+Context: on the iPad Pro (120 Hz) the native canvas moves at 60 fps: it is placed by the page's
+`canvasFrame` messages, sent on the page's frames, which WebKit gives at 60. In rs.21-25 the shells
+ran their own pinch and pan beside the page's (no zoom limits, own momentum): the ink parted from
+the page's text and jumped back (docs/rust-native-canvas.md N3). The owner asked for N5, fully in
+Rust.
+Decision: a Rust viewport (port of useViewport.ts's gestures: pan, pinch about the fingers,
+momentum, zoom limits, fit to width and its snap) is the only camera while the native canvas draws
+the note. The shells hand it two-finger touches; the canvas's render thread advances it and draws
+at the display's rate; the page mirrors the camera on its own frames and sends its own camera
+changes (fit to width, restored views, going to a page) and its layout to Rust. One-finger touches
+and the pen stay the page's. Notes the canvas does not draw keep the page's gestures.
+The rate is the best each device offers, never a fixed one (owner, 2026-11-19): iOS asks
+CADisplayLink for `UIScreen.maximumFramesPerSecond`, Android for the display mode with the highest
+refresh rate at its resolution (`Surface.setFrameRate`, `preferredDisplayModeId`); the system may
+lower it (Low Power Mode, heat). Motion uses elapsed time, never frame counts.
+Consequences: the page's DOM content (text, formulas, selection) follows the ink at the page's
+rate during a gesture, at most one page frame behind; it is measured, not hidden. Both shells use
+the same Rust gestures.

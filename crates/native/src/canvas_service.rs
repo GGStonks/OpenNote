@@ -50,6 +50,9 @@ struct Page {
     /// Ids whose scene changed (or went) since the last draw took them.
     changed: HashSet<String>,
     frame: Option<FrameSpec>,
+    /// Where the page's surface was when it made `frame` (device px: scale, x, y): the canvas
+    /// moves the frame from there to the Rust camera's (viewport_service, ADR-006).
+    surface: Option<[f64; 3]>,
     frame_changed: bool,
 }
 
@@ -79,18 +82,21 @@ pub fn clear_scenes() {
     });
 }
 
-/// The page's frame. Returns at once.
-pub fn put_frame(frame: FrameSpec) {
+/// The page's frame (and where its surface was then). Returns at once.
+pub fn put_frame(frame: FrameSpec, surface: Option<[f64; 3]>) {
     with_page(|p| {
         p.frame = Some(frame);
+        p.surface = surface;
         p.frame_changed = true;
     });
 }
 
 type SceneUpdates = Vec<(String, Option<Arc<Scene>>)>;
+/// The page's frame and its surface's placement then.
+type PageFrame = (FrameSpec, Option<[f64; 3]>);
 
 /// What the draw must give its host: everything for a new host, else what changed.
-fn take_changes(all: bool) -> (SceneUpdates, Option<FrameSpec>) {
+fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>) {
     with_page(|p| {
         let frame_changed = std::mem::take(&mut p.frame_changed);
         if all {
@@ -100,7 +106,7 @@ fn take_changes(all: bool) -> (SceneUpdates, Option<FrameSpec>) {
                     .iter()
                     .map(|(k, v)| (k.clone(), Some(v.clone())))
                     .collect(),
-                p.frame.clone(),
+                p.frame.clone().map(|f| (f, p.surface)),
             )
         } else {
             let ids: Vec<String> = p.changed.drain().collect();
@@ -111,7 +117,12 @@ fn take_changes(all: bool) -> (SceneUpdates, Option<FrameSpec>) {
                     (id, s)
                 })
                 .collect();
-            (updates, if frame_changed { p.frame.clone() } else { None })
+            let frame = if frame_changed {
+                p.frame.clone().map(|f| (f, p.surface))
+            } else {
+                None
+            };
+            (updates, frame)
         }
     })
 }
@@ -185,6 +196,7 @@ pub fn status_json() -> Value {
         "recreated": s.recreated,
         "lost": s.lost,
         "fallback": s.fallback,
+        "viewport": crate::viewport_service::status(),
     })
 }
 
@@ -235,6 +247,8 @@ struct Slot {
     /// Frames this host drew, and its errors before them (counted into the status).
     host_frames: u64,
     host_errors: u64,
+    /// The page's last frame, placed at the Rust camera on every tick while Rust owns it.
+    page_frame: Option<PageFrame>,
 }
 
 static HOST: Mutex<Slot> = Mutex::new(Slot {
@@ -247,6 +261,7 @@ static HOST: Mutex<Slot> = Mutex::new(Slot {
     attempts: 0,
     host_frames: 0,
     host_errors: 0,
+    page_frame: None,
 });
 
 /// Android only: Vulkan failed in this run, GLES from now on.
@@ -418,6 +433,8 @@ pub fn draw_active() -> bool {
 }
 
 fn draw_locked() -> bool {
+    // The camera first (its own lock): advanced to now whether or not a host draws.
+    let placed = crate::viewport_service::draw_tick(clock_ms());
     let mut guard = lock(&HOST);
     let slot: &mut Slot = &mut guard;
     if slot.host.is_none() {
@@ -466,9 +483,25 @@ fn draw_locked() -> bool {
         }
     }
     if let Some(f) = frame {
+        slot.page_frame = Some(f);
+    }
+    if let Some((spec, surface)) = &slot.page_frame {
+        // Rust owns the camera: the page's frame moved from where its surface was to the camera's.
+        let f = match (placed, surface) {
+            (Some((k, x, y)), Some([pk, px, py]))
+                if *pk > 0.0 && k.is_finite() && x.is_finite() && y.is_finite() =>
+            {
+                let s = k / pk;
+                spec.moved(s, x - px * s, y - py * s)
+            }
+            _ => spec.clone(),
+        };
         host.set_frame(f);
     }
     let result = host.draw();
+    if result == Ok(true) {
+        crate::viewport_service::drew();
+    }
     let s = host.stats();
     let errors = host.errors();
     let uncaptured = host.uncaptured_errors();
@@ -661,7 +694,14 @@ pub fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
     let frame = FrameSpec::parse(meta);
     let parsed = frame.is_some();
     if let Some(f) = frame {
-        put_frame(f);
+        // `surface: [k, x, y]`: where the page's surface was (device px) when it placed the pages.
+        let surface = serde_json::from_str::<Value>(meta).ok().and_then(|v| {
+            let a = v.get("surface")?.as_array()?;
+            let n: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
+            (n.len() == 3 && n.iter().all(|x| x.is_finite()) && n[0] > 0.0)
+                .then(|| [n[0], n[1], n[2]])
+        });
+        put_frame(f, surface);
     }
     let attached = attached();
     Ok((

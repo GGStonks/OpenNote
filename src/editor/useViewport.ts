@@ -4,7 +4,15 @@ import { GestureBus } from './gestures';
 import { setTilesPaused, tileWork } from './tileWork';
 import { crashLog, powerState } from '../services/crashLog';
 import { nativePinch } from './nativePinch';
+import { cameraFeed, onRustGesture, rustViewportCamera, rustViewportLayout, rustViewportSet, shellPushesCamera, type RustCamera, type RustViewportLayout } from '../services/rustCore';
 import { frameRate } from '../services/frameRate';
+import {
+  FIT_MARGIN, MAX_ZOOM, MIN_ZOOM, MOMENTUM_MIN_SPEED, MOMENTUM_STOP_SPEED, PINCH_START, PULL_EDGE, PULL_RESISTANCE, PULL_THRESHOLD,
+  RELEASE_RECENT_MS, TAP_MAX_MS, TAP_SLOP, VELOCITY_WINDOW_MS, clampZoom, fitWidthZoom as fitZoomFor, momentumStep, pinchZoom, releaseVelocity,
+  shouldRebase, snapsToFit, subPixel,
+} from './viewportMath';
+
+export { FIT_MARGIN, MAX_ZOOM, MIN_ZOOM, PULL_THRESHOLD };
 
 interface Options {
   contentWidth: number;
@@ -22,6 +30,22 @@ interface Options {
    * Without it, the whole content (the widest page and the padding around it).
    */
   fitTarget?: () => { left: number; width: number } | null;
+  /** Rust owns the camera while the native canvas draws the note (rust/DECISIONS.md ADR-006). */
+  rust?: RustOwner;
+}
+
+/**
+ * The Rust camera (crates/viewport, a port of this file's gestures) moves the note while the native
+ * canvas draws it: the shell hands it two-finger touches, the canvas draws at the display's rate,
+ * and this hook only mirrors it on the page's frames (scroll, zoom and the content's transform, so
+ * text, formulas, the selection and live ink follow the ink), sends the layout and its own views
+ * (fit to width, fit page, saved views, the keyboard, the wheel, going to a page, its own scroll).
+ * One finger, the pen and taps stay the page's.
+ */
+export interface RustOwner {
+  owned: boolean;
+  /** The surface's corner in the content and the pages on it (surface px; a new array when they change). */
+  layout: () => { surface: [number, number]; sheets: [number, number, number, number][]; contentHeight: number };
 }
 
 export type FitMode = 'width' | 'page' | null;
@@ -34,12 +58,8 @@ export interface SavedView {
   fit: FitMode;
 }
 
-/** Screen px left between a page fitted to the width and each edge of the screen. */
-export const FIT_MARGIN = 2;
 /** Window event after a zoom has placed the content (scroll and sub-pixel translate): ink canvases re-align to the pixel grid. */
 export const CONTENT_PLACED = 'opennote-content-placed';
-/** A pinch ending within this fraction of the page's fit-to-width zoom snaps to it (and follows the pages again). */
-const FIT_SNAP = 0.08;
 
 /** A content point (unscaled px, relative to the zoomed content) and where it goes on screen. */
 interface Anchor {
@@ -49,19 +69,12 @@ interface Anchor {
   sy: number;
 }
 
-const TAP_MAX_MS = 320;
-const TAP_SLOP = 14;
-export const MIN_ZOOM = 0.5;
-export const MAX_ZOOM = 5;
-const PINCH_START = 0.05;
-/**
- * A pinch that has scaled the page this much since the zoom it is drawn at commits that zoom while
- * the fingers are still down, and goes on from there: pictures, LaTeX, text and paper are drawn
- * again at the new scale (stretched from the pinch's start, a pinch from 30% to 300% showed them
- * blurred). At most every REBASE_MIN_MS.
+/*
+ * A pinch that has scaled the page REBASE_RATIO since the zoom it is drawn at commits that zoom
+ * while the fingers are still down, and goes on from there: pictures, LaTeX, text and paper are
+ * drawn again at the new scale (stretched from the pinch's start, a pinch from 30% to 300% showed
+ * them blurred). At most every REBASE_MIN_MS. The constants and arithmetic: viewportMath.ts.
  */
-const REBASE_RATIO = 1.5;
-const REBASE_MIN_MS = 250;
 
 /**
  * Which draws a pinch on iOS: the page (its own transform: the real note all round, zooming out
@@ -72,11 +85,8 @@ const REBASE_MIN_MS = 250;
 // Not over the native canvas (App's `on-native-canvas`): it follows the page's pinch itself, and
 // the shell's snapshot of the see-through web view would cover it (no ink while pinching).
 const shellDrawsPinch = () => !!window.OpenNoteNative?.lowPower && !document.documentElement.classList.contains('on-native-canvas');
-export const PULL_THRESHOLD = 110;
-/** Pull distance per px of finger travel past the end (rubber band). */
-const PULL_RESISTANCE = 0.5;
 
-export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget }: Options) {
+export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget, rust }: Options) {
   // Read through a ref: a new function on every render re-ran the gesture effect, whose clean-up
   // ended a pinch in progress (a render during the pinch, such as its zoom being committed on the
   // way, switched the GPU ink off).
@@ -86,6 +96,11 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
   fitTargetRef.current = fitTarget;
   const penScrollsRef = useRef(penScrolls);
   penScrollsRef.current = penScrolls;
+  const rustRef = useRef(rust);
+  rustRef.current = rust;
+  const rustOwned = !!rust?.owned;
+  /** The Rust camera has this note's layout: camera changes go to it, and the page mirrors it. */
+  const rustLive = useRef(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const outerRef = useRef<HTMLDivElement | null>(null);
   const [zoom, setZoomState] = useState(1);
@@ -156,8 +171,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     // the rounding: where the scroll range stops the content short (zoomed out to the page's
     // width), it stays where scrolling can reach it.
     o = contentCorner(el, outer);
-    const sub = (d: number) => (Math.abs(d) < 1 ? Math.round(d * 100) / 100 : 0);
-    const dx = sub(a.sx - (a.cx * z + o.x)), dy = sub(a.sy - (a.cy * z + o.y));
+    const dx = subPixel(a.sx - (a.cx * z + o.x)), dy = subPixel(a.sy - (a.cy * z + o.y));
     if (dx || dy) outer.style.translate = `${dx}px ${dy}px`;
     window.dispatchEvent(new Event(CONTENT_PLACED));
   };
@@ -169,8 +183,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
   const setView = useCallback((z: number, a?: Anchor | null, floor = Infinity) => {
     const el = scrollRef.current;
     if (!el) return;
-    const fitW = el.clientWidth / contentWidthRef.current;
-    z = Math.max(Math.min(MIN_ZOOM, fitW, floor), Math.min(MAX_ZOOM, z));
+    z = clampZoom(z, el.clientWidth, contentWidthRef.current, floor);
     anchor.current = a ?? anchorAt(el.clientWidth / 2, el.clientHeight / 2);
     if (Math.abs(z - zoomRef.current) < 1e-4) {
       applyAnchor();
@@ -186,11 +199,16 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
    * the padding around the surface: wide margins, and too small for narrower pages in a note that
    * mixes sizes or orientations.
    */
-  const fitWidthZoom = (el: HTMLElement, t: { width: number }) => Math.max(0.05, (el.clientWidth - 2 * FIT_MARGIN) / Math.max(1, t.width));
+  const fitWidthZoom = (el: HTMLElement, t: { width: number }) => fitZoomFor(el.clientWidth, t.width);
   const fitWidth = useCallback(() => {
     const el = scrollRef.current;
     if (!el || !el.clientWidth) return;
     setFitMode('width');
+    if (rustLive.current) {
+      const ft = fitTargetRef.current?.();
+      void rustViewportSet({ op: 'fitWidth', target: ft ? [ft.left, ft.width] : null });
+      return;
+    }
     const t = fitTargetRef.current?.() ?? { left: 0, width: contentWidthRef.current };
     const z = fitWidthZoom(el, t);
     const a = anchorAt(0, 0);
@@ -204,6 +222,10 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       const el = scrollRef.current;
       if (!el || !el.clientWidth) return;
       setFitMode('page');
+      if (rustLive.current) {
+        void rustViewportSet({ op: 'zoomToRect', rect: [r.x, r.y, r.width, r.height] });
+        return;
+      }
       const z = Math.min(el.clientWidth / r.width, el.clientHeight / r.height);
       setView(z, { cx: r.x + r.width / 2, cy: r.y + r.height / 2, sx: el.clientWidth / 2, sy: el.clientHeight / 2 }, z);
     },
@@ -224,6 +246,12 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     (v: SavedView) => {
       const el = scrollRef.current;
       if (!el || !el.clientWidth || !Number.isFinite(v.cx) || !Number.isFinite(v.cy) || !(v.zoom > 0)) return;
+      if (rustLive.current) {
+        setFitMode(v.fit);
+        const ft = fitTargetRef.current?.();
+        void rustViewportSet({ op: 'restore', view: { zoom: v.zoom, cx: v.cx, cy: v.cy, fit: v.fit }, target: ft ? [ft.left, ft.width] : null });
+        return;
+      }
       if (v.fit === 'width') {
         setFitMode('width');
         const t = fitTargetRef.current?.() ?? { left: 0, width: contentWidthRef.current };
@@ -241,7 +269,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
   const zoomBy = useCallback(
     (f: number) => {
       setFitMode(null);
-      setView(zoomRef.current * f);
+      if (rustLive.current) void rustViewportSet({ op: 'zoomBy', f });
+      else setView(zoomRef.current * f);
     },
     [setView]
   );
@@ -273,20 +302,19 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     const el = scrollRef.current;
     if (!el) return;
     let { x: vx, y: vy } = velocity.current;
-    if (Math.hypot(vx, vy) < 0.1) return;
+    if (Math.hypot(vx, vy) < MOMENTUM_MIN_SPEED) return;
     let t0 = performance.now();
     // UIScrollView's normal deceleration rate (0.998 per ms): long, soft glide.
     const step = (now: number) => {
-      const dt = Math.min(32, now - t0);
+      const s = momentumStep(vx, vy, now - t0);
       t0 = now;
       const bx = el.scrollLeft, by = el.scrollTop;
-      el.scrollTop -= vy * dt;
-      el.scrollLeft -= vx * dt;
-      const decay = Math.pow(0.998, dt);
-      vx *= decay;
-      vy *= decay;
+      el.scrollTop -= s.dy;
+      el.scrollLeft -= s.dx;
+      vx = s.vx;
+      vy = s.vy;
       const stuck = el.scrollTop === by && el.scrollLeft === bx; // reached an edge
-      if (Math.hypot(vx, vy) > 0.01 && !stuck) momentum.current = requestAnimationFrame(step);
+      if (Math.hypot(vx, vy) > MOMENTUM_STOP_SPEED && !stuck) momentum.current = requestAnimationFrame(step);
       else momentum.current = null;
     };
     momentum.current = requestAnimationFrame(step);
@@ -295,14 +323,15 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
   const reportPull = () => {
     const d = pullRaw.current * PULL_RESISTANCE;
     const outer = outerRef.current;
-    if (outer && !pinch.current?.engaged) {
+    if (rustLive.current) void rustViewportSet({ op: 'pull', d: d >= PULL_THRESHOLD ? 0 : Math.max(0, d), animate: false });
+    else if (outer && !pinch.current?.engaged) {
       outer.style.transition = '';
       outer.style.transform = d > 0 ? `translateY(${-d}px)` : '';
     }
     cb.current.onPull?.(d);
     if (d >= PULL_THRESHOLD) {
       pullRaw.current = 0;
-      if (outer) outer.style.transform = '';
+      if (outer && !rustLive.current) outer.style.transform = '';
       cb.current.onPull?.(0);
       cb.current.onPullCommit?.();
     }
@@ -312,7 +341,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     if (pullRaw.current === 0) return;
     pullRaw.current = 0;
     const outer = outerRef.current;
-    if (outer) {
+    if (rustLive.current) void rustViewportSet({ op: 'pull', d: 0, animate: true });
+    else if (outer) {
       outer.style.transition = 'transform 220ms cubic-bezier(.2,.8,.2,1)';
       outer.style.transform = '';
       setTimeout(() => {
@@ -378,8 +408,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     };
     /** The pinch's scale and centre from the fingers now (on every finger event: the shell's snapshot follows each). */
     const trackPinch = (pz: NonNullable<typeof pinch.current>) => {
-      const fitW = el.clientWidth / contentWidthRef.current;
-      const z = Math.max(Math.min(MIN_ZOOM, fitW), Math.min(MAX_ZOOM, pz.z0 * (spread() / pz.d0)));
+      const z = pinchZoom(pz.z0, spread(), pz.d0, el.clientWidth, contentWidthRef.current);
       pz.k = z / pz.z0;
       pz.c = centroid();
       if (pz.native !== null) nativePinch.move(pz.native, pz.k, pz.c);
@@ -474,7 +503,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       const a = { cx: p.o.x / p.z0, cy: p.o.y / p.z0, sx: p.c.x, sy: p.c.y };
       const t = fitTargetRef.current?.();
       const zf = t ? fitWidthZoom(el, t) : 0;
-      if (t && Math.abs(z / zf - 1) < FIT_SNAP) {
+      if (t && snapsToFit(z, zf)) {
         // Close to the page's width: fitted exactly, edge to edge, as the button does (the point
         // between the fingers keeps its height).
         setFitMode('width');
@@ -549,8 +578,11 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         if (!gestures.navigating) gestures.cancelStrokes();
         if (gestures.dragging || controlFingers.size) gestures.cancelDrags();
         gestures.navigating = true;
-        if (pointers.current.size === 2) beginPinch();
-        else endPinch();
+        // Over the native canvas the Rust camera moves the note (the shell gave it these fingers).
+        if (!rustLive.current) {
+          if (pointers.current.size === 2) beginPinch();
+          else endPinch();
+        }
       } else if (onControl) {
         // One finger on a control: the control handles it.
       } else if (fingersNavigate() || navigateMouse) {
@@ -573,7 +605,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
           reportPull();
         }
         const maxTop = el.scrollHeight - el.clientHeight;
-        if (dy > 0 && el.scrollTop + dy > maxTop - 0.5) {
+        if (dy > 0 && el.scrollTop + dy > maxTop - PULL_EDGE) {
           const extra = el.scrollTop + dy - Math.max(el.scrollTop, maxTop);
           dy -= extra;
           pullRaw.current += extra;
@@ -594,6 +626,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         if (o && Math.hypot(p.x - o.x, p.y - o.y) > TAP_SLOP) t.moved = true;
       }
       if (!gestures.navigating || !last.current) return;
+      // The Rust camera moves the note (the mouse's drag, a desktop's, stays the page's).
+      if (rustLive.current && !mouseDown) return;
       if (nativeSingle()) {
         resetTrack();
         return;
@@ -639,7 +673,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         if (pz.engaged) {
           if (pinchTimes) pinchTimes.events++;
           trackPinch(pz);
-          if (pz.native === null && Math.abs(Math.log(pz.k)) > Math.log(REBASE_RATIO) && now - pz.rebasedAt > REBASE_MIN_MS) rebase(pz, now);
+          if (pz.native === null && shouldRebase(pz.k, now - pz.rebasedAt)) rebase(pz, now);
           if (pinchFrame === null) pinchFrame = requestAnimationFrame(applyPinch);
           last.current = { x: c.x, y: c.y, t: now };
           return;
@@ -651,7 +685,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       last.current = { x: c.x, y: c.y, t: now };
       const h = history.current;
       h.push(last.current);
-      while (h.length > 2 && now - h[0].t > 80) h.shift();
+      while (h.length > 2 && now - h[0].t > VELOCITY_WINDOW_MS) h.shift();
     };
 
     const onUp = (e: PointerEvent) => {
@@ -671,16 +705,13 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       const pulled = pullRaw.current > 0;
       releasePull();
       // Release velocity over the last ~80 ms (one noisy event cannot fling or stop the page).
-      const h = history.current;
-      const first = h[0], lastH = h[h.length - 1];
-      const dt = first && lastH ? lastH.t - first.t : 0;
-      velocity.current = dt > 8 ? { x: (lastH.x - first.x) / dt, y: (lastH.y - first.y) / dt } : { x: 0, y: 0 };
+      velocity.current = releaseVelocity(history.current);
       history.current = [];
       const t = tap.current;
       tap.current = null;
       const wasNavigating = gestures.navigating;
       gestures.navigating = false;
-      const recent = last.current && performance.now() - last.current.t < 80;
+      const recent = last.current && performance.now() - last.current.t < RELEASE_RECENT_MS;
       last.current = null;
       if (t && !t.moved && t.fingers >= 2 && performance.now() - t.start < TAP_MAX_MS) {
         cb.current.onFingerTap?.(t.fingers);
@@ -699,7 +730,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         const a = anchorAt(p.x, p.y);
         const unit = ev.deltaMode === 1 ? 16 : 1;
         setFitMode(null);
-        setView(zoomRef.current * Math.exp(-ev.deltaY * unit * 0.0025), a);
+        if (rustLive.current) void rustViewportSet({ op: 'zoomAt', f: Math.exp(-ev.deltaY * unit * 0.0025), sx: p.x, sy: p.y });
+        else setView(zoomRef.current * Math.exp(-ev.deltaY * unit * 0.0025), a);
         return;
       }
       if (!cb.current.onPullCommit || ev.deltaY <= 0) return;
@@ -792,5 +824,151 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     };
   }, [gestures, setView]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView };
+  /** Scrolls the content height y (unscaled px, from the content's top) to the top of the screen. */
+  const scrollToY = useCallback((y: number, smooth: boolean) => {
+    const el = scrollRef.current, outer = outerRef.current;
+    if (!el || !outer) return;
+    if (rustLive.current) void rustViewportSet({ op: 'scrollTo', y, smooth });
+    else el.scrollTo({ top: outer.offsetTop + y * zoomRef.current, behavior: smooth ? 'smooth' : 'auto' });
+  }, []);
+
+  // The Rust camera's mirror (see RustOwner): on each of the page's frames the newest camera the
+  // shell pushed (or, without pushes, the bridge's reply) is put on the DOM: the committed zoom and
+  // scroll positions as they are, and the rest (a pinch's scale, the pull, what the browser's
+  // rounding of scroll positions left) as one transform on the content, measured, so that the
+  // content's corner is exactly where the canvas drew the ink. The layout goes to Rust whenever it
+  // changes; the first time with the page's camera, which Rust takes over.
+  useEffect(() => {
+    if (!rustOwned) return;
+    let raf = 0;
+    let alive = true;
+    let applied = -1;
+    let layoutKey = '';
+    let lastSheets: unknown = null;
+    let lastLayout: RustViewportLayout | null = null;
+    let polling = false;
+    /** The scroll positions the mirror last wrote (or the page's own last sent): a scroll event from them is no news. */
+    let written = { l: NaN, t: NaN };
+    let pullSeen = 0;
+    let pulls = -1;
+    let placed = -1;
+    onRustGesture((g) => crashLog.event('pinch', { ...g, gl: 'rust', pageHz: Math.round(frameRate.hz), ...powerState() }));
+    const el0 = scrollRef.current;
+    // The page's own scroll (one finger natively, the wheel, the keyboard, a mouse drag): to Rust.
+    const onScroll = () => {
+      const el = scrollRef.current;
+      if (!el || !rustLive.current) return;
+      const l = el.scrollLeft, t = el.scrollTop;
+      if (Math.abs(l - written.l) < 0.5 && Math.abs(t - written.t) < 0.5) return;
+      const dsl = Number.isNaN(written.l) ? 0 : l - written.l, dst = Number.isNaN(written.t) ? 0 : t - written.t;
+      written = { l, t };
+      void rustViewportSet({ op: 'scroll', sl: l, st: t, dsl, dst });
+    };
+    el0?.addEventListener('scroll', onScroll, { passive: true });
+
+    const sendLayout = (el: HTMLElement, outer: HTMLElement) => {
+      const info = rustRef.current?.layout();
+      if (!info) return;
+      const r = el.getBoundingClientRect();
+      const holes = [...document.querySelectorAll('[data-viewport-hole]')]
+        .map((h) => h.getBoundingClientRect())
+        .filter((b) => b.width > 0 && b.height > 0)
+        .map((b) => [b.left, b.top, b.width, b.height] as [number, number, number, number]);
+      const layout: RustViewportLayout = {
+        view: [r.left + el.clientLeft, r.top + el.clientTop, el.clientWidth, el.clientHeight],
+        content: [contentWidthRef.current, info.contentHeight],
+        surface: info.surface,
+        sheets: info.sheets,
+        pull: !!cb.current.onPullCommit,
+        single: fingersNavigateRef.current(),
+        holes,
+        dpr: window.devicePixelRatio || 1,
+        frameMs: frameRate.frameMs,
+        owned: true,
+      };
+      const key = JSON.stringify([layout.view, layout.content, layout.surface, layout.pull, layout.single, holes, layout.dpr, Math.round(layout.frameMs)]);
+      if (key === layoutKey && info.sheets === lastSheets) return;
+      layoutKey = key;
+      lastSheets = info.sheets;
+      lastLayout = layout;
+      const first = !rustLive.current;
+      rustLive.current = true;
+      if (first) {
+        const [sx, sy] = (outer.style.translate || '0px 0px').split(' ').map((v) => parseFloat(v) || 0);
+        written = { l: el.scrollLeft, t: el.scrollTop };
+        void rustViewportLayout(layout, { zoom: zoomRef.current, sl: el.scrollLeft, st: el.scrollTop, sub: [sx ?? 0, sy ?? 0], fit: fitModeRef.current });
+      } else void rustViewportLayout(layout);
+    };
+
+    const apply = (c: RustCamera, el: HTMLElement, outer: HTMLElement) => {
+      if (c.seq === applied) return;
+      applied = c.seq;
+      if (Math.abs(c.zoom - zoomRef.current) > 1e-9) {
+        // The committed zoom (a pinch's end or rebase, a page view): the page laid out at it now.
+        zoomRef.current = c.zoom;
+        flushSync(() => setZoomState(c.zoom));
+      }
+      outer.style.transform = '';
+      outer.style.translate = '';
+      if (!c.byPage) {
+        el.scrollLeft = c.sl;
+        el.scrollTop = c.st;
+        written = { l: el.scrollLeft, t: el.scrollTop };
+      }
+      const o = contentCorner(el, outer);
+      const dx = c.x - o.x, dy = c.y - o.y, k = c.ez / zoomRef.current;
+      if (Math.abs(k - 1) > 1e-7 || Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
+        outer.style.transformOrigin = '0 0';
+        outer.style.transform = `translate(${dx}px, ${dy}px) scale(${k})`;
+      } else outer.style.transformOrigin = '';
+      outer.style.willChange = c.gesture ? 'transform' : '';
+      if (c.fit !== fitModeRef.current) setFitMode(c.fit);
+      if (c.pull !== pullSeen) {
+        pullSeen = c.pull;
+        cb.current.onPull?.(c.pull);
+      }
+      if (pulls < 0) pulls = c.pulls;
+      while (pulls < c.pulls) {
+        pulls++;
+        cb.current.onPullCommit?.();
+      }
+      if (placed !== c.placed && !c.gesture && placed >= 0) window.dispatchEvent(new Event(CONTENT_PLACED));
+      placed = c.placed;
+      for (const fn of tileWork.moved) fn();
+    };
+
+    const frame = () => {
+      if (!alive) return;
+      raf = requestAnimationFrame(frame);
+      const el = scrollRef.current, outer = outerRef.current;
+      if (!el || !outer || !el.clientWidth) return;
+      sendLayout(el, outer);
+      if (!shellPushesCamera() && !polling) {
+        polling = true;
+        void rustViewportCamera().finally(() => {
+          polling = false;
+        });
+      }
+      const r = cameraFeed.latest;
+      if (r?.owned) apply(r.camera, el, outer);
+    };
+    raf = requestAnimationFrame(frame);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      el0?.removeEventListener('scroll', onScroll);
+      onRustGesture(null);
+      if (rustLive.current && lastLayout) void rustViewportLayout({ ...lastLayout, owned: false });
+      rustLive.current = false;
+      cameraFeed.latest = null;
+      const outer = outerRef.current;
+      if (outer) {
+        outer.style.transform = '';
+        outer.style.transformOrigin = '';
+        outer.style.willChange = '';
+      }
+    };
+  }, [rustOwned]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView, scrollToY };
 }

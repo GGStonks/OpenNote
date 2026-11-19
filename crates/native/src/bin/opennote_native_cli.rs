@@ -6,6 +6,8 @@
 //!   host of w x h device px, the active one), as the iOS / Android shells keep it: calls in a
 //!   row, each `u32 method length, method, u32 request length, request` in, `u32 reply length,
 //!   reply` out (little endian). `canvasSnapshot` draws the frame and replies its RGBA pixels.
+//!   `--serve <w> <h> --tick <hz>`: also a display link: `draw_active` every 1/hz s on a thread
+//!   of its own, as the shells' render threads call it (the Rust camera advances there).
 use std::io::{Read, Write};
 
 fn read_u32(r: &mut impl Read) -> Option<u32> {
@@ -25,6 +27,29 @@ fn main() {
             opennote_native::canvas_service::attach_offscreen(w, h),
             "no GPU for the canvas"
         );
+        if let Some(hz) = args
+            .iter()
+            .position(|a| a == "--tick")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|hz| *hz > 0.0)
+        {
+            opennote_native::viewport_service::set_display_hz(hz);
+            std::thread::spawn(move || {
+                let period = std::time::Duration::from_secs_f64(1.0 / hz);
+                let mut next = std::time::Instant::now();
+                loop {
+                    opennote_native::canvas_service::draw_active();
+                    next += period;
+                    let now = std::time::Instant::now();
+                    if next > now {
+                        std::thread::sleep(next - now);
+                    } else {
+                        next = now;
+                    }
+                }
+            });
+        }
         let (mut input, mut output) = (std::io::stdin().lock(), std::io::stdout().lock());
         while let Some(n) = read_u32(&mut input) {
             let mut method = vec![0u8; n as usize];

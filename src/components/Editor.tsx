@@ -36,7 +36,7 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { nativeCanvasFor } from '../services/rustCore';
+import { nativeCanvasFor, nativeViewportFor } from '../services/rustCore';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
 import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
@@ -265,8 +265,15 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   // Fit to width fits the page on screen (curSheetRef, set below once the current page is known).
   const curSheetRef = useRef<{ left: number; width: number } | null>(null);
   const fitTarget = useCallback(() => (curSheetRef.current ? { left: PAD + curSheetRef.current.left, width: curSheetRef.current.width } : null), []);
-  const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView } = useViewport({
+  // The Rust camera (rust/DECISIONS.md ADR-006) moves notes the native canvas draws: it needs the
+  // surface's place in the content and the pages on it.
+  const rustSheets = useMemo(() => sl.sheets.map((s) => [s.left, s.top, s.width, s.height] as [number, number, number, number]), [sl]);
+  const rustLayoutRef = useRef({ surface: [PAD, PAD] as [number, number], sheets: rustSheets, contentHeight: layout.totalHeight });
+  rustLayoutRef.current = { surface: [PAD, PAD], sheets: rustSheets, contentHeight: layout.totalHeight };
+  const rustLayout = useCallback(() => rustLayoutRef.current, []);
+  const { scrollRef, outerRef, zoom, fitMode, fitWidth, zoomToRect, zoomBy, viewState, restoreView, scrollToY } = useViewport({
     contentWidth: layout.contentWidth, fingersNavigate, gestures, onFingerTap, onPull, onPullCommit, penScrolls, fitTarget,
+    rust: { owned: nativeViewportFor(note), layout: rustLayout },
   });
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   // A stable callback: an inline one is called with null and then the element again on every
@@ -530,13 +537,12 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
   const jumpToPage = useCallback(
     (k: number) => {
-      const el = scrollRef.current, outer = outerRef.current;
       const sh = slRef.current.sheets[k];
-      if (!el || !outer || !sh) return;
-      el.scrollTo({ top: outer.offsetTop + (PAD + sh.top - PAD / 2) * zoom, behavior: 'smooth' });
+      if (!sh) return;
+      scrollToY(PAD + sh.top - PAD / 2, true);
       setCurrentPage(k);
     },
-    [zoom, scrollRef, outerRef]
+    [scrollToY]
   );
 
   /** Bottom-right zoom button: fit the width; when already fitted, fit the whole current page. */
@@ -1401,6 +1407,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
             style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
             data-no-pan
+            data-viewport-hole
           >
             <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
               {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}

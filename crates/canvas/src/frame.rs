@@ -113,6 +113,34 @@ impl FrameSpec {
         )
     }
 
+    /// The frame moved on screen: every placement followed by `p -> s p + (dx, dy)` (device px).
+    /// The native canvas places the page's last frame at the camera Rust owns (crates/viewport,
+    /// rust/DECISIONS.md ADR-006): `s` is the camera's scale over the one the page drew at, the
+    /// offset where the page's surface now is. Computed in f64 (a placement millions of device px
+    /// down a long note keeps its sub-pixel place).
+    pub fn moved(&self, s: f64, dx: f64, dy: f64) -> FrameSpec {
+        let m = |v: f32| (v as f64 * s) as f32;
+        FrameSpec {
+            clear: self.clear,
+            pages: self
+                .pages
+                .iter()
+                .map(|p| PagePlacement {
+                    page: p.page.clone(),
+                    tf: Transform {
+                        a: m(p.tf.a),
+                        b: m(p.tf.b),
+                        c: m(p.tf.c),
+                        d: m(p.tf.d),
+                        ox: (p.tf.ox as f64 * s + dx) as f32,
+                        oy: (p.tf.oy as f64 * s + dy) as f32,
+                    },
+                    paper: p.paper,
+                })
+                .collect(),
+        }
+    }
+
     /// The page's `canvasFrame` message: `{ clear: [r,g,b,a] | null, pages: [{ page, tf:
     /// [a,b,c,d,ox,oy], paper: { width, height, style, base, dark, pattern, origin } | null }] }`
     /// (device px). None when it does not parse. JSON has no NaN or infinity: those come as
@@ -199,6 +227,24 @@ mod tests {
             ox: 0.0,
             oy: 0.0
         }));
+    }
+
+    #[test]
+    fn a_moved_frame_maps_each_page_point_through_the_move() {
+        let f = FrameSpec::parse(r#"{"clear":[0.5,0.5,0.5,1],"pages":[{"page":"","tf":[2,0,0,2,16,140],"paper":{"width":816,"height":1056,"style":1,"base":[1,1,1,1],"origin":[0,0]}},{"page":"p","tf":[2,0,0,2,16,140],"paper":null}]}"#).unwrap();
+        // The camera zoomed 1.5x about device point (400, 600) and moved 10 px right.
+        let (s, dx, dy) = (1.5, 400.0 * (1.0 - 1.5) + 10.0, 600.0 * (1.0 - 1.5));
+        let g = f.moved(s, dx, dy);
+        assert_eq!(g.clear, f.clear);
+        assert_eq!(g.pages[0].paper, f.pages[0].paper);
+        for (a, b) in f.pages.iter().zip(&g.pages) {
+            for (x, y) in [(0.0f32, 0.0f32), (816.0, 1056.0), (100.5, 7.25)] {
+                let (px, py) = a.tf.apply(x, y);
+                let (qx, qy) = b.tf.apply(x, y);
+                assert!((qx as f64 - (px as f64 * s + dx)).abs() < 1e-3);
+                assert!((qy as f64 - (py as f64 * s + dy)).abs() < 1e-3);
+            }
+        }
     }
 
     #[test]

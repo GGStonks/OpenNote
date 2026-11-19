@@ -6,6 +6,8 @@ import android.os.Looper;
 import android.os.Process;
 import android.util.Base64;
 import android.view.Choreographer;
+import android.view.MotionEvent;
+import android.view.View;
 import android.view.Surface;
 import android.webkit.WebView;
 
@@ -86,6 +88,69 @@ public class OpenNoteRustPlugin extends Plugin {
     /** Draws the canvas's frame when the page changed it; on the render thread only. */
     static native boolean canvasDrawActive();
 
+    // The Rust camera (crates/native viewport_service.rs, rust/DECISIONS.md ADR-006): with the
+    // native canvas, two fingers over the note move crates/viewport; the render thread advances
+    // it and draws at the display's rate, then pushes the camera to the page, which mirrors it.
+    /** A finger: phase 0 down, 1 move, 2 up, 3 cancel; (x, y) WebView CSS px. True when the camera holds it. */
+    static native boolean viewportTouch(long id, int phase, double x, double y);
+    /** The display's best refresh rate, recorded with each gesture. */
+    static native void viewportDisplayHz(double hz);
+    /** The camera for the page when it moved and a page frame has passed since the last push, else null. */
+    static native String viewportPoll();
+
+    /** The WebView the camera is pushed to. */
+    private static volatile java.lang.ref.WeakReference<WebView> cameraWebView = new java.lang.ref.WeakReference<>(null);
+    private static final Handler uiThread = new Handler(Looper.getMainLooper());
+
+    /**
+     * Every finger of a touch event to the Rust camera, before the WebView gets the event (which it
+     * still does: taps, one finger, the page cancelling a finger stroke when a second finger lands).
+     * Rust takes only fingers that come down over the note while the stylus is off the glass, and
+     * moves the camera once two are down. MainActivity.dispatchTouchEvent, UI thread.
+     */
+    static void onTouch(MotionEvent ev, View webView) {
+        if (!LOADED || !canvasAttached || webView == null) return;
+        int[] loc = new int[2];
+        webView.getLocationInWindow(loc);
+        float density = webView.getResources().getDisplayMetrics().density;
+        int action = ev.getActionMasked();
+        int index = ev.getActionIndex();
+        switch (action) {
+            case MotionEvent.ACTION_DOWN:
+            case MotionEvent.ACTION_POINTER_DOWN:
+                if (ev.getToolType(index) != MotionEvent.TOOL_TYPE_FINGER || OpenNoteInkPlugin.stylusDown()) return;
+                viewportTouch(ev.getPointerId(index), 0, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                for (int i = 0; i < ev.getPointerCount(); i++) {
+                    if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) continue;
+                    viewportTouch(ev.getPointerId(i), 1, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density);
+                }
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_POINTER_UP:
+                if (ev.getToolType(index) != MotionEvent.TOOL_TYPE_FINGER) return;
+                viewportTouch(ev.getPointerId(index), 2, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density);
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                for (int i = 0; i < ev.getPointerCount(); i++) {
+                    viewportTouch(ev.getPointerId(i), 3, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density);
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** The display's best refresh rate (MainActivity, from the display's modes). */
+    static void setDisplayHz(float hz) {
+        if (LOADED && hz > 0) viewportDisplayHz(hz);
+    }
+    private static volatile float surfaceHz = 0;
+    static void setSurfaceRate(float hz) {
+        surfaceHz = hz;
+    }
+
     private static boolean canvasAttached = false;
     private static volatile boolean frameCallbackActive = false;
 
@@ -110,6 +175,14 @@ public class OpenNoteRustPlugin extends Plugin {
         public void doFrame(long frameTimeNanos) {
             if (!frameCallbackActive) return;
             canvasDrawActive();
+            String cam = viewportPoll();
+            if (cam != null) {
+                String js = "window.__opennoteCamera&&window.__opennoteCamera(" + cam + ")";
+                uiThread.post(() -> {
+                    WebView web = cameraWebView.get();
+                    if (web != null) web.evaluateJavascript(js, null);
+                });
+            }
             Choreographer.getInstance().postFrameCallback(this);
         }
     };
@@ -140,6 +213,15 @@ public class OpenNoteRustPlugin extends Plugin {
 
     static void onSurfaceChanged(Surface surface, int width, int height) {
         if (!LOADED) return;
+        // The canvas's surface at the display's best rate (Android 11+; the window's display mode,
+        // MainActivity.preferFastestMode, does it before): Choreographer then ticks at that rate.
+        if (android.os.Build.VERSION.SDK_INT >= 30 && surfaceHz > 0) {
+            try {
+                surface.setFrameRate(surfaceHz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+            } catch (Throwable ignored) {
+                // A surface that refuses keeps the display's rate.
+            }
+        }
         if (!canvasAttached) {
             canvasAttached = canvasSurfaceCreated(surface, width, height);
             pendingSurface = null;
@@ -205,7 +287,8 @@ public class OpenNoteRustPlugin extends Plugin {
         // The page asks window.__opennoteNativeCanvas (platform.ts hasNativeCanvas) before it draws.
         if (nativeCanvasEnabled(getContext()) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
             Uri page = Uri.parse(getBridge().getLocalUrl());
-            WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), "window.__opennoteNativeCanvas = true;",
+            cameraWebView = new java.lang.ref.WeakReference<>(getBridge().getWebView());
+            WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), "window.__opennoteNativeCanvas = true; window.__opennoteNativeViewport = true;",
                     Collections.singleton(page.getScheme() + "://" + page.getAuthority()));
         }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)

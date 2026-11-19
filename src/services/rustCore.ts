@@ -12,7 +12,7 @@
  */
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { NoteDocument, Stroke } from '../types';
-import { bytesToBase64, fromBase64, hasNativeCanvas, platformKind } from '../platform';
+import { bytesToBase64, fromBase64, hasNativeCanvas, hasNativeViewport, platformKind } from '../platform';
 import { computeStrokeGeometry, hasStrokeGeometry, setStrokeGeometry, type InkGeometry } from '../ink/strokeRenderer';
 import { packedPoints, PACKED_STRIDE } from '../storage/packedPoints';
 import { crashLog } from './crashLog';
@@ -373,6 +373,11 @@ export interface CanvasPlacement {
 export interface CanvasFrameReq {
   clear?: [number, number, number, number];
   pages: CanvasPlacement[];
+  /**
+   * Where the page's surface was when it placed the pages (device px: scale, x, y). While Rust owns
+   * the camera the canvas moves the frame from there to the camera's (crates/native viewport_service).
+   */
+  surface?: [number, number, number];
 }
 
 /** A key per stroke object for the native canvas: a changed stroke is a new object, so a new key. */
@@ -496,4 +501,147 @@ export async function setNativeCanvas(on: boolean): Promise<void> {
   } else if (platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android') {
     await registerPlugin<{ setNativeCanvas(o: { on: boolean }): Promise<void> }>('OpenNoteRust').setNativeCanvas({ on });
   }
+}
+
+// ------------------------------------------------------------------------------------------------
+// The Rust camera (rust/DECISIONS.md ADR-006, docs/rust-native-canvas.md N5): while the native canvas
+// draws a note, two fingers move crates/viewport (a port of useViewport.ts's gestures) at the
+// display's rate; the page sends its layout and its own views, and mirrors the camera.
+
+/** The camera as crates/viewport publishes it (`Camera`). */
+export interface RustCamera {
+  seq: number;
+  /** The committed zoom and scroll positions (the page's zoom state, scrollLeft, scrollTop). */
+  zoom: number;
+  sl: number;
+  st: number;
+  /** The content's corner on screen (scroll view px) and its scale, every transform included. */
+  x: number;
+  y: number;
+  ez: number;
+  fit: 'width' | 'page' | null;
+  /** useViewport's onPull distance, and how many pulls added a page. */
+  pull: number;
+  pulls: number;
+  /** applyAnchor placements so far (CONTENT_PLACED). */
+  placed: number;
+  gesture: boolean;
+  moving: boolean;
+  /** The last change was the page's own scroll: its DOM has it. */
+  byPage: boolean;
+}
+
+/** One gesture's frames, from the render thread (crates/viewport GestureSummary). */
+export interface RustGesture {
+  id: number;
+  ms: number;
+  frames: number;
+  drawn: number;
+  fps: number;
+  hz: number;
+  p50: number;
+  p95: number;
+  max: number;
+  slow: number;
+  events: number;
+  rebases: number;
+  z0: number;
+  z: number;
+  glide: boolean;
+}
+
+export interface RustCameraReply {
+  owned: boolean;
+  camera: RustCamera;
+  view: { zoom: number; cx: number; cy: number; fit: 'width' | 'page' | null };
+  page: number;
+  fingers: number;
+  log: RustGesture[];
+}
+
+/** The layout the camera needs (crates/viewport `Layout`). */
+export interface RustViewportLayout {
+  view: [number, number, number, number];
+  content: [number, number];
+  surface: [number, number];
+  sheets: [number, number, number, number][];
+  pull: boolean;
+  single: boolean;
+  holes: [number, number, number, number][];
+  dpr: number;
+  frameMs: number;
+  owned: boolean;
+}
+
+export type RustViewportOp =
+  | { op: 'fitWidth'; target?: [number, number] | null }
+  | { op: 'zoomToRect'; rect: [number, number, number, number] }
+  | { op: 'restore'; view: { zoom: number; cx: number; cy: number; fit: 'width' | 'page' | null }; target?: [number, number] | null }
+  | { op: 'zoomBy'; f: number }
+  | { op: 'zoomAt'; f: number; sx: number; sy: number }
+  | { op: 'scroll'; sl: number; st: number; dsl: number; dst: number }
+  | { op: 'scrollTo'; y: number; smooth: boolean }
+  | { op: 'pull'; d: number; animate: boolean }
+  | { op: 'stop' };
+
+/** Whether Rust owns this note's camera: the native canvas draws it and the shell runs the camera. */
+export function nativeViewportFor(note?: Pick<NoteDocument, 'sheets' | 'pages'> | null): boolean {
+  return nativeCanvasFor(note) && hasNativeViewport();
+}
+
+/**
+ * The newest camera the page has: pushed by the shell after the canvas drew it (iOS
+ * evaluateJavaScript, Android evaluateJavascript, at most once per page frame), or the reply to a
+ * bridge call. Each gesture's record (the render thread's frame intervals) goes to the crash report
+ * as a `pinch` entry, as useViewport logs its own pinches (`gl: 'rust'`).
+ */
+export const cameraFeed: { latest: RustCameraReply | null; pushedAt: number; pushes: number } = { latest: null, pushedAt: -Infinity, pushes: 0 };
+let gestureLogger: ((g: RustGesture) => void) | null = null;
+/** Who logs the gestures (useViewport, with the page's frame rate and power state). */
+export function onRustGesture(fn: ((g: RustGesture) => void) | null): void {
+  gestureLogger = fn;
+}
+function takeCamera(r: RustCameraReply | null | undefined): RustCameraReply | null {
+  if (!r || !r.camera) return null;
+  for (const g of r.log ?? []) gestureLogger?.(g);
+  if (!cameraFeed.latest || r.camera.seq >= cameraFeed.latest.camera.seq || !r.owned) cameraFeed.latest = r;
+  return r;
+}
+if (typeof window !== 'undefined') {
+  (window as unknown as { __opennoteCamera?: (r: RustCameraReply) => void }).__opennoteCamera = (r) => {
+    cameraFeed.pushedAt = performance.now();
+    cameraFeed.pushes++;
+    takeCamera(r);
+  };
+}
+
+/** The shell pushes the camera (else the page asks for it each frame: the PC's stand-in shell). */
+export function shellPushesCamera(): boolean {
+  return cameraFeed.pushes > 0;
+}
+
+async function viewportCall(method: string, meta: unknown): Promise<RustCameraReply | null> {
+  try {
+    const { meta: m } = await rustCall(method, meta);
+    if (m.error) throw new Error(String(m.error));
+    return takeCamera(m as unknown as RustCameraReply);
+  } catch (err) {
+    crashLog.event('viewport-failed', { method, error: err instanceof Error ? err.message : String(err) });
+    return null;
+  }
+}
+
+/** The page's layout (and, as Rust takes the camera over, the page's camera as it is). */
+export function rustViewportLayout(layout: RustViewportLayout, adopt?: { zoom: number; sl: number; st: number; sub: [number, number]; fit: 'width' | 'page' | null }): Promise<RustCameraReply | null> {
+  return viewportCall('viewportLayout', { layout, adopt: adopt ?? null });
+}
+
+/** A camera change the page makes (fit to width, a saved view, a page, the keyboard, its own scroll). */
+export function rustViewportSet(op: RustViewportOp): Promise<RustCameraReply | null> {
+  return viewportCall('viewportSet', op);
+}
+
+/** The camera now (and the gestures recorded since the last read). */
+export function rustViewportCamera(): Promise<RustCameraReply | null> {
+  return viewportCall('viewportCamera', {});
 }

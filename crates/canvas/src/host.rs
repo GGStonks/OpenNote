@@ -480,10 +480,12 @@ impl CanvasHost {
             return Vec::new();
         }
         let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((w * h * 4) as usize);
-        for row in 0..h {
-            let o = (row * padded) as usize;
-            out.extend_from_slice(&data[o..o + (w * 4) as usize]);
+        // In usize: a 32768 x 32768 target (a GPU's largest) is 2^32 bytes, past u32.
+        let (wb, padded) = (w as usize * 4, padded as usize);
+        let mut out = Vec::with_capacity(wb * h as usize);
+        for row in 0..h as usize {
+            let o = row * padded;
+            out.extend_from_slice(&data[o..o + wb]);
         }
         drop(data);
         buf.unmap();

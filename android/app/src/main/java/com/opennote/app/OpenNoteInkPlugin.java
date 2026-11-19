@@ -41,6 +41,11 @@ public class OpenNoteInkPlugin extends Plugin {
     /** Pointer id of the stylus touch being forwarded (-1: none). */
     private static int stylusId = -1;
 
+    /** The stylus is on the glass: a finger landing now is the hand resting (not the Rust camera's). */
+    static boolean stylusDown() {
+        return stylusId >= 0;
+    }
+
     @Override
     public void load() {
         WebView webView = getBridge().getWebView();
