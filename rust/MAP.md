@@ -7,7 +7,7 @@ Crate status: docs/rust-status.md.
 | Step | What | State |
 |---|---|---|
 | C1 | Canvas rebuilt: the parallel engine deleted, modules on the TS page's structure, one owner of the GPU, no host pointers in the shells, wgpu errors never panic, Android crash capture, GLES after an abnormal end | done 2026-11-19: cargo test 101/101 incl. a 3-thread stress test, clippy -D warnings, Android + iOS builds, `npm run build`, `bench:ui` nativecanvas and rustcore (0 lines differ); the Tab A8 crash not reproduced (no Mali on the PC) |
-| R1 | Release 2.9.5: C1 + crash capture, native canvas still opt-in | claimed by Claude 2026-11-19 |
+| R1 | Release 2.9.5: C1 + crash capture, native canvas still opt-in | done 2026-11-19: https://github.com/GGStonks/OpenNote/releases/tag/v2.9.5, verified (tag, APK, IPA 2.9.5) |
 | C2 | Pictures (N4): ImageBlock textures in z-order, crop, flip, rotation | open |
 | C3 | PDF pages (N4): PdfRenderer / PDFKit textures at the zoom in view | open |
 | C4 | Text boxes, formulas, TikZ as bitmaps from the web view (N5) | open |
