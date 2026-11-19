@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const REPO = 'GGStonks/OpenNote';
+// Releases are made from this branch (rust/DECISIONS.md ADR-003: official releases from opennote-rs).
+const BRANCH = 'opennote-rs';
 const sh = (cmd, args, quiet = false) =>
   execFileSync(cmd, args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', quiet ? 'ignore' : 'pipe'] }).trim();
 const fail = (msg) => {
@@ -48,10 +50,13 @@ function bump(version) {
   const now = current();
   const all = [now.pkg, now.name, now.shell, ...now.lock];
   if (new Set(all).size !== 1) fail(`the version differs between files before the bump: ${JSON.stringify(now)}`);
-  if (!(newer(want, parse(now.pkg)) > 0)) fail(`${version} is not newer than ${now.pkg}`);
+  // The branch's test builds carry a suffix (2.9.4-rs.27): compared by their X.Y.Z.
+  const base = parse(now.pkg.replace(/-.*$/, ''));
+  if (!base) fail(`cannot read the current version ${now.pkg}`);
+  if (!(newer(want, base) > 0)) fail(`${version} is not newer than ${now.pkg}`);
 
   const branch = sh('git', ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (branch !== 'main') fail(`on branch ${branch}: releases are made from main`);
+  if (branch !== BRANCH) fail(`on branch ${branch}: releases are made from ${BRANCH}`);
   // Tracked changes would go into the build but not into the tagged commit.
   const dirty = sh('git', ['status', '--porcelain', '--untracked-files=no']);
   if (dirty) fail(`uncommitted changes:\n${dirty}\ncommit them (or leave them out) first`);
@@ -59,8 +64,8 @@ function bump(version) {
   const stray = sh('git', ['status', '--porcelain', '--', 'src', 'public', 'ios-native', 'android/app/src', 'index.html'])
     .split('\n').filter((l) => l.startsWith('??'));
   if (stray.length) fail(`untracked files the build would include:\n${stray.join('\n')}`);
-  sh('git', ['fetch', '-q', 'origin', 'main']);
-  if (sh('git', ['rev-list', '--count', 'HEAD..origin/main']) !== '0') fail('origin/main has commits this checkout lacks: pull first');
+  sh('git', ['fetch', '-q', 'origin', BRANCH]);
+  if (sh('git', ['rev-list', '--count', `HEAD..origin/${BRANCH}`]) !== '0') fail(`origin/${BRANCH} has commits this checkout lacks: pull first`);
   const tag = `v${version}`;
   if (sh('git', ['tag', '-l', tag])) fail(`tag ${tag} exists already`);
   if (sh('git', ['ls-remote', '--tags', 'origin', `refs/tags/${tag}`])) fail(`tag ${tag} exists on GitHub already`);
@@ -78,7 +83,7 @@ function bump(version) {
   if (new Set([after.pkg, after.name, after.shell, ...after.lock]).size !== 1 || after.pkg !== version || after.code !== now.code + 1)
     fail(`the bump did not land everywhere: ${JSON.stringify(after)}`);
   console.log(`${now.pkg} -> ${version} (Android versionCode ${now.code} -> ${after.code}) in ${Object.values(FILES).join(', ')}`);
-  console.log('Next: write the notes, commit "' + version + ': <what changed>", git push origin main, then run the release script (docs/releasing.md).');
+  console.log('Next: write the notes, commit "' + version + ': <what changed>", git push origin ' + BRANCH + ', then run the release script (docs/releasing.md).');
 }
 
 function verify(version) {
@@ -91,9 +96,9 @@ function verify(version) {
   try { tagged = sh('git', ['rev-parse', `${tag}^{}`], true); } catch { problems.push(`no tag ${tag}`); }
   const head = sh('git', ['rev-parse', 'HEAD']);
   if (tagged && tagged !== head) problems.push(`${tag} is ${tagged.slice(0, 7)}, HEAD is ${head.slice(0, 7)}`);
-  sh('git', ['fetch', '-q', 'origin', 'main']);
+  sh('git', ['fetch', '-q', 'origin', BRANCH]);
   if (tagged) {
-    try { sh('git', ['merge-base', '--is-ancestor', tagged, 'origin/main'], true); } catch { problems.push(`${tag} is not on origin/main: git push origin main`); }
+    try { sh('git', ['merge-base', '--is-ancestor', tagged, `origin/${BRANCH}`], true); } catch { problems.push(`${tag} is not on origin/${BRANCH}: git push origin ${BRANCH}`); }
   }
   const dirty = sh('git', ['status', '--porcelain', '--untracked-files=no']);
   if (dirty) problems.push(`the working tree has changes the release did not include:\n${dirty}`);
@@ -115,7 +120,7 @@ function verify(version) {
     if (v !== version) problems.push(`the IPA says ${v ?? 'no version'}`);
   }
   if (problems.length) fail(`${tag} is not right:\n- ${problems.join('\n- ')}`);
-  console.log(`${tag} ok: tag on HEAD and on origin/main, APK and IPA on https://github.com/${REPO}/releases/tag/${tag}, IPA version ${version}`);
+  console.log(`${tag} ok: tag on HEAD and on origin/${BRANCH}, APK and IPA on https://github.com/${REPO}/releases/tag/${tag}, IPA version ${version}`);
 }
 
 const [cmd, version] = process.argv.slice(2);
