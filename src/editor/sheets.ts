@@ -46,10 +46,17 @@ export function surfaceLayout(doc: NoteDocument): SurfaceLayout {
 
 /** Index of the page at surface height y (clamped to the first / last page). */
 export function sheetIndexAt(layout: SurfaceLayout, y: number): number {
+  // The pages' tops rise down the surface: a binary search for the last page whose top is not
+  // below y (the same answer as walking from the first; read on every scroll event and for each
+  // item: a walk was O(pages) each time on notes of thousands of pages).
   const s = layout.sheets;
-  let k = 0;
-  while (k + 1 < s.length && s[k + 1].top <= y) k++;
-  return k;
+  let lo = 0, hi = s.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (s[mid].top <= y) lo = mid;
+    else hi = mid - 1;
+  }
+  return Math.max(0, lo);
 }
 
 // ----------------------------------------------------------------------------- item geometry
@@ -78,6 +85,12 @@ function strokeY(s: Stroke) {
 }
 
 const textH = (t: TextBlock) => t.fontSize * 1.4 * Math.max(1, t.text.split('\n').length);
+
+/** The height that decides which page a stroke belongs to (the middle of its points' heights). */
+export const strokeOwnY = (s: Stroke): number => {
+  const r = strokeY(s);
+  return (r.minY + r.maxY) / 2;
+};
 
 /** Height that decides which page an item belongs to. */
 const ownY = {

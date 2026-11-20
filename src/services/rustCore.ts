@@ -373,7 +373,17 @@ export interface CanvasPlacement {
 
 export interface CanvasFrameReq {
   clear?: [number, number, number, number];
-  pages: CanvasPlacement[];
+  pages?: CanvasPlacement[];
+  /**
+   * A long note's sheets, compact (crates/canvas FrameSpec::parse, ADR-007): the note's distinct
+   * papers, each sheet's id, box (surface px: left, top, width, height) and paper; `ink` names the
+   * surface whose sheets' scenes (`ink:sheetId`) are drawn over them.
+   */
+  papers?: { style: number; base: [number, number, number, number]; dark?: boolean; pattern?: [number, number, number] | null }[];
+  sheets?: { id: string; b: [number, number, number, number]; p: number }[];
+  ink?: string;
+  /** The surface alone moved: the last frame otherwise. */
+  keep?: boolean;
   /**
    * Where the page's surface was when it placed the pages (device px: scale, x, y). While Rust owns
    * the camera the canvas moves the frame from there to the camera's (crates/native viewport_service).
@@ -400,16 +410,41 @@ const canvasHolds = new Map<string, Set<number>>();
  * 6,000-stroke note, the new stroke missing from the screen meanwhile. No strokes: the page's
  * scene goes (the note closed). Logged as `canvas-scene` (crash report).
  */
-export function rustSetCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
+export function rustSetCanvasScene(pageId: string, strokes: readonly Stroke[], keep = false): Promise<boolean> {
   // One after the other, in the page's order: what the canvas holds is then known when each is
   // made, and an older scene never lands after a newer one.
-  const run = sceneTail.then(() => setCanvasScene(pageId, strokes));
+  const run = sceneTail.then(() => setCanvasScene(pageId, strokes, keep));
   sceneTail = run.catch(() => undefined);
   return run;
 }
 let sceneTail: Promise<unknown> = Promise.resolve();
 
-async function setCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolean> {
+/**
+ * Scenes the canvas let go for memory (rust/DECISIONS.md ADR-007): its reply to a scene names them,
+ * and the page sends them again when they come near (CanvasPage's stream).
+ */
+let droppedListener: ((ids: string[]) => void) | null = null;
+export function onCanvasDropped(fn: ((ids: string[]) => void) | null): void {
+  droppedListener = fn;
+}
+/** Pages near the view the canvas does not have (the camera's `missing`, in view first). */
+let missingListener: ((ids: string[]) => void) | null = null;
+export function onCanvasMissing(fn: ((ids: string[]) => void) | null): void {
+  missingListener = fn;
+}
+
+/** The canvas forgets scenes: `ids`, or all of a note's sheets (`prefix`, its surface's id). */
+export function rustForgetCanvasScenes(what: { prefix?: string; ids?: string[] }): Promise<void> {
+  const run = sceneTail.then(async () => {
+    if (what.prefix) for (const k of [...canvasHolds.keys()]) if (k.startsWith(`${what.prefix}:`)) canvasHolds.delete(k);
+    for (const id of what.ids ?? []) canvasHolds.delete(id);
+    await rustCall('canvasForget', what).catch(() => undefined);
+  });
+  sceneTail = run.catch(() => undefined);
+  return run;
+}
+
+async function setCanvasScene(pageId: string, strokes: readonly Stroke[], keep: boolean): Promise<boolean> {
   // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   const t0 = performance.now();
   let total = 0;
@@ -432,10 +467,15 @@ async function setCanvasScene(pageId: string, strokes: Stroke[]): Promise<boolea
       for (const k of Object.keys(st)) if (k !== 'points') head[k] = (st as unknown as Record<string, unknown>)[k];
       return { k: keys[i], n: parts[f++].n, s: head };
     });
-    const { meta } = await rustCall('canvasSceneBin', { page: pageId, strokes: heads }, new Uint8Array(vals.buffer));
+    const { meta } = await rustCall('canvasSceneBin', { page: pageId, strokes: heads, ...(keep ? { keep: true } : {}) }, new Uint8Array(vals.buffer));
     if (!meta.missing) {
       if (strokes.length) canvasHolds.set(pageId, new Set(keys));
       else canvasHolds.delete(pageId);
+    }
+    const dropped = Array.isArray(meta.dropped) ? (meta.dropped as string[]) : [];
+    if (dropped.length) {
+      for (const id of dropped) canvasHolds.delete(id);
+      droppedListener?.(dropped);
     }
     return meta;
   };
@@ -612,6 +652,8 @@ export interface RustCameraReply {
   page: number;
   fingers: number;
   log: RustGesture[];
+  /** Pages near the view the canvas does not have (in view first): the page sends them (ADR-007). */
+  missing?: string[];
 }
 
 /** The layout the camera needs (crates/viewport `Layout`). */
@@ -663,6 +705,7 @@ export function onRustGesture(fn: ((g: RustGesture) => void) | null): void {
 function takeCamera(r: RustCameraReply | null | undefined): RustCameraReply | null {
   if (!r || !r.camera) return null;
   for (const g of r.log ?? []) gestureLogger?.(g);
+  if (r.missing?.length) missingListener?.(r.missing);
   if (!cameraFeed.latest || r.camera.seq >= cameraFeed.latest.camera.seq || !r.owned) cameraFeed.latest = r;
   return r;
 }

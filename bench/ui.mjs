@@ -1623,7 +1623,9 @@ if (ONLY.has('nativecanvas')) {
   }
   await mouse('mouseReleased', box[2], box[1] + 80);
   await sleep(2500);
-  const capsAfter = meta(await rust('canvasStats', framed({}))).capsules;
+  const stAfter = meta(await rust('canvasStats', framed({})));
+  const capsAfter = stAfter.capsules;
+  console.log(`nativecanvas pages: ${stAfter.pages?.held} scenes held, ${stAfter.pages?.drawn} placements drawn, ${stAfter.pages?.visibleMissing} in view without ink; ${(stAfter.pages?.ids ?? []).join(', ')}`);
   const after = await seen('written');
   const r = box.map((v) => v * dpr);
   const gained = dark(after.px, r[0], r[1], r[2], r[3]) - dark(before.px, r[0], r[1], r[2], r[3]);
@@ -1959,6 +1961,8 @@ if (ONLY.has('cameracoherence')) {
   execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
   const monoMs = () => Number(process.hrtime.bigint()) / 1e6;
   const bigPages = Number(arg('big', 0));
+  // BENCH_CANVAS_OFF=1: the same notes on the page's own path (no native canvas, its own gestures).
+  const CANVAS_OFF = !!process.env.BENCH_CANVAS_OFF;
   // `light`: a long note's pages (every stroke kept to 24 samples, a line's first 8 words).
   const noteOf = (pages, lines, light = false) => {
     const strokes = [], textBlocks = [], latexBlocks = [];
@@ -1994,11 +1998,11 @@ if (ONLY.has('cameracoherence')) {
   let fail = false;
 
   // One iPad orientation: a context, the stand-in shell, the note opened through the Rust camera.
-  const session = async (W, H, note) => {
+  const session = async (W, H, note, extra = []) => {
     const dpr = 2;
     const pctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: dpr, hasTouch: true });
-    await pctx.addInitScript(() => {
-      window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true, nativeViewport: true };
+    await pctx.addInitScript((off) => {
+      window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: !off, nativeViewport: !off };
       window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
       // The iOS shell's safe area (status bar, home indicator) as the page reads it.
       document.addEventListener('DOMContentLoaded', () => {
@@ -2019,12 +2023,12 @@ if (ONLY.has('cameracoherence')) {
         prev = t;
       };
       requestAnimationFrame(loop);
-    });
+    }, CANVAS_OFF);
     const p = await pctx.newPage();
     p.on('pageerror', (e) => console.error('page error:', e.message));
     // The display's rate: the page's own here (headless Chromium paints at 60), as the owner's iPad
     // runs the page at the display's 120 (--tick to differ).
-    const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W * dpr), String(H * dpr), '--tick', String(arg('tick', 60))], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W * dpr), String(H * dpr), '--tick', String(arg('tick', 60)), ...extra], { stdio: ['pipe', 'pipe', 'inherit'] });
     let buf = Buffer.alloc(0);
     const waiting = [];
     shell.stdout.on('data', (d) => {
@@ -2047,12 +2051,19 @@ if (ONLY.has('cameracoherence')) {
     await p.route('**/__rust/*', async (route) => route.fulfill({ status: 200, contentType: 'application/octet-stream',
       body: await rust(route.request().url().split('/__rust/')[1], route.request().postDataBuffer() ?? Buffer.alloc(0)) }));
     await p.goto(url);
+    // The strokes go in chunks (a 10,000-page note's in one message closed the page).
+    const strokesAll = note.pages[0].strokes;
+    await p.evaluate(() => { window.__ccStrokes = []; });
+    for (let i = 0; i < strokesAll.length; i += 5000) await p.evaluate((c) => { window.__ccStrokes.push(...c); }, strokesAll.slice(i, i + 5000));
     await p.evaluate(async (nt) => {
+      nt.pages[0].strokes = window.__ccStrokes;
+      window.__ccStrokes = null;
       const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
       await new Promise((res, rej) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(nt); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
       db.close();
-    }, note);
+    }, { ...note, pages: [{ ...note.pages[0], strokes: [] }] });
     const cdp2 = await pctx.newCDPSession(p);
+    let lastOpenInkMs = NaN;
     const open = async (legacy) => {
       await p.evaluate((l) => {
         localStorage.removeItem('opennote_note_views_v1');
@@ -2062,15 +2073,25 @@ if (ONLY.has('cameracoherence')) {
         localStorage.setItem('opennote_settings_v2', JSON.stringify(st));
       }, legacy);
       await p.reload();
-      const t0 = performance.now();
-      await p.getByText(note.title).first().click();
-      await p.waitForSelector('[data-note-content]');
+      const t0 = performance.now(), m0 = monoMs();
+      await p.getByText(note.title).first().click({ timeout: 600000 });
+      await p.waitForSelector('[data-note-content]', { timeout: 600000 });
       await p.waitForFunction(() => document.querySelector('.katex'), null, { timeout: 30000 }).catch(() => {});
       const openMs = performance.now() - t0;
+      // The first frame the canvas drew with every page in view inked (canvasStats
+      // pages.inkCompleteMs, on the shells' clock): open to ink.
+      let inkMs = NaN;
+      for (let i = 0; i < 600 && !CANVAS_OFF && !Number.isFinite(inkMs); i++) {
+        const st = await call('canvasStats', {});
+        const at = st.pages?.inkCompleteMs ?? 0;
+        if (at > m0) inkMs = at - m0;
+        else await sleep(5);
+      }
+      lastOpenInkMs = inkMs;
       await sleep(2500);
       return openMs;
     };
-    return { p, call, cdp: cdp2, open, dpr, close: async () => { shell.stdin.end(); await pctx.close(); } };
+    return { p, call, cdp: cdp2, open, dpr, openInk: () => lastOpenInkMs, close: async () => { shell.stdin.end(); await pctx.close(); } };
   };
 
   // A path's finger samples every 8.33 ms: [t from start, [[x, y], [x, y]]]; `end`: 'lift' | 'fling'.
@@ -2184,7 +2205,8 @@ if (ONLY.has('cameracoherence')) {
   const report = (label, m) => console.log(`cameracoherence ${label.padEnd(26)} ${m.name.padEnd(10)} page frame ${f2(m.pageP50)} ms, ticks ${String(m.ticks).padStart(4)} gap p50 ${f2(m.gapP50)} p95 ${f2(m.gapP95)} max ${f2(m.gapMax)} | ink-paper ${f2(m.inkPaper)} | under fingers max ${f2(m.underMax)} | DOM vs canvas p50 ${f2(m.domP50)} p95 ${f2(m.domP95)} max ${f2(m.domMax)} dev px, DOM cameras drawn ${(100 * m.matched).toFixed(0)}% after p50 ${f2(m.delayP50)} p95 ${f2(m.delayP95)} ms | d2 drawn p95 ${f2(m.d2P95)} max ${f2(m.d2Max)}, camera p95 ${f2(m.inD2P95)} max ${f2(m.inD2Max)} | alone ${m.alone}`);
 
   const small = noteOf(4, 6);
-  for (const [W, H] of arg('orient') === 'portrait' ? [[1024, 1366]] : [[1024, 1366], [1366, 1024]]) {
+  // BENCH_CC_LONG_ONLY=1: the long note's part alone (with --big).
+  for (const [W, H] of CANVAS_OFF || process.env.BENCH_CC_LONG_ONLY ? [] : arg('orient') === 'portrait' ? [[1024, 1366]] : [[1024, 1366], [1366, 1024]]) {
     const s = await session(W, H, small);
     for (const mode of ['before', 'after']) {
       await s.open(mode === 'before');
@@ -2214,11 +2236,16 @@ if (ONLY.has('cameracoherence')) {
     await s.close();
   }
   if (bigPages > 0) {
-    // The long note against the small one, canvas on, portrait.
+    // The long note against the small one, canvas on, portrait; the stand-in waits for the GPU
+    // after each frame (a surface's next image would), so a frame's GPU cost shows in the ticks.
+    const mb = (v) => (Number.isFinite(v) ? v.toFixed(1) : '-');
+    const pagesLine = (st) => { const g = st.pages ?? {}; return `drawn ${g.drawn} placements, ${g.drawnCapsules} capsules (of ${st.capsules} held in ${st.scenes} scenes) | gpu ${f2(g.gpuMs)} worst ${f2(g.worstGpuMs)} ms | GPU ${mb(g.gpuMB)}/${mb(g.gpuBudgetMB)} MB, kept ${mb(g.heldMB)}/${mb(g.cpuBudgetMB)} MB`; };
+    const gpuWait = process.env.BENCH_NO_GPU_WAIT ? [] : ['--gpu-wait'];
     for (const nt of [small, noteOf(bigPages, 1, true)]) {
-      const s = await session(1024, 1366, nt);
+      const s = await session(1024, 1366, nt, gpuWait);
       const openMs = await s.open(false);
-      const st0 = await s.call('canvasStats', {});
+      const name0 = `${String(nt.sheets.length).padStart(5)} pages`;
+      console.log(`cameracoherence long note ${name0} open ${openMs.toFixed(0)} ms (formula shown), open to ink ${f2(s.openInk())} ms`);
       for (const [name, samples, end] of pathsFor(1024, 1366).filter(([n]) => n !== 'long pinch')) {
         await s.call('viewportSet', { op: 'fitWidth' });
         await s.call('viewportSet', { op: 'scrollTo', y: 0 });
@@ -2227,9 +2254,83 @@ if (ONLY.has('cameracoherence')) {
         const pageGaps = r.dom.slice(1).map((d, i) => d[0] - r.dom[i][0]);
         const m = measure(name, r, [[0, 0]], s.dpr);
         const st = await s.call('canvasStats', {});
-        console.log(`cameracoherence long note ${String(nt.sheets.length).padStart(5)} pages ${name.padEnd(6)} open ${openMs.toFixed(0)} ms | ticks gap p50 ${f2(m.gapP50)} p95 ${f2(m.gapP95)} max ${f2(m.gapMax)} | page frames p50 ${f2(q(pageGaps, 0.5))} p95 ${f2(q(pageGaps, 0.95))} | canvas draw last ${f2(st.lastDrawMs)} worst ${f2(st.worstDrawMs)} ms, ${st.capsules} capsules in ${st.scenes} scenes | d2 max ${f2(m.d2Max)}`);
+        console.log(`cameracoherence long note ${name0} ${name.padEnd(6)} open ${openMs.toFixed(0)} ms | ticks gap p50 ${f2(m.gapP50)} p95 ${f2(m.gapP95)} max ${f2(m.gapMax)} | page frames p50 ${f2(q(pageGaps, 0.5))} p95 ${f2(q(pageGaps, 0.95))} | canvas draw last ${f2(st.lastDrawMs)} worst ${f2(st.worstDrawMs)} ms, ${pagesLine(st)} | d2 max ${f2(m.d2Max)}`);
       }
-      void st0;
+      if (nt.sheets.length > 20 && CANVAS_OFF) {
+        // The page's own path: its scroll view moved 0.5 page per frame through 500 pages.
+        const gaps = await s.p.evaluate(async () => {
+          const el = document.querySelector('[data-note-content]').parentElement;
+          const pageH = el.scrollHeight / 2000;
+          el.scrollTop = 10 * pageH;
+          await new Promise((r) => setTimeout(r, 800));
+          const out = [];
+          let prev = 0;
+          await new Promise((res) => {
+            let i = 0;
+            const f = (t) => {
+              if (prev) out.push(t - prev);
+              prev = t;
+              el.scrollTop += pageH * 0.5;
+              if (++i < 1000) requestAnimationFrame(f); else res();
+            };
+            requestAnimationFrame(f);
+          });
+          return out;
+        });
+        const mem = await s.p.evaluate(() => performance.memory ? performance.memory.usedJSHeapSize / 1048576 : NaN);
+        console.log(`cameracoherence long note ${name0} canvas off, scrolled through 500 pages: page frames p50 ${f2(q(gaps, 0.5))} p95 ${f2(q(gaps, 0.95))} max ${f2(Math.max(...gaps))} ms | JS heap ${mb(mem)} MB | DOM ${await s.p.evaluate(() => document.querySelectorAll('*').length)} elements`);
+      }
+      if (nt.sheets.length > 20 && !CANVAS_OFF) {
+        // Where page k's top is (content px at zoom 1): the surface's place in the content.
+        const pad = await s.p.evaluate(() => parseFloat(document.querySelector('[data-note-content] > div > div')?.style.top || '0'));
+        const pageH = 1056;
+        // A fast fling through 500 pages (a constant 0.5 page per 60 Hz frame, 30 pages a second)
+        // with the device's budgets, then with small ones (GPU 8 MB, kept 16 MB): memory every 50
+        // pages (it stops growing at the budget), the ticks, and each page's time to ink.
+        for (const [label, budget, from] of [['device budgets', {}, 10], ['small budgets', { gpuMB: 8, cpuMB: 16 }, Math.min(600, nt.sheets.length - 520)]]) {
+          await s.call('canvasBudget', budget);
+          await s.call('viewportSet', { op: 'fitWidth' });
+          await s.call('viewportSet', { op: 'scrollTo', y: pad + from * pageH });
+          await sleep(800);
+          await s.call('canvasStats', { resetInk: true });
+          await sleep(100);
+          await s.call('viewportTrace', { start: true });
+          const mem = [];
+          const t0 = monoMs();
+          const frames = 1000;
+          for (let i = 1; i <= frames; i++) {
+            const wait = t0 + i * (1000 / 60) - monoMs();
+            if (wait > 1) await sleep(wait);
+            await s.call('viewportSet', { op: 'scrollTo', y: pad + (from + i * 0.5) * pageH });
+            if (i % 100 === 0) {
+              const st = await s.call('canvasStats', {});
+              mem.push(`${i / 2}: GPU ${mb(st.pages.gpuMB)} kept ${mb(st.pages.heldMB)} MB (${st.pages.held} held, ${st.pages.resident} on GPU)`);
+            }
+          }
+          await sleep(1500);
+          const ticks = (await s.call('viewportTrace', {})).ticks;
+          const T = ticks.map((t) => t[0]);
+          const gaps = T.slice(1).map((t, i) => t - T[i]);
+          const st = await s.call('canvasStats', {});
+          const w = st.pages.inkWait;
+          console.log(`cameracoherence long note ${name0} fling 500 pages, ${label}: ticks gap p50 ${f2(q(gaps, 0.5))} p95 ${f2(q(gaps, 0.95))} max ${f2(Math.max(0, ...gaps))} | time to ink ${w.n} pages p50 ${f2(w.p50)} p95 ${f2(w.p95)} max ${f2(w.max)} ms, ${w.unfilled} left before their ink | ${pagesLine(st)}, ${st.pages.evictions} evictions, ${st.pages.dropped} dropped for memory`);
+          console.log(`cameracoherence long note ${name0}   memory after N pages: ${mem.join(' | ')}`);
+        }
+        await s.call('canvasBudget', {});
+        // Go to page 1,500 (or the last but one): its ink within 100 ms.
+        const target = Math.min(1500, nt.sheets.length - 2);
+        await s.call('viewportSet', { op: 'scrollTo', y: pad + 5 * pageH });
+        await sleep(1000);
+        const g0 = monoMs();
+        await s.call('viewportSet', { op: 'scrollTo', y: pad + target * pageH });
+        let goMs = NaN;
+        for (let i = 0; i < 400 && !Number.isFinite(goMs); i++) {
+          const st = await s.call('canvasStats', {});
+          if ((st.pages?.inkCompleteMs ?? 0) > g0) goMs = st.pages.inkCompleteMs - g0;
+          else await sleep(2);
+        }
+        console.log(`cameracoherence long note ${name0} go to page ${target + 1}: ink in ${f2(goMs)} ms${goMs <= 100 ? '' : ' (over 100 ms)'}`);
+      }
       await s.close();
     }
   }

@@ -13,10 +13,12 @@
 use crate::frame::{clamp_rgba, drawable_tf};
 pub use crate::frame::{FrameSpec, PagePlacement};
 use crate::gpu::{device_descriptor, pc_device_backend};
+use crate::pages::{PageStats, PageStore};
 use crate::paper::Paper;
+use crate::scene::Transform;
 use crate::{Frame, GpuCanvas, GpuScene, PageDraw, Scene};
 use model::Stroke;
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Clone, Debug, Default)]
@@ -36,6 +38,8 @@ pub struct Stats {
     pub skipped_pages: u64,
     /// Frames whose surface image was suboptimal.
     pub suboptimal: u64,
+    /// The pages' scenes: held, on the GPU, drawn, waited for (crates/canvas `pages`).
+    pub pages: PageStats,
 }
 
 enum Target {
@@ -56,7 +60,10 @@ pub struct CanvasHost {
     /// The adapter as the driver describes it: driver, its version, the downlevel flags, the
     /// self-test's result (canvasStats, the crash report's `canvas-status`).
     diag: String,
-    scenes: HashMap<String, (GpuScene, usize)>,
+    /// Each page's scene, on the GPU near the view only (ADR-007).
+    pages: PageStore,
+    /// The largest gap between a drawn paper and the surface's transform, the last frame.
+    gap: f64,
     /// Drawn for a placement with paper but no scene (a sheet's paper, the ink placed apart).
     empty: GpuScene,
     frame: FrameSpec,
@@ -221,7 +228,8 @@ impl CanvasHost {
                 },
                 backend,
                 diag,
-                scenes: HashMap::new(),
+                pages: PageStore::default(),
+                gap: 0.0,
                 empty,
                 frame: FrameSpec::default(),
                 dirty: false,
@@ -247,7 +255,8 @@ impl CanvasHost {
                 target: Target::Offscreen { texture },
                 backend,
                 diag: String::new(),
-                scenes: HashMap::new(),
+                pages: PageStore::default(),
+                gap: 0.0,
                 empty,
                 frame: FrameSpec::default(),
                 dirty: true,
@@ -323,11 +332,59 @@ impl CanvasHost {
     /// The scene of page `id`, built by the caller (crates/native builds it on the page's bridge
     /// thread, outside any lock: `Scene::build` is CPU work, ~100 ms for a long note on an iPad).
     pub fn put_scene(&mut self, id: &str, scene: &Scene) -> usize {
-        let n = scene.caps.len();
-        let gs = self.canvas.upload(scene);
-        self.scenes.insert(id.to_string(), (gs, n));
+        self.put_scene_arc(id, Arc::new(scene.clone()))
+    }
+
+    /// The scene of page `id`, shared with its owner's copy: kept here and uploaded to the GPU
+    /// when it comes near the view (ADR-007).
+    pub fn put_scene_arc(&mut self, id: &str, scene: Arc<Scene>) -> usize {
         self.dirty = true;
-        n
+        self.pages.put(id, scene)
+    }
+
+    /// The GPU memory the pages' scenes may take (bytes): beyond it the least recently used
+    /// leave the GPU (never one in view).
+    pub fn set_gpu_budget(&mut self, bytes: u64) {
+        self.pages.set_budget(bytes);
+    }
+
+    /// Scene ids near the view the last frame, and those of them not here (in view first).
+    pub fn near(&self) -> &[String] {
+        self.pages.near()
+    }
+
+    pub fn missing(&self) -> &[String] {
+        self.pages.missing()
+    }
+
+    /// Pages that entered the view: how long until their ink was drawn (ms).
+    pub fn ink_waits(&self) -> Vec<f32> {
+        self.pages.ink_waits()
+    }
+
+    pub fn reset_ink_waits(&mut self) {
+        self.pages.reset_waits();
+    }
+
+    /// The largest gap (device px) between a drawn paper and the surface's transform, the last
+    /// frame (0 when papers and ink are one transform).
+    pub fn paper_gap(&self) -> f64 {
+        self.gap
+    }
+
+    /// Waits until the GPU has done everything submitted (the PC's stand-in shell: its display
+    /// link then waits for the frame as a surface's would). The time it took, ms.
+    pub fn wait_gpu(&self) -> f64 {
+        let t0 = Instant::now();
+        let _ = self.canvas.device.poll(wgpu::PollType::wait_indefinitely());
+        t0.elapsed().as_secs_f64() * 1000.0
+    }
+
+    fn target_size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Surface { config, .. } => (config.width, config.height),
+            Target::Offscreen { texture } => (texture.width(), texture.height()),
+        }
     }
 
     /// The scene of page `id`: its strokes as the page stores them (one z-layer).
@@ -336,7 +393,7 @@ impl CanvasHost {
     }
 
     pub fn remove_scene(&mut self, id: &str) {
-        if self.scenes.remove(id).is_some() {
+        if self.pages.remove(id) {
             self.dirty = true;
         }
     }
@@ -348,6 +405,7 @@ impl CanvasHost {
     /// drifted off the page's content while the fingers moved and jumped back after.
     pub fn set_frame(&mut self, frame: FrameSpec) {
         if frame != self.frame {
+            self.pages.set_frame(&frame);
             self.frame = frame;
             self.dirty = true;
         }
@@ -355,8 +413,26 @@ impl CanvasHost {
 
     /// Every placement on the page's surface placed from one transform (scale, corner, device px):
     /// the camera's, on each tick (`FrameSpec::place`). In place.
+    /// The page moved its surface alone (its frame otherwise the same): no new frame to index.
+    pub fn set_surface(&mut self, surface: [f64; 3]) {
+        if self.frame.surface != Some(surface) {
+            self.frame.surface = Some(surface);
+            self.dirty = true;
+        }
+    }
+
+    pub fn near_gen(&self) -> u64 {
+        self.pages.near_gen()
+    }
+
+    /// Only the surface's transform is kept; each drawn placement's transform is made from it at
+    /// the draw (never one per placement of the note per tick: ADR-007).
     pub fn place(&mut self, k: f64, x: f64, y: f64) {
-        if self.frame.place(k, x, y) {
+        if !(k.is_finite() && x.is_finite() && y.is_finite() && k > 0.0) {
+            return;
+        }
+        if self.frame.placed != Some([k, x, y]) {
+            self.frame.placed = Some([k, x, y]);
             self.dirty = true;
         }
     }
@@ -367,16 +443,17 @@ impl CanvasHost {
     }
 
     pub fn clear_scenes(&mut self) {
-        if !self.scenes.is_empty() {
-            self.scenes.clear();
+        if self.pages.held() > 0 {
+            self.pages.clear();
             self.dirty = true;
         }
     }
 
     pub fn stats(&self) -> Stats {
         Stats {
-            scenes: self.scenes.len(),
-            capsules: self.scenes.values().map(|s| s.1).sum(),
+            scenes: self.pages.held(),
+            capsules: self.pages.capsules(),
+            pages: self.pages.stats(),
             ..self.stats.clone()
         }
     }
@@ -407,7 +484,14 @@ impl CanvasHost {
     /// error while it was drawn, the surface failed, or the device is lost). A frame that failed
     /// on the GPU is not retried until the page sends something new.
     pub fn draw(&mut self) -> Result<bool, String> {
+        let surface = self.frame.placed.or(self.frame.surface);
+        let size = self.target_size();
         if !self.dirty {
+            // Nothing new to show: pages coming near are uploaded meanwhile.
+            if !self.is_lost() {
+                self.pages
+                    .prefetch(&self.canvas, &self.frame, surface, size);
+            }
             return Ok(false);
         }
         if self.is_lost() {
@@ -422,36 +506,60 @@ impl CanvasHost {
         }
         let t0 = Instant::now();
         let errors_before = self.errors();
+        // The placements meeting the view (all of them without a surface transform), their
+        // scenes on the GPU (ADR-007).
+        let order = self.pages.plan(&self.canvas, &self.frame, surface, size);
         // The frame as drawn: placements that cannot be drawn left out, papers that cannot be
         // drawn dropped, the desk colour clamped (FrameSpec::drawable, without copying the frame).
+        // A placement on the surface takes the surface's transform (one f64 transform for all,
+        // ADR-008), computed here for the drawn ones only.
         let mut skipped = 0u64;
+        let mut gap = 0.0f64;
         let empty = &self.empty;
-        let pages: Vec<PageDraw> = self
-            .frame
-            .pages
+        let store = &self.pages;
+        let pages: Vec<PageDraw> = order
             .iter()
-            .filter(|p| {
-                let ok = drawable_tf(&p.tf);
-                skipped += u64::from(!ok);
-                ok
-            })
-            .filter_map(|p| {
+            .filter_map(|&i| {
+                let p = &self.frame.pages[i];
+                let tf = match (surface, p.at) {
+                    (Some([k, x, y]), Some([ax, ay])) => Transform {
+                        a: k as f32,
+                        b: 0.0,
+                        c: 0.0,
+                        d: k as f32,
+                        ox: (x + ax * k) as f32,
+                        oy: (y + ay * k) as f32,
+                    },
+                    _ => p.tf,
+                };
+                if !drawable_tf(&tf) {
+                    skipped += 1;
+                    return None;
+                }
                 let paper = p.paper.filter(Paper::is_drawable);
-                match self.scenes.get(&p.page) {
-                    Some((scene, _)) => Some(PageDraw {
-                        scene,
-                        tf: p.tf,
-                        paper,
-                    }),
-                    // A sheet's paper is drawn even though its ink is a scene placed apart.
+                if paper.is_some() {
+                    if let (Some([k, x, y]), Some([ax, ay])) = (surface, p.at) {
+                        gap = gap.max(
+                            (tf.ox as f64 - (x + ax * k))
+                                .abs()
+                                .max((tf.oy as f64 - (y + ay * k)).abs())
+                                .max((tf.a as f64 - k).abs() * 1000.0),
+                        );
+                    }
+                }
+                match store.gpu(&p.page) {
+                    Some(scene) => Some(PageDraw { scene, tf, paper }),
+                    // A sheet's paper is drawn even though its ink is a scene placed apart (or
+                    // not here yet: the page sends it).
                     None => paper.map(|_| PageDraw {
                         scene: empty,
-                        tf: p.tf,
+                        tf,
                         paper,
                     }),
                 }
             })
             .collect();
+        self.gap = gap;
         self.stats.skipped_pages += skipped;
         let frame = Frame {
             clear: self.frame.clear.map(clamp_rgba),

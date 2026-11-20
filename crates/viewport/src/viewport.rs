@@ -1027,11 +1027,16 @@ impl Viewport {
         self.layout.surface_at(self.cam.x, self.cam.y, self.cam.ez)
     }
 
-    /// The page in view (Editor `currentPage`: the one at a third of the screen's height).
+    /// The page in view (Editor `currentPage`: the one at a third of the screen's height). A
+    /// binary search over the sheets' tops (laid out down the page in order: the same answer as
+    /// `sheet_index_at_top`'s walk): read with every camera the page is sent, so never a walk
+    /// over the note's sheets (ADR-007).
     pub fn current_sheet(&self) -> usize {
-        let tops: Vec<f64> = self.layout.sheets.iter().map(|s| s[1]).collect();
         let y = (self.st + self.layout.view[3] / 3.0) / self.zoom - self.layout.surface[1];
-        sheet_index_at_top(&tops, y)
+        match self.layout.sheets.get(1..) {
+            Some(rest) => rest.partition_point(|s| s[1] <= y),
+            None => 0,
+        }
     }
 
     /// Editor `fitTarget`: the page in view's left edge and width (content px).

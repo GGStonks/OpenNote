@@ -124,3 +124,22 @@ its cap). When C4 draws text boxes, formulas and the selection, the canvas can d
 camera again. The ported pinch drops the movement not yet scrolled when it engages (as useViewport
 does): the content leaves the fingers by 1-3 px on long pinches; changing it changes the page's
 own gesture (the owner's call).
+
+## ADR-009: The sheet is the native canvas's unit; memory budgets from the device
+Status: accepted (2026-11-20, the owner accepted the draw order below)
+Context: ADR-007 asks every cost per frame and on open to be bounded by what is on screen. 2.9.7
+sent a note's ink as one scene (all sheets) and drew all of it every frame (a 2,000-page note:
+621,194 capsules per frame), rebuilt and sent the whole surface's stroke list at every lift, placed
+every sheet's paper per tick, and kept every sheet in the page's DOM.
+Decision: each sheet's ink is a scene of its own (`surface:sheet`, strokes owned by the sheet that
+holds the middle of their height, as sheets.ts `ownership`); the frame lists the sheets compactly
+once per layout; the canvas draws the placements meeting the view (a box tree, O(found x log n)),
+keeps scenes on the GPU near the view (an LRU by bytes) and on the CPU within a budget, names the
+near sheets it lacks (`missing`) and the ones it let go (`dropped`); the page streams the sheets
+near the view, nearest first, one at a time, and keeps only those sheets in its DOM. Budgets come
+from the device's memory (GPU a 48th, 32-256 MB; Rust twice that), not from the note.
+Consequences: strokes of two sheets that overlap (one reaching past its sheet) are drawn sheet by
+sheet: a highlighter of the later sheet now lies over ink of the earlier one where before all
+highlighters went under all ink (one scene). Pages far away cost a re-send (and their strokes'
+drawn lines rebuilt) when they come back after being dropped. The page's own path (canvas off) is
+unchanged and remains O(note) (a 2,000-page note: open 212 s, frames 0.3-1.4 s on the PC).

@@ -299,6 +299,40 @@ impl Scene {
         sc
     }
 
+    /// Where the scene draws (page px): the union of its ops' boxes; None when it draws nothing.
+    pub fn bounds(&self) -> Option<PageBox> {
+        let mut b: Option<PageBox> = None;
+        for op in &self.ops {
+            let o = match op {
+                Op::See { bx, .. } | Op::Fill { bx, .. } | Op::Flat { bx, .. } => *bx,
+            };
+            if !(o.x0.is_finite() && o.y0.is_finite() && o.x1.is_finite() && o.y1.is_finite()) {
+                continue;
+            }
+            b = Some(match b {
+                None => o,
+                Some(a) => PageBox {
+                    x0: a.x0.min(o.x0),
+                    y0: a.y0.min(o.y0),
+                    x1: a.x1.max(o.x1),
+                    y1: a.y1.max(o.y1),
+                },
+            });
+        }
+        b
+    }
+
+    /// The bytes its buffers take on the GPU.
+    pub fn gpu_bytes(&self) -> u64 {
+        (self.caps.len().max(1) * std::mem::size_of::<CapInst>()
+            + self.flat.len().max(1) * std::mem::size_of::<[f32; 2]>()) as u64
+    }
+
+    /// The bytes it takes in memory (its buffers' contents and its ops).
+    pub fn cpu_bytes(&self) -> u64 {
+        self.gpu_bytes() + (self.ops.len() * std::mem::size_of::<Op>()) as u64 + 64
+    }
+
     fn push_caps(&mut self, caps: &[Capsule], col: Rgba) -> u32 {
         let first = self.caps.len() as u32;
         let c = rgba(col);

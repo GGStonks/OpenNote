@@ -217,6 +217,7 @@ fn canvas_host_renders_paper_and_strokes() {
             tf: Transform::scale(1.0, 0.0, 0.0),
             paper: Some(paper),
             at: None,
+            bx: None,
         }],
     });
 

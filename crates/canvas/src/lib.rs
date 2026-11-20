@@ -8,15 +8,20 @@
 //!   each placement's transform and paper), parsed and checked.
 //! - `gpu`: the GPU objects (glInk.ts `GlInk`: programs, buffers, the coverage texture).
 //! - `ink`: the passes of a frame (glInk.ts `draw` / `layOn`).
+//! - `cull`: which placements meet the view, without looking at the others (ADR-007).
+//! - `pages`: each page's scene on the CPU and, near the view only, on the GPU (an LRU by bytes),
+//!   and what the view still waits for (docs/rust-native-canvas.md "Scale").
 //! - `host`: a surface (a shell's layer or window) or an offscreen texture with the scenes and the
 //!   frame, drawn on demand.
 //!
 //! `render_offscreen` is the PC path (tests, the CLI).
 
+pub mod cull;
 pub mod frame;
 pub mod gpu;
 pub mod host;
 pub mod ink;
+pub mod pages;
 pub mod paper;
 pub mod scene;
 pub use wgpu;

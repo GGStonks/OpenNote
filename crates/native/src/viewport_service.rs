@@ -120,6 +120,8 @@ struct View {
     /// What the shell's push last delivered.
     pushed_seq: u64,
     pushed_at: f64,
+    /// The canvas's missing pages as last pushed (their generation).
+    pushed_missing: u64,
     /// Fingers waiting for their time, and the ids taken (Began accepted, not yet ended).
     queue: VecDeque<Sample>,
     held: Vec<i64>,
@@ -160,6 +162,7 @@ fn with_view<R>(f: impl FnOnce(&mut View) -> R) -> R {
         hz: 0.0,
         pushed_seq: 0,
         pushed_at: f64::NEG_INFINITY,
+        pushed_missing: 0,
         queue: VecDeque::with_capacity(QUEUE),
         held: Vec::with_capacity(FINGERS),
         fingers: Vec::with_capacity(FINGERS),
@@ -621,6 +624,10 @@ fn camera_value_with(v: &mut View, take_log: bool) -> Value {
     } else {
         Vec::new()
     };
+    // The pages near the view the canvas does not have (in view first): the page sends them
+    // (ADR-007). VIEW is held: the canvas service's page lock is a leaf.
+    let (missing, gen) = crate::canvas_service::missing();
+    v.pushed_missing = gen;
     json!({
         "owned": owned(v),
         "camera": v.vp.camera(),
@@ -628,6 +635,7 @@ fn camera_value_with(v: &mut View, take_log: bool) -> Value {
         "page": v.vp.current_sheet(),
         "fingers": v.vp.fingers(),
         "log": log,
+        "missing": missing,
     })
 }
 
@@ -642,7 +650,10 @@ pub fn poll(now_ms: f64) -> Option<String> {
         let seq = v.vp.camera().seq;
         let f = v.vp.layout().frame_ms.clamp(4.0, 100.0);
         let gap = if legacy(v) { f * 0.8 } else { f * 0.45 };
-        if (seq == v.pushed_seq && v.unread.is_empty()) || now_ms - v.pushed_at < gap {
+        let missing_new = crate::canvas_service::missing().1 != v.pushed_missing;
+        if (seq == v.pushed_seq && v.unread.is_empty() && !missing_new)
+            || now_ms - v.pushed_at < gap
+        {
             return None;
         }
         v.pushed_seq = seq;

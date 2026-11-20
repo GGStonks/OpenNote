@@ -118,7 +118,7 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "viewportLayout", "viewportSet", "viewportCamera", "viewportTouch", "viewportShown", "viewportTrace", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "canvasForget", "canvasBudget", "viewportLayout", "viewportSet", "viewportCamera", "viewportTouch", "viewportShown", "viewportTrace", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
@@ -126,7 +126,9 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "canvasScene" => canvas_service::canvas_scene(meta),
         "canvasSceneBin" => canvas_service::canvas_scene_bin(meta, data),
         "canvasFrame" => canvas_service::canvas_frame(meta),
-        "canvasStats" => canvas_service::canvas_stats(),
+        "canvasStats" => canvas_service::canvas_stats(meta),
+        "canvasForget" => canvas_service::canvas_forget(meta),
+        "canvasBudget" => canvas_service::canvas_budget(meta),
         "viewportLayout" => viewport_service::viewport_layout(meta),
         "viewportSet" => viewport_service::viewport_set(meta),
         "viewportCamera" => viewport_service::viewport_camera(meta),

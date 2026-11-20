@@ -53,12 +53,14 @@ fn paper_is_drawn_for_a_sheet_without_a_scene() {
                 tf: Transform::scale(1.0, 0.0, 0.0),
                 paper: Some(paper),
                 at: None,
+                bx: None,
             },
             PagePlacement {
                 page: "ink".into(),
                 tf: Transform::scale(1.0, 0.0, 0.0),
                 paper: None,
                 at: None,
+                bx: None,
             },
         ],
     });
@@ -84,6 +86,7 @@ fn the_pages_frame_always_places_the_canvas() {
             tf: Transform::scale(k, ox, oy),
             paper: None,
             at: None,
+            bx: None,
         }],
     };
     host.set_frame(at(1.0, 10.0, 20.0));
@@ -118,6 +121,7 @@ fn placements_that_cannot_be_drawn_are_left_out() {
             tf: Transform::scale(k, 0.0, 0.0),
             paper: paper(100.0),
             at: None,
+            bx: None,
         })
         .collect();
     pages.push(PagePlacement {
@@ -125,24 +129,28 @@ fn placements_that_cannot_be_drawn_are_left_out() {
         tf: Transform::scale(1.0, f32::NAN, 0.0),
         paper: paper(100.0),
         at: None,
+        bx: None,
     });
     pages.push(PagePlacement {
         page: String::new(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: paper(f32::NAN),
         at: None,
+        bx: None,
     });
     pages.push(PagePlacement {
         page: String::new(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: paper(-5.0),
         at: None,
+        bx: None,
     });
     pages.push(PagePlacement {
         page: "ink".into(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: None,
         at: None,
+        bx: None,
     });
     host.set_frame(FrameSpec {
         surface: None,
@@ -178,6 +186,7 @@ fn placements_that_cannot_be_drawn_are_left_out() {
                 tf: Transform::scale(k, ox, oy),
                 paper: paper(100.0),
                 at: None,
+                bx: None,
             }],
         });
         assert!(host.draw().unwrap());

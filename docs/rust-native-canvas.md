@@ -267,3 +267,44 @@ page's own frame messages through the bridge.
   pixel covered by its share of a line (`fs_paper`); `compare.rs` checks it against the CSS rules
   sampled 8 x 8 per pixel at 1x-23.7x, deep inside a page larger than the screen. The CPU painter
   (`renderer::paper`, thumbnails) is not the reference: its lines are 1 device px at rounded places.
+- Scale (ADR-007, V3): every cost per frame and on open is bounded by what is on screen, never by
+  the note's length. What is bounded, and how:
+  - The frame: the page sends its sheets once per layout, compact (crates/canvas `FrameSpec::parse`:
+    the note's distinct papers, each sheet's id, box and paper, `ink`: the surface whose sheets'
+    scenes are `surface:sheet`), then only the surface's place while it places it itself (`keep`).
+    The host indexes the placements once per frame message (`cull::BoxTree`: an implicit tree of
+    boxes in drawing order, a sheet's box with its scene's own bounds) and each draw takes the
+    placements meeting the view, O(found x log n); each drawn placement's transform is made from
+    the surface's at the draw (2.9.7 recomputed one per sheet per tick). Strokes belong to the
+    sheet holding the middle of their height (sheets.ts `ownership`); one reaching past its sheet is
+    drawn wherever its scene's bounds meet the view, and only the draw order of strokes of two
+    sheets that overlap differs from one scene (sheet by sheet).
+  - The scenes: the page streams them (services/canvasPages.ts `useCanvasPageStream`): the sheets
+    near the view (the view, a screen above and below, more ahead of the motion, by binary search
+    on the tops), nearest first, one at a time, by difference with `sceneKey` as before; a sheet
+    without ink is sent known-empty (`keep`). The canvas names the near sheets it lacks (`missing`
+    in the camera it pushes, in view first). A sheet changed far from the view is forgotten
+    (`canvasForget`) until it comes near; the note closed, all of them (`prefix`).
+  - GPU memory (crates/canvas `pages.rs`): scenes are kept on the CPU and uploaded when they come
+    near the view (8 MB per frame ahead of it; one in view at once); beyond the GPU budget the least
+    recently used leave the GPU (never one in view). Rust memory (`canvas_service`: the scenes and
+    each stroke's ops in `SCENE_OPS`): beyond its budget the scenes longest away from the view go
+    with their ops (never one near it), the page is told (`dropped` in the reply) and sends them
+    again when they come near. Budgets: GPU a 48th of the device's memory, 32-256 MB; Rust twice
+    that (`canvasBudget` sets them for benches and tests). `canvasStats.pages`: held, on the GPU,
+    MB against the budgets, uploads, evictions, drawn placements and capsules, time to ink of each
+    page entering the view (p50 / p95 / max), `inkCompleteMs` (the last time every page in view
+    got its ink).
+  - Never a hole: a page in view whose scene is not there yet shows its paper (its placement is
+    drawn), never another page's ink.
+  - The page's DOM (CanvasPage `useSheetWindow`): while the canvas draws the note, only the sheets
+    within a screen of the view and four more each way keep their DOM (page lines and numbers, their
+    blocks unless selected or edited); the content's size is Editor's box, so scrolling, going to a
+    page, the pages panel, saved views and export are unchanged. Not on the page's own path.
+  - The camera: the page in view is a binary search (`Viewport::current_sheet`, sheets.ts
+    `sheetIndexAt`), read with every camera pushed and every scroll event.
+  - Checks: `crates/native/tests/canvas_scale.rs` (10,000 sheets: what is drawn, `missing`, time to
+    ink, the GPU budget through a 300-page fling, the memory budget's `dropped`), `crates/canvas`
+    `cull` tests, `bench:ui --native --only cameracoherence --big 2000` (and `--big 10000`): open
+    to ink, ticks with the stand-in waiting for the GPU (`--gpu-wait`), memory every 50 pages of a
+    500-page fling with the device's budgets and small ones, time to ink, going to page 1,500.

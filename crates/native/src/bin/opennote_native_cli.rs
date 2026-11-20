@@ -8,6 +8,8 @@
 //!   reply` out (little endian). `canvasSnapshot` draws the frame and replies its RGBA pixels.
 //!   `--serve <w> <h> --tick <hz>`: also a display link: `draw_active` every 1/hz s on a thread
 //!   of its own, as the shells' render threads call it (the Rust camera advances there).
+//!   `--gpu-wait`: each drawn frame waits for the GPU to finish it (a surface's next image waits
+//!   for the display likewise; offscreen nothing would, and a frame's GPU cost would not show).
 use std::io::{Read, Write};
 
 fn read_u32(r: &mut impl Read) -> Option<u32> {
@@ -27,6 +29,7 @@ fn main() {
             opennote_native::canvas_service::attach_offscreen(w, h),
             "no GPU for the canvas"
         );
+        opennote_native::canvas_service::set_gpu_wait(args.iter().any(|a| a == "--gpu-wait"));
         if let Some(hz) = args
             .iter()
             .position(|a| a == "--tick")

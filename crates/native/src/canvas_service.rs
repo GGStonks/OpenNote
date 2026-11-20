@@ -31,7 +31,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// A lock taken whatever a panicking thread left behind (every value here stays consistent:
@@ -43,10 +43,37 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 // ------------------------------------------------------------------------------------------------
 // What the page sends: written by the bridge, drained by the draw.
 
+/// A page's scene as the bridge keeps it, and its bytes in memory: the scene and the strokes' ops
+/// kept for it (`SCENE_OPS`, estimated from the scene).
+struct Held {
+    scene: Arc<Scene>,
+    bytes: u64,
+}
+
+fn held_bytes(s: &Scene) -> u64 {
+    // The ops' capsules are f64 (48 bytes), arrowheads and fills a few points each.
+    s.cpu_bytes() + s.caps.len() as u64 * 48 + s.flat.len() as u64 * 16
+}
+
 #[derive(Default)]
 struct Page {
-    /// Each page id's scene as last sent (kept for a host made later).
-    scenes: HashMap<String, Arc<Scene>>,
+    /// Each page id's scene as last sent (kept for a host made later), within the memory budget:
+    /// beyond it the scenes longest away from the view go, and the page sends them again when
+    /// they come near (ADR-007).
+    scenes: HashMap<String, Held>,
+    bytes: u64,
+    /// When each scene id was last near the view (the render thread's count), and the ids near
+    /// it now (never evicted).
+    near_at: HashMap<String, u64>,
+    near_now: HashSet<String>,
+    near_tick: u64,
+    /// Scene ids near the view that the canvas does not have (in view first): the page sends them.
+    missing: Vec<String>,
+    missing_gen: u64,
+    /// Scenes evicted for memory since the run began.
+    dropped: u64,
+    /// The surface alone moved (the page's frame otherwise the same).
+    surface: Option<[f64; 3]>,
     /// Ids whose scene changed (or went) since the last draw took them.
     changed: HashSet<String>,
     /// The page's last frame: what it shows (desk, sheets' paper, the scene's placement) and where
@@ -65,12 +92,115 @@ fn with_page<R>(f: impl FnOnce(&mut Page) -> R) -> R {
 /// The scene of page `id` (None: it goes). Returns at once.
 pub fn put_scene(id: &str, scene: Option<Scene>) {
     with_page(|p| {
-        match scene {
-            Some(s) => p.scenes.insert(id.to_string(), Arc::new(s)),
+        let old = match scene {
+            Some(s) => {
+                let bytes = held_bytes(&s);
+                p.bytes += bytes;
+                p.scenes.insert(
+                    id.to_string(),
+                    Held {
+                        scene: Arc::new(s),
+                        bytes,
+                    },
+                )
+            }
             None => p.scenes.remove(id),
         };
+        if let Some(o) = old {
+            p.bytes -= o.bytes;
+        }
         p.changed.insert(id.to_string());
     });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Memory (ADR-007): bounded by the device, never by the note's length.
+
+/// The budgets set by a caller (bench, tests), bytes; 0: derived from the device.
+static GPU_BUDGET: AtomicU64 = AtomicU64::new(0);
+static CPU_BUDGET: AtomicU64 = AtomicU64::new(0);
+
+/// The device's memory (bytes), when the system says.
+fn device_memory() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf only reads system values.
+        let (pages, size) = unsafe {
+            (
+                libc::sysconf(libc::_SC_PHYS_PAGES),
+                libc::sysconf(libc::_SC_PAGESIZE),
+            )
+        };
+        if pages > 0 && size > 0 {
+            return Some(pages as u64 * size as u64);
+        }
+    }
+    None
+}
+
+/// The pages' scenes on the GPU: a 48th of the device's memory (iPad and Android GPUs share it
+/// with the app), between 32 and 256 MB. What the bridge keeps (scenes and the strokes' ops):
+/// twice that.
+pub fn budgets() -> (u64, u64) {
+    const MB: u64 = 1 << 20;
+    let derived = device_memory()
+        .map(|m| (m / 48).clamp(32 * MB, 256 * MB))
+        .unwrap_or(96 * MB);
+    let gpu = match GPU_BUDGET.load(Ordering::Relaxed) {
+        0 => derived,
+        b => b,
+    };
+    let cpu = match CPU_BUDGET.load(Ordering::Relaxed) {
+        0 => gpu * 2,
+        b => b,
+    };
+    (gpu, cpu)
+}
+
+/// Beyond the memory budget, the scenes longest away from the view go (never one near it, nor
+/// `keep`), with their strokes' ops; the page is told (`dropped`) and sends them again when they
+/// come near. Returns the ids that went.
+fn evict_for_memory(keep: &str) -> Vec<String> {
+    let (_, budget) = budgets();
+    let out = with_page(|p| {
+        if p.bytes <= budget {
+            return Vec::new();
+        }
+        let mut cands: Vec<(u64, String)> = p
+            .scenes
+            .iter()
+            .filter(|(id, h)| h.bytes > 1024 && id.as_str() != keep && !p.near_now.contains(*id))
+            .map(|(id, _)| (p.near_at.get(id).copied().unwrap_or(0), id.clone()))
+            .collect();
+        cands.sort();
+        let mut out = Vec::new();
+        for (_, id) in cands {
+            if p.bytes <= budget {
+                break;
+            }
+            if let Some(h) = p.scenes.remove(&id) {
+                p.bytes -= h.bytes;
+                p.changed.insert(id.clone());
+                p.near_at.remove(&id);
+                p.dropped += 1;
+                out.push(id);
+            }
+        }
+        out
+    });
+    if !out.is_empty() {
+        let mut ops = lock(&SCENE_OPS);
+        let map = ops.get_or_insert_with(Default::default);
+        for id in &out {
+            map.remove(id);
+        }
+    }
+    out
+}
+
+/// Scene ids near the view the canvas does not have (in view first), and their generation.
+pub fn missing() -> (Vec<String>, u64) {
+    with_page(|p| (p.missing.clone(), p.missing_gen))
 }
 
 /// Every scene goes.
@@ -79,6 +209,7 @@ pub fn clear_scenes() {
         let ids: Vec<String> = p.scenes.keys().cloned().collect();
         p.changed.extend(ids);
         p.scenes.clear();
+        p.bytes = 0;
     });
 }
 
@@ -93,32 +224,52 @@ pub fn put_frame(frame: FrameSpec) {
 type SceneUpdates = Vec<(String, Option<Arc<Scene>>)>;
 type PageFrame = FrameSpec;
 
-/// What the draw must give its host: everything for a new host, else what changed.
-fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>) {
+/// What the draw must give its host: everything for a new host, else what changed (and the
+/// surface alone when only it moved).
+fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>, Option<[f64; 3]>) {
     with_page(|p| {
         let frame_changed = std::mem::take(&mut p.frame_changed);
+        let surface = p.surface.take();
         if all {
             p.changed.clear();
             (
                 p.scenes
                     .iter()
-                    .map(|(k, v)| (k.clone(), Some(v.clone())))
+                    .map(|(k, v)| (k.clone(), Some(v.scene.clone())))
                     .collect(),
                 p.frame.clone(),
+                None,
             )
         } else {
             let ids: Vec<String> = p.changed.drain().collect();
             let updates = ids
                 .into_iter()
                 .map(|id| {
-                    let s = p.scenes.get(&id).cloned();
+                    let s = p.scenes.get(&id).map(|h| h.scene.clone());
                     (id, s)
                 })
                 .collect();
             let frame = if frame_changed { p.frame.clone() } else { None };
-            (updates, frame)
+            (updates, frame, if frame_changed { None } else { surface })
         }
     })
+}
+
+/// After a draw: what is near the view (kept from eviction) and what it misses (the page sends
+/// it). Only when the host's lists changed.
+fn note_near(near: &[String], missing: &[String]) {
+    with_page(|p| {
+        p.near_tick += 1;
+        let t = p.near_tick;
+        for id in near {
+            p.near_at.insert(id.clone(), t);
+        }
+        p.near_now = near.iter().cloned().collect();
+        if p.missing != missing {
+            p.missing = missing.to_vec();
+            p.missing_gen += 1;
+        }
+    });
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -150,6 +301,14 @@ struct Status {
     /// The host's driver, downlevel flags and self-test; the first error of the run.
     diag: Option<String>,
     first_error: Option<String>,
+    /// The pages' scenes on the host (ADR-007).
+    pages: canvas::pages::PageStats,
+    /// Time-to-ink of pages entering the view: samples, p50, p95, max (ms).
+    ink: (usize, f64, f64, f64),
+    /// When (clock_ms) the view last became complete: every page in view drawn with its ink.
+    ink_complete_ms: f64,
+    /// The GPU's own time per frame (the PC's stand-in waits for it): last, worst.
+    gpu_ms: (f64, f64),
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -171,12 +330,33 @@ fn note_error(e: String) {
 /// `canvasStats`: the GPU, frames, errors, never waiting for a draw.
 pub fn status_json() -> Value {
     let s = with_status(|s| s.clone());
-    let (scenes, capsules) = with_page(|p| {
+    let (scenes, capsules, bytes, missing, dropped, sample) = with_page(|p| {
+        // A few ids, for the crash report: what the view misses, and some of what is held.
+        let mut sample: Vec<String> = p
+            .missing
+            .iter()
+            .take(4)
+            .map(|m| format!("missing {m}"))
+            .collect();
+        sample.extend(p.scenes.keys().take(4).map(|k| format!("held {k}")));
         (
             p.scenes.len(),
-            p.scenes.values().map(|s| s.caps.len()).sum::<usize>(),
+            p.scenes.values().map(|s| s.scene.caps.len()).sum::<usize>(),
+            p.bytes,
+            p.missing.len(),
+            p.dropped,
+            sample,
         )
     });
+    let rust_ops: usize = lock(&SCENE_OPS)
+        .as_ref()
+        .map(|m| m.values().map(|v| v.len()).sum())
+        .unwrap_or(0);
+    let (gpu_budget, cpu_budget) = budgets();
+    let mut pages = pages_json(
+        &s, scenes, bytes, missing, dropped, rust_ops, gpu_budget, cpu_budget,
+    );
+    pages["ids"] = json!(sample);
     json!({
         "attached": s.attached,
         "adapter": s.adapter,
@@ -199,6 +379,43 @@ pub fn status_json() -> Value {
         "diag": s.diag,
         "firstError": s.first_error,
         "viewport": crate::viewport_service::status(),
+        "pages": pages,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pages_json(
+    s: &Status,
+    scenes: usize,
+    bytes: u64,
+    missing: usize,
+    dropped: u64,
+    rust_ops: usize,
+    gpu_budget: u64,
+    cpu_budget: u64,
+) -> Value {
+    let mb = |b: u64| (b as f64 / 1048576.0 * 100.0).round() / 100.0;
+    let pg = &s.pages;
+    json!({
+            "held": scenes,
+            "heldMB": mb(bytes),
+            "cpuBudgetMB": mb(cpu_budget),
+            "strokesKept": rust_ops,
+            "dropped": dropped,
+            "missing": missing,
+            "onHost": pg.held,
+            "resident": pg.resident,
+            "gpuMB": mb(pg.gpu_bytes),
+            "gpuBudgetMB": mb(gpu_budget),
+            "uploads": pg.uploads,
+            "evictions": pg.evictions,
+            "drawn": pg.drawn,
+            "drawnCapsules": pg.drawn_caps,
+            "visibleMissing": pg.visible_missing,
+            "inkWait": { "n": s.ink.0, "p50": s.ink.1, "p95": s.ink.2, "max": s.ink.3, "unfilled": pg.ink_unfilled },
+            "inkCompleteMs": s.ink_complete_ms,
+            "gpuMs": s.gpu_ms.0,
+            "worstGpuMs": s.gpu_ms.1,
     })
 }
 
@@ -249,6 +466,11 @@ struct Slot {
     /// Frames this host drew, and its errors before them (counted into the status).
     host_frames: u64,
     host_errors: u64,
+    /// The host's near / missing lists as last given to `PAGE`, its time-to-ink samples as last
+    /// summed up, and whether the view was complete (every page in it with its ink).
+    near_gen: u64,
+    ink_samples: usize,
+    complete: bool,
 }
 
 static HOST: Mutex<Slot> = Mutex::new(Slot {
@@ -261,7 +483,19 @@ static HOST: Mutex<Slot> = Mutex::new(Slot {
     attempts: 0,
     host_frames: 0,
     host_errors: 0,
+    near_gen: u64::MAX,
+    ink_samples: usize::MAX,
+    complete: false,
 });
+
+/// The PC's stand-in shell waits for the GPU after each frame (as a surface's next image would).
+static GPU_WAIT: AtomicBool = AtomicBool::new(false);
+/// The time-to-ink samples start again at the next draw (a bench's run).
+static RESET_INK: AtomicBool = AtomicBool::new(false);
+
+pub fn set_gpu_wait(on: bool) {
+    GPU_WAIT.store(on, Ordering::Relaxed);
+}
 
 /// Android only: Vulkan failed in this run, GLES from now on.
 static USE_GL: AtomicBool = AtomicBool::new(false);
@@ -329,7 +563,8 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
         return false;
     };
     match make_host(surface, w, h) {
-        Ok((host, name)) => {
+        Ok((mut host, name)) => {
+            host.set_gpu_budget(budgets().0);
             let backend = format!("{:?}", host.backend());
             let diag = host.diag().to_string();
             slot.host = Some(host);
@@ -339,6 +574,9 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
             slot.attempts = 0;
             slot.host_frames = 0;
             slot.host_errors = 0;
+            slot.near_gen = u64::MAX;
+            slot.ink_samples = usize::MAX;
+            slot.complete = false;
             with_status(|s| {
                 s.attached = true;
                 s.adapter = Some(name);
@@ -488,18 +726,26 @@ fn draw_locked(present_ms: f64) -> bool {
         slot.wait = 0;
         return false;
     }
-    let (updates, frame) = take_changes(fresh);
+    let (updates, frame, moved) = take_changes(fresh);
     for (id, scene) in updates {
         match scene {
             Some(s) => {
-                host.put_scene(&id, &s);
+                host.put_scene_arc(&id, s);
             }
             None => host.remove_scene(&id),
         }
     }
     if let Some(f) = frame {
         host.set_frame(f);
+        slot.complete = false;
     }
+    if let Some(sf) = moved {
+        host.set_surface(sf);
+    }
+    if RESET_INK.swap(false, Ordering::Relaxed) {
+        host.reset_ink_waits();
+    }
+    host.set_gpu_budget(budgets().0);
     // One transform for everything drawn (ADR-008): the camera's surface while Rust owns the
     // camera, else where the page drew its surface (its own numbers).
     let surface = placed.or(host.frame().surface.map(|[k, x, y]| (k, x, y)));
@@ -507,10 +753,45 @@ fn draw_locked(present_ms: f64) -> bool {
         host.place(k, x, y);
     }
     let result = host.draw();
+    let mut gpu_ms = None;
     if result == Ok(true) {
-        crate::viewport_service::drew(host.frame().paper_gap());
+        crate::viewport_service::drew(host.paper_gap());
+        if GPU_WAIT.load(Ordering::Relaxed) {
+            gpu_ms = Some(host.wait_gpu());
+        }
+    }
+    // What is near the view and what it misses, for the bridge (eviction) and the page.
+    let gen = host.near_gen();
+    if gen != slot.near_gen {
+        slot.near_gen = gen;
+        note_near(host.near(), host.missing());
     }
     let s = host.stats();
+    let ink = if s.pages.ink_samples != slot.ink_samples {
+        slot.ink_samples = s.pages.ink_samples;
+        let mut w = host.ink_waits();
+        w.sort_by(f32::total_cmp);
+        let q = |p: f64| {
+            if w.is_empty() {
+                f64::NAN
+            } else {
+                w[((w.len() - 1) as f64 * p).round() as usize] as f64
+            }
+        };
+        Some((
+            w.len(),
+            q(0.5),
+            q(0.95),
+            w.last().map_or(f64::NAN, |v| *v as f64),
+        ))
+    } else {
+        None
+    };
+    let complete = result == Ok(true) && s.pages.visible_missing == 0 && s.pages.drawn_caps > 0;
+    let became_complete = complete && !slot.complete;
+    if result == Ok(true) {
+        slot.complete = complete;
+    }
     let errors = host.errors();
     let uncaptured = host.uncaptured_errors();
     let backend = host.backend();
@@ -529,6 +810,16 @@ fn draw_locked(present_ms: f64) -> bool {
         st.failed_frames = s.failed;
         st.skipped_frames = s.skipped_frames;
         st.skipped_pages = s.skipped_pages;
+        st.pages = s.pages.clone();
+        if let Some(i) = ink {
+            st.ink = i;
+        }
+        if became_complete {
+            st.ink_complete_ms = clock_ms();
+        }
+        if let Some(g) = gpu_ms {
+            st.gpu_ms = (g, st.gpu_ms.1.max(g));
+        }
         st.errors += new_errors;
         if new_errors > 0 {
             st.error = last.clone().map(|e| format!("gpu: {e}"));
@@ -601,7 +892,9 @@ pub fn canvas_scene(meta: &str) -> Result<(String, Vec<u8>), String> {
 /// style and `n` its point count, sent only for a stroke the canvas does not have yet (else its
 /// key `k` alone); data the points of those, f64 x, y, pressure, t (t NaN: none), n per stroke
 /// in order. A key the canvas does not hold is answered `missing` (nothing changes; the page
-/// sends them all). No strokes: the page's scene goes.
+/// sends them all). No strokes: the page's scene goes, unless `keep` (a sheet without ink: known
+/// empty, nothing to ask for). The reply's `dropped`: scenes that went for memory meanwhile
+/// (ADR-007; the page sends them again when they come near).
 pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     #[derive(Deserialize)]
     struct Head {
@@ -615,6 +908,8 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
     struct Req {
         page: String,
         strokes: Vec<Head>,
+        #[serde(default)]
+        keep: bool,
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasSceneBin request: {e}"))?;
     let vals = f64s(data)?;
@@ -632,12 +927,17 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
         ));
     }
     if r.strokes.is_empty() {
-        lock(&SCENE_OPS)
-            .get_or_insert_with(Default::default)
-            .remove(&r.page);
-        put_scene(&r.page, None);
+        let mut ops = lock(&SCENE_OPS);
+        let map = ops.get_or_insert_with(Default::default);
+        if r.keep {
+            map.insert(r.page.clone(), Vec::new());
+        } else {
+            map.remove(&r.page);
+        }
+        drop(ops);
+        put_scene(&r.page, r.keep.then(Scene::default));
         let attached = attached();
-        return Ok((json!({ "ok": attached, "capsules": 0, "attached": attached, "strokes": 0, "built": 0 }).to_string(), Vec::new()));
+        return Ok((json!({ "ok": attached, "capsules": 0, "attached": attached, "strokes": 0, "built": 0, "dropped": [] }).to_string(), Vec::new()));
     }
     let held: HashMap<u64, StrokeOps> = lock(&SCENE_OPS)
         .get_or_insert_with(Default::default)
@@ -693,12 +993,108 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
         .get_or_insert_with(Default::default)
         .insert(r.page.clone(), ops);
     put_scene(&r.page, Some(scene));
+    let dropped = evict_for_memory(&r.page);
     let attached = attached();
-    Ok((json!({ "ok": attached, "capsules": count, "attached": attached, "strokes": strokes, "built": built }).to_string(), Vec::new()))
+    Ok((json!({ "ok": attached, "capsules": count, "attached": attached, "strokes": strokes, "built": built, "dropped": dropped }).to_string(), Vec::new()))
 }
 
-/// `canvasFrame`: where the page shows its pages (crates/canvas `FrameSpec::parse`).
+/// `canvasForget`: the scenes of `ids`, or of every id starting with `prefix` (a note's sheets,
+/// `prefix:sheet`), go with their strokes' ops (the note closed; sheets changed far from view).
+pub fn canvas_forget(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        ids: Vec<String>,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasForget request: {e}"))?;
+    let gone = with_page(|p| {
+        let mut ids: Vec<String> = r.ids.clone();
+        if let Some(pre) = &r.prefix {
+            let pre = format!("{pre}:");
+            ids.extend(p.scenes.keys().filter(|k| k.starts_with(&pre)).cloned());
+        }
+        let mut gone = Vec::new();
+        for id in ids {
+            if let Some(h) = p.scenes.remove(&id) {
+                p.bytes -= h.bytes;
+                p.changed.insert(id.clone());
+                p.near_at.remove(&id);
+                gone.push(id);
+            }
+        }
+        gone
+    });
+    {
+        let mut ops = lock(&SCENE_OPS);
+        let map = ops.get_or_insert_with(Default::default);
+        for id in &r.ids {
+            map.remove(id);
+        }
+        if let Some(pre) = &r.prefix {
+            let pre = format!("{pre}:");
+            map.retain(|k, _| !k.starts_with(&pre));
+        }
+    }
+    Ok((
+        json!({ "ok": true, "forgotten": gone.len() }).to_string(),
+        Vec::new(),
+    ))
+}
+
+/// `canvasBudget`: the memory budgets in MB (`gpuMB`, `cpuMB`; 0 or absent: from the device).
+/// For the bench and tests: the budgets are otherwise the device's.
+pub fn canvas_budget(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        #[serde(default, rename = "gpuMB")]
+        gpu_mb: f64,
+        #[serde(default, rename = "cpuMB")]
+        cpu_mb: f64,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasBudget request: {e}"))?;
+    let b = |mb: f64| {
+        if mb.is_finite() && mb > 0.0 {
+            (mb * 1048576.0) as u64
+        } else {
+            0
+        }
+    };
+    GPU_BUDGET.store(b(r.gpu_mb), Ordering::Relaxed);
+    CPU_BUDGET.store(b(r.cpu_mb), Ordering::Relaxed);
+    let dropped = evict_for_memory("");
+    let (g, c) = budgets();
+    Ok((json!({ "ok": true, "gpuMB": g as f64 / 1048576.0, "cpuMB": c as f64 / 1048576.0, "dropped": dropped }).to_string(), Vec::new()))
+}
+
+/// `canvasFrame`: where the page shows its pages (crates/canvas `FrameSpec::parse`). With `keep`,
+/// the surface alone moved (`{ surface, keep: true }`): the frame is otherwise the last one.
 pub fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Moved {
+        keep: bool,
+        surface: [f64; 3],
+    }
+    if let Ok(m) = serde_json::from_str::<Moved>(meta) {
+        if m.keep {
+            let ok = m.surface.iter().all(|v| v.is_finite()) && m.surface[0] > 0.0;
+            let had = ok
+                && with_page(|p| match p.frame.as_mut() {
+                    Some(f) => {
+                        f.surface = Some(m.surface);
+                        p.surface = Some(m.surface);
+                        true
+                    }
+                    None => false,
+                });
+            let attached = attached();
+            return Ok((
+                json!({ "ok": attached && had, "attached": attached, "frame": had }).to_string(),
+                Vec::new(),
+            ));
+        }
+    }
     let frame = FrameSpec::parse(meta);
     let parsed = frame.is_some();
     if let Some(f) = frame {
@@ -711,7 +1107,19 @@ pub fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
     ))
 }
 
-pub fn canvas_stats() -> Result<(String, Vec<u8>), String> {
+/// `canvasStats` (`{ resetInk: true }`: the time-to-ink samples start again).
+pub fn canvas_stats(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize, Default)]
+    #[serde(rename_all = "camelCase")]
+    struct Req {
+        #[serde(default)]
+        reset_ink: bool,
+    }
+    let r: Req = serde_json::from_str(meta).unwrap_or_default();
+    if r.reset_ink {
+        RESET_INK.store(true, Ordering::Relaxed);
+        with_status(|s| s.ink = (0, f64::NAN, f64::NAN, f64::NAN));
+    }
     Ok((status_json().to_string(), Vec::new()))
 }
 
@@ -768,6 +1176,7 @@ pub fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
             tf,
             paper,
             at: None,
+            bx: None,
         }],
     });
     host.draw()?;

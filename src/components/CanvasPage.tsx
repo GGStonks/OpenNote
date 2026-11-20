@@ -27,7 +27,8 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
 import { haptic } from '../platform';
-import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
+import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, rustGetCanvasStats, rustSetCanvasFrame } from '../services/rustCore';
+import { useCanvasPageStream, useSheetWindow } from '../services/canvasPages';
 import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
@@ -1258,7 +1259,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // Where the canvas draws them: read from the page's own box every animation frame, so scrolling,
   // zooming, a pinch's CSS transform and the sub-pixel placement are all followed (device px; the
-  // shell's view covers the web view from its origin). Sent only when it changes.
+  // shell's view covers the web view from its origin). Sent only when it changes. The sheets go
+  // compact (crates/canvas FrameSpec: the note's distinct papers, each sheet's box and paper, its
+  // ink the scene `page:sheet`), once per layout; afterwards only the surface's place, and that
+  // only while the page places it (while Rust owns the camera it places it itself, ADR-008).
   useEffect(() => {
     if (!isNative) return;
     const styleCode: Record<string, number> = { ruled: 1, narrow: 2, lines: 3, narrowLines: 4, grid: 5, graph: 6, dots: 7 };
@@ -1266,8 +1270,26 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const n = parseInt(hex.slice(1, 7), 16) || 0;
       return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
     };
+    // The sheets and their papers: once per layout (ADR-007: never per frame for the note's length).
+    const papers: { style: number; base: [number, number, number, number]; dark: boolean; pattern: [number, number, number] | null }[] = [];
+    const paperIx = new Map<string, number>();
+    const sheets = layout.sheets.map((sh) => {
+      const paper = {
+        style: styleCode[sh.paperStyle] ?? 0,
+        base: [...rgb01(paperHex(sh.paperColor)), 1] as [number, number, number, number],
+        dark: paperIsDark(sh.paperColor),
+        pattern: sh.patternColor && /^#[0-9a-f]{6}$/i.test(sh.patternColor) ? rgb01(sh.patternColor) : null,
+      };
+      const key = JSON.stringify(paper);
+      let p = paperIx.get(key);
+      if (p === undefined) {
+        paperIx.set(key, (p = papers.length));
+        papers.push(paper);
+      }
+      return { id: sh.id, b: [sh.left, sh.top, sh.width, sh.height] as [number, number, number, number], p };
+    });
     let raf = 0;
-    let last = '';
+    let sentDesk = '';
     let lastCheap = '';
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -1282,39 +1304,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       const k = (r.width / layout.width) * dpr * vs;
       const x0 = (r.left - vx) * dpr * vs, y0 = (r.top - vy) * dpr * vs;
       const desk = deskRgba();
-      // While Rust owns the camera it places the surface itself on every display frame from the
-      // camera and the layout (ADR-008): this frame says only what is drawn, so it is made (all
-      // sheets) only when that changes, never per frame for the note's length (ADR-007).
       const owned = !!cameraFeed.latest?.owned;
-      const cheap = owned ? `${desk.join()}|own` : `${desk.join()}|${k}|${x0}|${y0}`;
-      if (cheap === lastCheap && last) return;
+      const deskKey = desk.join();
+      const cheap = owned ? `${deskKey}|own` : `${deskKey}|${k}|${x0}|${y0}`;
+      if (cheap === lastCheap) return;
       lastCheap = cheap;
-      const pages = layout.sheets.map((sh) => ({
-        page: '',
-        tf: [k, 0, 0, k, x0 + sh.left * k, y0 + sh.top * k] as [number, number, number, number, number, number],
-        at: [sh.left, sh.top] as [number, number],
-        paper: {
-          width: sh.width,
-          height: sh.height,
-          style: styleCode[sh.paperStyle] ?? 0,
-          base: [...rgb01(paperHex(sh.paperColor)), 1] as [number, number, number, number],
-          dark: paperIsDark(sh.paperColor),
-          pattern: sh.patternColor && /^#[0-9a-f]{6}$/i.test(sh.patternColor) ? rgb01(sh.patternColor) : null,
-          origin: [sh.left, sh.top] as [number, number],
-        },
-      }));
-      const frame = {
-        clear: desk,
-        pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], at: [0, 0] as [number, number], paper: null }],
-        // Where this surface was (device px): the canvas puts every placement at one transform
-        // from it (or, while the Rust camera moves the note, from the camera's).
-        surface: [k, x0, y0] as [number, number, number],
-      };
-      const key = JSON.stringify(frame);
-      if (key === last) return;
-      last = key;
+      // Where this surface was (device px): the canvas puts every placement at one transform from
+      // it (or, while the Rust camera moves the note, from the camera's).
+      const surface = [k, x0, y0] as [number, number, number];
       if (!firstFrameAt.current) firstFrameAt.current = performance.now();
-      void rustSetCanvasFrame(frame);
+      if (deskKey !== sentDesk) {
+        sentDesk = deskKey;
+        void rustSetCanvasFrame({ clear: desk, papers, sheets, ink: page.id, pages: [], surface });
+      } else if (!owned) void rustSetCanvasFrame({ surface, keep: true });
     };
     raf = requestAnimationFrame(tick);
     // What the canvas did with it, for the crash report (Send to PC): attached, frames drawn, GPU, errors.
@@ -1349,23 +1351,31 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
-  // The page's strokes for the native canvas, once per change (surface px: all sheets in one
-  // scene), without those being moved or reshaped (the floating and live layers draw them).
-  // `sceneSent` counts the scenes sent and `sceneIn` is the last one's arrival: a finished stroke's
-  // live copy (the shell's) stays until the canvas has it (finishStroke).
-  const sceneSent = useRef(0);
-  const sceneIn = useRef<Promise<unknown>>(Promise.resolve());
-  useEffect(() => {
-    if (!isNative) return;
-    sceneSent.current++;
-    sceneIn.current = rustSetCanvasScene(page.id, hiddenIds ? page.strokes.filter((st) => !hiddenIds.has(st.id)) : page.strokes);
-  }, [isNative, page.id, page.strokes, hiddenIds]);
-  // The note closed: its scene and the strokes' geometry the canvas kept go.
-  useEffect(() => {
-    if (!isNative) return;
-    const id = page.id;
-    return () => void rustSetCanvasScene(id, []);
-  }, [isNative, page.id]);
+  // The page's strokes for the native canvas: each sheet's as a scene of its own, streamed as the
+  // sheets come near the view (services/canvasPages.ts, ADR-007), without those being moved or
+  // reshaped (the floating and live layers draw them). `sceneSent` counts the sends made for a
+  // change and `sceneIn` is their arrival: a finished stroke's live copy (the shell's) stays until
+  // the canvas has it (finishStroke). The note closed: its scenes and the strokes' geometry go.
+  const { sent: sceneSent, arrived: sceneIn } = useCanvasPageStream({
+    enabled: isNative,
+    surfaceId: page.id,
+    strokes: page.strokes,
+    hidden: hiddenIds,
+    sheets: layout.sheets,
+    surfaceWidth: layout.width,
+    container: containerRef,
+    scrollRoot: scrollRoot ?? null,
+  });
+  // While the native canvas draws the note, the page keeps in its DOM only the sheets near the
+  // view (their page lines and numbers, their blocks; ADR-007): the rest is the content's size
+  // alone (Editor's box), so opening and zooming a note of thousands of pages costs what is near.
+  const sheetWin = useSheetWindow(isNative && !printMode, layout.sheets, layout.width, containerRef, scrollRoot ?? null);
+  const inSheetWin = (i: number) => !sheetWin || (i >= sheetWin[0] && i <= sheetWin[1]);
+  const winTop = sheetWin ? layout.sheets[sheetWin[0]].top : -Infinity;
+  const winBottom = sheetWin ? layout.sheets[sheetWin[1]].top + layout.sheets[sheetWin[1]].height : Infinity;
+  /** A block outside the sheets in the DOM is left out (never one selected or being edited). */
+  const blockShown = (y0: number, y1: number, id: string) =>
+    !sheetWin || (y1 >= winTop - 200 && y0 <= winBottom + 200) || selectedBlockId === id || editingTextId === id || !!selection?.latexIds.includes(id) || !!selection?.textIds.includes(id) || !!selection?.imageIds.includes(id);
   const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
 
@@ -3040,7 +3050,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       data-page-index={pageIndex}
     >
       {/* The pages' paper: one continuous strip, cut where a page ends (a hairline). */}
-      {layout.sheets.filter((sh) => !printMode || !printSheet || sh.id === printSheet).map((sh) => (
+      {layout.sheets.filter((sh) => (!printMode || !printSheet || sh.id === printSheet) && inSheetWin(sh.index)).map((sh) => (
         <div
           key={sh.id}
           data-sheet={sh.index}
@@ -3110,9 +3120,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             />
           ) : null;
         }
-        if (l.kind === 'image') return <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} />;
+        if (l.kind === 'image') return blockShown(l.block.y, l.block.y + l.block.height, l.block.id) ? <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} /> : null;
         if (l.kind === 'latex') {
           const b = l.block;
+          if (!blockShown(b.y, b.y + b.height, b.id)) return null;
           return (
             <LatexBlockView
               key={l.key}
@@ -3131,6 +3142,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           );
         }
         const t = l.block;
+        if (!blockShown(t.y, t.y + textHeight(t), t.id)) return null;
         return (
           <TextBlockView
             key={l.key}
@@ -3333,7 +3345,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
       {/* Page lines and numbers; the PDF is cut at the lines. */}
       {!printMode &&
-        layout.sheets.map((sh) => (
+        layout.sheets.filter((sh) => inSheetWin(sh.index)).map((sh) => (
           <React.Fragment key={sh.id}>
             {sh.index > 0 && (
               <div

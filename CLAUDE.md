@@ -138,6 +138,13 @@ than six page frames behind. A change to the page's gestures is made in both. `n
 the link's interval (`linkMs`), how far the canvas trailed the newest camera (`trailP50`,
 `trailMax`) and the ticks it went on without the DOM (`alone`). A canvas that does not draw (no
 host, nothing presented, frames failing) hands the note back to the page (`canvas-fallback`).
+Every cost per frame and on open is bounded by what is on screen, never by the note's length
+(ADR-007, docs/rust-native-canvas.md "Scale"): each sheet's ink is a scene of its own
+(`note:sheet`), streamed by the page as it comes near the view (services/canvasPages.ts) and asked
+for by the canvas (`missing`); the canvas draws only the placements meeting the view, keeps scenes
+on the GPU near the view (an LRU by bytes) and lets go of far ones beyond a memory budget
+(`dropped`); the page keeps only the sheets near the view in its DOM. `--big 2000` / `--big 10000`
+measure open to ink, ticks, memory through a 500-page fling and a jump to page 1,500.
 
 ## Conversion server access
 

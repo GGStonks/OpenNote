@@ -79,6 +79,10 @@ pub struct PagePlacement {
     /// Where it sits on the page's surface (surface px), when the frame says where the surface is:
     /// then its transform follows the surface's (`FrameSpec::place`).
     pub at: Option<[f64; 2]>,
+    /// The part of the surface its scene belongs to (x0, y0, x1, y1 in its own px: a sheet's box
+    /// for that sheet's ink), whether or not the scene is there yet: the canvas culls it with this
+    /// box and its scene's own bounds, and asks for the scene when it comes near (ADR-007).
+    pub bx: Option<[f64; 4]>,
 }
 
 /// The page's frame as sent (`canvasFrame`).
@@ -110,6 +114,7 @@ impl FrameSpec {
                 tf: p.tf,
                 paper: p.paper.filter(Paper::is_drawable),
                 at: p.at,
+                bx: p.bx,
             })
             .collect();
         (
@@ -192,6 +197,7 @@ impl FrameSpec {
                     },
                     paper: p.paper,
                     at: p.at,
+                    bx: p.bx,
                 })
                 .collect(),
             surface: self
@@ -202,9 +208,16 @@ impl FrameSpec {
     }
 
     /// The page's `canvasFrame` message: `{ clear: [r,g,b,a] | null, pages: [{ page, tf:
-    /// [a,b,c,d,ox,oy], paper: { width, height, style, base, dark, pattern, origin } | null }] }`
-    /// (device px). None when it does not parse. JSON has no NaN or infinity: those come as
-    /// `null`, read here as NaN so that the placement is skipped rather than the whole frame.
+    /// [a,b,c,d,ox,oy], paper: { width, height, style, base, dark, pattern, origin } | null, at?,
+    /// bx? }] }` (device px). None when it does not parse. JSON has no NaN or infinity: those come
+    /// as `null`, read here as NaN so that the placement is skipped rather than the whole frame.
+    ///
+    /// A long note's sheets come compact (ADR-007: its frame is sent once per layout, its size a
+    /// few dozen bytes a sheet): `papers: [{ style, base, dark, pattern }]` (the note's distinct
+    /// papers), `sheets: [{ id, b: [left, top, width, height], p: paper index }]` (surface px) and
+    /// `ink: prefix`, with `surface`. They become a paper placement per sheet, then an ink
+    /// placement per sheet (scene `prefix:id`, at the surface's corner, `bx` the sheet's box), then
+    /// `pages` as given.
     pub fn parse(json: &str) -> Option<FrameSpec> {
         #[derive(Deserialize)]
         struct JsonPaper {
@@ -225,17 +238,45 @@ impl FrameSpec {
             paper: Option<JsonPaper>,
             #[serde(default)]
             at: Option<[f64; 2]>,
+            #[serde(default)]
+            bx: Option<[Option<f64>; 4]>,
+        }
+        #[derive(Deserialize)]
+        struct JsonSheetPaper {
+            style: u32,
+            base: [Option<f32>; 4],
+            #[serde(default)]
+            dark: bool,
+            pattern: Option<[Option<f32>; 3]>,
+        }
+        #[derive(Deserialize)]
+        struct JsonSheet {
+            id: String,
+            b: [Option<f64>; 4],
+            #[serde(default)]
+            p: usize,
         }
         #[derive(Deserialize)]
         struct JsonFrame {
             clear: Option<[Option<f32>; 4]>,
-            pages: Vec<JsonPlacement>,
+            #[serde(default)]
+            pages: Option<Vec<JsonPlacement>>,
             #[serde(default)]
             surface: Option<[Option<f64>; 3]>,
+            #[serde(default)]
+            papers: Vec<JsonSheetPaper>,
+            #[serde(default)]
+            sheets: Vec<JsonSheet>,
+            #[serde(default)]
+            ink: Option<String>,
         }
         let n = |v: Option<f32>| v.unwrap_or(f32::NAN);
         let n64 = |v: Option<f64>| v.unwrap_or(f64::NAN);
         let jf = serde_json::from_str::<JsonFrame>(json).ok()?;
+        // A frame says what it shows: placements, or sheets.
+        if jf.pages.is_none() && jf.sheets.is_empty() {
+            return None;
+        }
         let surface = jf
             .surface
             .map(|s| s.map(n64))
@@ -246,49 +287,96 @@ impl FrameSpec {
             b: n(c[2]),
             a: n(c[3]),
         });
-        let pages = jf
-            .pages
-            .into_iter()
-            .map(|jp| {
-                let tf = jp.tf.map(n64);
-                // A placement on the surface: given, else read from its transform (a translation
-                // of the surface's at its scale).
-                let at = jp
-                    .at
-                    .filter(|a| a.iter().all(|v| v.is_finite()))
-                    .or_else(|| {
-                        surface.and_then(|[k, x, y]| {
-                            let on = (tf[0] - k).abs() <= 1e-9 * k
-                                && (tf[3] - k).abs() <= 1e-9 * k
-                                && tf[1] == 0.0
-                                && tf[2] == 0.0;
-                            let a = [(tf[4] - x) / k, (tf[5] - y) / k];
-                            (on && a.iter().all(|v| v.is_finite())).then_some(a)
-                        })
-                    });
-                PagePlacement {
-                    page: jp.page,
-                    tf: Transform {
-                        a: tf[0] as f32,
-                        b: tf[1] as f32,
-                        c: tf[2] as f32,
-                        d: tf[3] as f32,
-                        ox: tf[4] as f32,
-                        oy: tf[5] as f32,
-                    },
-                    paper: jp.paper.map(|p| Paper {
-                        width: n(p.width),
-                        height: n(p.height),
-                        style: p.style,
-                        base: p.base.map(n),
-                        dark: p.dark,
-                        pattern: p.pattern.map(|c| c.map(n)),
-                        origin: p.origin.map(|v| v.unwrap_or(0.0)),
-                    }),
-                    at,
-                }
-            })
-            .collect();
+        // The compact sheets first: their papers, then their ink.
+        let [sk, sx, sy] = surface.unwrap_or([1.0, 0.0, 0.0]);
+        let on_surface = |ax: f64, ay: f64| Transform {
+            a: sk as f32,
+            b: 0.0,
+            c: 0.0,
+            d: sk as f32,
+            ox: (sx + ax * sk) as f32,
+            oy: (sy + ay * sk) as f32,
+        };
+        let mut pages: Vec<PagePlacement> =
+            Vec::with_capacity(jf.sheets.len() * 2 + jf.pages.as_ref().map_or(0, Vec::len));
+        for sh in &jf.sheets {
+            let [l, t, w, h] = sh.b.map(n64);
+            let paper = jf.papers.get(sh.p).map(|p| Paper {
+                width: w as f32,
+                height: h as f32,
+                style: p.style,
+                base: p.base.map(n),
+                dark: p.dark,
+                pattern: p.pattern.map(|c| c.map(n)),
+                origin: [l as f32, t as f32],
+            });
+            pages.push(PagePlacement {
+                page: String::new(),
+                tf: on_surface(l, t),
+                paper,
+                at: [l, t].iter().all(|v| v.is_finite()).then_some([l, t]),
+                bx: None,
+            });
+        }
+        if let Some(prefix) = &jf.ink {
+            for sh in &jf.sheets {
+                let [l, t, w, h] = sh.b.map(n64);
+                pages.push(PagePlacement {
+                    page: format!("{prefix}:{}", sh.id),
+                    tf: on_surface(0.0, 0.0),
+                    paper: None,
+                    at: Some([0.0, 0.0]),
+                    bx: [l, t, w, h]
+                        .iter()
+                        .all(|v| v.is_finite())
+                        .then_some([l, t, l + w, t + h]),
+                });
+            }
+        }
+        let given = jf.pages.unwrap_or_default().into_iter().map(|jp| {
+            let tf = jp.tf.map(n64);
+            // A placement on the surface: given, else read from its transform (a translation
+            // of the surface's at its scale).
+            let at = jp
+                .at
+                .filter(|a| a.iter().all(|v| v.is_finite()))
+                .or_else(|| {
+                    surface.and_then(|[k, x, y]| {
+                        let on = (tf[0] - k).abs() <= 1e-9 * k
+                            && (tf[3] - k).abs() <= 1e-9 * k
+                            && tf[1] == 0.0
+                            && tf[2] == 0.0;
+                        let a = [(tf[4] - x) / k, (tf[5] - y) / k];
+                        (on && a.iter().all(|v| v.is_finite())).then_some(a)
+                    })
+                });
+            PagePlacement {
+                page: jp.page,
+                tf: Transform {
+                    a: tf[0] as f32,
+                    b: tf[1] as f32,
+                    c: tf[2] as f32,
+                    d: tf[3] as f32,
+                    ox: tf[4] as f32,
+                    oy: tf[5] as f32,
+                },
+                paper: jp.paper.map(|p| Paper {
+                    width: n(p.width),
+                    height: n(p.height),
+                    style: p.style,
+                    base: p.base.map(n),
+                    dark: p.dark,
+                    pattern: p.pattern.map(|c| c.map(n)),
+                    origin: p.origin.map(|v| v.unwrap_or(0.0)),
+                }),
+                at,
+                bx: jp
+                    .bx
+                    .map(|b| b.map(n64))
+                    .filter(|b| b.iter().all(|v| v.is_finite())),
+            }
+        });
+        pages.extend(given);
         let mut f = FrameSpec {
             clear,
             pages,
