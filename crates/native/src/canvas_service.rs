@@ -49,10 +49,10 @@ struct Page {
     scenes: HashMap<String, Arc<Scene>>,
     /// Ids whose scene changed (or went) since the last draw took them.
     changed: HashSet<String>,
+    /// The page's last frame: what it shows (desk, sheets' paper, the scene's placement) and where
+    /// its surface was (`FrameSpec::surface`); while Rust owns the camera every placement is put
+    /// at the camera's surface on each tick (ADR-008).
     frame: Option<FrameSpec>,
-    /// Where the page's surface was when it made `frame` (device px: scale, x, y): the canvas
-    /// moves the frame from there to the Rust camera's (viewport_service, ADR-006).
-    surface: Option<[f64; 3]>,
     frame_changed: bool,
 }
 
@@ -82,18 +82,16 @@ pub fn clear_scenes() {
     });
 }
 
-/// The page's frame (and where its surface was then). Returns at once.
-pub fn put_frame(frame: FrameSpec, surface: Option<[f64; 3]>) {
+/// The page's frame. Returns at once.
+pub fn put_frame(frame: FrameSpec) {
     with_page(|p| {
         p.frame = Some(frame);
-        p.surface = surface;
         p.frame_changed = true;
     });
 }
 
 type SceneUpdates = Vec<(String, Option<Arc<Scene>>)>;
-/// The page's frame and its surface's placement then.
-type PageFrame = (FrameSpec, Option<[f64; 3]>);
+type PageFrame = FrameSpec;
 
 /// What the draw must give its host: everything for a new host, else what changed.
 fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>) {
@@ -106,7 +104,7 @@ fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>) {
                     .iter()
                     .map(|(k, v)| (k.clone(), Some(v.clone())))
                     .collect(),
-                p.frame.clone().map(|f| (f, p.surface)),
+                p.frame.clone(),
             )
         } else {
             let ids: Vec<String> = p.changed.drain().collect();
@@ -117,11 +115,7 @@ fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>) {
                     (id, s)
                 })
                 .collect();
-            let frame = if frame_changed {
-                p.frame.clone().map(|f| (f, p.surface))
-            } else {
-                None
-            };
+            let frame = if frame_changed { p.frame.clone() } else { None };
             (updates, frame)
         }
     })
@@ -153,6 +147,9 @@ struct Status {
     lost: u64,
     /// Why Android left Vulkan for GLES in this run.
     fallback: Option<String>,
+    /// The host's driver, downlevel flags and self-test; the first error of the run.
+    diag: Option<String>,
+    first_error: Option<String>,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -164,6 +161,9 @@ fn with_status<R>(f: impl FnOnce(&mut Status) -> R) -> R {
 fn note_error(e: String) {
     with_status(|s| {
         s.errors += 1;
+        if s.first_error.is_none() {
+            s.first_error = Some(e.clone());
+        }
         s.error = Some(e);
     });
 }
@@ -196,6 +196,8 @@ pub fn status_json() -> Value {
         "recreated": s.recreated,
         "lost": s.lost,
         "fallback": s.fallback,
+        "diag": s.diag,
+        "firstError": s.first_error,
         "viewport": crate::viewport_service::status(),
     })
 }
@@ -247,8 +249,6 @@ struct Slot {
     /// Frames this host drew, and its errors before them (counted into the status).
     host_frames: u64,
     host_errors: u64,
-    /// The page's last frame, placed at the Rust camera on every tick while Rust owns it.
-    page_frame: Option<PageFrame>,
 }
 
 static HOST: Mutex<Slot> = Mutex::new(Slot {
@@ -261,7 +261,6 @@ static HOST: Mutex<Slot> = Mutex::new(Slot {
     attempts: 0,
     host_frames: 0,
     host_errors: 0,
-    page_frame: None,
 });
 
 /// Android only: Vulkan failed in this run, GLES from now on.
@@ -332,6 +331,7 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
     match make_host(surface, w, h) {
         Ok((host, name)) => {
             let backend = format!("{:?}", host.backend());
+            let diag = host.diag().to_string();
             slot.host = Some(host);
             slot.size = (w, h);
             slot.fresh = true;
@@ -343,6 +343,7 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
                 s.attached = true;
                 s.adapter = Some(name);
                 s.backend = Some(backend);
+                s.diag = Some(diag);
                 s.frames = 0;
                 s.width = w;
                 s.height = h;
@@ -418,9 +419,23 @@ pub fn offscreen_pixels() -> Vec<u8> {
 }
 
 /// The render thread's draw: what the page changed, then the frame when anything changed.
-/// True when a frame was drawn.
+/// True when a frame was drawn. Without the display's presentation time (the PC's stand-in,
+/// tests) the frame is taken as shown a resampling interval from now: the fingers are placed
+/// where they are now.
 pub fn draw_active() -> bool {
-    catch_unwind(AssertUnwindSafe(draw_locked)).unwrap_or_else(|_| {
+    draw_at(clock_ms() + crate::viewport_service::RESAMPLE_MS)
+}
+
+/// The draw of the display frame presented at `present_ms` (the shells' clock: iOS
+/// `CADisplayLink.targetTimestamp`, Android Choreographer's frame time plus a vsync period): the
+/// camera is advanced to that moment, not to the moment the tick happened to run.
+pub fn draw_at(present_ms: f64) -> bool {
+    let t = if present_ms.is_finite() {
+        present_ms
+    } else {
+        clock_ms()
+    };
+    catch_unwind(AssertUnwindSafe(|| draw_locked(t))).unwrap_or_else(|_| {
         // Nothing drawn by a host that panicked is trusted: made again at a later tick.
         let mut slot = lock(&HOST);
         drop_host(&mut slot);
@@ -432,9 +447,9 @@ pub fn draw_active() -> bool {
     })
 }
 
-fn draw_locked() -> bool {
-    // The camera first (its own lock): advanced to now whether or not a host draws.
-    let placed = crate::viewport_service::draw_tick(clock_ms());
+fn draw_locked(present_ms: f64) -> bool {
+    // The camera first (its own lock): advanced to the frame's time whether or not a host draws.
+    let placed = crate::viewport_service::draw_tick(present_ms);
     let mut guard = lock(&HOST);
     let slot: &mut Slot = &mut guard;
     if slot.host.is_none() {
@@ -483,24 +498,17 @@ fn draw_locked() -> bool {
         }
     }
     if let Some(f) = frame {
-        slot.page_frame = Some(f);
-    }
-    if let Some((spec, surface)) = &slot.page_frame {
-        // Rust owns the camera: the page's frame moved from where its surface was to the camera's.
-        let f = match (placed, surface) {
-            (Some((k, x, y)), Some([pk, px, py]))
-                if *pk > 0.0 && k.is_finite() && x.is_finite() && y.is_finite() =>
-            {
-                let s = k / pk;
-                spec.moved(s, x - px * s, y - py * s)
-            }
-            _ => spec.clone(),
-        };
         host.set_frame(f);
+    }
+    // One transform for everything drawn (ADR-008): the camera's surface while Rust owns the
+    // camera, else where the page drew its surface (its own numbers).
+    let surface = placed.or(host.frame().surface.map(|[k, x, y]| (k, x, y)));
+    if let Some((k, x, y)) = surface {
+        host.place(k, x, y);
     }
     let result = host.draw();
     if result == Ok(true) {
-        crate::viewport_service::drew();
+        crate::viewport_service::drew(host.frame().paper_gap());
     }
     let s = host.stats();
     let errors = host.errors();
@@ -694,14 +702,7 @@ pub fn canvas_frame(meta: &str) -> Result<(String, Vec<u8>), String> {
     let frame = FrameSpec::parse(meta);
     let parsed = frame.is_some();
     if let Some(f) = frame {
-        // `surface: [k, x, y]`: where the page's surface was (device px) when it placed the pages.
-        let surface = serde_json::from_str::<Value>(meta).ok().and_then(|v| {
-            let a = v.get("surface")?.as_array()?;
-            let n: Vec<f64> = a.iter().filter_map(Value::as_f64).collect();
-            (n.len() == 3 && n.iter().all(|x| x.is_finite()) && n[0] > 0.0)
-                .then(|| [n[0], n[1], n[2]])
-        });
-        put_frame(f, surface);
+        put_frame(f);
     }
     let attached = attached();
     Ok((
@@ -759,11 +760,14 @@ pub fn canvas_render(meta: &str) -> Result<(String, Vec<u8>), String> {
         origin: [0.0, 0.0],
     });
     host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(clear_rgba),
         pages: vec![PagePlacement {
             page: "page".to_string(),
             tf,
             paper,
+            at: None,
         }],
     });
     host.draw()?;
@@ -806,6 +810,13 @@ pub extern "C" fn opennote_canvas_detach() {
 }
 
 /// The render thread's draw (never the main thread: it waits for the surface's next image).
+/// The draw of the display frame presented at `present_s` (seconds on the shells' clock:
+/// `CADisplayLink.targetTimestamp`). Render thread only.
+#[no_mangle]
+pub extern "C" fn opennote_canvas_draw_at(present_s: f64) -> bool {
+    draw_at(present_s * 1000.0)
+}
+
 #[no_mangle]
 pub extern "C" fn opennote_canvas_draw_active() -> bool {
     catch_unwind(draw_active).unwrap_or(false)

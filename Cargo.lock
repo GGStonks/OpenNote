@@ -1649,6 +1649,7 @@ dependencies = [
  "canvas",
  "ink",
  "jni",
+ "libc",
  "model",
  "ndk-sys",
  "nib",

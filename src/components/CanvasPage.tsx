@@ -27,7 +27,7 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
 import { haptic } from '../platform';
-import { deskRgba, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
+import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
 import { GestureBus } from '../editor/gestures';
 import {
   Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
@@ -1253,6 +1253,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * draw yet: a PDF page or a picture in the web view would cover the native ink (N4).
    */
   const isNative = !!props.nativeCanvas && !printMode;
+  /** When the page sent the canvas its first frame (performance.now()): the health checks wait for it. */
+  const firstFrameAt = useRef(0);
 
   // Where the canvas draws them: read from the page's own box every animation frame, so scrolling,
   // zooming, a pinch's CSS transform and the sub-pixel placement are all followed (device px; the
@@ -1266,17 +1268,31 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
     let raf = 0;
     let last = '';
+    let lastCheap = '';
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const el = containerRef.current;
       if (!el || !layout.width) return;
       const r = el.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const k = (r.width / layout.width) * dpr;
-      const x0 = r.left * dpr, y0 = r.top * dpr;
+      // Client px to the shell's view (it covers the web view from its origin): the visual
+      // viewport's offset and scale (iOS scrolls the web view under the keyboard).
+      const vv = window.visualViewport;
+      const vs = vv?.scale ?? 1, vx = vv?.offsetLeft ?? 0, vy = vv?.offsetTop ?? 0;
+      const k = (r.width / layout.width) * dpr * vs;
+      const x0 = (r.left - vx) * dpr * vs, y0 = (r.top - vy) * dpr * vs;
+      const desk = deskRgba();
+      // While Rust owns the camera it places the surface itself on every display frame from the
+      // camera and the layout (ADR-008): this frame says only what is drawn, so it is made (all
+      // sheets) only when that changes, never per frame for the note's length (ADR-007).
+      const owned = !!cameraFeed.latest?.owned;
+      const cheap = owned ? `${desk.join()}|own` : `${desk.join()}|${k}|${x0}|${y0}`;
+      if (cheap === lastCheap && last) return;
+      lastCheap = cheap;
       const pages = layout.sheets.map((sh) => ({
         page: '',
         tf: [k, 0, 0, k, x0 + sh.left * k, y0 + sh.top * k] as [number, number, number, number, number, number],
+        at: [sh.left, sh.top] as [number, number],
         paper: {
           width: sh.width,
           height: sh.height,
@@ -1288,15 +1304,16 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         },
       }));
       const frame = {
-        clear: deskRgba(),
-        pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], paper: null }],
-        // Where this surface was: while the Rust camera moves the note (ADR-006) the canvas moves
-        // the frame from here to the camera's surface, at the display's rate.
+        clear: desk,
+        pages: [...pages, { page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], at: [0, 0] as [number, number], paper: null }],
+        // Where this surface was (device px): the canvas puts every placement at one transform
+        // from it (or, while the Rust camera moves the note, from the camera's).
         surface: [k, x0, y0] as [number, number, number],
       };
       const key = JSON.stringify(frame);
       if (key === last) return;
       last = key;
+      if (!firstFrameAt.current) firstFrameAt.current = performance.now();
       void rustSetCanvasFrame(frame);
     };
     raf = requestAnimationFrame(tick);
@@ -1309,6 +1326,26 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       clearTimeout(status);
     };
   }, [isNative, page.id, layout]);
+
+  // Never a black page: once a second, whether the canvas really draws; if not, the page draws
+  // the note itself for the rest of the run (rustCore `fallBackFromNativeCanvas`). Its own effect:
+  // the frame's is made again with every layout.
+  useEffect(() => {
+    if (!isNative) return;
+    let prev: Record<string, unknown> | null = null;
+    let silent = 0;
+    const health = setInterval(() => {
+      if (!firstFrameAt.current || canvasFellBack()) return;
+      void rustGetCanvasStats().then((st) => {
+        if (canvasFellBack()) return;
+        silent = st ? 0 : silent + 1;
+        const why = canvasHealth(prev, st, firstFrameAt.current, performance.now());
+        if (why && (st || silent >= 3)) fallBackFromNativeCanvas(why, st);
+        prev = st;
+      });
+    }, 1000);
+    return () => clearInterval(health);
+  }, [isNative]);
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);

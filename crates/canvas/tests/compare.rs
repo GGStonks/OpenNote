@@ -209,11 +209,14 @@ fn canvas_host_renders_paper_and_strokes() {
     };
 
     host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(Rgba::new(230.0 / 255.0, 230.0 / 255.0, 230.0 / 255.0, 1.0)),
         pages: vec![PagePlacement {
             page: "p1".to_string(),
             tf: Transform::scale(1.0, 0.0, 0.0),
             paper: Some(paper),
+            at: None,
         }],
     });
 

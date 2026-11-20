@@ -33,17 +33,46 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-/// Milliseconds on a monotonic clock where there is one (WebAssembly has none here: the page
-/// times the call itself, and `ms` is 0).
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn clock_ms() -> f64 {
+/// Milliseconds on the shells' own monotonic clock, so that the times they stamp on touches and
+/// display frames are on the same line as Rust's: iOS `CLOCK_UPTIME_RAW` (mach_absolute_time:
+/// `UITouch.timestamp`, `CADisplayLink.targetTimestamp`, `CACurrentMediaTime`), Android and Linux
+/// `CLOCK_MONOTONIC` (`MotionEvent.getEventTime`, Choreographer's frame time, Node's hrtime: the
+/// PC's bench). Elsewhere a clock of its own; WebAssembly has none here (the page times the call
+/// itself, and `ms` is 0).
+#[cfg(any(
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "linux"
+))]
+pub fn clock_ms() -> f64 {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_UPTIME_RAW;
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid timespec for the call to fill.
+    unsafe { libc::clock_gettime(CLOCK, &mut ts) };
+    ts.tv_sec as f64 * 1000.0 + ts.tv_nsec as f64 / 1e6
+}
+#[cfg(not(any(
+    target_os = "ios",
+    target_os = "macos",
+    target_os = "android",
+    target_os = "linux",
+    target_arch = "wasm32"
+)))]
+pub fn clock_ms() -> f64 {
     use std::sync::OnceLock;
     use std::time::Instant;
     static T0: OnceLock<Instant> = OnceLock::new();
     T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn clock_ms() -> f64 {
+pub fn clock_ms() -> f64 {
     0.0
 }
 
@@ -89,7 +118,7 @@ pub fn call_framed(method: &str, request: &[u8]) -> Vec<u8> {
 
 pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
     match method {
-        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "viewportLayout", "viewportSet", "viewportCamera", "viewportTouch", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
+        "info" => Ok((json!({ "version": VERSION, "methods": ["info", "geometry", "liveReplay", "renderThumbnail", "canvasRender", "canvasScene", "canvasFrame", "canvasStats", "viewportLayout", "viewportSet", "viewportCamera", "viewportTouch", "viewportShown", "viewportTrace", "selectInRect", "selectInLasso", "selectionBounds", "transformPageItems", "shapeHandles", "moveShapeHandle", "snapStroke", "uiThemeTokens", "uiLayoutCompute", "uiFormatPill"] }).to_string(), Vec::new())),
         "geometry" => geometry(meta, data),
         "liveReplay" => live_replay(meta),
         "renderThumbnail" => render_thumbnail(meta),
@@ -102,6 +131,8 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "viewportSet" => viewport_service::viewport_set(meta),
         "viewportCamera" => viewport_service::viewport_camera(meta),
         "viewportTouch" => viewport_service::viewport_touch(meta),
+        "viewportShown" => viewport_service::viewport_shown(meta),
+        "viewportTrace" => viewport_service::viewport_trace(meta),
         "selectInRect" => select_in_rect(meta),
         "selectInLasso" => select_in_lasso(meta),
         "selectionBounds" => selection_bounds(meta),
@@ -995,6 +1026,58 @@ mod android {
         _class: JClass<'l>,
     ) -> jboolean {
         if catch_unwind(crate::canvas_service::draw_active).unwrap_or(false) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    /// The draw of the display frame presented at `present_ms` (CLOCK_MONOTONIC ms:
+    /// Choreographer's frame time plus a vsync period). Render thread only.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_canvasDrawAt<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        present_ms: jdouble,
+    ) -> jboolean {
+        if catch_unwind(|| crate::canvas_service::draw_at(present_ms)).unwrap_or(false) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        }
+    }
+
+    /// The fingers of one MotionEvent, historical samples first: `n` x [id, phase, x, y, t]
+    /// (WebView CSS px, `t` seconds of CLOCK_MONOTONIC: getEventTime / 1000). UI thread.
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_viewportTouches<'l>(
+        env: JNIEnv<'l>,
+        _class: JClass<'l>,
+        samples: JDoubleArray<'l>,
+        n: jni::sys::jint,
+    ) -> jni::sys::jint {
+        let len = (n.max(0) as usize) * 5;
+        let mut buf = [0f64; 5 * 64];
+        if len == 0 || len > buf.len() {
+            return 0;
+        }
+        if env
+            .get_double_array_region(&samples, 0, &mut buf[..len])
+            .is_err()
+        {
+            return 0;
+        }
+        catch_unwind(|| crate::viewport_service::touches(&buf[..len])).unwrap_or(0)
+    }
+
+    /// Whether the camera moves or holds fingers (the render thread asks for the display's best
+    /// rate then).
+    #[no_mangle]
+    pub extern "system" fn Java_com_opennote_app_OpenNoteRustPlugin_viewportBusy<'l>(
+        _env: JNIEnv<'l>,
+        _class: JClass<'l>,
+    ) -> jboolean {
+        if catch_unwind(crate::viewport_service::busy).unwrap_or(false) {
             JNI_TRUE
         } else {
             JNI_FALSE

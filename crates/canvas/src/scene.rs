@@ -64,6 +64,13 @@ pub struct CapInst {
     col: [f32; 4],
 }
 
+impl CapInst {
+    /// A capsule from `a` to `b` ([x, y, radius], page px) in `col` (straight alpha).
+    pub fn new(a: [f32; 3], b: [f32; 3], col: [f32; 4]) -> Self {
+        CapInst { a, b, col }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Op {
     /// A coverage run (max blend), composited once in `col` (straight alpha).

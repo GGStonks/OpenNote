@@ -1526,7 +1526,7 @@ if (ONLY.has('nativecanvas')) {
   execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
   const vp = page.viewportSize(), dpr = Number(arg('dpr', 2));
   const W = vp.width * dpr, H = vp.height * dpr;
-  const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W), String(H)], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W), String(H), '--tick', '60'], { stdio: ['pipe', 'pipe', 'inherit'] });
   let buf = Buffer.alloc(0);
   const waiting = [];
   shell.stdout.on('data', (d) => {
@@ -1940,6 +1940,355 @@ if (ONLY.has('probe')) {
   const r = await page.evaluate(() => window.__opennoteFrameProbe.run());
   console.log(`probe    ${Object.entries(r.phases).map(([k, v]) => `${k} ${v ? `${v.fps} fps (p50 ${v.p50} ms)` : '-'}`).join('  ')}  (${CPU}x slower CPU)`);
 }
+// Not in the default run (run it alone): --native --only cameracoherence [--big <pages>]. The page and
+// the native canvas as one piece while Rust moves the camera (rust/DECISIONS.md ADR-008), on an
+// iPad-like screen (1024 x 1366 then 1366 x 1024, dpr 2, the editor's toolbar, the iOS safe area),
+// a note with ink, a text box and a formula; each path (a constant-speed pan, a pinch, a long
+// pinch that rebases, a fling) as the shell would hand it: every finger sample stamped with its
+// own time on the shells' clock (CLOCK_MONOTONIC: Node's hrtime) and delivered 0-8 ms late at
+// random. Per display tick of the stand-in shell (opennote_native_cli --serve --tick 120, its
+// `viewportTrace`): (a) the papers against the ink as drawn, (b) the canvas's placement of the
+// text box and the formula against where the page's DOM showed them at that moment (device px),
+// (c) the page point first under the fingers against where the camera puts it, (d) the second
+// difference of the drawn camera (jumps and judder: a constant-speed pan has none) and the ticks'
+// pacing. "before" is 2.9.6's camera (localStorage opennote_camera_v1), "after" this one.
+// --big N: the same on a note of N pages (recorded handwriting repeated, a text box and a formula
+// every 50 pages) against the small note: open time, ticks, the canvas's draw time (ADR-007).
+if (ONLY.has('cameracoherence')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  const monoMs = () => Number(process.hrtime.bigint()) / 1e6;
+  const bigPages = Number(arg('big', 0));
+  // `light`: a long note's pages (every stroke kept to 24 samples, a line's first 8 words).
+  const noteOf = (pages, lines, light = false) => {
+    const strokes = [], textBlocks = [], latexBlocks = [];
+    let n = 0;
+    for (let pg = 0; pg < pages; pg++) {
+      for (let line = 0; line < lines; line++) {
+        let x = 90, words = 0;
+        while (x < PAGE_W - 120 && (!light || words++ < 8)) {
+          const s0 = recorded[n++ % recorded.length];
+          const s = light && s0.samples.length > 24 ? { ...s0, samples: s0.samples.filter((_, i, a) => i % Math.ceil(a.length / 24) === 0 || i === a.length - 1) } : s0;
+          const xs = s.samples.map((p) => p[0]), ys = s.samples.map((p) => p[1]);
+          const minX = Math.min(...xs), minY = Math.min(...ys), w = Math.max(...xs) - minX, h = Math.max(...ys) - minY;
+          const k = Math.min(1, 26 / Math.max(1, h), 60 / Math.max(1, w));
+          const ox = x, oy = pg * (PAGE_H + 8) + 90 + line * 40 + (line >= 4 ? 120 : 0);
+          strokes.push({ id: `s_${n}_${pg}`, tool: 'pen', color: '#111827', width: s.width || 1.6, opacity: 1, penStyle: s.penStyle || 'fountain', createdAt: 1700000000000 + strokes.length,
+            points: s.samples.map((p) => ({ x: ox + (p[0] - minX) * k, y: oy + (p[1] - minY) * k, pressure: p[3] || 0.5, t: p[2] })) });
+          x += w * k + 14;
+        }
+      }
+      if (pg % 50 === 0) {
+        const top = pg * (PAGE_H + 8);
+        textBlocks.push({ id: `tb_${pg}`, x: 120, y: top + 260, width: 320, text: 'A text box moves with the ink', fontSize: 20, color: '#111827', createdAt: 1700000000000 + strokes.length });
+        latexBlocks.push({ id: `lx_${pg}`, x: 470, y: top + 250, width: 240, height: 60, latexCode: '\\int_0^1 x^2\\,dx = \\frac{1}{3}', createdAt: 1700000000000 + strokes.length + 1 });
+      }
+    }
+    const now = Date.now();
+    return { id: pages > 20 ? 'doc_cc_big' : 'doc_cc', title: pages > 20 ? 'Long note' : 'Coherence note', createdAt: now, updatedAt: now, paperStyle: 'ruled', paperColor: 'white', schemaVersion: 5,
+      sheets: Array.from({ length: pages }, (_, i) => ({ id: `sh_${i}`, size: 'letter', orientation: 'portrait' })),
+      pages: [{ id: 'page_cc', pageNumber: 1, strokes, latexBlocks, textBlocks, imageBlocks: [] }] };
+  };
+  const q = (v, p) => pct(v.filter(Number.isFinite), p);
+  const f2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : '-');
+  let fail = false;
+
+  // One iPad orientation: a context, the stand-in shell, the note opened through the Rust camera.
+  const session = async (W, H, note) => {
+    const dpr = 2;
+    const pctx = await browser.newContext({ viewport: { width: W, height: H }, deviceScaleFactor: dpr, hasTouch: true });
+    await pctx.addInitScript(() => {
+      window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true, nativeViewport: true };
+      window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
+      // The iOS shell's safe area (status bar, home indicator) as the page reads it.
+      document.addEventListener('DOMContentLoaded', () => {
+        document.documentElement.style.setProperty('--sa-top', '24px');
+        document.documentElement.style.setProperty('--sa-bottom', '20px');
+      });
+      // Each painted frame: the content's camera as the DOM shows it, read at the start of the
+      // next frame (this loop runs before the page's), stamped with the frame that painted it.
+      window.__dom = [];
+      let prev = 0;
+      const loop = (t) => {
+        requestAnimationFrame(loop);
+        const outer = document.querySelector('[data-note-content]'), el = outer?.parentElement;
+        if (window.__domRec && el && prev) {
+          const r = el.getBoundingClientRect(), o = outer.getBoundingClientRect();
+          window.__dom.push([performance.timeOrigin + prev, o.left - r.left - el.clientLeft, o.top - r.top - el.clientTop, o.width / parseFloat(outer.firstElementChild.style.width), r.left + el.clientLeft, r.top + el.clientTop]);
+        }
+        prev = t;
+      };
+      requestAnimationFrame(loop);
+    });
+    const p = await pctx.newPage();
+    p.on('pageerror', (e) => console.error('page error:', e.message));
+    // The display's rate: the page's own here (headless Chromium paints at 60), as the owner's iPad
+    // runs the page at the display's 120 (--tick to differ).
+    const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W * dpr), String(H * dpr), '--tick', String(arg('tick', 60))], { stdio: ['pipe', 'pipe', 'inherit'] });
+    let buf = Buffer.alloc(0);
+    const waiting = [];
+    shell.stdout.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+        const n = buf.readUInt32LE(0);
+        waiting.shift()(buf.subarray(4, 4 + n));
+        buf = buf.subarray(4 + n);
+      }
+    });
+    const rust = (method, req) => new Promise((res) => {
+      waiting.push(res);
+      const m = Buffer.from(method), x = Buffer.alloc(4), y = Buffer.alloc(4);
+      x.writeUInt32LE(m.length);
+      y.writeUInt32LE(req.length);
+      shell.stdin.write(Buffer.concat([x, m, y, req]));
+    });
+    const framed = (obj) => { const m = Buffer.from(JSON.stringify(obj)), h = Buffer.alloc(4); h.writeUInt32LE(m.length); return Buffer.concat([h, m]); };
+    const call = async (method, obj) => { const r = await rust(method, framed(obj)); return JSON.parse(r.subarray(4, 4 + r.readUInt32LE(0)).toString()); };
+    await p.route('**/__rust/*', async (route) => route.fulfill({ status: 200, contentType: 'application/octet-stream',
+      body: await rust(route.request().url().split('/__rust/')[1], route.request().postDataBuffer() ?? Buffer.alloc(0)) }));
+    await p.goto(url);
+    await p.evaluate(async (nt) => {
+      const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      await new Promise((res, rej) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(nt); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      db.close();
+    }, note);
+    const cdp2 = await pctx.newCDPSession(p);
+    const open = async (legacy) => {
+      await p.evaluate((l) => {
+        localStorage.removeItem('opennote_note_views_v1');
+        if (l) localStorage.setItem('opennote_camera_v1', '1'); else localStorage.removeItem('opennote_camera_v1');
+        const st = JSON.parse(localStorage.getItem('opennote_settings_v2') || '{}');
+        st.stylusOnly = false;
+        localStorage.setItem('opennote_settings_v2', JSON.stringify(st));
+      }, legacy);
+      await p.reload();
+      const t0 = performance.now();
+      await p.getByText(note.title).first().click();
+      await p.waitForSelector('[data-note-content]');
+      await p.waitForFunction(() => document.querySelector('.katex'), null, { timeout: 30000 }).catch(() => {});
+      const openMs = performance.now() - t0;
+      await sleep(2500);
+      return openMs;
+    };
+    return { p, call, cdp: cdp2, open, dpr, close: async () => { shell.stdin.end(); await pctx.close(); } };
+  };
+
+  // A path's finger samples every 8.33 ms: [t from start, [[x, y], [x, y]]]; `end`: 'lift' | 'fling'.
+  const linear = (a, b, ms) => {
+    const n = Math.max(1, Math.round(ms / (1000 / 120)));
+    return Array.from({ length: n + 1 }, (_, i) => [(i * ms) / n, a.map(([x, y], k) => [x + ((b[k][0] - x) * i) / n, y + ((b[k][1] - y) * i) / n])]);
+  };
+  const pathsFor = (W, H) => {
+    const cx = W / 2, cy = H / 2 + 60;
+    return [
+      ['pan', linear([[cx - 100, cy + 250], [cx + 100, cy + 250]], [[cx - 100, cy - 350], [cx + 100, cy - 350]], 1000), 'lift'],
+      ['pinch', linear([[cx - 60, cy], [cx + 60, cy]], [[cx - 90, cy - 20], [cx + 90, cy - 20]], 400), 'lift'],
+      ['long pinch', linear([[cx - 50, cy], [cx + 50, cy]], [[cx - 150, cy + 40], [cx + 150, cy + 40]], 1500), 'lift'],
+      ['fling', linear([[cx - 100, cy + 300], [cx + 100, cy + 300]], [[cx - 100, cy - 100], [cx + 100, cy - 100]], 160), 'fling'],
+    ];
+  };
+
+  // Runs one path: samples to Rust (stamped, delivered late at random) and to the page (CDP).
+  const run = async (s, samples, end) => {
+    const { p, call, cdp: c } = s;
+    let seed = 12345;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+    await p.evaluate(() => { window.__dom = []; window.__domRec = true; });
+    await call('viewportTrace', { start: true });
+    const wall0 = Date.now(), mono0 = monoMs();
+    const sends = [];
+    const send = (t, phase, pts, ids) => {
+      const stamp = mono0 + t;
+      const late = rnd() * 8;
+      sends.push(new Promise((res) => setTimeout(() => {
+        call('viewportTouch', { touches: pts.map(([x, y], i) => [ids ? ids[i] : i, phase, x, y, stamp]) }).then(res);
+      }, Math.max(0, stamp + late - monoMs()))));
+    };
+    const tp = (type, pts, ids) => c.send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], i) => ({ x, y, id: ids ? ids[i] : i })) }).catch(() => {});
+    let last = samples[0][1];
+    for (const [t, pts] of samples) {
+      const wait = mono0 + t - monoMs();
+      if (wait > 1) await sleep(wait);
+      send(t, t === 0 ? 0 : 1, pts);
+      void tp(t === 0 ? 'touchStart' : 'touchMove', pts);
+      last = pts;
+    }
+    const tEnd = samples[samples.length - 1][0];
+    if (end === 'fling') {
+      const v = [(last[0][0] - samples[samples.length - 2][1][0][0]), (last[0][1] - samples[samples.length - 2][1][0][1])];
+      send(tEnd + 2, 2, [last[1]], [1]);
+      void tp('touchEnd', [last[1]], [1]);
+      for (let i = 1; i <= 3; i++) {
+        const pt = [[last[0][0] + v[0] * i, last[0][1] + v[1] * i]];
+        await sleep(8.33);
+        send(tEnd + i * 8.33, 1, pt, [0]);
+        void tp('touchMove', pt, [0]);
+      }
+      send(tEnd + 30, 2, [[last[0][0] + v[0] * 3, last[0][1] + v[1] * 3]], [0]);
+    } else send(tEnd + 2, 2, last);
+    void tp('touchEnd', []);
+    await Promise.all(sends);
+    await sleep(end === 'fling' ? 3000 : 1000);
+    const ticks = (await call('viewportTrace', {})).ticks;
+    const dom = await p.evaluate(() => { window.__domRec = false; return window.__dom; });
+    // The page's clock (wall ms) on the shells' monotonic line.
+    return { ticks, dom: dom.map((d) => [d[0] - wall0 + mono0, ...d.slice(1)]) };
+  };
+
+  // The numbers of one path: what was drawn on each tick against the DOM shown then.
+  const measure = (name, { ticks, dom }, pts, dpr) => {
+    const T = ticks.map((r) => r[0]);
+    const gaps = T.slice(1).map((t, i) => t - T[i]);
+    const inkPaper = Math.max(0, ...ticks.map((r) => r[14] ?? 0).filter(Number.isFinite));
+    const under = ticks.filter((r) => r[16] >= 2 && Number.isFinite(r[13])).map((r) => r[13]);
+    // (b): each tick's drawn camera against the DOM's shown at that tick's presentation time: a
+    // page frame painted at rAF time t reaches the screen a page frame later (its median interval).
+    const pageGaps = dom.slice(1).map((d, i) => d[0] - dom[i][0]);
+    const lDom = q(pageGaps, 0.5) || 1000 / 60;
+    const vsDom = [];
+    let j = -1;
+    for (const r of ticks) {
+      while (j + 1 < dom.length && dom[j + 1][0] + lDom <= r[0]) j++;
+      if (j < 0) continue;
+      const d = dom[j];
+      vsDom.push(Math.max(...pts.map(([qx, qy]) => Math.hypot(r[7] + qx * r[9] - (d[1] + qx * d[3]), r[8] + qy * r[9] - (d[2] + qy * d[3])) * dpr)));
+    }
+    // When the canvas first drew each camera the DOM showed, after the DOM's frame (ms): the
+    // canvas's delay behind the DOM it follows (the DOM reaches the screen about a page frame
+    // after its rAF; the model above).
+    const delays = [];
+    for (const d of dom) {
+      const r = ticks.find((r) => r[0] >= d[0] && Math.abs(r[7] - d[1]) < 0.02 && Math.abs(r[8] - d[2]) < 0.02 && Math.abs(r[9] / d[3] - 1) < 1e-5);
+      if (r) delays.push(r[0] - d[0]);
+    }
+    // (d): a fixed page point's drawn place from tick to tick (device px): its second difference
+    // (0 for a constant-speed pan; a jump or judder shows as a spike), over the gesture's ticks.
+    const [qx, qy] = pts[0];
+    const moving = ticks.map((r) => [r[11] + qx * r[10], r[12] + qy * r[10]]);
+    const second = [];
+    for (let i = 2; i < moving.length; i++) {
+      const ax = moving[i][0] - 2 * moving[i - 1][0] + moving[i - 2][0], ay = moving[i][1] - 2 * moving[i - 1][1] + moving[i - 2][1];
+      second.push(Math.hypot(ax, ay));
+    }
+    const ruleOut = second;
+    // The newest camera's (the input's) second difference, the same point.
+    const newest = ticks.map((r) => [(r[2] + qx * r[4]) * dpr, (r[3] + qy * r[4]) * dpr]);
+    const inD2 = [];
+    for (let i = 2; i < newest.length; i++) inD2.push(Math.hypot(newest[i][0] - 2 * newest[i - 1][0] + newest[i - 2][0], newest[i][1] - 2 * newest[i - 1][1] + newest[i - 2][1]));
+    return { name, ticks: ticks.length, pageP50: q(pageGaps, 0.5), inD2P95: q(inD2, 0.95), inD2Max: inD2.length ? Math.max(...inD2) : NaN, gapP50: q(gaps, 0.5), gapP95: q(gaps, 0.95), gapMax: Math.max(0, ...gaps), inkPaper,
+      underMax: under.length ? Math.max(...under) : NaN, underP95: q(under, 0.95), domP50: q(vsDom, 0.5), domP95: q(vsDom, 0.95), domMax: vsDom.length ? Math.max(...vsDom) : NaN,
+      delayP50: q(delays, 0.5), delayP95: q(delays, 0.95), matched: dom.length ? delays.length / dom.length : NaN,
+      d2P95: q(ruleOut, 0.95), d2Max: ruleOut.length ? Math.max(...ruleOut) : NaN, alone: ticks.filter((r) => r[15]).length };
+  };
+
+  const report = (label, m) => console.log(`cameracoherence ${label.padEnd(26)} ${m.name.padEnd(10)} page frame ${f2(m.pageP50)} ms, ticks ${String(m.ticks).padStart(4)} gap p50 ${f2(m.gapP50)} p95 ${f2(m.gapP95)} max ${f2(m.gapMax)} | ink-paper ${f2(m.inkPaper)} | under fingers max ${f2(m.underMax)} | DOM vs canvas p50 ${f2(m.domP50)} p95 ${f2(m.domP95)} max ${f2(m.domMax)} dev px, DOM cameras drawn ${(100 * m.matched).toFixed(0)}% after p50 ${f2(m.delayP50)} p95 ${f2(m.delayP95)} ms | d2 drawn p95 ${f2(m.d2P95)} max ${f2(m.d2Max)}, camera p95 ${f2(m.inD2P95)} max ${f2(m.inD2Max)} | alone ${m.alone}`);
+
+  const small = noteOf(4, 6);
+  for (const [W, H] of arg('orient') === 'portrait' ? [[1024, 1366]] : [[1024, 1366], [1366, 1024]]) {
+    const s = await session(W, H, small);
+    for (const mode of ['before', 'after']) {
+      await s.open(mode === 'before');
+      // The text box's and the formula's corners in content px at zoom 1 (from the DOM at rest).
+      const pts = await s.p.evaluate(() => {
+        const outer = document.querySelector('[data-note-content]');
+        const o = outer.getBoundingClientRect(), z = o.width / parseFloat(outer.firstElementChild.style.width);
+        return [document.querySelector('[data-text-id]'), document.querySelector('.katex')].filter(Boolean).map((e) => {
+          const b = e.getBoundingClientRect();
+          return [(b.left - o.left) / z, (b.top - o.top) / z];
+        });
+      });
+      for (const [name, samples, end] of pathsFor(W, H)) {
+        await s.call('viewportSet', { op: 'fitWidth' });
+        await s.call('viewportSet', { op: 'scrollTo', y: 0 });
+        await sleep(600);
+        const raw = await run(s, samples, end);
+        if (process.env.BENCH_CC_DUMP) writeFileSync(join(process.env.BENCH_CC_DUMP, `cc-${W}x${H}-${mode}-${name.replace(' ', '_')}.json`), JSON.stringify({ pts, ...raw }));
+        const m = measure(name, raw, pts.length ? pts : [[0, 0]], s.dpr);
+        report(`${W}x${H} ${mode}`, m);
+        // The canvas is the DOM's camera (b), paper and ink one transform (a), a constant-speed pan
+        // drawn evenly (d). (c) is reported: the ported pinch's start (useViewport drops the movement
+        // not yet scrolled when the pinch engages) leaves the fingers by a pixel or two, as the page's own.
+        if (mode === 'after' && (m.inkPaper > 0.01 || m.domP50 > 1 || (name === 'pan' && m.inD2P95 > 1))) fail = true;
+      }
+    }
+    await s.close();
+  }
+  if (bigPages > 0) {
+    // The long note against the small one, canvas on, portrait.
+    for (const nt of [small, noteOf(bigPages, 1, true)]) {
+      const s = await session(1024, 1366, nt);
+      const openMs = await s.open(false);
+      const st0 = await s.call('canvasStats', {});
+      for (const [name, samples, end] of pathsFor(1024, 1366).filter(([n]) => n !== 'long pinch')) {
+        await s.call('viewportSet', { op: 'fitWidth' });
+        await s.call('viewportSet', { op: 'scrollTo', y: 0 });
+        await sleep(600);
+        const r = await run(s, samples, end);
+        const pageGaps = r.dom.slice(1).map((d, i) => d[0] - r.dom[i][0]);
+        const m = measure(name, r, [[0, 0]], s.dpr);
+        const st = await s.call('canvasStats', {});
+        console.log(`cameracoherence long note ${String(nt.sheets.length).padStart(5)} pages ${name.padEnd(6)} open ${openMs.toFixed(0)} ms | ticks gap p50 ${f2(m.gapP50)} p95 ${f2(m.gapP95)} max ${f2(m.gapMax)} | page frames p50 ${f2(q(pageGaps, 0.5))} p95 ${f2(q(pageGaps, 0.95))} | canvas draw last ${f2(st.lastDrawMs)} worst ${f2(st.worstDrawMs)} ms, ${st.capsules} capsules in ${st.scenes} scenes | d2 max ${f2(m.d2Max)}`);
+      }
+      void st0;
+      await s.close();
+    }
+  }
+  console.log(`cameracoherence ${fail ? 'FAIL' : 'ok'}`);
+  if (fail) process.exitCode = 1;
+}
+
+// Not in the default run (run it alone): --only canvasfallback. Never a black page (rustCore
+// `fallBackFromNativeCanvas`): a stand-in shell whose canvas has no host / presents nothing / fails
+// its frames; within a few seconds the page must draw the note's ink itself, the desk opaque again,
+// with `canvas-fallback` in the crash report.
+if (ONLY.has('canvasfallback')) {
+  const framed = (obj) => { const m = Buffer.from(JSON.stringify(obj)), h = Buffer.alloc(4); h.writeUInt32LE(m.length); return Buffer.concat([h, m]); };
+  const cases = [
+    ['no host', { attached: false, frames: 0, errors: 1, failedFrames: 0, error: 'attach: self-test failed', firstError: 'attach: self-test failed' }],
+    ['presents nothing', { attached: true, frames: 0, errors: 0, failedFrames: 0 }],
+    ['frames failing', null],
+  ];
+  for (const [name, fixed] of cases) {
+    const pctx = await browser.newContext({ viewport: { width: 1024, height: 1366 }, deviceScaleFactor: 2, hasTouch: true });
+    await pctx.addInitScript(() => {
+      window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true, nativeViewport: true };
+      window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
+    });
+    const p = await pctx.newPage();
+    let calls = 0;
+    await p.route('**/__rust/*', async (route) => {
+      const method = route.request().url().split('/__rust/')[1];
+      let meta = { ok: true, attached: true };
+      if (method === 'canvasStats') {
+        calls++;
+        // 'frames failing': a host that drew once, then every frame fails.
+        meta = fixed ?? { attached: true, frames: 1, errors: calls * 4, failedFrames: calls * 4, error: 'validation' };
+      }
+      await route.fulfill({ status: 200, contentType: 'application/octet-stream', body: framed(meta) });
+    });
+    await p.goto(url);
+    await p.evaluate(async (nt) => {
+      const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+      await new Promise((res, rej) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(nt); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      db.close();
+    }, seedNote());
+    await p.reload();
+    await p.getByText('Bench note').first().click();
+    const before = await p.evaluate(() => ({ native: document.documentElement.classList.contains('on-native-canvas'), paths: document.querySelectorAll('[data-note-content] svg path').length }));
+    await sleep(6000);
+    const after = await p.evaluate(() => ({
+      native: document.documentElement.classList.contains('on-native-canvas'),
+      paths: document.querySelectorAll('[data-note-content] svg path').length,
+      canvases: document.querySelectorAll('[data-note-content] canvas').length,
+      log: (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'canvas-fallback').map((c) => c.why),
+    }));
+    const ok = before.native && !after.native && (after.paths > 100 || after.canvases > 0) && after.log.length === 1;
+    console.log(`canvasfallback ${name.padEnd(17)} at open: native ${before.native}, page ink paths ${before.paths} | after 6 s: native ${after.native}, page ink paths ${after.paths}, canvases ${after.canvases}, canvas-fallback ${JSON.stringify(after.log)} ${ok ? 'ok' : 'FAIL'}`);
+    if (!ok) process.exitCode = 1;
+    await pctx.close();
+  }
+}
+
 // Not in the default run (run it alone: it installs a stand-in shell): --only nativepinch, the
 // messages the iOS shell's pinch snapshot gets (nativePinch.ts), and where its last transform puts a
 // page against where the page really is once drawn at the new zoom (they must match: no jump when

@@ -428,7 +428,9 @@ impl GpuCanvas {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let uniform_capacity = 64;
+        // Room for a zoomed-out view's runs from the start (256 KB): the buffer is not made again
+        // in the middle of a gesture (a Mali Vulkan driver crashed on the first move).
+        let uniform_capacity = 1024;
         let (uniforms, uniform_bg) = Self::uniform_buffer(&device, &uniform_bgl, uniform_capacity);
         GpuCanvas {
             device,

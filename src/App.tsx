@@ -11,7 +11,7 @@ import {
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
 import { ExportMode, exportFile, hasNativeCanvas, listenForOpenedFiles, setLaunchTheme } from './platform';
-import { deskRgba, nativeCanvasFor, rustSetCanvasFrame } from './services/rustCore';
+import { deskRgba, nativeCanvasFor, rustSetCanvasFrame, useCanvasFallback } from './services/rustCore';
 import { THEMES, applyTheme } from './theme';
 import { Logo } from './components/Logo';
 import { folderAndDescendants } from './library';
@@ -323,7 +323,8 @@ export const App: React.FC = () => {
   const openNote = notes?.find((n) => n.id === openNoteId) ?? null;
   // The native canvas under the web view shows only where the page is see-through: index.html
   // gives <html> the theme's colour inline, so it is lifted while a note is open (index.css).
-  const nativeCanvasShown = !!openNote && nativeCanvasFor(openNote);
+  const canvasFallback = useCanvasFallback();
+  const nativeCanvasShown = !!openNote && !canvasFallback && nativeCanvasFor(openNote);
   useEffect(() => {
     document.documentElement.classList.toggle('on-native-canvas', nativeCanvasShown);
     // Whenever no note is drawn natively, the canvas shows the desk (never an undrawn, black surface).

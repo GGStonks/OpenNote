@@ -31,6 +31,16 @@ pub struct GestureSummary {
     pub z0: f64,
     pub z: f64,
     pub glide: bool,
+    /// How far behind the newest camera the drawn one was (ms of camera time: the page's DOM
+    /// latency the canvas matches), p50 and max, and the ticks the canvas went on alone because
+    /// the page's DOM had fallen further behind (docs/rust-native-canvas.md, "One piece").
+    pub trail_p50: f64,
+    pub trail_max: f64,
+    pub alone: usize,
+    /// The display link as the shell last saw it: its interval, and how far ahead of the frame's
+    /// presentation the tick ran (ms; 0 when the shell does not say).
+    pub link_ms: f64,
+    pub lead_ms: f64,
 }
 
 /// One gesture being recorded.
@@ -44,6 +54,8 @@ pub struct GestureRecorder {
     rebases0: u64,
     glide: bool,
     hz: f64,
+    trail: Vec<f64>,
+    alone: usize,
 }
 
 impl GestureRecorder {
@@ -52,14 +64,26 @@ impl GestureRecorder {
     pub fn new(t_ms: f64, z0: f64, events: u64, rebases: u64, hz: f64) -> Self {
         GestureRecorder {
             start: t_ms,
-            ticks: Vec::new(),
+            // Sized for a long gesture at 120 Hz: no allocation on the render thread's ticks.
+            ticks: Vec::with_capacity(4096),
             drawn: 0,
             z0,
             events0: events,
             rebases0: rebases,
             glide: false,
             hz,
+            trail: Vec::with_capacity(4096),
+            alone: 0,
         }
+    }
+
+    /// What the tick drew: `trail_ms` behind the newest camera, `alone` when the page's DOM was
+    /// too far behind to be followed.
+    pub fn placed(&mut self, trail_ms: f64, alone: bool) {
+        if trail_ms.is_finite() {
+            self.trail.push(trail_ms.max(0.0));
+        }
+        self.alone += usize::from(alone);
     }
 
     /// A display tick at `t_ms`; `drawn`: the canvas drew a frame in it.
@@ -94,6 +118,14 @@ impl GestureRecorder {
                 .copied()
                 .unwrap_or(0.0)
         };
+        let mut trail = self.trail.clone();
+        trail.sort_by(|a, b| a.total_cmp(b));
+        let trail_at = |q: f64| {
+            trail
+                .get((((trail.len() as f64) * q) as usize).min(trail.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0.0)
+        };
         let frame = if self.hz > 0.0 {
             1000.0 / self.hz
         } else {
@@ -119,6 +151,11 @@ impl GestureRecorder {
             z0: (self.z0 * 100.0).round() / 100.0,
             z: (z * 100.0).round() / 100.0,
             glide: self.glide,
+            trail_p50: r(trail_at(0.5)),
+            trail_max: r(trail_at(1.0)),
+            alone: self.alone,
+            link_ms: 0.0,
+            lead_ms: 0.0,
         }
     }
 }

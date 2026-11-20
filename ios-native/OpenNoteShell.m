@@ -39,6 +39,7 @@
 //    (window.__opennoteCamera, at most once per page frame), which mirrors it.
 //  - JS alert/confirm/prompt panels and microphone permission (audio notes) are implemented.
 
+#include <stdatomic.h>
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -164,11 +165,38 @@ static UIColor *ONLaunchColor(void) {
 
 // The Rust camera (crates/native viewport_service.rs): fingers in, the camera out for the page.
 extern bool opennote_viewport_touch(int64_t id, int32_t phase, double x, double y);
+extern int32_t opennote_viewport_touches(const double *samples, int32_t n);
 extern void opennote_viewport_display_hz(double hz);
+extern void opennote_viewport_link(double duration, double lead);
+extern bool opennote_viewport_busy(void);
 extern char *opennote_viewport_poll(void);
 extern void opennote_viewport_free(char *p);
 /** The web view the camera is pushed to (the canvas thread evaluates it on the main thread). */
 static __weak WKWebView *gCameraWebView;
+
+// The camera to the page, one evaluation at a time (main thread): a push asked for while the last
+// is still running in the page is sent, with the newest camera, once that one has run. Never a
+// queue of stale cameras, never more than one evaluateJavaScript in flight.
+static BOOL gCameraInFlight = NO;
+static BOOL gCameraAgain = NO;
+static void ONPushCamera(void) {
+    if (gCameraInFlight) { gCameraAgain = YES; return; }
+    WKWebView *web = gCameraWebView;
+    if (!web) return;
+    char *cam = opennote_viewport_poll();
+    if (!cam) return;
+    NSString *json = [NSString stringWithUTF8String:cam];
+    opennote_viewport_free(cam);
+    if (!json) return;
+    gCameraInFlight = YES;
+    NSString *js = [NSString stringWithFormat:@"window.__opennoteCamera&&window.__opennoteCamera(%@)", json];
+    [web evaluateJavaScript:js completionHandler:^(id r, NSError *e) {
+        gCameraInFlight = NO;
+        if (gCameraAgain) { gCameraAgain = NO; ONPushCamera(); }
+    }];
+}
+/** Set by the canvas thread, cleared on the main thread: one dispatch per push at most. */
+static atomic_bool gCameraPushQueued;
 
 #pragma mark - 240 Hz Apple Pencil samples
 
@@ -220,6 +248,11 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
 // camera only once two are down; a finger landing while the Pencil writes is the hand resting.
 - (void)forwardFingers:(UIEvent *)event {
     WKWebView *view = self.webView;
+    // Every finger of the event at once, each sample with its own time (UITouch.timestamp, the
+    // clock Rust and the display link share) and the coalesced ones between events: the camera is
+    // resampled at each display frame's time, so the main thread's delivery jitter never shows.
+    double buf[5 * 64];
+    int n = 0;
     for (UITouch *touch in event.allTouches) {
         if (touch.type != UITouchTypeDirect) continue;
         int phase;
@@ -235,9 +268,21 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
             UIView *hit = touch.view ?: [self hitTest:[touch locationInView:self] withEvent:event];
             if (![hit isDescendantOfView:view] && ![hit isDescendantOfView:(UIView *)self.rustCanvasView]) continue;
         }
-        CGPoint p = [touch locationInView:view];
-        opennote_viewport_touch((int64_t)(uintptr_t)(__bridge void *)touch, phase, p.x, p.y);
+        double ident = (double)(int64_t)(uintptr_t)(__bridge void *)touch;
+        NSArray<UITouch *> *samples = phase == 1 ? [event coalescedTouchesForTouch:touch] : nil;
+        if (samples.count == 0) samples = @[touch];
+        for (UITouch *c in samples) {
+            if (n >= 64) break;
+            CGPoint p = [c locationInView:view];
+            buf[5 * n] = ident;
+            buf[5 * n + 1] = phase;
+            buf[5 * n + 2] = p.x;
+            buf[5 * n + 3] = p.y;
+            buf[5 * n + 4] = c.timestamp;
+            n++;
+        }
     }
+    if (n > 0) opennote_viewport_touches(buf, n);
 }
 
 // phase: 0 began, 1 moved, 2 ended, 3 cancelled. Samples: x, y, force 0..1, time (s), altitude, azimuth.
@@ -334,6 +379,7 @@ extern void opennote_canvas_resize(uint32_t w, uint32_t h);
 /** Synchronous: when it returns no draw uses the layer. */
 extern void opennote_canvas_detach(void);
 extern bool opennote_canvas_draw_active(void);
+extern bool opennote_canvas_draw_at(double present_s);
 
 
 // One Rust call at a time, in order, never on the main thread.
@@ -1293,23 +1339,46 @@ static const double kInkHoldSeconds = 0.06;
 - (void)tick:(CADisplayLink *)link;
 @end
 
-@implementation ONCanvasTicker
+/** The display's best rate, read on the main thread when the canvas thread starts. */
+static float gCanvasMaxFps = 60;
+
+@implementation ONCanvasTicker {
+    BOOL _fast;
+    CFTimeInterval _idleSince;
+}
 - (void)tick:(CADisplayLink *)link {
     @autoreleasepool {
-        opennote_canvas_draw_active();
-        // The camera the canvas just drew, for the page to mirror (when it moved and a page frame
-        // has passed since the last push): evaluated on the main thread, the page's next frame
-        // puts its text, selection and live ink there.
-        char *cam = opennote_viewport_poll();
-        if (cam) {
-            NSString *json = [NSString stringWithUTF8String:cam];
-            opennote_viewport_free(cam);
-            if (json) {
-                NSString *js = [NSString stringWithFormat:@"window.__opennoteCamera&&window.__opennoteCamera(%@)", json];
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    [gCameraWebView evaluateJavaScript:js completionHandler:nil];
-                });
+        // The display's best rate while the camera moves or holds fingers: a minimum close to the
+        // maximum (Apple's ProMotion recipe, 80-120), never the range down to half that 2.9.6
+        // asked for, which let iOS run this background display link at 60 (69-85 fps measured on
+        // the owner's iPad Pro M4 while the page ran at 120). Relaxed after half a second at rest.
+        BOOL busy = opennote_viewport_busy();
+        if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
+            float max = gCanvasMaxFps;
+            if (busy && !_fast) {
+                _fast = YES;
+                link.preferredFrameRateRange = CAFrameRateRangeMake(max > 60 ? MAX(60.0f, max * 2.0f / 3.0f) : max, max, max);
+            } else if (!busy && _fast) {
+                if (_idleSince == 0) _idleSince = link.timestamp;
+                if (link.timestamp - _idleSince > 0.5) {
+                    _fast = NO;
+                    _idleSince = 0;
+                    link.preferredFrameRateRange = CAFrameRateRangeMake(MIN(30.0f, max), max, max > 60 ? 60.0f : max);
+                }
             }
+            if (busy) _idleSince = 0;
+        }
+        // What the link really gives (its interval) and how far ahead of the frame it runs, for
+        // the gesture's crash-log entry; then the frame drawn for its presentation time.
+        opennote_viewport_link(link.duration, link.targetTimestamp - CACurrentMediaTime());
+        opennote_canvas_draw_at(link.targetTimestamp);
+        // The camera the canvas just advanced, for the page to mirror: one push in flight at a
+        // time (ONPushCamera), the page's next frame puts its text, selection and live ink there.
+        if (!atomic_exchange(&gCameraPushQueued, true)) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                atomic_store(&gCameraPushQueued, false);
+                ONPushCamera();
+            });
         }
     }
 }
@@ -1319,6 +1388,7 @@ static void ONStartCanvasThread(void) {
     static NSThread *thread;
     if (thread) return;
     NSInteger fps = ONMaxFramesPerSecond();
+    gCanvasMaxFps = (float)fps;
     // The display's best rate, whatever it is (60 on most iPads, 120 on ProMotion): asked for, never
     // assumed; the system may lower it (Low Power Mode, heat) down to half. Recorded with each
     // gesture beside the rate achieved.
@@ -1326,8 +1396,9 @@ static void ONStartCanvasThread(void) {
     thread = [[NSThread alloc] initWithBlock:^{
         CADisplayLink *link = [CADisplayLink displayLinkWithTarget:[ONCanvasTicker new] selector:@selector(tick:)];
         if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
+            // At rest until the camera moves (ONCanvasTicker raises it at once).
             float max = (float)fps;
-            link.preferredFrameRateRange = CAFrameRateRangeMake(MAX(30.0f, max / 2.0f), max, max);
+            link.preferredFrameRateRange = CAFrameRateRangeMake(MIN(30.0f, max), max, max > 60 ? 60.0f : max);
         } else {
             link.preferredFramesPerSecond = fps;
         }

@@ -125,11 +125,19 @@ messages and that the snapshot's last position matches the drawn page.
 Over the native canvas (opennote-rs, Settings > Diagnostics > Native canvas) none of this applies:
 two fingers move the Rust camera (`crates/viewport`, a port of useViewport.ts's gestures and
 viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (iOS `ONWindow
-sendEvent:`, Android `MainActivity.dispatchTouchEvent`) and drawn by the canvas's render thread at
-the display's best rate, in Low Power Mode too (no snapshot); the page mirrors the camera the shell
-pushes (`window.__opennoteCamera`) and sends its own views to it. A change to the page's gestures
-is made in both. `npm run bench:ui -- --native --only rustcamera`; each gesture's crash-log `pinch`
-entry says `gl: 'rust'`, with the frame rate achieved (`fps`) and the display's best (`hz`).
+sendEvent:`, Android `MainActivity.dispatchTouchEvent`: every sample with its own timestamp,
+coalesced / historical ones included) and advanced by the canvas's render thread to each display
+frame's presentation time, the fingers resampled 8 ms before it, at the display's best rate (the
+iOS display link asks 80-120 while the camera moves), in Low Power Mode too (no snapshot); the page
+mirrors the camera the shell pushes (`window.__opennoteCamera`, one at a time), reports the camera
+it put on its DOM (`viewportShown`) and sends its own views to it. The canvas draws the camera the
+DOM shows (ADR-008: text, formulas, the selection and the ink move as one), unless the DOM is more
+than six page frames behind. A change to the page's gestures is made in both. `npm run bench:ui --
+--native --only rustcamera`, `--native --only cameracoherence [--big N]`; each gesture's crash-log
+`pinch` entry says `gl: 'rust'`, with the frame rate achieved (`fps`), the display's best (`hz`),
+the link's interval (`linkMs`), how far the canvas trailed the newest camera (`trailP50`,
+`trailMax`) and the ticks it went on without the DOM (`alone`). A canvas that does not draw (no
+host, nothing presented, frames failing) hands the note back to the page (`canvas-fallback`).
 
 ## Conversion server access
 

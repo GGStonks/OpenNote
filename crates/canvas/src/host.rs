@@ -10,8 +10,10 @@
 //! outdated or late is skipped and drawn at the next tick, and a lost device is reported by
 //! `is_lost` for the owner to make the host again.
 
+use crate::frame::{clamp_rgba, drawable_tf};
 pub use crate::frame::{FrameSpec, PagePlacement};
 use crate::gpu::{device_descriptor, pc_device_backend};
+use crate::paper::Paper;
 use crate::{Frame, GpuCanvas, GpuScene, PageDraw, Scene};
 use model::Stroke;
 use std::collections::HashMap;
@@ -32,6 +34,8 @@ pub struct Stats {
     pub skipped_frames: u64,
     /// Placements left out because their transform could not be drawn.
     pub skipped_pages: u64,
+    /// Frames whose surface image was suboptimal.
+    pub suboptimal: u64,
 }
 
 enum Target {
@@ -49,6 +53,9 @@ pub struct CanvasHost {
     canvas: GpuCanvas,
     target: Target,
     backend: wgpu::Backend,
+    /// The adapter as the driver describes it: driver, its version, the downlevel flags, the
+    /// self-test's result (canvasStats, the crash report's `canvas-status`).
+    diag: String,
     scenes: HashMap<String, (GpuScene, usize)>,
     /// Drawn for a placement with paper but no scene (a sheet's paper, the ink placed apart).
     empty: GpuScene,
@@ -88,6 +95,29 @@ impl CanvasHost {
         .map_err(|e| format!("no adapter for {backends:?}: {e}"))?;
         let info = adapter.get_info();
         let name = format!("{} ({:?})", info.name, info.backend);
+        let downlevel = adapter.get_downlevel_capabilities();
+        let mut diag = format!(
+            "driver {} {}; shader model {:?}; downlevel {:?}",
+            info.driver, info.driver_info, downlevel.shader_model, downlevel.flags
+        );
+        // What the drawing needs and a GL or downlevel adapter may lack: the coverage target (R8,
+        // max blend) and the stencil of fills. Refused here, the page draws the note itself.
+        let cov = adapter.get_texture_format_features(crate::gpu::COV_FORMAT);
+        let st = adapter.get_texture_format_features(crate::gpu::STENCIL_FORMAT);
+        if !cov
+            .allowed_usages
+            .contains(wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING)
+            || !cov
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::BLENDABLE)
+            || !st
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            return Err(format!(
+                "{name}: no blendable R8 coverage or stencil target ({diag})"
+            ));
+        }
         let caps = surface.get_capabilities(&adapter);
         // 8-bit BGRA or RGBA as the page's canvas draws (blendable everywhere), else the first
         // linear format offered, else the first: never one the surface does not list.
@@ -132,7 +162,10 @@ impl CanvasHost {
             width: w.clamp(1, max),
             height: h.clamp(1, max),
             present_mode,
-            desired_maximum_frame_latency: 1,
+            // Three images (Metal's maximumDrawableCount = latency + 1): with two, the next
+            // drawable waits for the display to release the last one, and a 120 Hz iPad Pro drew
+            // at 60 (2.9.6: p50 16.6 ms against the page's 8).
+            desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
         };
@@ -144,6 +177,33 @@ impl CanvasHost {
             ));
         }
         let empty = canvas.upload(&Scene::default());
+        // GL and Android's Vulkan drivers: the pipeline proved before anything is shown (a capsule
+        // through the coverage pass and a sheet's paper, read back). One that draws nothing (a
+        // black page on a Mali GLES) is refused: the page draws the note itself.
+        if info.backend != wgpu::Backend::Metal {
+            let mut canvas = canvas;
+            let verdict = self_test(&mut canvas, &empty);
+            diag.push_str(&format!(
+                "; self-test {}",
+                verdict.as_deref().unwrap_or("ok")
+            ));
+            if let Some(why) = verdict {
+                return Err(format!("{name}: self-test failed: {why} ({diag})"));
+            }
+            return Self::finish_attach(canvas, surface, config, info.backend, empty, diag, name);
+        }
+        Self::finish_attach(canvas, surface, config, info.backend, empty, diag, name)
+    }
+
+    fn finish_attach(
+        canvas: GpuCanvas,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+        backend: wgpu::Backend,
+        empty: GpuScene,
+        diag: String,
+        name: String,
+    ) -> Result<(Self, String), String> {
         // Nothing is presented before the page's first frame: an empty frame cleared the surface
         // to see-through black, a black flash at every start (the view's launch colour shows meanwhile).
         let stats = Stats {
@@ -159,7 +219,8 @@ impl CanvasHost {
                     config,
                     reconfigure: false,
                 },
-                backend: info.backend,
+                backend,
+                diag,
                 scenes: HashMap::new(),
                 empty,
                 frame: FrameSpec::default(),
@@ -185,6 +246,7 @@ impl CanvasHost {
                 canvas,
                 target: Target::Offscreen { texture },
                 backend,
+                diag: String::new(),
                 scenes: HashMap::new(),
                 empty,
                 frame: FrameSpec::default(),
@@ -219,6 +281,11 @@ impl CanvasHost {
     /// The backend the host draws with (Metal, Vulkan, Gl).
     pub fn backend(&self) -> wgpu::Backend {
         self.backend
+    }
+
+    /// The driver, the downlevel flags and the self-test (see `attach`).
+    pub fn diag(&self) -> &str {
+        &self.diag
     }
 
     /// The surface's new size, kept within 1 and the device's largest texture.
@@ -286,6 +353,19 @@ impl CanvasHost {
         }
     }
 
+    /// Every placement on the page's surface placed from one transform (scale, corner, device px):
+    /// the camera's, on each tick (`FrameSpec::place`). In place.
+    pub fn place(&mut self, k: f64, x: f64, y: f64) {
+        if self.frame.place(k, x, y) {
+            self.dirty = true;
+        }
+    }
+
+    /// The frame as it will be drawn.
+    pub fn frame(&self) -> &FrameSpec {
+        &self.frame
+    }
+
     pub fn clear_scenes(&mut self) {
         if !self.scenes.is_empty() {
             self.scenes.clear();
@@ -342,27 +422,39 @@ impl CanvasHost {
         }
         let t0 = Instant::now();
         let errors_before = self.errors();
-        let (spec, skipped) = self.frame.drawable();
-        self.stats.skipped_pages += skipped as u64;
-        let pages: Vec<PageDraw> = spec
+        // The frame as drawn: placements that cannot be drawn left out, papers that cannot be
+        // drawn dropped, the desk colour clamped (FrameSpec::drawable, without copying the frame).
+        let mut skipped = 0u64;
+        let empty = &self.empty;
+        let pages: Vec<PageDraw> = self
+            .frame
             .pages
             .iter()
-            .filter_map(|p| match self.scenes.get(&p.page) {
-                Some((scene, _)) => Some(PageDraw {
-                    scene,
-                    tf: p.tf,
-                    paper: p.paper,
-                }),
-                // A sheet's paper is drawn even though its ink is a scene placed apart.
-                None => p.paper.map(|_| PageDraw {
-                    scene: &self.empty,
-                    tf: p.tf,
-                    paper: p.paper,
-                }),
+            .filter(|p| {
+                let ok = drawable_tf(&p.tf);
+                skipped += u64::from(!ok);
+                ok
+            })
+            .filter_map(|p| {
+                let paper = p.paper.filter(Paper::is_drawable);
+                match self.scenes.get(&p.page) {
+                    Some((scene, _)) => Some(PageDraw {
+                        scene,
+                        tf: p.tf,
+                        paper,
+                    }),
+                    // A sheet's paper is drawn even though its ink is a scene placed apart.
+                    None => paper.map(|_| PageDraw {
+                        scene: empty,
+                        tf: p.tf,
+                        paper,
+                    }),
+                }
             })
             .collect();
+        self.stats.skipped_pages += skipped;
         let frame = Frame {
-            clear: spec.clear,
+            clear: self.frame.clear.map(clamp_rgba),
             pages,
         };
         let drawn = match &mut self.target {
@@ -396,7 +488,13 @@ impl CanvasHost {
                 let view = st.texture.create_view(&Default::default());
                 let (tw, th) = (st.texture.width(), st.texture.height());
                 let drawn = self.canvas.draw_frame(&view, tw, th, &frame);
-                *reconfigure = st.suboptimal;
+                // Suboptimal (Android's pre-rotation, a size not told yet) is configured again
+                // once; a surface that stays suboptimal is drawn as it is: reconfiguring the
+                // swapchain on every frame of a gesture is what a Mali Vulkan driver crashed on.
+                if st.suboptimal {
+                    self.stats.suboptimal += 1;
+                }
+                *reconfigure = st.suboptimal && self.stats.suboptimal == 1;
                 // What was acquired is always presented: dropped unpresented, wgpu discards it,
                 // and a failed discard is one of the errors it never hands to the handler.
                 st.present();
@@ -490,5 +588,111 @@ impl CanvasHost {
         drop(data);
         buf.unmap();
         out
+    }
+}
+
+/// Draws a capsule through the coverage pass and a sheet's paper offscreen and reads them back:
+/// None when both came out, else what did not.
+fn self_test(canvas: &mut GpuCanvas, empty: &GpuScene) -> Option<String> {
+    use crate::scene::{CapInst, Op, PageBox, Transform};
+    let scene = Scene {
+        caps: vec![CapInst::new(
+            [8.0, 20.0, 6.0],
+            [56.0, 20.0, 6.0],
+            [0.0, 0.0, 0.0, 1.0],
+        )],
+        flat: Vec::new(),
+        ops: vec![Op::See {
+            first: 0,
+            count: 1,
+            col: [0.0, 0.0, 0.0, 1.0],
+            bx: PageBox {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 64.0,
+                y1: 40.0,
+            },
+        }],
+    };
+    let gs = canvas.upload(&scene);
+    let paper = Paper {
+        width: 64.0,
+        height: 24.0,
+        style: 0,
+        base: [1.0, 0.0, 0.0, 1.0],
+        dark: false,
+        pattern: None,
+        origin: [0.0, 0.0],
+    };
+    let frame = Frame {
+        clear: Some(renderer::color::Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        pages: vec![
+            PageDraw {
+                scene: empty,
+                tf: Transform::scale(1.0, 0.0, 40.0),
+                paper: Some(paper),
+            },
+            PageDraw {
+                scene: &gs,
+                tf: Transform::scale(1.0, 0.0, 0.0),
+                paper: None,
+            },
+        ],
+    };
+    let px = crate::gpu::render_frame_offscreen(canvas, 64, 64, &frame);
+    if px.len() < 64 * 64 * 4 {
+        return Some(format!(
+            "no pixels read back ({})",
+            canvas.health().last().unwrap_or_default()
+        ));
+    }
+    // BGRA or RGBA: the channels compared are symmetric (grey, red vs blue / green).
+    let at = |x: usize, y: usize| {
+        let i = (y * 64 + x) * 4;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    let ink = at(32, 20);
+    let desk = at(32, 4);
+    let sheet = at(32, 52);
+    let mut bad = Vec::new();
+    if ink.iter().any(|c| *c > 90) {
+        bad.push(format!("ink {ink:?}"));
+    }
+    if desk.iter().any(|c| *c < 200) {
+        bad.push(format!("clear {desk:?}"));
+    }
+    let (hi, lo) = (sheet.iter().max().copied(), sheet.iter().min().copied());
+    if !(hi > Some(200) && lo < Some(60) && sheet[1] < 60) {
+        bad.push(format!("paper {sheet:?}"));
+    }
+    (!bad.is_empty() || canvas.health().errors() > 0).then(|| {
+        format!(
+            "{} {}",
+            bad.join(", "),
+            canvas.health().last().unwrap_or_default()
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_self_test_passes_on_a_gpu_that_draws() {
+        for format in [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Bgra8Unorm,
+        ] {
+            let (device, queue, name, _) = pc_device_backend().expect("a GPU on the PC");
+            let mut canvas = GpuCanvas::new(device, queue, format);
+            let empty = canvas.upload(&Scene::default());
+            assert_eq!(self_test(&mut canvas, &empty), None, "{name} {format:?}");
+        }
     }
 }

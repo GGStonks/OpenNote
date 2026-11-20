@@ -4,7 +4,7 @@ import { GestureBus } from './gestures';
 import { setTilesPaused, tileWork } from './tileWork';
 import { crashLog, powerState } from '../services/crashLog';
 import { nativePinch } from './nativePinch';
-import { cameraFeed, onRustGesture, rustViewportCamera, rustViewportLayout, rustViewportSet, shellPushesCamera, type RustCamera, type RustViewportLayout } from '../services/rustCore';
+import { cameraFeed, onRustGesture, rustViewportCamera, rustViewportLayout, rustViewportSet, rustViewportShown, shellPushesCamera, type RustCamera, type RustViewportLayout } from '../services/rustCore';
 import { frameRate } from '../services/frameRate';
 import {
   FIT_MARGIN, MAX_ZOOM, MIN_ZOOM, MOMENTUM_MIN_SPEED, MOMENTUM_STOP_SPEED, PINCH_START, PULL_EDGE, PULL_RESISTANCE, PULL_THRESHOLD,
@@ -885,8 +885,10 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         dpr: window.devicePixelRatio || 1,
         frameMs: frameRate.frameMs,
         owned: true,
+        vv: [window.visualViewport?.offsetLeft ?? 0, window.visualViewport?.offsetTop ?? 0, window.visualViewport?.scale ?? 1],
+        legacy: localStorage.getItem('opennote_camera_v1') === '1',
       };
-      const key = JSON.stringify([layout.view, layout.content, layout.surface, layout.pull, layout.single, holes, layout.dpr, Math.round(layout.frameMs)]);
+      const key = JSON.stringify([layout.view, layout.content, layout.surface, layout.pull, layout.single, holes, layout.dpr, Math.round(layout.frameMs), layout.vv, layout.legacy]);
       if (key === layoutKey && info.sheets === lastSheets) return;
       layoutKey = key;
       lastSheets = info.sheets;
@@ -935,6 +937,9 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       if (placed !== c.placed && !c.gesture && placed >= 0) window.dispatchEvent(new Event(CONTENT_PLACED));
       placed = c.placed;
       for (const fn of tileWork.moved) fn();
+      // The canvas draws the camera the DOM shows (ADR-008): text, formulas and the selection
+      // move with the ink. One small call per page frame the camera changed.
+      rustViewportShown(c.seq);
     };
 
     const frame = () => {

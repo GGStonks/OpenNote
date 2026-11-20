@@ -75,3 +75,52 @@ lower it (Low Power Mode, heat). Motion uses elapsed time, never frame counts.
 Consequences: the page's DOM content (text, formulas, selection) follows the ink at the page's
 rate during a gesture, at most one page frame behind; it is measured, not hidden. Both shells use
 the same Rust gestures.
+
+## ADR-007: The TypeScript page's smoothness, held on notes of thousands of pages
+Status: accepted (2026-11-20)
+Context: on the owner's iPad Pro M4 the TypeScript page runs at 120 Hz (WebKit's cap lifted) and
+pinches at p50 8 / p95 10 ms; 2.9.6's Rust canvas ticked at 69-85 fps (p50 16.6 ms) with ink
+drifting from the page's text. The owner: "the objective is using Rust to have the same
+performance, but be able to also hold it under much heavier loads, for example 1000s of pages
+long notes".
+Decision: the bar is the TypeScript page's frame timing and feel on a small note, held unchanged
+on a note of thousands of pages. Rust owns the camera and the frame timing (a design led by the
+page's frames is ruled out: their cost grows with the note). Every per-frame cost is bounded by
+what is on screen, never by the note's length: the canvas culls to the pages in view, keeps GPU
+memory for pages near the view only (an LRU by bytes), and gets pages from the page lazily as
+they come near; the page keeps only the sheets near the view in its DOM and mirrors the camera at
+a cost independent of the note's size. Opening a note costs the pages in view, not all of them.
+Consequences: benches gain a note of 2,000+ pages (recorded handwriting repeated, text boxes and
+formulas on some pages): frame timing during pan / pinch / fling, memory and open time, with the
+canvas off and on, against the same numbers on a small note.
+
+## ADR-008: The canvas draws the camera the page's DOM shows; fingers by their own time
+Status: accepted (2026-11-20)
+Context: 2.9.6 on the owner's iPad Pro M4: ink slid against the page's text, formulas and
+selection while moving and met them again at rest, and the content left the fingers. The bench
+(`--native --only cameracoherence`, iPad sizes) found: the canvas drew the newest camera while the
+DOM showed the camera pushed one or two page frames earlier (40-70 device px apart on a pan,
+180-290 on a fling, p95); fingers were stamped when the main thread delivered them, so the camera
+juddered by a whole sample (second difference p95 20 device px on a constant-speed pan); the
+display link asked a 60-120 range and Metal had two drawables (the canvas ticked at 69-85 fps).
+Ink and paper were always one transform (0.00 px). The page's DOM cannot be moved natively on
+Android (one WebView) and text cannot be rasterised on iOS (WebKit taints a canvas that draws HTML
+through SVG), so the canvas cannot draw the DOM's content yet (C4).
+Decision: the shells hand every finger sample with its own timestamp (coalesced / historical
+included) on the clock the display link uses (`clock_ms`: CLOCK_UPTIME_RAW / CLOCK_MONOTONIC); the
+render thread advances the camera to each frame's presentation time, the fingers resampled 8 ms
+before it (interpolated, else extrapolated up to two sampling intervals, held when they stop).
+The page reports the camera it put on its DOM (`viewportShown`, its seq); the canvas places
+everything (papers and the scene, one f64 transform from the camera and the layout, never the
+page's last frame shifted) at that camera, from a history of the last 64 ticks. Rust keeps the
+frame timing (ADR-007): the canvas draws the camera as far back as the DOM trails it (measured
+each time the DOM shows a new camera, smoothed: it moves as evenly as the camera, not in the steps
+the reports arrive in); a DOM that stops reporting (a long page frame) is not waited for, the
+canvas goes on and the trail rises gradually when the DOM comes back (capped at six page frames). The iOS display link asks 80-120 Hz
+while the camera moves, Metal gets three drawables; pushes to the page are one at a time.
+Consequences: the ink trails the newest camera by the DOM's latency (the same as the TypeScript
+page's own gestures), and moves at the page's rate (120 on the owner's iPad; 60 where WebKit keeps
+its cap). When C4 draws text boxes, formulas and the selection, the canvas can draw the newest
+camera again. The ported pinch drops the movement not yet scrolled when it engages (as useViewport
+does): the content leaves the fingers by 1-3 px on long pinches; changing it changes the page's
+own gesture (the owner's call).

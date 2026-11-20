@@ -36,7 +36,7 @@ import {
   sheetIndexAt, sheetSlice, sheetStrokes, surfaceLayout, usePageClipboard,
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
-import { nativeCanvasFor, nativeViewportFor } from '../services/rustCore';
+import { nativeCanvasFor, nativeViewportFor, useCanvasFallback } from '../services/rustCore';
 import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
 import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
@@ -190,6 +190,8 @@ class PrintUnusable extends Error {}
 const printPageName = (w: number, h: number) => `on-${Math.round(w * 100)}x${Math.round(h * 100)}`;
 
 export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onSaved, onBack, onOpenSettings }) => {
+  // The page takes its drawing back when the native canvas does not draw (rustCore fallBackFromNativeCanvas).
+  useCanvasFallback();
   const gestures = useMemo(() => new GestureBus(), []);
   const editor = useNoteEditor(note, onSaved, () => gestures.inking);
   const { doc } = editor;

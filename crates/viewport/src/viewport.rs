@@ -48,6 +48,13 @@ pub struct Layout {
     pub frame_ms: f64,
     /// Rust owns this note's camera (the native canvas draws it and the shell hands it fingers).
     pub owned: bool,
+    /// The visual viewport (`window.visualViewport`): offsetLeft, offsetTop, scale. The shells'
+    /// points are the web view's own; the page's are its client px: client = web / scale + offset
+    /// (iOS scrolls the web view under the keyboard: the two then part).
+    pub vv: [f64; 3],
+    /// The bench's "before" (`--only cameracoherence`): 2.9.6's camera, fingers stamped as they
+    /// arrive and the newest camera drawn whatever the page's DOM shows.
+    pub legacy: bool,
 }
 
 impl Default for Layout {
@@ -63,6 +70,8 @@ impl Default for Layout {
             dpr: 1.0,
             frame_ms: 1000.0 / 60.0,
             owned: false,
+            vv: [0.0, 0.0, 1.0],
+            legacy: false,
         }
     }
 }
@@ -75,6 +84,39 @@ impl Layout {
             content_w: self.content[0].max(1e-9),
             content_h: self.content[1],
         }
+    }
+
+    /// The visual viewport's scale, never 0.
+    fn vv_scale(&self) -> f64 {
+        if self.vv[2].is_finite() && self.vv[2] > 0.0 {
+            self.vv[2]
+        } else {
+            1.0
+        }
+    }
+
+    /// A shell's web view point (its own points) in the page's client px.
+    pub fn client_of_web(&self, x: f64, y: f64) -> (f64, f64) {
+        let s = self.vv_scale();
+        (x / s + self.vv[0], y / s + self.vv[1])
+    }
+
+    /// A page client point in the shell's web view points.
+    pub fn web_of_client(&self, x: f64, y: f64) -> (f64, f64) {
+        let s = self.vv_scale();
+        ((x - self.vv[0]) * s, (y - self.vv[1]) * s)
+    }
+
+    /// Where the page's surface is drawn (device px of the shell's view, which covers the web
+    /// view from its origin: scale, left, top) for the content's corner at (x, y) view px and
+    /// scale `ez`: the one transform of everything the canvas draws. f64 throughout.
+    pub fn surface_at(&self, x: f64, y: f64, ez: f64) -> (f64, f64, f64) {
+        let s = self.vv_scale();
+        let (wx, wy) = self.web_of_client(
+            self.view[0] + x + self.surface[0] * ez,
+            self.view[1] + y + self.surface[1] * ez,
+        );
+        (ez * s * self.dpr, wx * self.dpr, wy * self.dpr)
     }
 
     /// A web view point (CSS px) the camera's fingers may start on.
@@ -240,6 +282,9 @@ pub struct Viewport {
     pub events: u64,
     /// The last pinch: its zoom at the start and at the end.
     pub last_pinch: Option<(f64, f64)>,
+    /// The fingers' places being fed are resampled ones (between real samples): a pinch engages
+    /// and rebases only on a real sample, where the page's own gesture does.
+    pub resampled: bool,
 }
 
 impl Default for Viewport {
@@ -284,6 +329,7 @@ impl Viewport {
             rebases: 0,
             events: 0,
             last_pinch: None,
+            resampled: false,
         };
         v.recompute();
         v
@@ -554,6 +600,14 @@ impl Viewport {
         self.pointers.len()
     }
 
+    /// The point between the fingers the camera holds (view px), when any.
+    pub fn finger_centroid(&self) -> Option<(f64, f64)> {
+        (!self.pointers.is_empty()).then(|| {
+            let c = self.centroid();
+            (c.x, c.y)
+        })
+    }
+
     fn down(&mut self, id: i64, p: P, now: f64) {
         if self.pointers.iter().any(|(i, _)| *i == id) {
             self.moved(id, p, now);
@@ -630,7 +684,7 @@ impl Viewport {
             let spread = self.spread();
             let mut pz = self.pinch.expect("pinch");
             let s = spread / pz.d0;
-            if !pz.engaged && (s - 1.0).abs() > PINCH_START {
+            if !pz.engaged && !self.resampled && (s - 1.0).abs() > PINCH_START {
                 // The pinch starts here, about the point between the fingers; movement not
                 // scrolled yet is dropped.
                 self.pending = P::default();
@@ -658,7 +712,9 @@ impl Viewport {
                 pz.k = z / pz.z0;
                 pz.c = c;
                 self.pinch = Some(pz);
-                if should_rebase(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r)) {
+                if !self.resampled
+                    && should_rebase(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r))
+                {
                     self.rebase(now);
                 }
                 self.last = Some((c, now));
@@ -968,14 +1024,7 @@ impl Viewport {
 
     /// The page's surface (CanvasPage's box) in device px: (scale, x, y) of its corner.
     pub fn surface_device(&self) -> (f64, f64, f64) {
-        let l = &self.layout;
-        let c = &self.cam;
-        let k = c.ez * l.dpr;
-        (
-            k,
-            (l.view[0] + c.x + l.surface[0] * c.ez) * l.dpr,
-            (l.view[1] + c.y + l.surface[1] * c.ez) * l.dpr,
-        )
+        self.layout.surface_at(self.cam.x, self.cam.y, self.cam.ez)
     }
 
     /// The page in view (Editor `currentPage`: the one at a third of the screen's height).

@@ -24,6 +24,7 @@ fn layout(pages: usize) -> Layout {
         dpr: 2.0,
         frame_ms: 1000.0 / 60.0,
         owned: true,
+        ..Layout::default()
     }
 }
 

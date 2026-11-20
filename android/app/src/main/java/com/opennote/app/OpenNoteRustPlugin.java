@@ -95,8 +95,14 @@ public class OpenNoteRustPlugin extends Plugin {
     static native boolean viewportTouch(long id, int phase, double x, double y);
     /** The display's best refresh rate, recorded with each gesture. */
     static native void viewportDisplayHz(double hz);
-    /** The camera for the page when it moved and a page frame has passed since the last push, else null. */
+    /** The camera for the page when it moved since the last push, else null. */
     static native String viewportPoll();
+    /** The fingers of one event, n x [id, phase, x, y, t] (WebView CSS px, t s of CLOCK_MONOTONIC). */
+    static native int viewportTouches(double[] samples, int n);
+    /** Whether the camera moves or holds fingers. */
+    static native boolean viewportBusy();
+    /** Draws the frame presented at `presentMs` (CLOCK_MONOTONIC ms); render thread only. */
+    static native boolean canvasDrawAt(double presentMs);
 
     /** The WebView the camera is pushed to. */
     private static volatile java.lang.ref.WeakReference<WebView> cameraWebView = new java.lang.ref.WeakReference<>(null);
@@ -115,31 +121,81 @@ public class OpenNoteRustPlugin extends Plugin {
         float density = webView.getResources().getDisplayMetrics().density;
         int action = ev.getActionMasked();
         int index = ev.getActionIndex();
+        // Every finger of the event at once, each sample with its own time (getEventTime, the
+        // clock Choreographer's frames are on) and the historical ones batched into the event:
+        // the camera is resampled at each display frame's time (crates/native viewport_service.rs).
+        double[] buf = touchBuf;
+        int n = 0;
         switch (action) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN:
                 if (ev.getToolType(index) != MotionEvent.TOOL_TYPE_FINGER || OpenNoteInkPlugin.stylusDown()) return;
-                viewportTouch(ev.getPointerId(index), 0, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density);
+                n = put(buf, n, ev.getPointerId(index), 0, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density, ev.getEventTime());
                 break;
             case MotionEvent.ACTION_MOVE:
+                for (int h = 0; h < ev.getHistorySize(); h++) {
+                    for (int i = 0; i < ev.getPointerCount(); i++) {
+                        if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) continue;
+                        n = put(buf, n, ev.getPointerId(i), 1, (ev.getHistoricalX(i, h) - loc[0]) / density, (ev.getHistoricalY(i, h) - loc[1]) / density, ev.getHistoricalEventTime(h));
+                    }
+                }
                 for (int i = 0; i < ev.getPointerCount(); i++) {
                     if (ev.getToolType(i) != MotionEvent.TOOL_TYPE_FINGER) continue;
-                    viewportTouch(ev.getPointerId(i), 1, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density);
+                    n = put(buf, n, ev.getPointerId(i), 1, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density, ev.getEventTime());
                 }
                 break;
             case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_POINTER_UP:
                 if (ev.getToolType(index) != MotionEvent.TOOL_TYPE_FINGER) return;
-                viewportTouch(ev.getPointerId(index), 2, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density);
+                n = put(buf, n, ev.getPointerId(index), 2, (ev.getX(index) - loc[0]) / density, (ev.getY(index) - loc[1]) / density, ev.getEventTime());
                 break;
             case MotionEvent.ACTION_CANCEL:
                 for (int i = 0; i < ev.getPointerCount(); i++) {
-                    viewportTouch(ev.getPointerId(i), 3, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density);
+                    n = put(buf, n, ev.getPointerId(i), 3, (ev.getX(i) - loc[0]) / density, (ev.getY(i) - loc[1]) / density, ev.getEventTime());
                 }
                 break;
             default:
                 break;
         }
+        if (n > 0) viewportTouches(buf, n);
+    }
+
+    /** Up to 64 samples of one event (UI thread only). */
+    private static final double[] touchBuf = new double[5 * 64];
+
+    private static int put(double[] buf, int n, int id, int phase, double x, double y, long timeMs) {
+        if (n >= 64) return n;
+        buf[5 * n] = id;
+        buf[5 * n + 1] = phase;
+        buf[5 * n + 2] = x;
+        buf[5 * n + 3] = y;
+        buf[5 * n + 4] = timeMs / 1000.0;
+        return n + 1;
+    }
+
+    // The camera to the page, one evaluation at a time (UI thread): a push asked for while the
+    // last is still running in the page is sent, with the newest camera, once that one has run.
+    private static boolean cameraInFlight = false;
+    private static boolean cameraAgain = false;
+    private static final java.util.concurrent.atomic.AtomicBoolean cameraPushQueued = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static void pushCamera() {
+        if (cameraInFlight) {
+            cameraAgain = true;
+            return;
+        }
+        WebView web = cameraWebView.get();
+        if (web == null) return;
+        String cam = viewportPoll();
+        if (cam == null) return;
+        cameraInFlight = true;
+        web.evaluateJavascript("window.__opennoteCamera&&window.__opennoteCamera(" + cam + ")", r -> {
+            cameraInFlight = false;
+            if (cameraAgain) {
+                cameraAgain = false;
+                pushCamera();
+            }
+        });
     }
 
     /** The display's best refresh rate (MainActivity, from the display's modes). */
@@ -174,18 +230,24 @@ public class OpenNoteRustPlugin extends Plugin {
         @Override
         public void doFrame(long frameTimeNanos) {
             if (!frameCallbackActive) return;
-            canvasDrawActive();
-            String cam = viewportPoll();
-            if (cam != null) {
-                String js = "window.__opennoteCamera&&window.__opennoteCamera(" + cam + ")";
+            // The frame is presented about a vsync after Choreographer's frame time: the camera is
+            // advanced to that moment (System.nanoTime and getEventTime are both CLOCK_MONOTONIC).
+            double t = frameTimeNanos / 1e6;
+            double d = t - lastFrameMs;
+            if (d > 3 && d < 40) periodMs += (d - periodMs) * 0.1;
+            lastFrameMs = t;
+            canvasDrawAt(t + periodMs);
+            if (cameraPushQueued.compareAndSet(false, true)) {
                 uiThread.post(() -> {
-                    WebView web = cameraWebView.get();
-                    if (web != null) web.evaluateJavascript(js, null);
+                    cameraPushQueued.set(false);
+                    pushCamera();
                 });
             }
             Choreographer.getInstance().postFrameCallback(this);
         }
     };
+    private static double lastFrameMs = 0;
+    private static double periodMs = 1000.0 / 60.0;
 
     static final String PREFS = "opennote_native_canvas";
 

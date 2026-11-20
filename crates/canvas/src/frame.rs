@@ -76,6 +76,9 @@ pub struct PagePlacement {
     pub page: String,
     pub tf: Transform,
     pub paper: Option<Paper>,
+    /// Where it sits on the page's surface (surface px), when the frame says where the surface is:
+    /// then its transform follows the surface's (`FrameSpec::place`).
+    pub at: Option<[f64; 2]>,
 }
 
 /// The page's frame as sent (`canvasFrame`).
@@ -83,6 +86,10 @@ pub struct PagePlacement {
 pub struct FrameSpec {
     pub clear: Option<Rgba>,
     pub pages: Vec<PagePlacement>,
+    /// Where the page's surface was drawn (device px: scale, left, top), f64, as the page sent it.
+    pub surface: Option<[f64; 3]>,
+    /// Where `place` last put it.
+    pub placed: Option<[f64; 3]>,
 }
 
 impl FrameSpec {
@@ -102,22 +109,70 @@ impl FrameSpec {
                 page: p.page.clone(),
                 tf: p.tf,
                 paper: p.paper.filter(Paper::is_drawable),
+                at: p.at,
             })
             .collect();
         (
             FrameSpec {
                 clear: self.clear.map(clamp_rgba),
                 pages,
+                surface: self.surface,
+                placed: self.placed,
             },
             skipped,
         )
     }
 
+    /// Every placement that sits on the surface (`at`) placed from one surface transform: scale
+    /// `k`, the surface's corner (`x`, `y`), device px. Computed in f64 down to each transform's
+    /// own numbers, so the paper of every sheet and the ink keep exactly their places on the
+    /// surface whatever the camera (one transform for all, ADR-008). In place: nothing is made.
+    /// True when anything changed.
+    pub fn place(&mut self, k: f64, x: f64, y: f64) -> bool {
+        if !(k.is_finite() && x.is_finite() && y.is_finite() && k > 0.0) {
+            return false;
+        }
+        let mut changed = self.placed != Some([k, x, y]);
+        self.placed = Some([k, x, y]);
+        for p in &mut self.pages {
+            let Some([ax, ay]) = p.at else { continue };
+            let tf = Transform {
+                a: k as f32,
+                b: 0.0,
+                c: 0.0,
+                d: k as f32,
+                ox: (x + ax * k) as f32,
+                oy: (y + ay * k) as f32,
+            };
+            if tf != p.tf {
+                p.tf = tf;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The largest gap (device px) between a placement with paper and where the surface's
+    /// transform puts its `at` (the ink's frame of reference): 0 when they are one transform.
+    pub fn paper_gap(&self) -> f64 {
+        let Some([k, x, y]) = self.placed.or(self.surface) else {
+            return 0.0;
+        };
+        self.pages
+            .iter()
+            .filter(|p| p.paper.is_some())
+            .filter_map(|p| p.at.map(|a| (p.tf, a)))
+            .map(|(tf, [ax, ay])| {
+                (tf.ox as f64 - (x + ax * k))
+                    .abs()
+                    .max((tf.oy as f64 - (y + ay * k)).abs())
+                    .max((tf.a as f64 - k).abs() * 1000.0)
+            })
+            .fold(0.0, f64::max)
+    }
+
     /// The frame moved on screen: every placement followed by `p -> s p + (dx, dy)` (device px).
-    /// The native canvas places the page's last frame at the camera Rust owns (crates/viewport,
-    /// rust/DECISIONS.md ADR-006): `s` is the camera's scale over the one the page drew at, the
-    /// offset where the page's surface now is. Computed in f64 (a placement millions of device px
-    /// down a long note keeps its sub-pixel place).
+    /// 2.9.6 placed the page's last frame at the Rust camera this way (ADR-006); kept for tests.
     pub fn moved(&self, s: f64, dx: f64, dy: f64) -> FrameSpec {
         let m = |v: f32| (v as f64 * s) as f32;
         FrameSpec {
@@ -136,8 +191,13 @@ impl FrameSpec {
                         oy: (p.tf.oy as f64 * s + dy) as f32,
                     },
                     paper: p.paper,
+                    at: p.at,
                 })
                 .collect(),
+            surface: self
+                .surface
+                .map(|[k, x, y]| [k * s, x * s + dx, y * s + dy]),
+            placed: self.placed.map(|[k, x, y]| [k * s, x * s + dx, y * s + dy]),
         }
     }
 
@@ -161,16 +221,25 @@ impl FrameSpec {
         #[derive(Deserialize)]
         struct JsonPlacement {
             page: String,
-            tf: [Option<f32>; 6],
+            tf: [Option<f64>; 6],
             paper: Option<JsonPaper>,
+            #[serde(default)]
+            at: Option<[f64; 2]>,
         }
         #[derive(Deserialize)]
         struct JsonFrame {
             clear: Option<[Option<f32>; 4]>,
             pages: Vec<JsonPlacement>,
+            #[serde(default)]
+            surface: Option<[Option<f64>; 3]>,
         }
         let n = |v: Option<f32>| v.unwrap_or(f32::NAN);
+        let n64 = |v: Option<f64>| v.unwrap_or(f64::NAN);
         let jf = serde_json::from_str::<JsonFrame>(json).ok()?;
+        let surface = jf
+            .surface
+            .map(|s| s.map(n64))
+            .filter(|s| s.iter().all(|v| v.is_finite()) && s[0] > 0.0);
         let clear = jf.clear.map(|c| Rgba {
             r: n(c[0]),
             g: n(c[1]),
@@ -180,28 +249,57 @@ impl FrameSpec {
         let pages = jf
             .pages
             .into_iter()
-            .map(|jp| PagePlacement {
-                page: jp.page,
-                tf: Transform {
-                    a: n(jp.tf[0]),
-                    b: n(jp.tf[1]),
-                    c: n(jp.tf[2]),
-                    d: n(jp.tf[3]),
-                    ox: n(jp.tf[4]),
-                    oy: n(jp.tf[5]),
-                },
-                paper: jp.paper.map(|p| Paper {
-                    width: n(p.width),
-                    height: n(p.height),
-                    style: p.style,
-                    base: p.base.map(n),
-                    dark: p.dark,
-                    pattern: p.pattern.map(|c| c.map(n)),
-                    origin: p.origin.map(|v| v.unwrap_or(0.0)),
-                }),
+            .map(|jp| {
+                let tf = jp.tf.map(n64);
+                // A placement on the surface: given, else read from its transform (a translation
+                // of the surface's at its scale).
+                let at = jp
+                    .at
+                    .filter(|a| a.iter().all(|v| v.is_finite()))
+                    .or_else(|| {
+                        surface.and_then(|[k, x, y]| {
+                            let on = (tf[0] - k).abs() <= 1e-9 * k
+                                && (tf[3] - k).abs() <= 1e-9 * k
+                                && tf[1] == 0.0
+                                && tf[2] == 0.0;
+                            let a = [(tf[4] - x) / k, (tf[5] - y) / k];
+                            (on && a.iter().all(|v| v.is_finite())).then_some(a)
+                        })
+                    });
+                PagePlacement {
+                    page: jp.page,
+                    tf: Transform {
+                        a: tf[0] as f32,
+                        b: tf[1] as f32,
+                        c: tf[2] as f32,
+                        d: tf[3] as f32,
+                        ox: tf[4] as f32,
+                        oy: tf[5] as f32,
+                    },
+                    paper: jp.paper.map(|p| Paper {
+                        width: n(p.width),
+                        height: n(p.height),
+                        style: p.style,
+                        base: p.base.map(n),
+                        dark: p.dark,
+                        pattern: p.pattern.map(|c| c.map(n)),
+                        origin: p.origin.map(|v| v.unwrap_or(0.0)),
+                    }),
+                    at,
+                }
             })
             .collect();
-        Some(FrameSpec { clear, pages })
+        let mut f = FrameSpec {
+            clear,
+            pages,
+            surface,
+            placed: None,
+        };
+        // Each placement's numbers from the surface's, in f64 (the page's own, rounded the same).
+        if let Some([k, x, y]) = surface {
+            f.place(k, x, y);
+        }
+        Some(f)
     }
 }
 
@@ -245,6 +343,18 @@ mod tests {
                 assert!((qy as f64 - (py as f64 * s + dy)).abs() < 1e-3);
             }
         }
+    }
+
+    #[test]
+    fn placed_from_the_surface_the_papers_and_the_ink_are_one_transform() {
+        let mut f = FrameSpec::parse(r#"{"clear":null,"surface":[2,16,140],"pages":[{"page":"","tf":[2,0,0,2,16,140],"paper":{"width":816,"height":1056,"style":1,"base":[1,1,1,1],"origin":[0,0]}},{"page":"","tf":[2,0,0,2,16,2268],"paper":{"width":816,"height":1056,"style":1,"base":[1,1,1,1],"origin":[0,1064]}},{"page":"s","tf":[2,0,0,2,16,140],"paper":null}]}"#).unwrap();
+        assert_eq!(f.pages[1].at, Some([0.0, 1064.0]));
+        assert_eq!(f.pages[2].at, Some([0.0, 0.0]));
+        // Far down a long note, zoomed in: still exactly on the surface's transform.
+        assert!(f.place(9.5, -3.25, -2_345_678.125));
+        assert!(f.paper_gap() < 0.13, "{}", f.paper_gap());
+        assert!(!f.place(9.5, -3.25, -2_345_678.125), "nothing new");
+        assert_eq!(f.pages[1].tf.oy, (-2_345_678.125f64 + 1064.0 * 9.5) as f32);
     }
 
     #[test]

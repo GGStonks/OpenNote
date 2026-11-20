@@ -129,9 +129,9 @@ page's own frame messages through the bridge.
   reproduces; there is no rubber band but the pull. crates/native `viewport_service.rs` owns it
   beside the scenes: the shells hand it every finger that starts over the note (iOS `ONWindow
   sendEvent:`, Android `MainActivity.dispatchTouchEvent`, before the web view, which still gets
-  them); the render thread advances it each display frame and places the page's last frame at
-  its camera (the frame carries where the page's surface was, `surface`; `FrameSpec::moved`), so
-  ink follows the fingers at the display's best rate with no page round trip; after each tick the
+  them); the render thread advances it to each display frame's presentation time and places
+  everything at the camera the page's DOM shows (since ADR-008; 2.9.6 placed the page's last frame
+  at the newest camera, `FrameSpec::moved`, and the ink ran ahead of the page's text); after each tick the
   shell pushes the camera to the page (`window.__opennoteCamera`, at most once per page frame),
   whose `useViewport` mirrors it on its own frames (committed zoom and scroll, the rest as one
   measured transform on the content) and sends its layout and its own views (`viewportLayout`,
@@ -222,6 +222,40 @@ page's own frame messages through the bridge.
   --module viewport`). The display's rate is asked for, never assumed: iOS the display link's
   `preferredFrameRateRange` up to `maximumFramesPerSecond`, Android the display mode of the same
   size with the highest rate and `Surface.setFrameRate`; momentum and animations use elapsed time.
+- One piece (ADR-008): the page and the canvas move as one. The canvas draws the camera the page's
+  DOM shows: the page reports the camera it put on its DOM (`viewportShown`, its seq, each page
+  frame it changed), and the render thread draws the camera as far back as the DOM trails it
+  (measured each time the DOM shows a new camera, smoothed, from a history of its last 64 ticks):
+  as evenly as the camera moves, never in the steps the reports arrive in. A DOM that stops
+  reporting (a page stalled by a long frame) is not waited for: the canvas goes on, and the trail
+  (at most six page frames) rises gradually when it comes back; never a jump. One transform: every placement of the page's frame (each sheet's
+  paper, the scene) carries its place on the surface (`at`, surface px), and `FrameSpec::place` puts
+  them all at the surface's transform, computed in f64 from the camera and the layout
+  (`Layout::surface_at`: the scroll view's corner, the surface's, dpr, the visual viewport), never
+  from the page's last frame shifted by a delta; the page's frame says what is drawn, and where only
+  while Rust does not own the camera. While Rust owns it the page sends a frame only when what is
+  drawn changes (not per page frame for the note's length, ADR-007). Fingers: every sample with its
+  own time on the clock the display link uses (`clock_ms`), coalesced / historical samples included;
+  the render thread advances the camera to each frame's presentation time (iOS
+  `targetTimestamp`, Android the frame time plus a vsync), the fingers resampled `RESAMPLE_MS`
+  (8 ms) before it. Touch points are the web view's own and become the page's client px through the
+  visual viewport (`Layout::vv`). `bench:ui --native --only cameracoherence [--big N]` measures, per
+  tick, ink against paper, the DOM against the canvas, the page point under the fingers and the
+  drawn camera's second difference, 2.9.6's camera ("before", localStorage `opennote_camera_v1`)
+  against this one, on iPad sizes. The text boxes, formulas and selection drawn by the canvas (C4)
+  will let it draw the newest camera again.
+- Never a black page: the page checks `canvasStats` once a second while a note is drawn natively
+  (CanvasPage); no host, nothing presented 3 s after its first frame, frames failing or errors
+  without frames, a lost device or a silent bridge make it take the note back for the rest of the
+  run (rustCore `fallBackFromNativeCanvas`, crash log `canvas-fallback`): it draws its ink and
+  paper, the desk is opaque over the canvas, the camera is its own (`bench:ui --only
+  canvasfallback`: no host, nothing presented, frames failing). A host proves its pipeline
+  before it shows anything on GL and Android Vulkan (`self_test`: a capsule through the coverage
+  pass and a sheet's paper, read back) and records the driver, the downlevel flags and the
+  self-test (`canvasStats.diag`, `firstError`); an adapter without a blendable R8 coverage target
+  or a stencil is refused. A surface that stays suboptimal (Android pre-rotation) is configured
+  again once, never on every frame of a gesture; the uniform buffer starts with room for 1,024
+  runs (no buffer made in a gesture).
 - Over the native canvas the page draws no ink of its own, also while pinching (no WebGL pinch ink:
   usePinchInk is off) and in Low Power Mode (no shell snapshot pinch: it covered the canvas).
 - The canvas is drawn on a thread of its own in both shells (iOS `ONStartCanvasThread`, a display

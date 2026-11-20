@@ -43,6 +43,8 @@ fn paper_is_drawn_for_a_sheet_without_a_scene() {
         origin: [0.0, 0.0],
     };
     host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(Rgba::WHITE),
         pages: vec![
             // A sheet: paper only, its ink is the scene placed below.
@@ -50,11 +52,13 @@ fn paper_is_drawn_for_a_sheet_without_a_scene() {
                 page: String::new(),
                 tf: Transform::scale(1.0, 0.0, 0.0),
                 paper: Some(paper),
+                at: None,
             },
             PagePlacement {
                 page: "ink".into(),
                 tf: Transform::scale(1.0, 0.0, 0.0),
                 paper: None,
+                at: None,
             },
         ],
     });
@@ -72,11 +76,14 @@ fn the_pages_frame_always_places_the_canvas() {
     // the shells' own pinch transform instead while their recognisers ran).
     let (mut host, _) = CanvasHost::offscreen(400, 400).expect("GPU host");
     let at = |k: f32, ox: f32, oy: f32| FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(Rgba::WHITE),
         pages: vec![PagePlacement {
             page: "p1".into(),
             tf: Transform::scale(k, ox, oy),
             paper: None,
+            at: None,
         }],
     };
     host.set_frame(at(1.0, 10.0, 20.0));
@@ -110,29 +117,36 @@ fn placements_that_cannot_be_drawn_are_left_out() {
             page: "ink".into(),
             tf: Transform::scale(k, 0.0, 0.0),
             paper: paper(100.0),
+            at: None,
         })
         .collect();
     pages.push(PagePlacement {
         page: String::new(),
         tf: Transform::scale(1.0, f32::NAN, 0.0),
         paper: paper(100.0),
+        at: None,
     });
     pages.push(PagePlacement {
         page: String::new(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: paper(f32::NAN),
+        at: None,
     });
     pages.push(PagePlacement {
         page: String::new(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: paper(-5.0),
+        at: None,
     });
     pages.push(PagePlacement {
         page: "ink".into(),
         tf: Transform::scale(1.0, 0.0, 0.0),
         paper: None,
+        at: None,
     });
     host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(Rgba {
             r: f32::NAN,
             g: 2.0,
@@ -156,11 +170,14 @@ fn placements_that_cannot_be_drawn_are_left_out() {
         (3.0, 1e6, -1e6),
     ] {
         host.set_frame(FrameSpec {
+            surface: None,
+            placed: None,
             clear: Some(Rgba::WHITE),
             pages: vec![PagePlacement {
                 page: "ink".into(),
                 tf: Transform::scale(k, ox, oy),
                 paper: paper(100.0),
+                at: None,
             }],
         });
         assert!(host.draw().unwrap());
@@ -177,6 +194,8 @@ fn sizes_stay_within_the_device() {
     let s = host.stats();
     assert!(s.width >= 1 && s.width <= 1 << 15 && s.height == 1, "{s:?}");
     host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
         clear: Some(Rgba::WHITE),
         pages: vec![],
     });

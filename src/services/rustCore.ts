@@ -10,6 +10,7 @@
  * strokeGeometry computes (crates/ink/tests/reference.rs, to 1e-4 px), off the page's main thread.
  * The live line while writing stays TypeScript.
  */
+import { useEffect, useState } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { NoteDocument, Stroke } from '../types';
 import { bytesToBase64, fromBase64, hasNativeCanvas, hasNativeViewport, platformKind } from '../platform';
@@ -479,10 +480,64 @@ export async function rustGetCanvasStats(): Promise<Record<string, unknown> | nu
  * Made separately, a note with a picture got a see-through desk over a canvas nobody drew: black.
  */
 export function nativeCanvasFor(note?: Pick<NoteDocument, 'sheets' | 'pages'> | null): boolean {
-  if (!note || !hasNativeCanvas()) return false;
+  if (!note || !hasNativeCanvas() || canvasFallback) return false;
   const sheets = note.sheets ?? [];
   const pages = note.pages ?? [];
   return !sheets.some((s) => s?.pdf) && !pages.some((p) => (p?.imageBlocks ?? []).length > 0);
+}
+
+/**
+ * Never a black page: when the canvas is not actually drawing (no host, nothing presented after
+ * the page's first frame, frames failing or errors growing, the bridge silent), the page takes its
+ * drawing back for the rest of the run: `nativeCanvasFor` is false from then on, so the page draws
+ * its ink and paper, the desk is opaque again over the canvas, and the camera is the page's own
+ * (useViewport hands it back to the page). Logged as `canvas-fallback` with the canvas's status.
+ * The 2.9.5 rule (a crashed run starts the next on GLES) can therefore never leave a black page
+ * either: a GLES that draws nothing ends here too. CanvasPage checks `canvasStats` once a second.
+ */
+let canvasFallback: string | null = null;
+export const CANVAS_FALLBACK = 'opennote:canvasFallback';
+export function canvasFellBack(): string | null {
+  return canvasFallback;
+}
+export function fallBackFromNativeCanvas(why: string, status: unknown): void {
+  if (canvasFallback) return;
+  canvasFallback = why;
+  crashLog.event('canvas-fallback', { why, status });
+  window.dispatchEvent(new Event(CANVAS_FALLBACK));
+}
+
+/** Re-renders its component when the page takes its drawing back from the canvas. */
+export function useCanvasFallback(): string | null {
+  const [why, setWhy] = useState(canvasFallback);
+  useEffect(() => {
+    const on = () => setWhy(canvasFallback);
+    window.addEventListener(CANVAS_FALLBACK, on);
+    return () => window.removeEventListener(CANVAS_FALLBACK, on);
+  }, []);
+  return why;
+}
+
+/**
+ * Whether the canvas is drawing, from successive `canvasStats` (CanvasPage): why not, else null.
+ * `since` is when the page sent its first frame and scene (ms, performance.now()).
+ */
+export function canvasHealth(prev: Record<string, unknown> | null, st: Record<string, unknown> | null, since: number, now: number): string | null {
+  if (!st) return 'the bridge does not answer';
+  const n = (k: string, o: Record<string, unknown> | null = st) => (typeof o?.[k] === 'number' ? (o[k] as number) : 0);
+  const waited = now - since;
+  if (!st.attached && waited > 1500) return `no canvas host (${String(st.firstError ?? st.error ?? 'none')})`;
+  if (n('frames') === 0 && st.attached && waited > 3000) return 'nothing presented';
+  if (prev) {
+    const failed = n('failedFrames') - n('failedFrames', prev);
+    const errors = n('errors') - n('errors', prev);
+    const frames = n('frames') - n('frames', prev);
+    const lost = n('lost') - n('lost', prev);
+    if (lost > 0 && !st.attached) return 'device lost';
+    if (failed >= 3 && failed >= frames) return `${failed} frames failed`;
+    if (errors >= 3 && frames === 0) return `${errors} errors, no frame`;
+  }
+  return null;
 }
 
 /** The theme's desk colour (index.css --ui-desk: "r g b"), 0..1, for the native canvas. */
@@ -571,6 +626,10 @@ export interface RustViewportLayout {
   dpr: number;
   frameMs: number;
   owned: boolean;
+  /** window.visualViewport: offsetLeft, offsetTop, scale (the shells' points are the web view's). */
+  vv: [number, number, number];
+  /** The bench's "before" (`--only cameracoherence`): 2.9.6's camera. */
+  legacy?: boolean;
 }
 
 export type RustViewportOp =
@@ -642,6 +701,11 @@ export function rustViewportSet(op: RustViewportOp): Promise<RustCameraReply | n
 }
 
 /** The camera now (and the gestures recorded since the last read). */
+/** The camera the page just put on its DOM (its seq): the canvas draws that one (ADR-008). */
+export function rustViewportShown(seq: number): void {
+  void rustCall('viewportShown', { seq }).catch(() => undefined);
+}
+
 export function rustViewportCamera(): Promise<RustCameraReply | null> {
   return viewportCall('viewportCamera', {});
 }
