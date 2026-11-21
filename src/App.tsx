@@ -10,6 +10,7 @@ import {
 } from './storage/db';
 import { AppSettings, loadSettings, saveSettings } from './settings';
 import { UpdatePrompt } from './components/UpdatePrompt';
+import { FpsOverlay } from './components/FpsOverlay';
 import { ExportMode, exportFile, hasNativeCanvas, listenForOpenedFiles, setLaunchTheme } from './platform';
 import { deskRgba, nativeCanvasFor, rustSetCanvasFrame, useCanvasFallback } from './services/rustCore';
 import { THEMES, applyTheme } from './theme';
@@ -383,6 +384,7 @@ export const App: React.FC = () => {
       )}
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
       <UpdatePrompt enabled={settings.checkUpdates} />
+      {settings.showFps && <FpsOverlay />}
     </div>
   );
 };

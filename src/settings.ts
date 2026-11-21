@@ -25,6 +25,8 @@ export interface AppSettings {
   theme: UiTheme;
   /** At start, look for a newer release on GitHub and offer to update (services/updater.ts). */
   checkUpdates: boolean;
+  /** Developer setting: show live frame rate (FPS) on-screen while using the app. */
+  showFps: boolean;
 }
 
 const KEY = 'opennote_settings_v2';
@@ -55,6 +57,7 @@ export function defaultSettings(): AppSettings {
     fingerTapUndo: true,
     theme: 'light',
     checkUpdates: true,
+    showFps: false,
   };
 }
 
@@ -64,6 +67,7 @@ export function loadSettings(): AppSettings {
     const raw = localStorage.getItem(KEY);
     if (raw) {
       const s: AppSettings = { ...defaults, ...JSON.parse(raw) };
+      if (typeof s.showFps !== 'boolean') s.showFps = false;
       // The old placeholder key; the server now issues real ones.
       if (s.apiKey === 'sk-dummy') s.apiKey = '';
       if (s.vlmEndpoint.trim().replace(/\/+$/, '') === OLD_DEFAULT_SERVER) s.vlmEndpoint = DEFAULT_SERVER;

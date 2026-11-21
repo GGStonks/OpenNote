@@ -257,7 +257,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
           </section>
 
           <section className="border-t border-gray-100 dark:border-gray-800 pt-3">
-            <div className={label}>Diagnostics</div>
+            <div className={label}>Diagnostics & Developer</div>
+            <Toggle
+              checked={Boolean(draft.showFps)}
+              onChange={(v) => set({ showFps: v })}
+              title="Show frame rate (FPS)"
+              sub="Developer overlay: displays a real-time framerate counter on the screen while using the app."
+            />
             <Toggle
               checked={rec.on}
               onChange={(v) => penRecorder.setEnabled(v)}
