@@ -113,6 +113,50 @@
   --ui-app: 242 242 247; --ui-desk: 229 229 234; --ui-card: 249 249 251; --ui-side: 236 236 241;
   --ui-panel: 255 255 255; --ui-raised: 243 244 246; --ui-high: 229 231 235; --ui-bar: 28 28 30;
   --ui-white: 255 255 255;
+
+  /* Studio Editorial tokens */
+  --studio-accent: #2563EB;
+  --studio-accent-hover: #1D4ED8;
+  --studio-accent-subtle: rgba(37, 99, 235, 0.08);
+  --studio-accent-glow: rgba(37, 99, 235, 0.25);
+  --studio-border-subtle: rgba(0, 0, 0, 0.07);
+  --studio-border-strong: rgba(0, 0, 0, 0.14);
+}
+
+.dark {
+  --studio-accent: #3B82F6;
+  --studio-accent-hover: #60A5FA;
+  --studio-accent-subtle: rgba(59, 130, 246, 0.15);
+  --studio-accent-glow: rgba(59, 130, 246, 0.35);
+  --studio-border-subtle: rgba(255, 255, 255, 0.08);
+  --studio-border-strong: rgba(255, 255, 255, 0.16);
+}
+
+.studio-glass {
+  background: rgba(var(--ui-panel) / 0.82);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--studio-border-subtle);
+}
+
+.studio-glass-dock {
+  background: rgba(var(--ui-bar) / 0.92);
+  backdrop-filter: blur(28px) saturate(190%);
+  -webkit-backdrop-filter: blur(28px) saturate(190%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 16px 40px -8px rgba(0, 0, 0, 0.36), 0 4px 14px -2px rgba(0, 0, 0, 0.18);
+}
+
+.studio-card {
+  background: rgb(var(--ui-card));
+  border: 1px solid var(--studio-border-subtle);
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.studio-card:hover {
+  border-color: var(--studio-border-strong);
+  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
 }
 
 /* Note pages are never themed: their paper is the page's own colour (inline style). */

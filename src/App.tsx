@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
-import { LibraryView } from './components/LibraryView';
+import { LibraryStudio } from './components/studio/LibraryStudio';
 import { Editor } from './components/Editor';
-import { SettingsModal } from './components/SettingsModal';
+import { SettingsStudioModal } from './components/studio/SettingsStudioModal';
 import { Folder, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, SCHEMA_VERSION, Tag, newId } from './types';
 import {
   collectUnusedFiles, createBlankPage, deleteNote, exportLibrary, saveRecording, getAllFolders, getAllNotes, getAllTags, importBackup,
@@ -347,7 +347,7 @@ export const App: React.FC = () => {
           />
         </ErrorBoundary>
       ) : (
-        <LibraryView
+        <LibraryStudio
           notes={notes}
           folders={folders}
           tags={tags}
@@ -371,7 +371,7 @@ export const App: React.FC = () => {
           onImportFiles={importExternal}
         />
       )}
-      <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
+      <SettingsStudioModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
       <UpdatePrompt enabled={settings.checkUpdates} />
     </div>
   );

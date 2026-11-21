@@ -11,11 +11,16 @@ import { markMoved, strokeHitTest } from '../ink/strokeRenderer';
 import { setColourPicker } from '../services/eyedropper';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings, paperHex, paperIsDark } from './CanvasPage';
-import { Toolbar } from './Toolbar';
-import { LatexModal, LatexModalState } from './LatexModal';
-import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
+import { EditorMasthead } from './studio/EditorMasthead';
+import { ToolDock } from './studio/ToolDock';
+import { SelectionHUD } from './studio/SelectionHUD';
+import { ViewportHUD } from './studio/ViewportHUD';
+import { FloatingTextFormatBar } from './studio/FloatingTextFormatBar';
+import { PageStudioTray } from './studio/PageStudioTray';
+import { LatexStudioModal, LatexStudioModalState } from './studio/LatexStudioModal';
+import { ExportStudioModal } from './studio/ExportStudioModal';
+import { SelectionExportModal, baseName } from './ExportModal';
 import { selectionSvg } from '../services/svgExport';
-import { TextFormatBar } from './TextFormatBar';
 import { AudioRecorder } from './AudioRecorder';
 import { GestureBus } from '../editor/gestures';
 import { MAX_ZOOM, PULL_THRESHOLD, SavedView, useViewport } from '../editor/useViewport';
@@ -279,7 +284,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const editingText = editingTextId ? (surface.textBlocks ?? []).find((t) => t.id === editingTextId) ?? null : null;
-  const [modal, setModal] = useState<LatexModalState | null>(null);
+  const [modal, setModal] = useState<LatexStudioModalState | null>(null);
   const [target, setTarget] = useState<ConvTarget | null>(null);
   const [busy, setBusy] = useState<{ label: string; detail?: string } | null>(null);
   const busyToken = useRef(0);
@@ -1287,10 +1292,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   useBack(!!busy, cancelConversion);
 
   return (
-    <div className="h-full flex flex-col overflow-hidden">
-      <Toolbar
-        tools={tools}
-        setTools={setTools}
+    <div className="h-full flex flex-col overflow-hidden bg-ui-desk dark:bg-ui-desk">
+      <EditorMasthead
         canUndo={editor.canUndo}
         canRedo={editor.canRedo}
         onUndo={editor.undo}
@@ -1322,9 +1325,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         {pagesOpen && (
           <>
             {/* Narrow screens: the panel covers the page; a tap beside it closes it. */}
-            <div className="md:hidden absolute inset-0 z-30 bg-black/25" onClick={() => setPagesOpen(false)} data-no-pan />
+            <div className="md:hidden absolute inset-0 z-30 bg-black/25 backdrop-blur-xs" onClick={() => setPagesOpen(false)} data-no-pan />
             <div className="absolute md:relative z-40 h-full shadow-2xl md:shadow-none">
-              <PageManager
+              <PageStudioTray
                 doc={doc}
                 layout={sl}
                 currentPage={Math.min(currentPage, pageCount - 1)}
@@ -1351,7 +1354,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           {editingText && (
             <div className="absolute top-2 left-0 right-0 z-40 flex justify-center px-3 pointer-events-none">
               <div className="pointer-events-auto max-w-full">
-                <TextFormatBar block={editingText} onChange={(patch) => editor.commitPage(surface.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === editingText.id ? { ...x, ...patch } : x)) }))} />
+                <FloatingTextFormatBar block={editingText} onChange={(patch) => editor.commitPage(surface.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === editingText.id ? { ...x, ...patch } : x)) }))} />
               </div>
             </div>
           )}
@@ -1392,101 +1395,62 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           </div>
           <PullIndicator bind={bindPull} />
 
-          {/* Page indicator and zoom */}
-          <div
-            data-cutout-clear
-            className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
-            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
-            data-no-pan
-          >
-            <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
-              {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}
+          {/* Viewport & zoom HUD */}
+          <ViewportHUD
+            currentPage={Math.min(currentPage, pageCount - 1) + 1}
+            totalPages={pageCount}
+            zoom={zoom}
+            maxZoom={MAX_ZOOM}
+            fitMode={fitMode}
+            onZoomBy={zoomBy}
+            onToggleFit={toggleFit}
+            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 88 : 20}px + var(--sa-bottom))` }}
+          />
+
+          {/* Floating ToolDock when there is no active selection */}
+          {!selection && (
+            <div
+              className="absolute left-0 right-0 z-30 flex justify-center px-3 pointer-events-none"
+              style={{ bottom: `calc(16px + var(--sa-bottom))` }}
+              data-no-pan
+            >
+              <div className="pointer-events-auto">
+                <ToolDock tools={tools} setTools={setTools} />
+              </div>
             </div>
-            <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
-              <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={toggleFit}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
-                title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
-              >
-                {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
-                {Math.round(zoom * 100)}%
-              </button>
-              <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
       {/* Paste (lasso tool, something copied, nothing selected) */}
       {!selection && clipboard && tools.tool === 'lasso' && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
-          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
-            <ClipboardPaste className="w-5 h-5" /> Paste
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
+          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 studio-glass-dock text-studio-ink dark:text-studio-dark-ink rounded-full shadow-2xl px-5 py-2.5 text-sm font-medium active:scale-95 transition" title="Paste the copied items here">
+            <ClipboardPaste className="w-4 h-4 text-studio-accent" /> Paste
           </button>
         </div>
       )}
 
       {/* Selection action bar */}
-      {selection && fillMenu && selectionHasInk && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
-            {FILL_OPTIONS.map((f) => (
-              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
-                <span className="scale-125"><FillSwatch fill={f.id} color="#E5E7EB" /></span>
-                <span>{f.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
       {selection && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1.5 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
-            {selectionHasInk && (
-              <>
-                <button onClick={() => convertSelection('math')} className={PILL + ' bg-blue-600'} title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
-                  <Sparkles className="w-5 h-5" /> LaTeX
-                </button>
-                <button onClick={() => convertSelection('text')} className={PILL + ' bg-blue-500/80'} title="Transcribe notes (text + math)">
-                  <FileText className="w-5 h-5" /> Notes
-                </button>
-                <button onClick={() => convertSelection('tikz')} className={PILL + ' bg-indigo-600'} title="Diagram → TikZ (Qwen3-VL)">
-                  <Share2 className="w-5 h-5" /> TikZ
-                </button>
-                <button onClick={vectorizeSelection} className={PILL + ' bg-white/10'} title="Convert ink geometry to TikZ offline (no AI)">
-                  <Wand2 className="w-5 h-5" /> Vector
-                </button>
-                <button onClick={snapSelection} className={ICON_BTN} title="Snap to shapes"><Shapes className="w-5 h-5" /></button>
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
-                {['#111827', '#1A73E8', '#D93025', '#188038', '#9B51E0'].map((c) => (
-                  <button key={c} onClick={() => recolorSelection(c)} className="w-8 h-8 rounded-full ring-2 ring-white/30 flex-shrink-0 active:scale-90 transition" style={{ backgroundColor: c }} title="Recolour" />
-                ))}
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
-                {LINE_STYLES.map((ls) => (
-                  <button key={ls.id} onClick={() => restyleSelection(ls.id)} className={ICON_BTN} title={ls.label} aria-label={ls.label}>
-                    <LineStyleIcon style={ls.id} width={22} />
-                  </button>
-                ))}
-                <button onClick={() => setFillMenu((v) => !v)} className={`${ICON_BTN} ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">
-                  <PaintBucket className="w-5 h-5" />
-                </button>
-                <button onClick={toggleArrowSelection} className={ICON_BTN} title="Arrowhead on/off"><MoveUpRight className="w-5 h-5" /></button>
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
-              </>
-            )}
-            <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" /></button>
-            <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" /></button>
-            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><Share className="w-5 h-5" /></button>
-            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" /></button>
-            <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
-            <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
-          </div>
-        </div>
+        <SelectionHUD
+          hasInk={selectionHasInk}
+          onConvertMath={() => convertSelection('math')}
+          onConvertText={() => convertSelection('text')}
+          onConvertTikz={() => convertSelection('tikz')}
+          onVectorize={vectorizeSelection}
+          onSnap={snapSelection}
+          onRecolor={recolorSelection}
+          onRestyleLine={restyleSelection}
+          onFill={fillSelection}
+          onToggleArrow={toggleArrowSelection}
+          onCut={cutSelection}
+          onCopy={copySelectionToClipboard}
+          onExportSvg={() => setSelExportOpen(true)}
+          onDuplicate={duplicateSelection}
+          onDelete={deleteSelection}
+          onDeselect={() => setSelectionState(null)}
+        />
       )}
 
       {busy && (
@@ -1514,7 +1478,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         </div>
       )}
 
-      <LatexModal
+      <LatexStudioModal
         state={modal}
         onClose={() => {
           setModal(null);
@@ -1580,7 +1544,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           document.body
         )}
 
-      <ExportModal isOpen={exportOpen} onClose={() => setExportOpen(false)} document={doc} onPdf={exportPdf} onPrint={printNote} onError={(m) => showToast(m, true)} />
+      <ExportStudioModal isOpen={exportOpen} onClose={() => setExportOpen(false)} document={doc} onPdf={exportPdf} onPrint={printNote} onError={(m) => showToast(m, true)} />
       <SelectionExportModal
         isOpen={selExportOpen && !!selection && !!selPage}
         onClose={() => setSelExportOpen(false)}
