@@ -437,7 +437,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       pinchFrame = null;
       const pz = pinch.current, outer = outerRef.current;
       if (!pz || !pz.engaged || !outer || pointers.current.size !== 2 || pz.native !== null) return;
-      outer.style.transform = `translate(${pz.c.x - pz.c0.x}px, ${pz.c.y - pz.c0.y}px) scale(${pz.k})`;
+      outer.style.transform = `translate3d(${(pz.c.x - pz.c0.x).toFixed(3)}px, ${(pz.c.y - pz.c0.y).toFixed(3)}px, 0) scale(${pz.k})`;
       for (const fn of tileWork.moved) fn();
     };
 
@@ -935,7 +935,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       const dx = c.x - o.x, dy = c.y - o.y, k = c.ez / zoomRef.current;
       if (Math.abs(k - 1) > 1e-7 || Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
         outer.style.transformOrigin = '0 0';
-        outer.style.transform = `translate(${dx}px, ${dy}px) scale(${k})`;
+        outer.style.transform = `translate3d(${dx.toFixed(3)}px, ${dy.toFixed(3)}px, 0) scale(${k})`;
       } else outer.style.transformOrigin = '';
       outer.style.willChange = c.gesture ? 'transform' : '';
       if (c.fit !== fitModeRef.current) setFitMode(c.fit);

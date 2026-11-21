@@ -64,11 +64,13 @@ fn js_round(x: f64) -> f64 {
 
 impl Live {
     pub fn new(p: LiveParams) -> Self {
+        let mut dense = SampleDensifier::new();
+        dense.set_zoom(p.k);
         Live {
             p,
             started: false,
             real: false,
-            dense: SampleDensifier::new(),
+            dense,
             model: SmoothLiveStroke::new(),
             sent: 0,
         }

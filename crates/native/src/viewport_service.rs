@@ -24,6 +24,7 @@
 //! tick allocates nothing: the queue, the fingers and the camera's history are made once.
 
 use crate::clock_ms;
+use crate::one_euro::OneEuroFilter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -144,6 +145,23 @@ struct View {
     /// The DOM's trail behind the newest camera (ms, smoothed) and the seq last seen shown.
     trail: f64,
     last_shown: Option<u64>,
+    filter_x: OneEuroFilter,
+    filter_y: OneEuroFilter,
+    filter_ln_ez: OneEuroFilter,
+    filter_converging: bool,
+    filter_last_t: Option<f64>,
+    pub filtered_cam: Option<(f64, f64, f64)>,
+}
+
+impl View {
+    fn reset_filters(&mut self) {
+        self.filter_x.reset();
+        self.filter_y.reset();
+        self.filter_ln_ez.reset();
+        self.filter_converging = false;
+        self.filter_last_t = None;
+        self.filtered_cam = None;
+    }
 }
 
 static VIEW: Mutex<Option<View>> = Mutex::new(None);
@@ -178,6 +196,12 @@ fn with_view<R>(f: impl FnOnce(&mut View) -> R) -> R {
         moved_at: f64::NEG_INFINITY,
         trail: f64::NAN,
         last_shown: None,
+        filter_x: OneEuroFilter::new(8.0, 0.18, 15.0),
+        filter_y: OneEuroFilter::new(8.0, 0.18, 15.0),
+        filter_ln_ez: OneEuroFilter::new(7.0, 0.25, 15.0),
+        filter_converging: false,
+        filter_last_t: None,
+        filtered_cam: None,
     }))
 }
 
@@ -322,18 +346,29 @@ fn process(v: &mut View, upto: f64, resample: bool) {
                 // Two samples a sampling interval apart (coalesced ones closer say little of
                 // the speed), recent enough.
                 if dt >= MIN_SAMPLE_MS && gap > 0.0 && gap <= 3.0 * dt {
-                    let tp = upto.min(f.last.2 + PREDICT_MAX_MS.min(2.0 * dt));
-                    (tp > f.fed.2).then(|| {
-                        let u = (tp - f.last.2) / dt;
-                        (
-                            f.last.0 + (f.last.0 - f.prev.0) * u,
-                            f.last.1 + (f.last.1 - f.prev.1) * u,
-                            tp,
-                        )
-                    })
-                } else if (f.fed.0, f.fed.1) != (f.last.0, f.last.1) {
-                    // Stopped: back where its last sample was.
-                    Some((f.last.0, f.last.1, upto.max(f.fed.2)))
+                    let dist = (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1);
+                    let v_ms = dist / dt; // px/ms
+                    let extrap_weight = if v_ms < 0.06 {
+                        0.0
+                    } else if v_ms < 0.25 {
+                        let t = (v_ms - 0.06) / (0.25 - 0.06);
+                        t * t * (3.0 - 2.0 * t)
+                    } else {
+                        1.0
+                    };
+                    if extrap_weight > 0.0 {
+                        let tp = upto.min(f.last.2 + PREDICT_MAX_MS.min(2.0 * dt));
+                        (tp > f.fed.2).then(|| {
+                            let u = ((tp - f.last.2) / dt) * extrap_weight;
+                            (
+                                f.last.0 + (f.last.0 - f.prev.0) * u,
+                                f.last.1 + (f.last.1 - f.prev.1) * u,
+                                tp,
+                            )
+                        })
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
@@ -552,6 +587,33 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             // Live presentation at current frame: zero latency, maximum responsiveness, lean execution
             (c.x, c.y, c.ez, t_ms)
         };
+        let t_s = t_ms / 1000.0;
+        if let Some(prev) = v.filter_last_t {
+            if t_s - prev > 0.1 || t_s < prev {
+                v.reset_filters();
+            }
+        }
+        v.filter_last_t = Some(t_s);
+
+        let (draw_cam_x, draw_cam_y, draw_cam_ez) = {
+            let fx = v.filter_x.filter(draw_cam_x, t_s);
+            let fy = v.filter_y.filter(draw_cam_y, t_s);
+            let ln_ez = v.filter_ln_ez.filter(draw_cam_ez.ln(), t_s);
+            let fez = ln_ez.exp();
+
+            let dx = (fx - draw_cam_x).abs();
+            let dy = (fy - draw_cam_y).abs();
+            let dln = (ln_ez - draw_cam_ez.ln()).abs();
+
+            if !busy && dx < 0.02 && dy < 0.02 && dln < 1e-4 {
+                v.filter_converging = false;
+                (draw_cam_x, draw_cam_y, draw_cam_ez)
+            } else {
+                v.filter_converging = dx >= 0.02 || dy >= 0.02 || dln >= 1e-4;
+                (fx, fy, fez)
+            }
+        };
+        v.filtered_cam = Some((draw_cam_x, draw_cam_y, draw_cam_ez));
         v.tick_t = t_ms;
         v.drawn_t = draw_cam_t;
         if let Some(r) = v.rec.as_mut() {
@@ -738,9 +800,13 @@ pub fn viewport_layout(meta: &str) -> Result<(String, Vec<u8>), String> {
             v.held.clear();
             v.shown = None;
         }
+        if !was {
+            v.reset_filters();
+        }
         if let Some(a) = req.adopt {
             if !was || !v.vp.busy() {
                 v.vp.adopt(a.zoom, a.sl, a.st, (a.sub[0], a.sub[1]), a.fit);
+                v.reset_filters();
             }
         }
         camera_value(v)
@@ -804,6 +870,11 @@ pub fn viewport_set(meta: &str) -> Result<(String, Vec<u8>), String> {
         flush(v);
         let vp = &mut v.vp;
         let pair = |a: Option<[f64; 2]>| a.map(|[l, w]| (l, w));
+        let reset_filter = match req {
+            SetReq::ScrollTo { smooth, .. } => !smooth,
+            SetReq::Pull { animate, .. } => !animate,
+            _ => true,
+        };
         match req {
             SetReq::FitWidth { target } => vp.fit_width(pair(target)),
             SetReq::ZoomToRect { rect } => vp.zoom_to_rect(rect),
@@ -819,6 +890,9 @@ pub fn viewport_set(meta: &str) -> Result<(String, Vec<u8>), String> {
             SetReq::ScrollTo { y, smooth } => vp.scroll_to(y, smooth, t),
             SetReq::Pull { d, animate } => vp.page_pull(d, animate, t),
             SetReq::Stop => vp.stop(),
+        }
+        if reset_filter {
+            v.reset_filters();
         }
         camera_value(v)
     });
@@ -935,6 +1009,7 @@ pub fn viewport_trace(meta: &str) -> Result<(String, Vec<u8>), String> {
 
 /// Tests: back to a new camera.
 pub fn reset() {
+    with_view(|v| v.reset_filters());
     *view() = None;
 }
 
@@ -999,8 +1074,13 @@ pub fn busy() -> bool {
             && (v.vp.busy()
                 || !v.held.is_empty()
                 || !v.queue.is_empty()
+                || v.filter_converging
                 || clock_ms() - v.moved_at < 500.0)
     })
+}
+
+pub fn filtered_camera() -> Option<(f64, f64, f64)> {
+    with_view(|v| v.filtered_cam)
 }
 
 /// The display link's interval and how far ahead of its frame's presentation the tick ran
@@ -1041,6 +1121,8 @@ pub unsafe extern "C" fn opennote_viewport_free(p: *mut std::ffi::c_char) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn layout() -> String {
         json!({
@@ -1101,13 +1183,100 @@ mod tests {
 
     #[test]
     fn resampled_fingers_pan_evenly_despite_late_delivery() {
+        let _lock = TEST_LOCK.lock().unwrap();
         let ys = pan();
         let new = worst_second_difference(&ys);
         assert!(new < 0.05, "resampled: worst second difference {new}");
     }
 
     #[test]
+    fn micro_movement_pan_is_subpixel_smooth() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        reset();
+        viewport_layout(&layout()).unwrap();
+        let t0 = clock_ms() - 900.0;
+        let period = 1000.0 / 120.0; // ~8.333 ms
+
+        // Super-slow two-finger pan at 18 px/s (0.15 px/frame at 120 Hz)
+        // Hardware touch samples arrive every ~28 ms quantized to 0.5 px steps.
+        let mut touch_samples = Vec::new();
+        let mut cur_t = t0;
+        let stop_t = t0 + 720.0;
+        while cur_t <= stop_t {
+            let elapsed_ms = cur_t - t0;
+            let continuous_y = 700.0 - (18.0 * elapsed_ms / 1000.0);
+            let quantized_y = (continuous_y * 2.0).round() / 2.0;
+            touch_samples.push((cur_t, quantized_y));
+            cur_t += 28.0;
+        }
+
+        let mut ys = Vec::new();
+        let mut sample_idx = 0;
+        for k in 0..120 {
+            let present = t0 + 20.0 + k as f64 * period;
+            while sample_idx < touch_samples.len()
+                && touch_samples[sample_idx].0 <= present - period
+            {
+                let (t, y) = touch_samples[sample_idx];
+                let phase = if sample_idx == 0 { 0 } else { 1 };
+                touch(1, phase, 300.0, y + 50.0, Some(t));
+                touch(2, phase, 400.0, y + 50.0, Some(t));
+                sample_idx += 1;
+            }
+            draw_tick(present);
+            let cam_y = with_view(|v| v.filtered_cam.map(|c| c.1).unwrap_or(v.vp.camera().y));
+            ys.push(cam_y);
+        }
+
+        // 1. Zero backward reversals (dy never flips sign during steady slow forward motion)
+        for i in 10..80 {
+            let dy = ys[i] - ys[i - 1];
+            assert!(
+                dy <= 1e-4,
+                "backward reversal at frame {i}: step={dy} (prev={}, curr={})",
+                ys[i - 1],
+                ys[i]
+            );
+        }
+
+        // 2. Max single-frame velocity spike < 2.0x mean step
+        let delta_total = (ys[80] - ys[20]).abs();
+        let mean_step = delta_total / 60.0;
+        assert!(
+            mean_step > 0.05,
+            "mean step should be non-trivial: {mean_step}"
+        );
+        for i in 20..80 {
+            let step = (ys[i] - ys[i - 1]).abs();
+            assert!(
+                step < 2.0 * mean_step,
+                "velocity spike at frame {i}: step={step}, mean={mean_step}"
+            );
+        }
+
+        // 3. Continuous non-zero sub-pixel progression on > 90% of frames during slow move
+        let moving_frames = (20..80)
+            .filter(|&i| (ys[i] - ys[i - 1]).abs() >= 0.03)
+            .count();
+        let ratio = moving_frames as f64 / 60.0;
+        assert!(
+            ratio > 0.90,
+            "continuous progression on {moving_frames}/60 frames ({:.1}%)",
+            ratio * 100.0
+        );
+
+        // 4. Final resting position converges within < 0.05 px of true finger position
+        let final_raw_cam = with_view(|v| v.vp.camera().y);
+        let final_filtered = *ys.last().unwrap();
+        assert!(
+            (final_filtered - final_raw_cam).abs() < 0.05,
+            "final position did not converge: filtered={final_filtered}, target={final_raw_cam}"
+        );
+    }
+
+    #[test]
     fn the_history_gives_the_camera_at_a_time() {
+        let _lock = TEST_LOCK.lock().unwrap();
         reset();
         with_view(|v| {
             for i in 0..5 {

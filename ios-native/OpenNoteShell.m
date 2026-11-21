@@ -272,7 +272,7 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
         if (samples.count == 0) samples = @[touch];
         for (UITouch *c in samples) {
             if (n >= 64) break;
-            CGPoint p = [c locationInView:view];
+            CGPoint p = [c preciseLocationInView:view];
             buf[5 * n] = ident;
             buf[5 * n + 1] = phase;
             buf[5 * n + 2] = p.x;

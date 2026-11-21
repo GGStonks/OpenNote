@@ -18,17 +18,36 @@ struct V {
     y: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SampleDensifier {
     last: Option<Point>,
     held: Option<Point>,
     hist: Vec<V>,
     dir: Option<V>,
+    still_px: f64,
+}
+
+impl Default for SampleDensifier {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SampleDensifier {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            last: None,
+            held: None,
+            hist: Vec::new(),
+            dir: None,
+            still_px: STILL_PX,
+        }
+    }
+
+    pub fn set_zoom(&mut self, zoom: f64) {
+        if zoom > 0.0 {
+            self.still_px = (0.35 / zoom).min(0.2).max(0.04);
+        }
     }
 
     pub fn push(&mut self, pt: Point) -> Vec<Point> {
@@ -41,7 +60,7 @@ impl SampleDensifier {
             Some(p) => p,
         };
 
-        if (pt.x - prev.x).abs() < STILL_PX && (pt.y - prev.y).abs() < STILL_PX {
+        if (pt.x - prev.x).abs() < self.still_px && (pt.y - prev.y).abs() < self.still_px {
             let dt = pt.t.unwrap_or(0.0) - prev.t.unwrap_or(0.0);
             if dt < STILL_MS {
                 self.held = Some(pt);

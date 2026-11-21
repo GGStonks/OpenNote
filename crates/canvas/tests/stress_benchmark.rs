@@ -90,9 +90,11 @@ fn test_a_240_frame_pan_pinch_zoom_100_pages_dot_paper() {
         pages: placements.clone(),
     });
 
-    // Warm up the pages in the pan/zoom range [0..2000 px] so they reside on the GPU
-    for warmup_y in [0.0, 500.0, 1000.0, 1500.0, 2000.0] {
-        host.set_surface([1.0, 0.0, -warmup_y]);
+    // Warm up the pages in the pan/zoom range [0..3500 px] so they reside on the GPU
+    for warmup_y in [0.0, 500.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0, 3500.0] {
+        host.set_surface([0.85, 0.0, -warmup_y]);
+        let _ = host.draw();
+        host.set_surface([1.15, 0.0, -warmup_y]);
         let _ = host.draw();
     }
 
