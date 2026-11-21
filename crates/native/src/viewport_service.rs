@@ -678,7 +678,7 @@ pub fn poll(now_ms: f64) -> Option<String> {
         }
         let seq = v.vp.camera().seq;
         let f = v.vp.layout().frame_ms.clamp(4.0, 100.0);
-        let gap = if legacy(v) { f * 0.8 } else { f * 0.45 };
+        let gap = if legacy(v) { f * 0.8 } else { f * 0.95 };
         let missing_new = crate::canvas_service::missing().1 != v.pushed_missing;
         if (seq == v.pushed_seq && v.unread.is_empty() && !missing_new)
             || now_ms - v.pushed_at < gap

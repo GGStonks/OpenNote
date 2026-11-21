@@ -32,6 +32,7 @@ pub struct Pictures {
     map: HashMap<u64, Tex>,
     /// The page's keys drawn this frame, to their file's id.
     ids: HashMap<u64, u64>,
+    pending: Vec<crate::picture::Decoded>,
     bytes: u64,
     budget: u64,
     max_side: u32,
@@ -69,6 +70,7 @@ impl Pictures {
             sampler,
             map: HashMap::new(),
             ids: HashMap::new(),
+            pending: Vec::new(),
             bytes: 0,
             budget,
             max_side: max_dim.min(16384),
@@ -183,8 +185,15 @@ impl Pictures {
         size: (u32, u32),
     ) {
         self.frame += 1;
-        for d in self.lib.take_done() {
+        self.pending.extend(self.lib.take_done());
+        let mut uploaded_bytes = 0u64;
+        while let Some(d) = self.pending.pop() {
+            let b: u64 = d.levels.iter().map(|l| (l.w * l.h * 4) as u64).sum();
             self.upload(device, queue, d);
+            uploaded_bytes += b;
+            if uploaded_bytes >= 2 * MIB || !self.pending.is_empty() {
+                break;
+            }
         }
         self.ids.clear();
         let mut wants: HashMap<u64, (std::sync::Arc<crate::picture::Source>, f32, f32)> =

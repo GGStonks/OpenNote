@@ -12,6 +12,8 @@ import { setColourPicker } from '../services/eyedropper';
 import { useNoteEditor } from '../state/useNoteEditor';
 import { CanvasPage, ToolSettings, paperHex, paperIsDark } from './CanvasPage';
 import { Toolbar } from './Toolbar';
+
+const MemoizedToolbar = React.memo(Toolbar);
 import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
 import { selectionSvg } from '../services/svgExport';
@@ -442,12 +444,23 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // Track the page at a third of the screen's height.
+  // Track the page at a third of the screen's height, throttled to <= 10 Hz during active scroll.
+  const lastPageRef = useRef(0);
+  const pageTimerRef = useRef<number | null>(null);
   const onScroll = useCallback(() => {
     const el = scrollRef.current, outer = outerRef.current;
     if (!el || !outer) return;
     const y = (el.scrollTop + el.clientHeight / 3 - outer.offsetTop) / zoom - PAD;
-    setCurrentPage(sheetIndexAt(slRef.current, y));
+    const next = sheetIndexAt(slRef.current, y);
+    if (next !== lastPageRef.current) {
+      lastPageRef.current = next;
+      if (pageTimerRef.current === null) {
+        pageTimerRef.current = window.setTimeout(() => {
+          pageTimerRef.current = null;
+          setCurrentPage(lastPageRef.current);
+        }, 100);
+      }
+    }
   }, [zoom, scrollRef, outerRef]);
   useEffect(onScroll, [onScroll, layout]);
 
@@ -1298,7 +1311,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <Toolbar
+      <MemoizedToolbar
         tools={tools}
         setTools={setTools}
         canUndo={editor.canUndo}

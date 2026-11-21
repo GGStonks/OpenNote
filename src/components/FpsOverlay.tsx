@@ -4,7 +4,7 @@ type Corner = 'top-right' | 'bottom-right' | 'bottom-left' | 'top-left';
 
 const CORNER_KEY = 'opennote_fps_overlay_corner';
 
-export const FpsOverlay: React.FC = () => {
+export const FpsOverlay: React.FC = React.memo(() => {
   const [fps, setFps] = useState<number>(0);
   const [ms, setMs] = useState<number>(0);
   const [corner, setCorner] = useState<Corner>(() => {
@@ -86,4 +86,4 @@ export const FpsOverlay: React.FC = () => {
       <span className="text-[9px] text-white/60">({ms.toFixed(1)} ms)</span>
     </div>
   );
-};
+});

@@ -219,7 +219,7 @@ public class OpenNoteRustPlugin extends Plugin {
 
     private static synchronized Handler render() {
         if (render == null) {
-            android.os.HandlerThread t = new android.os.HandlerThread("opennote-canvas", Process.THREAD_PRIORITY_DISPLAY);
+            android.os.HandlerThread t = new android.os.HandlerThread("opennote-canvas", Process.THREAD_PRIORITY_URGENT_DISPLAY);
             t.start();
             render = new Handler(t.getLooper());
         }
@@ -277,7 +277,15 @@ public class OpenNoteRustPlugin extends Plugin {
         if (!LOADED) return;
         // The canvas's surface at the display's best rate (Android 11+; the window's display mode,
         // MainActivity.preferFastestMode, does it before): Choreographer then ticks at that rate.
-        if (android.os.Build.VERSION.SDK_INT >= 30 && surfaceHz > 0) {
+        if (android.os.Build.VERSION.SDK_INT >= 31 && surfaceHz > 0) {
+            try {
+                surface.setFrameRate(surfaceHz, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE, Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+            } catch (Throwable ignored) {
+                try {
+                    surface.setFrameRate(surfaceHz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
+                } catch (Throwable ignored2) {}
+            }
+        } else if (android.os.Build.VERSION.SDK_INT >= 30 && surfaceHz > 0) {
             try {
                 surface.setFrameRate(surfaceHz, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT);
             } catch (Throwable ignored) {

@@ -909,13 +909,20 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       } else void rustViewportLayout(layout);
     };
 
+    let lastCommittedZoom = zoomRef.current;
     const apply = (c: RustCamera, el: HTMLElement, outer: HTMLElement) => {
       if (c.seq === applied) return;
       applied = c.seq;
       if (Math.abs(c.zoom - zoomRef.current) > 1e-9) {
-        // The committed zoom (a pinch's end or rebase, a page view): the page laid out at it now.
+        // During active gestures, defer React state reconciliation to avoid frame drops.
         zoomRef.current = c.zoom;
-        flushSync(() => setZoomState(c.zoom));
+        if (!c.gesture) {
+          lastCommittedZoom = c.zoom;
+          setZoomState(c.zoom);
+        }
+      } else if (!c.gesture && Math.abs(c.zoom - lastCommittedZoom) > 1e-9) {
+        lastCommittedZoom = c.zoom;
+        setZoomState(c.zoom);
       }
       outer.style.transform = '';
       outer.style.translate = '';

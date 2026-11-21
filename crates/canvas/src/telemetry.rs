@@ -36,6 +36,10 @@ pub struct StatsSummary {
     pub avg_bytes_uploaded: f64,
     pub avg_draw_calls: f64,
     pub dropped_frame_pct: f64,
+    pub spikes_under_4_2_ms: u32,
+    pub spikes_4_2_to_8_5_ms: u32,
+    pub spikes_8_5_to_12_5_ms: u32,
+    pub spikes_over_12_5_ms: u32,
 }
 
 impl Default for FrameStats {
@@ -115,6 +119,23 @@ impl FrameStats {
             .filter(|s| s.frame_dt_us > self.target_budget_us)
             .count();
 
+        let mut under_4_2 = 0u32;
+        let mut b_4_2_8_5 = 0u32;
+        let mut b_8_5_12_5 = 0u32;
+        let mut over_12_5 = 0u32;
+
+        for s in &samples {
+            if s.frame_dt_us < 4200 {
+                under_4_2 += 1;
+            } else if s.frame_dt_us <= 8500 {
+                b_4_2_8_5 += 1;
+            } else if s.frame_dt_us <= 12500 {
+                b_8_5_12_5 += 1;
+            } else {
+                over_12_5 += 1;
+            }
+        }
+
         StatsSummary {
             p50_cpu_us: percentile(&cpu_times, 0.50),
             p95_cpu_us: percentile(&cpu_times, 0.95),
@@ -127,6 +148,10 @@ impl FrameStats {
             avg_bytes_uploaded: total_bytes as f64 / n as f64,
             avg_draw_calls: total_draws as f64 / n as f64,
             dropped_frame_pct: (dropped as f64 / n as f64) * 100.0,
+            spikes_under_4_2_ms: under_4_2,
+            spikes_4_2_to_8_5_ms: b_4_2_8_5,
+            spikes_8_5_to_12_5_ms: b_8_5_12_5,
+            spikes_over_12_5_ms: over_12_5,
         }
     }
 }

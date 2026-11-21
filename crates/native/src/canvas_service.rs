@@ -278,17 +278,21 @@ fn take_changes(all: bool) -> (SceneUpdates, Option<PageFrame>, Option<[f64; 3]>
 /// it). Only when the host's lists changed.
 fn note_near(near: &[String], missing: &[String]) {
     with_page(|p| {
-        p.near_tick += 1;
-        let t = p.near_tick;
-        for id in near {
-            p.near_at.insert(id.clone(), t);
-        }
-        p.near_now = near.iter().cloned().collect();
-        if p.missing != missing {
-            p.missing = missing.to_vec();
-            p.missing_gen += 1;
-        }
+        note_near_page(p, near, missing);
     });
+}
+
+fn note_near_page(p: &mut Page, near: &[String], missing: &[String]) {
+    p.near_tick += 1;
+    let t = p.near_tick;
+    for id in near {
+        p.near_at.insert(id.clone(), t);
+    }
+    p.near_now = near.iter().cloned().collect();
+    if p.missing != missing {
+        p.missing = missing.to_vec();
+        p.missing_gen += 1;
+    }
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -377,8 +381,50 @@ pub fn status_json() -> Value {
         .map(|m| m.values().map(|v| v.len()).sum())
         .unwrap_or(0);
     let (gpu_budget, cpu_budget) = budgets();
+
+    let (ink_val, telemetry_val, host_stats) =
+        lock(&HOST)
+            .host
+            .as_ref()
+            .map_or((s.ink, json!(null), None), |h| {
+                let mut w = h.ink_waits();
+                w.sort_by(f32::total_cmp);
+                let q = |p: f64| {
+                    if w.is_empty() {
+                        f64::NAN
+                    } else {
+                        w[((w.len() - 1) as f64 * p).round() as usize] as f64
+                    }
+                };
+                let ink = (
+                    w.len(),
+                    q(0.5),
+                    q(0.95),
+                    w.last().map_or(f64::NAN, |v| *v as f64),
+                );
+                let t = h.stats().telemetry;
+                let telem = json!({
+                    "p50CpuUs": t.p50_cpu_us,
+                    "p95CpuUs": t.p95_cpu_us,
+                    "p99CpuUs": t.p99_cpu_us,
+                    "maxCpuUs": t.max_cpu_us,
+                    "p50DtUs": t.p50_dt_us,
+                    "p95DtUs": t.p95_dt_us,
+                    "p99DtUs": t.p99_dt_us,
+                    "maxDtUs": t.max_dt_us,
+                    "avgBytesUploaded": t.avg_bytes_uploaded,
+                    "avgDrawCalls": t.avg_draw_calls,
+                    "droppedFramePct": t.dropped_frame_pct,
+                    "spikesUnder4_2ms": t.spikes_under_4_2_ms,
+                    "spikes4_2To8_5ms": t.spikes_4_2_to_8_5_ms,
+                    "spikes8_5To12_5ms": t.spikes_8_5_to_12_5_ms,
+                    "spikesOver12_5ms": t.spikes_over_12_5_ms,
+                });
+                (ink, telem, Some(h.stats()))
+            });
+
     let mut pages = pages_json(
-        &s, scenes, bytes, missing, dropped, rust_ops, gpu_budget, cpu_budget,
+        &s, scenes, bytes, missing, dropped, rust_ops, gpu_budget, cpu_budget, ink_val,
     );
     pages["ids"] = json!(sample);
     json!({
@@ -410,11 +456,12 @@ pub fn status_json() -> Value {
                 "decodeMs": l.decode_ms.round(),
                 "failed": l.failed,
                 "lastFailure": l.last_failure,
-                "textures": s.pictures,
-                "textureBytes": s.picture_bytes,
-                "budget": s.picture_budget,
+                "textures": host_stats.as_ref().map_or(s.pictures, |st| st.pictures),
+                "textureBytes": host_stats.as_ref().map_or(s.picture_bytes, |st| st.picture_bytes),
+                "budget": host_stats.as_ref().map_or(s.picture_budget, |st| st.picture_budget),
             }),
         "viewport": crate::viewport_service::status(),
+        "telemetry": telemetry_val,
         "pages": pages,
     })
 }
@@ -429,6 +476,7 @@ fn pages_json(
     rust_ops: usize,
     gpu_budget: u64,
     cpu_budget: u64,
+    ink: (usize, f64, f64, f64),
 ) -> Value {
     let mb = |b: u64| (b as f64 / 1048576.0 * 100.0).round() / 100.0;
     let pg = &s.pages;
@@ -448,7 +496,7 @@ fn pages_json(
             "drawn": pg.drawn,
             "drawnCapsules": pg.drawn_caps,
             "visibleMissing": pg.visible_missing,
-            "inkWait": { "n": s.ink.0, "p50": s.ink.1, "p95": s.ink.2, "max": s.ink.3, "unfilled": pg.ink_unfilled },
+            "inkWait": { "n": ink.0, "p50": ink.1, "p95": ink.2, "max": ink.3, "unfilled": pg.ink_unfilled },
             "inkCompleteMs": s.ink_complete_ms,
             "gpuMs": s.gpu_ms.0,
             "worstGpuMs": s.gpu_ms.1,
@@ -806,30 +854,16 @@ fn draw_locked(present_ms: f64) -> bool {
     // What is near the view and what it misses, for the bridge (eviction) and the page.
     let gen = host.near_gen();
     if gen != slot.near_gen {
-        slot.near_gen = gen;
-        note_near(host.near(), host.missing());
+        if !crate::viewport_service::busy() {
+            slot.near_gen = gen;
+            note_near(host.near(), host.missing());
+        } else if let Ok(mut guard) = PAGE.try_lock() {
+            slot.near_gen = gen;
+            let p = guard.get_or_insert_with(Default::default);
+            note_near_page(p, host.near(), host.missing());
+        }
     }
     let s = host.stats();
-    let ink = if s.pages.ink_samples != slot.ink_samples {
-        slot.ink_samples = s.pages.ink_samples;
-        let mut w = host.ink_waits();
-        w.sort_by(f32::total_cmp);
-        let q = |p: f64| {
-            if w.is_empty() {
-                f64::NAN
-            } else {
-                w[((w.len() - 1) as f64 * p).round() as usize] as f64
-            }
-        };
-        Some((
-            w.len(),
-            q(0.5),
-            q(0.95),
-            w.last().map_or(f64::NAN, |v| *v as f64),
-        ))
-    } else {
-        None
-    };
     let complete = result == Ok(true) && s.pages.visible_missing == 0 && s.pages.drawn_caps > 0;
     let became_complete = complete && !slot.complete;
     if result == Ok(true) {
@@ -844,33 +878,37 @@ fn draw_locked(present_ms: f64) -> bool {
         slot.host_frames += 1;
     }
     let last = host.last_error();
-    with_status(|st| {
-        st.frames = s.frames;
-        st.last_draw_ms = s.last_draw_ms;
-        st.worst_draw_ms = s.worst_draw_ms;
-        st.width = s.width;
-        st.height = s.height;
-        st.failed_frames = s.failed;
-        st.skipped_frames = s.skipped_frames;
-        st.skipped_pages = s.skipped_pages;
-        st.pages = s.pages.clone();
-        if let Some(i) = ink {
-            st.ink = i;
-        }
-        if became_complete {
-            st.ink_complete_ms = clock_ms();
-        }
-        if let Some(g) = gpu_ms {
-            st.gpu_ms = (g, st.gpu_ms.1.max(g));
-        }
-        st.pictures = s.pictures;
-        st.picture_bytes = s.picture_bytes;
-        st.picture_budget = s.picture_budget;
-        st.errors += new_errors;
-        if new_errors > 0 {
-            st.error = last.clone().map(|e| format!("gpu: {e}"));
-        }
-    });
+    if slot.host_frames <= 2
+        || slot.host_frames.is_multiple_of(16)
+        || became_complete
+        || new_errors > 0
+        || result.is_err()
+    {
+        with_status(|st| {
+            st.frames = s.frames;
+            st.last_draw_ms = s.last_draw_ms;
+            st.worst_draw_ms = s.worst_draw_ms;
+            st.width = s.width;
+            st.height = s.height;
+            st.failed_frames = s.failed;
+            st.skipped_frames = s.skipped_frames;
+            st.skipped_pages = s.skipped_pages;
+            st.pages = s.pages.clone();
+            if became_complete {
+                st.ink_complete_ms = clock_ms();
+            }
+            if let Some(g) = gpu_ms {
+                st.gpu_ms = (g, st.gpu_ms.1.max(g));
+            }
+            st.pictures = s.pictures;
+            st.picture_bytes = s.picture_bytes;
+            st.picture_budget = s.picture_budget;
+            st.errors += new_errors;
+            if new_errors > 0 {
+                st.error = last.clone().map(|e| format!("gpu: {e}"));
+            }
+        });
+    }
     if let Err(e) = &result {
         with_status(|st| st.error = Some(format!("draw: {e}")));
     }

@@ -21,7 +21,7 @@ function fmt(ms: number): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
-export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) => void }> = ({ noteId, onError }) => {
+export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) => void }> = React.memo(({ noteId, onError }) => {
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [list, setList] = useState<AudioRecording[]>([]);
@@ -158,4 +158,4 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
       )}
     </div>
   );
-};
+});

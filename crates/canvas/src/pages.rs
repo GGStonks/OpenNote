@@ -510,8 +510,10 @@ impl PageStore {
         self.drawn_caps = caps;
         self.visible_missing = vis_missing.len();
         let uploaded_in_view = self.uploads > uploads_before;
+        let elapsed = now.elapsed();
+        let skip_prefetch = uploaded_in_view || elapsed.as_micros() > 1500;
         let vis = std::mem::take(&mut self.visible);
-        self.near_pass(canvas, frame, view, &vis, uploaded_in_view);
+        self.near_pass(canvas, frame, view, &vis, skip_prefetch);
         self.visible = vis;
         // Those in view are asked for first.
         let mut missing = vis_missing.clone();
@@ -616,9 +618,11 @@ impl PageStore {
     }
 
     /// Beyond the budget: the least recently used scenes leave the GPU (they stay on the CPU),
-    /// those far from the view first, never one in view.
+    /// those far from the view first, never one in view. Defers eviction during tight gestures
+    /// until memory exceeds 1.15x budget to avoid mid-gesture GPU buffer stalls.
     fn evict(&mut self) {
-        if self.gpu_bytes <= self.budget {
+        let soft_limit = (self.budget as f64 * 1.15) as u64;
+        if self.gpu_bytes <= soft_limit {
             return;
         }
         let tick = self.tick;

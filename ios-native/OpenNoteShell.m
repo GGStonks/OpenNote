@@ -1356,7 +1356,7 @@ static float gCanvasMaxFps = 60;
             float max = gCanvasMaxFps;
             if (busy && !_fast) {
                 _fast = YES;
-                link.preferredFrameRateRange = CAFrameRateRangeMake(max > 60 ? MAX(60.0f, max * 2.0f / 3.0f) : max, max, max);
+                link.preferredFrameRateRange = CAFrameRateRangeMake(max, max, max);
             } else if (!busy && _fast) {
                 if (_idleSince == 0) _idleSince = link.timestamp;
                 if (link.timestamp - _idleSince > 0.5) {
@@ -1454,6 +1454,7 @@ static void ONStartCanvasThread(void) {
     metalLayer.framebufferOnly = YES;
     metalLayer.opaque = YES;
     metalLayer.presentsWithTransaction = NO;
+    metalLayer.maximumDrawableCount = 3;
     uint32_t w = (uint32_t)(sz.width * scale);
     uint32_t h = (uint32_t)(sz.height * scale);
     if (!self.canvasAttached) self.canvasAttached = opennote_canvas_attach_layer((__bridge void *)metalLayer, w, h);
