@@ -121,16 +121,29 @@ const rgbOf = (hex: string): [number, number, number] => {
 };
 
 /** The paper's colour as #RRGGBB (named colours or any colour). */
-export function paperHex(c: PaperColor | undefined): string {
+export function paperHex(c: PaperColor | undefined, adaptDark = false): string {
+  if (adaptDark && (!c || c === 'white' || c.toUpperCase() === '#FFFFFF')) {
+    if (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')) {
+      const theme = document.documentElement.getAttribute('data-theme');
+      if (theme === 'midnight') return '#12192B';
+      if (theme === 'oled') return '#0A0A0C';
+      return '#16181E';
+    }
+  }
   if (c && /^#[0-9a-f]{6}$/i.test(c)) return c;
   return PAPER_COLORS[c as PaperColorName] ?? PAPER_COLORS.white;
 }
 
 /** Dark paper (light ink and lines on it): 'dark', or any colour of low luminance. */
-export function paperIsDark(c: PaperColor | undefined): boolean {
+export function paperIsDark(c: PaperColor | undefined, adaptDark = false): boolean {
   if (c === 'dark') return true;
+  if (adaptDark && (!c || c === 'white' || c.toUpperCase() === '#FFFFFF')) {
+    if (typeof document !== 'undefined' && document.documentElement.classList.contains('dark')) {
+      return true;
+    }
+  }
   if (!c || c[0] !== '#') return false;
-  const [r, g, b] = rgbOf(paperHex(c));
+  const [r, g, b] = rgbOf(paperHex(c, adaptDark));
   return 0.2126 * r + 0.7152 * g + 0.0722 * b < 110;
 }
 
@@ -151,10 +164,11 @@ export function paperBackground(
   origin = { x: 0, y: 0 },
   scale = 1,
   swatch = false,
-  pattern: string | null = null
+  pattern: string | null = null,
+  adaptDark = false
 ): React.CSSProperties {
-  const dark = paperIsDark(color);
-  const base = paperHex(color);
+  const dark = paperIsDark(color, adaptDark);
+  const base = paperHex(color, adaptDark);
   const small = scale < 0.6;
   // Line thickness in page px, so a line covers about 0.9 screen px at this scale.
   const lw = small ? Math.max(1, 0.9 / scale) : 1;
@@ -1241,8 +1255,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const inputRef = useRef<HTMLDivElement>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement>(null);
   const visible = true;
+  const adaptDark = !printMode && typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
   /** Blocks: the default ink follows the paper of the page they are on. */
-  const darkAt = (y: number) => paperIsDark(sheetAt(y).paperColor);
+  const darkAt = (y: number) => paperIsDark(sheetAt(y).paperColor, adaptDark);
   const inkAt = (y: number) => (darkAt(y) ? '#F3F4F6' : '#111827');
   const pageRef = useRef(page);
   pageRef.current = page;
@@ -3107,7 +3122,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   return (
     <div
       ref={containerRef}
-      className={`on-page relative select-none overflow-hidden ${isNative ? 'bg-transparent' : ''}`}
+      className={`on-page relative select-none overflow-hidden ${isNative ? 'bg-transparent' : ''} ${adaptDark ? 'on-adaptive-dark' : ''}`}
       style={pageStyle}
       data-page-index={pageIndex}
     >
@@ -3119,7 +3134,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
           className={`absolute pointer-events-none ${isNative ? 'bg-transparent shadow-none' : (printMode ? '' : 'shadow-[0_4px_24px_rgba(0,0,0,0.12)]')}`}
           style={{
             left: sh.left, top: sh.top, width: sh.width, height: sh.height,
-            ...(isNative ? { background: 'transparent', boxShadow: 'none' } : (sh.pdf && printMode && printBare ? {} : paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor))),
+            ...(isNative ? { background: 'transparent', boxShadow: 'none' } : (sh.pdf && printMode && printBare ? {} : paperBackground(sh.paperStyle, sh.paperColor, { x: sh.left, y: sh.top }, 1, false, sh.patternColor, adaptDark))),
           }}
         >
           {sh.pdf && (

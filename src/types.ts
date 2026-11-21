@@ -1,4 +1,4 @@
-export type ToolType = 'pen' | 'shape' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'hand';
+export type ToolType = 'pen' | 'shape' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'hand' | 'laser';
 
 /** What the smart pen (PDEDraw's drawing engine) produces. */
 export type ShapeMode = 'curve' | 'line' | 'rectangle' | 'ellipse' | 'point';

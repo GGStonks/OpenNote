@@ -36,7 +36,12 @@ const paperColorOf = (hex: string): PaperColor => PAPER_COLOR_OPTIONS.find((o) =
 /** A colour being dragged in the spectrum reaches the note this long after the last move (one undo step, not one per move). */
 const COLOUR_SETTLE_MS = 150;
 
-export const PaperPicker: React.FC<{ value: PaperValues; onChange: (patch: SetupPatch) => void }> = ({ value: given, onChange }) => {
+export const PaperPicker: React.FC<{
+  value: PaperValues;
+  onChange: (patch: SetupPatch) => void;
+  adaptDarkPaper?: boolean;
+  onToggleAdaptDarkPaper?: (adapt: boolean) => void;
+}> = ({ value: given, onChange, adaptDarkPaper, onToggleAdaptDarkPaper }) => {
   const [pending, setPending] = useState<SetupPatch | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flush = useRef<() => void>(() => undefined);
@@ -99,6 +104,17 @@ export const PaperPicker: React.FC<{ value: PaperValues; onChange: (patch: Setup
           </button>
         ))}
       </div>
+      {onToggleAdaptDarkPaper && (
+        <div className="pt-2.5 mt-2.5 border-t border-gray-200/60 dark:border-white/10 flex items-center justify-between">
+          <span className="text-xs font-medium text-gray-700 dark:text-gray-300">Auto-adapt paper to dark mode</span>
+          <input
+            type="checkbox"
+            checked={adaptDarkPaper ?? true}
+            onChange={(e) => onToggleAdaptDarkPaper(e.target.checked)}
+            className="w-4 h-4 accent-blue-600 rounded cursor-pointer"
+          />
+        </div>
+      )}
     </div>
   );
 };

@@ -2,18 +2,20 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Undo2, Redo2, PenLine, Highlighter, Eraser, Lasso, Type, Hand, Share, Settings, ChevronLeft, Plus,
   LayoutTemplate, Sparkles, Image as ImageIcon, Sigma, Shapes, Trash2, Copy, MoreHorizontal,
-  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText, Bookmark,
+  Spline, Slash, Square, Circle, Dot, Pointer, PointerOff, ClipboardPaste, PanelLeft, FileText,
+  Bookmark, Cast, Eye, Search, MoveUpRight, Sliders, Check, Wand2
 } from 'lucide-react';
-import { EraserMode, FillType, PenStyle, ShapeMode, ToolType } from '../types';
-import { LineStylePicker } from './LineStyles';
+import { EraserMode, FillType, PenStyle, ShapeMode, ToolType, LineStyle } from '../types';
+import { LINE_STYLES, LineStylePicker } from './LineStyles';
 import { SetupPatch } from '../editor/pageSetup';
 import { PaperPicker, PaperValues } from './PaperPicker';
 import { ToolSettings } from './CanvasPage';
 import { ColorPicker } from './ColorPicker';
 import { OnScreen } from './onScreen';
 import { useBack } from '../services/backStack';
+import { MirrorPopover } from './MirrorPopover';
 
-const PEN_COLORS = ['#111827', '#1A73E8', '#D93025', '#188038', '#F2994A', '#9B51E0', '#6B7280', '#00A88A', '#FFFFFF'];
+const PEN_COLORS = ['#111827', '#2563EB', '#DC2626', '#16A34A', '#EA580C', '#9333EA', '#4B5563', '#0D9488', '#FFFFFF'];
 const HIGHLIGHTER_COLORS = ['#FDE047', '#86EFAC', '#93C5FD', '#F9A8D4', '#C4B5FD', '#FDBA74'];
 
 export const FILL_OPTIONS: { id: FillType; label: string }[] = [
@@ -26,14 +28,43 @@ export const FILL_OPTIONS: { id: FillType; label: string }[] = [
 ];
 
 const SHAPE_MODES: { id: ShapeMode; label: string; icon: React.ReactNode }[] = [
-  { id: 'curve', label: 'Smart curve', icon: <Spline className="w-6 h-6" /> },
-  { id: 'line', label: 'Line', icon: <Slash className="w-6 h-6" /> },
-  { id: 'rectangle', label: 'Rectangle', icon: <Square className="w-6 h-6" /> },
-  { id: 'ellipse', label: 'Ellipse / circle', icon: <Circle className="w-6 h-6" /> },
-  { id: 'point', label: 'Point', icon: <Dot className="w-6 h-6" /> },
+  { id: 'curve', label: 'Curve', icon: <Spline className="w-5 h-5" strokeWidth={1.75} /> },
+  { id: 'line', label: 'Line', icon: <Slash className="w-5 h-5" strokeWidth={1.75} /> },
+  { id: 'rectangle', label: 'Rectangle', icon: <Square className="w-5 h-5" strokeWidth={1.75} /> },
+  { id: 'ellipse', label: 'Ellipse', icon: <Circle className="w-5 h-5" strokeWidth={1.75} /> },
+  { id: 'point', label: 'Point', icon: <Dot className="w-5 h-5" strokeWidth={1.75} /> },
 ];
 
-/** Small preview of a fill style. */
+/** Live interactive nib preview */
+export const NibPreview: React.FC<{
+  color: string;
+  width: number;
+  opacity?: number;
+  style?: LineStyle;
+}> = ({ color, width, opacity = 1, style = 'solid' }) => {
+  const dashArray =
+    style === 'dashed' ? '10 6' :
+    style === 'dotted' ? '3 5' :
+    style === 'dashdot' ? '12 5 3 5' :
+    style === 'longdash' ? '20 7' : undefined;
+
+  return (
+    <div className="w-full h-11 rounded-2xl bg-gray-100/80 dark:bg-white/5 border border-gray-200/50 dark:border-white/5 flex items-center justify-center px-4 overflow-hidden mb-3">
+      <svg className="w-full h-8 overflow-visible" viewBox="0 0 240 32">
+        <path
+          d="M 20 16 Q 80 4, 120 16 T 220 16"
+          fill="none"
+          stroke={color.toUpperCase() === '#FFFFFF' ? '#9CA3AF' : color}
+          strokeWidth={Math.max(1, Math.min(24, width))}
+          strokeOpacity={opacity}
+          strokeLinecap="round"
+          strokeDasharray={dashArray}
+        />
+      </svg>
+    </div>
+  );
+};
+
 export const FillSwatch: React.FC<{ fill: FillType; color: string }> = ({ fill, color }) => {
   const id = `sw-${fill}`;
   return (
@@ -60,7 +91,7 @@ export const FillSwatch: React.FC<{ fill: FillType; color: string }> = ({ fill, 
   );
 };
 
-interface ToolbarProps {
+export interface ToolbarProps {
   tools: ToolSettings;
   setTools: (patch: Partial<ToolSettings>) => void;
   canUndo: boolean;
@@ -69,7 +100,6 @@ interface ToolbarProps {
   onRedo: () => void;
   title: string;
   setTitle: (t: string) => void;
-  /** The note's default paper (pages without paper of their own, and new pages). */
   paper: PaperValues;
   setPaper: (patch: SetupPatch) => void;
   pagesOpen: boolean;
@@ -79,19 +109,27 @@ interface ToolbarProps {
   onExport: () => void;
   onSettings: () => void;
   onDuplicatePage: () => void;
-  /** Whether the current page is bookmarked, and its toggle. */
   pageBookmarked: boolean;
   onToggleBookmark: () => void;
   onDeletePage: () => void;
   onInsertLatex: () => void;
   onInsertImage: (file: File) => void;
-  /** A PDF's pages, inserted after the current page. */
   onInsertPdf: (file: File) => void;
-  /** Paste the clipboard (undefined: nothing copied). */
   onPaste?: () => void;
   currentPage: number;
   totalPages: number;
   audioSlot: React.ReactNode;
+  onOpenMirror?: () => void;
+  isMirrorActive?: boolean;
+  onOpenCommandPalette?: () => void;
+  zenMode?: boolean;
+  onToggleZen?: () => void;
+  dockPosition?: 'bottom' | 'left' | 'right';
+  onSetDockPosition?: (pos: 'bottom' | 'left' | 'right') => void;
+  cleanPresentation?: boolean;
+  onToggleCleanPresentation?: (clean: boolean) => void;
+  adaptDarkPaper?: boolean;
+  onToggleAdaptDarkPaper?: (adapt: boolean) => void;
 }
 
 function usePopover() {
@@ -109,27 +147,54 @@ function usePopover() {
   return { open, setOpen, ref };
 }
 
-const ToolButton: React.FC<{ active: boolean; title: string; onClick: () => void; children: React.ReactNode }> = ({ active, title, onClick, children }) => (
+const ToolDockButton: React.FC<{
+  active: boolean;
+  title: string;
+  onClick: () => void;
+  children: React.ReactNode;
+}> = ({ active, title, onClick, children }) => (
   <button
     onClick={onClick}
     title={title}
-    className={`h-10 min-w-8 px-1 min-[360px]:min-w-10 min-[360px]:px-1.5 sm:h-11 sm:min-w-11 sm:px-2.5 rounded-2xl flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-95 ${
+    className={`min-w-[40px] min-h-[40px] h-10 w-10 sm:h-11 sm:w-11 rounded-2xl flex items-center justify-center relative transition-all duration-150 active:scale-95 ${
       active
         ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30'
-        : 'text-gray-700 dark:text-gray-200 hover:bg-white dark:hover:bg-white/10'
+        : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
     }`}
   >
     {children}
   </button>
 );
 
-// Kept on the screen (onScreen.tsx): a popover under a button near an edge of a phone's screen
-// went partly past it.
-const Popover: React.FC<{ align?: 'left' | 'right' | 'center'; children: React.ReactNode }> = ({ align = 'left', children }) => (
+const DockPopover: React.FC<{
+  position?: 'bottom' | 'left' | 'right';
+  children: React.ReactNode;
+}> = ({ position = 'bottom', children }) => {
+  const positionClass =
+    position === 'left'
+      ? 'left-full top-0 ml-3'
+      : position === 'right'
+      ? 'right-full top-0 mr-3'
+      : 'bottom-full left-1/2 -translate-x-1/2 mb-3';
+
+  return (
+    <OnScreen
+      data-ui-panel
+      className={`absolute z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-120px)] overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${positionClass}`}
+    >
+      {children}
+    </OnScreen>
+  );
+};
+
+const HeaderPopover: React.FC<{
+  align?: 'left' | 'right';
+  children: React.ReactNode;
+}> = ({ align = 'right', children }) => (
   <OnScreen
     data-ui-panel
-    className={`absolute top-14 z-50 bg-white/95 dark:bg-ui-raised/95 backdrop-blur-xl rounded-3xl p-4 shadow-2xl shadow-black/15 border border-gray-200/80 dark:border-white/10 w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto overflow-x-hidden no-scrollbar ${
-      align === 'right' ? 'right-0' : align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
+    className={`absolute top-12 z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${
+      align === 'right' ? 'right-0' : 'left-0'
     }`}
   >
     {children}
@@ -140,21 +205,34 @@ const Label: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="text-[11px] font-bold text-gray-400 uppercase tracking-wider mb-2 mt-1.5">{children}</div>
 );
 
-/**
- * A tool's width (or opacity) as a slider and a box, both from 1 to 100; editing one moves the
- * other. The level maps onto the tool's own range [min, max], along a log scale for widths (fine
- * steps where widths are thin) or straight for opacity.
- */
-const LevelControl: React.FC<{ value: number; min: number; max: number; log?: boolean; onChange: (v: number) => void; label: string }> = ({ value, min, max, log = true, onChange, label }) => {
-  const toLevel = (v: number) => Math.round(1 + 99 * (log ? Math.log(Math.max(min, Math.min(max, v)) / min) / Math.log(max / min) : (Math.max(min, Math.min(max, v)) - min) / (max - min)));
+const LevelControl: React.FC<{
+  value: number;
+  min: number;
+  max: number;
+  log?: boolean;
+  onChange: (v: number) => void;
+  label: string;
+}> = ({ value, min, max, log = true, onChange, label }) => {
+  const toLevel = (v: number) =>
+    Math.round(1 + 99 * (log ? Math.log(Math.max(min, Math.min(max, v)) / min) / Math.log(max / min) : (Math.max(min, Math.min(max, v)) - min) / (max - min)));
   const fromLevel = (l: number) => (log ? min * Math.pow(max / min, (l - 1) / 99) : min + ((l - 1) / 99) * (max - min));
   const level = toLevel(value);
   const [draft, setDraft] = useState(String(level));
   useEffect(() => setDraft(String(level)), [level]);
   const set = (l: number) => onChange(fromLevel(Math.max(1, Math.min(100, Math.round(l)))));
+
   return (
     <div className="flex items-center gap-3 mb-2">
-      <input type="range" min={1} max={100} step={1} value={level} onChange={(e) => set(+e.target.value)} className="flex-1 accent-blue-600" aria-label={label} />
+      <input
+        type="range"
+        min={1}
+        max={100}
+        step={1}
+        value={level}
+        onChange={(e) => set(+e.target.value)}
+        className="flex-1 accent-blue-600"
+        aria-label={label}
+      />
       <input
         type="number"
         inputMode="numeric"
@@ -168,348 +246,711 @@ const LevelControl: React.FC<{ value: number; min: number; max: number; log?: bo
           if (e.target.value !== '' && Number.isFinite(n) && n >= 1 && n <= 100) set(n);
         }}
         onBlur={() => setDraft(String(level))}
-        className="w-16 text-center text-sm rounded-xl border border-gray-200 dark:border-gray-600 bg-white dark:bg-ui-high py-1.5 tabular-nums"
+        className="w-16 text-center text-sm rounded-xl border border-gray-200 dark:border-white/10 bg-white/80 dark:bg-ui-high py-1.5 tabular-nums text-gray-900 dark:text-gray-100"
       />
     </div>
   );
 };
 
-/** The tools' width ranges (page px) behind the 1-100 levels. */
 const PEN_WIDTH_RANGE = { min: 0.5, max: 24 };
 const HIGHLIGHTER_WIDTH_RANGE = { min: 1, max: 20 };
 const ERASER_SIZE_RANGE = { min: 2, max: 100 };
 
-/**
- * Header buttons moved into the "…" menu, in this order, when the top bar's row has no room for
- * them; after them the title may shrink away. Measured, not set per screen size: on a 360 px phone
- * the buttons on the left (title, undo, redo) slid under the ones on the right.
- */
-const FOLDABLE = ['paper', 'export', 'settings'] as const;
-const FOLD_TITLE = FOLDABLE.length + 1;
-
-/** How many of FOLDABLE (then the title) give way so that the left group's buttons are not covered. */
-function useHeaderFold(row: React.RefObject<HTMLElement | null>, left: React.RefObject<HTMLElement | null>): number {
-  const [fold, setFold] = useState(0);
-  // One more at a time while the left group's content is wider than its room (before paint).
-  useLayoutEffect(() => {
-    const el = left.current;
-    if (el && fold < FOLD_TITLE && el.scrollWidth > el.clientWidth + 1) setFold(fold + 1);
-  }, [fold, left]);
-  // Any change of the header's size (rotation, split screen, the pages panel) starts over. (A button
-  // moved aside from a camera cutout, services/cutout.ts, never takes room the row does not have.)
-  useEffect(() => {
-    const el = row.current;
-    if (!el) return;
-    let width = el.clientWidth;
-    const ro = new ResizeObserver(() => {
-      if (el.clientWidth === width) return;
-      width = el.clientWidth;
-      setFold(0);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [row]);
-  return fold;
-}
-
 export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const { tools, setTools } = p;
-  const pop = usePopover();
+  const dockPop = usePopover();
+  const headerPop = usePopover();
   const fileRef = useRef<HTMLInputElement>(null);
   const pdfRef = useRef<HTMLInputElement>(null);
 
+  const [smartPenTab, setSmartPenTab] = useState<'shape' | 'style'>('shape');
+  const [colorPickerOpen, setColorPickerOpen] = useState(false);
+  const dockPos = p.dockPosition ?? 'bottom';
+
   const selectTool = (tool: ToolType, menu?: string) => {
-    if (tools.tool === tool && menu) pop.setOpen(pop.open === menu ? null : menu);
-    else {
+    if (tools.tool === tool && menu) {
+      dockPop.setOpen(dockPop.open === menu ? null : menu);
+    } else {
       setTools({ tool });
-      pop.setOpen(null);
+      dockPop.setOpen(null);
     }
   };
 
-  const shelf = (
-    <div ref={pop.ref} className="flex items-center bg-gray-100/90 dark:bg-ui-raised p-1 sm:p-1.5 rounded-[22px] border border-gray-200/70 dark:border-white/10 gap-0.5 sm:gap-1 shadow-inner">
-      <div className="relative">
-        <ToolButton active={tools.tool === 'pen'} title="Pen (tap again for options)" onClick={() => selectTool('pen', 'pen')}>
-          <PenLine className="w-6 h-6" />
-          <span className="hidden sm:block w-4 h-4 rounded-full ring-2 ring-white/90 dark:ring-black/40 shadow-sm" style={{ backgroundColor: tools.penColor }} />
-        </ToolButton>
-        {pop.open === 'pen' && (
-          <Popover>
-            <Label>Pen type</Label>
-            <div className="flex gap-1 mb-2">
-              {(['fountain', 'ballpoint'] as PenStyle[]).map((s) => (
-                <button key={s} onClick={() => setTools({ penStyle: s })} className={`flex-1 text-sm py-2 rounded-xl border capitalize ${tools.penStyle === s ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600'}`}>
-                  {s === 'fountain' ? 'Fountain (pressure)' : 'Ballpoint'}
-                </button>
-              ))}
-            </div>
-            <Label>Line</Label>
-            <LineStylePicker value={tools.penLineStyle} onChange={(ls) => setTools({ penLineStyle: ls })} />
-            <Label>Width</Label>
-            <LevelControl label="Pen width" value={tools.penWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ penWidth: v })} />
-            <Label>Colour</Label>
-            <ColorPicker value={tools.penColor} onChange={(c) => setTools({ penColor: c })} presets={PEN_COLORS} />
-          </Popover>
-        )}
-      </div>
+  const currentStrokeColor =
+    tools.tool === 'highlighter' ? tools.highlighterColor :
+    tools.tool === 'shape' ? tools.shapeColor : tools.penColor;
 
-      <div className="relative">
-        <ToolButton active={tools.tool === 'shape'} title="Smart pen: smooth curves that close themselves, lines, rectangles, ellipses, fills (tap again for options)" onClick={() => selectTool('shape', 'shape')}>
-          {SHAPE_MODES.find((m) => m.id === tools.shapeMode)?.icon ?? <Spline className="w-6 h-6" />}
-          <span className="hidden sm:block w-4 h-4 rounded-full ring-2 ring-white/90 dark:ring-black/40 shadow-sm" style={{ backgroundColor: tools.shapeColor }} title="Draw colour" />
-        </ToolButton>
-        {pop.open === 'shape' && (
-          <Popover>
-            <Label>Draw</Label>
-            <div className="grid grid-cols-5 gap-1 mb-2">
-              {SHAPE_MODES.map((m) => (
-                <button key={m.id} onClick={() => setTools({ shapeMode: m.id })} title={m.label} className={`h-11 rounded-xl border flex items-center justify-center ${tools.shapeMode === m.id ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600 text-gray-700 dark:text-gray-300'}`}>
-                  {m.icon}
-                </button>
-              ))}
-            </div>
-            <Label>Fill (closed shapes)</Label>
-            <div className="grid grid-cols-6 gap-1 mb-2">
-              {FILL_OPTIONS.map((f) => (
-                <button key={f.id} onClick={() => setTools({ shapeFill: f.id })} title={f.label} className={`h-11 rounded-xl border flex items-center justify-center ${tools.shapeFill === f.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-600'}`}>
-                  <FillSwatch fill={f.id} color={tools.shapeColor.toUpperCase() === '#FFFFFF' ? '#9CA3AF' : tools.shapeColor} />
-                </button>
-              ))}
-            </div>
-            <Label>Line</Label>
-            <LineStylePicker value={tools.shapeLineStyle} onChange={(ls) => setTools({ shapeLineStyle: ls })} />
-            <Label>Width</Label>
-            <LevelControl label="Draw width" value={tools.shapeWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ shapeWidth: v })} />
-            <Label>Colour</Label>
-            <div className="mb-2">
-              <ColorPicker value={tools.shapeColor} onChange={(c) => setTools({ shapeColor: c })} presets={PEN_COLORS} size="sm" />
-            </div>
-            <label className="flex items-center justify-between gap-3 py-1 mt-1 text-sm text-gray-700 dark:text-gray-300">
-              Arrowhead on open lines
-              <input type="checkbox" checked={tools.shapeArrow} onChange={(e) => setTools({ shapeArrow: e.target.checked })} />
-            </label>
-            <label className="flex items-center justify-between gap-3 py-1 mt-2 text-sm text-gray-700 dark:text-gray-300">
-              Snap to shapes (points, edges, crossings)
-              <input type="checkbox" checked={tools.shapeSnap} onChange={(e) => setTools({ shapeSnap: e.target.checked })} />
-            </label>
-            <label className="flex items-center justify-between gap-3 py-1 mt-2 text-sm text-gray-700 dark:text-gray-300">
-              Snap to grid / dot paper
-              <input type="checkbox" checked={tools.shapeGridSnap} onChange={(e) => setTools({ shapeGridSnap: e.target.checked })} />
-            </label>
-            <p className="text-[10px] text-gray-400 mt-2 leading-snug">End a curve near its start to close it. Closed shapes take the fill. Lasso a single shape to reshape it with its handles.</p>
-          </Popover>
-        )}
-      </div>
+  const currentStrokeWidth =
+    tools.tool === 'highlighter' ? tools.highlighterWidth :
+    tools.tool === 'shape' ? tools.shapeWidth : tools.penWidth;
 
-      <div className="relative">
-        <ToolButton active={tools.tool === 'highlighter'} title="Highlighter" onClick={() => selectTool('highlighter', 'hl')}>
-          <Highlighter className="w-6 h-6" />
-          <span className="hidden sm:block w-4 h-4 rounded-full ring-2 ring-white/90 dark:ring-black/40 shadow-sm" style={{ backgroundColor: tools.highlighterColor }} />
-        </ToolButton>
-        {pop.open === 'hl' && (
-          <Popover>
-            <Label>Colour</Label>
-            <div className="mb-2">
-              <ColorPicker value={tools.highlighterColor} onChange={(c) => setTools({ highlighterColor: c })} presets={HIGHLIGHTER_COLORS} />
-            </div>
-            <Label>Width</Label>
-            <LevelControl label="Highlighter width" value={tools.highlighterWidth} {...HIGHLIGHTER_WIDTH_RANGE} onChange={(v) => setTools({ highlighterWidth: v })} />
-            <Label>Opacity</Label>
-            <LevelControl label="Highlighter opacity" value={tools.highlighterOpacity} min={0.01} max={1} log={false} onChange={(v) => setTools({ highlighterOpacity: v })} />
-          </Popover>
-        )}
-      </div>
+  const currentLineStyle =
+    tools.tool === 'shape' ? tools.shapeLineStyle : tools.penLineStyle;
 
-      <div className="relative">
-        <ToolButton active={tools.tool === 'eraser'} title="Eraser" onClick={() => selectTool('eraser', 'eraser')}>
-          <Eraser className="w-6 h-6" />
-        </ToolButton>
-        {pop.open === 'eraser' && (
-          <Popover align="center">
-            <Label>Mode</Label>
-            <div className="flex gap-1 mb-2">
-              {(['stroke', 'partial'] as EraserMode[]).map((m) => (
-                <button key={m} onClick={() => setTools({ eraserMode: m })} className={`flex-1 text-sm py-2 rounded-xl border ${tools.eraserMode === m ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' : 'border-gray-200 dark:border-gray-600'}`}>
-                  {m === 'stroke' ? 'Whole stroke' : 'Precision'}
-                </button>
-              ))}
-            </div>
-            <Label>Size</Label>
-            <LevelControl label="Eraser size" value={tools.eraserSize} {...ERASER_SIZE_RANGE} onChange={(v) => setTools({ eraserSize: v })} />
-          </Popover>
-        )}
-      </div>
+  // 1-tap width presets
+  const widthPresets =
+    tools.tool === 'highlighter'
+      ? [3, 8, 16]
+      : [2, 5, 12];
 
-      <div className="relative">
-        <ToolButton active={tools.tool === 'lasso'} title="Lasso: select, move, convert to LaTeX/TikZ" onClick={() => selectTool('lasso', 'lasso')}>
-          <Lasso className="w-6 h-6" />
-        </ToolButton>
-        {pop.open === 'lasso' && (
-          <Popover align="center">
-            <Label>Mode</Label>
-            <div className="flex gap-1 mb-2">
-              {(['freeform', 'rect'] as const).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setTools({ lassoMode: m })}
-                  className={`flex-1 text-sm py-2 rounded-xl border ${
-                    (tools.lassoMode ?? 'freeform') === m
-                      ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
-                      : 'border-gray-200 dark:border-gray-600'
-                  }`}
-                >
-                  {m === 'freeform' ? 'Freeform' : 'Rectangle'}
-                </button>
-              ))}
-            </div>
-          </Popover>
-        )}
-      </div>
-      <ToolButton active={tools.tool === 'text'} title="Text" onClick={() => selectTool('text')}>
-        <Type className="w-6 h-6" />
-      </ToolButton>
-      <ToolButton active={tools.tool === 'hand'} title="Scroll / hand" onClick={() => selectTool('hand')}>
-        <Hand className="w-6 h-6" />
-      </ToolButton>
-      <ToolButton
-        active={!tools.stylusOnly}
-        title={tools.stylusOnly ? 'Pencil only (fingers scroll). Tap to allow finger drawing.' : 'Finger drawing enabled. Tap for pencil only.'}
-        onClick={() => setTools({ stylusOnly: !tools.stylusOnly })}
-      >
-        {tools.stylusOnly ? <PointerOff className="w-6 h-6" /> : <Pointer className="w-6 h-6" />}
-      </ToolButton>
-    </div>
-  );
+  const setWidthPreset = (w: number) => {
+    if (tools.tool === 'highlighter') setTools({ highlighterWidth: w });
+    else if (tools.tool === 'shape') setTools({ shapeWidth: w });
+    else setTools({ penWidth: w });
+  };
 
-  const menu = usePopover();
-  const rowRef = useRef<HTMLDivElement>(null);
-  const leftRef = useRef<HTMLDivElement>(null);
-  const fold = useHeaderFold(rowRef, leftRef);
-  const folded = (id: (typeof FOLDABLE)[number]) => FOLDABLE.indexOf(id) < fold;
-  const iconBtn = 'p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 active:scale-95 transition';
+  // 1-tap favorite swatches
+  const quickColors =
+    tools.tool === 'highlighter'
+      ? HIGHLIGHTER_COLORS.slice(0, 4)
+      : ['#111827', '#2563EB', '#DC2626', '#16A34A'];
+
+  const setQuickColor = (c: string) => {
+    if (tools.tool === 'highlighter') setTools({ highlighterColor: c });
+    else if (tools.tool === 'shape') setTools({ shapeColor: c });
+    else setTools({ penColor: c });
+  };
+
+  const dockOrientationClass =
+    dockPos === 'left'
+      ? 'fixed left-3 top-1/2 -translate-y-1/2 flex-col z-40'
+      : dockPos === 'right'
+      ? 'fixed right-3 top-1/2 -translate-y-1/2 flex-col z-40'
+      : 'fixed bottom-4 left-1/2 -translate-x-1/2 flex-row z-40';
+
+  const iconBtn = 'min-w-[40px] min-h-[40px] h-10 w-10 sm:h-11 sm:w-11 rounded-2xl flex items-center justify-center text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition';
 
   return (
-    <header data-cutout-clear data-cutout-bar className="bg-white/95 dark:bg-ui-panel/95 backdrop-blur border-b border-gray-200 dark:border-gray-800 z-30 select-none pt-[var(--sa-top)]">
-      <div ref={rowRef} className="flex flex-wrap lg:flex-nowrap items-center gap-x-3 gap-y-2 py-2 pl-[calc(0.75rem+var(--sa-left))] pr-[calc(0.75rem+var(--sa-right))]">
-        <div ref={leftRef} className="flex items-center gap-0.5 min-w-0 flex-1 lg:flex-1 lg:basis-0">
-          <button onClick={p.onBack} className="flex-none flex items-center text-blue-600 dark:text-blue-400 px-1.5 sm:px-2 py-2 rounded-xl text-base font-semibold hover:bg-blue-50 dark:hover:bg-blue-900/20">
-            <ChevronLeft className="w-6 h-6" />
-            <span className="hidden 2xl:inline">Notes</span>
+    <>
+      {/* =========================================================================
+          TOP FLOATING GLASS ISLANDS (Zero Full-Width Opaque Header!)
+          ========================================================================= */}
+      <div className="fixed top-3 left-3 right-3 z-30 pointer-events-none flex items-center justify-between gap-3 pt-[var(--sa-top)] select-none">
+        {/* Top-Left Island */}
+        <div className="glass-pill rounded-2xl px-2 py-1.5 flex items-center gap-1 sm:gap-1.5 pointer-events-auto max-w-[calc(100vw-120px)] sm:max-w-md">
+          <button
+            onClick={p.onBack}
+            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 active:scale-95 transition"
+            title="Back to notes"
+          >
+            <ChevronLeft className="w-5 h-5" strokeWidth={1.75} />
           </button>
+
           <button
             onClick={p.onTogglePages}
-            className={`flex-none p-2 sm:p-2.5 rounded-xl active:scale-95 transition ${p.pagesOpen ? 'bg-blue-600 text-white' : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10'}`}
-            title="Pages"
+            className={`min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl active:scale-95 transition ${
+              p.pagesOpen ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
+            }`}
+            title="Page Overview Drawer"
           >
-            <PanelLeft className="w-6 h-6" />
+            <PanelLeft className="w-5 h-5" strokeWidth={1.75} />
           </button>
+
           <input
             value={p.title}
             onChange={(e) => p.setTitle(e.target.value)}
-            className={`font-semibold text-base bg-transparent rounded-lg px-2 py-1.5 w-full max-w-[220px] ${fold < FOLD_TITLE ? 'min-w-[4.5rem]' : 'min-w-0'} text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 select-text`}
+            className="font-semibold text-sm sm:text-base bg-transparent rounded-lg px-2 py-1 w-24 min-[420px]:w-36 sm:w-48 text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 hover:bg-black/5 dark:hover:bg-white/5 transition select-text"
+            title="Click to rename note"
           />
-          <button onClick={p.onUndo} disabled={!p.canUndo} className="flex-none p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Undo">
-            <Undo2 className="w-6 h-6" />
-          </button>
-          <button onClick={p.onRedo} disabled={!p.canRedo} className="flex-none p-2 sm:p-2.5 rounded-xl text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition" title="Redo">
-            <Redo2 className="w-6 h-6" />
+
+          <button
+            onClick={p.onTogglePages}
+            className="px-2 py-1 rounded-xl text-xs font-semibold text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/10 tabular-nums flex-shrink-0"
+            title="Current page / Total pages"
+          >
+            {p.currentPage} / {p.totalPages}
           </button>
         </div>
 
-        <div className="order-last w-full flex justify-center lg:order-none lg:w-auto lg:flex-none">{shelf}</div>
-
-        <div ref={menu.ref} className="flex items-center justify-end gap-0.5 relative lg:flex-1 lg:basis-0">
-          {p.audioSlot}
-          <button onClick={p.onConvertPage} className="hidden sm:flex items-center gap-2 bg-gradient-to-r from-blue-600 to-indigo-600 text-white px-3 2xl:px-4 py-2.5 rounded-2xl text-sm font-semibold shadow-md shadow-indigo-600/25 active:scale-95 transition" title="Transcribe the current page with Qwen3-VL">
-            <Sparkles className="w-5 h-5" />
-            <span className="hidden 2xl:inline">Page → LaTeX</span>
+        {/* Top-Right Island */}
+        <div ref={headerPop.ref} className="glass-pill rounded-2xl px-2 py-1.5 flex items-center gap-1 pointer-events-auto relative">
+          <button
+            onClick={p.onUndo}
+            disabled={!p.canUndo}
+            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition"
+            title="Undo"
+          >
+            <Undo2 className="w-5 h-5" strokeWidth={1.75} />
           </button>
-          {!folded('paper') && (
-            <button onClick={() => menu.setOpen(menu.open === 'paper' ? null : 'paper')} className={iconBtn} title="Paper">
-              <LayoutTemplate className="w-6 h-6" />
-            </button>
-          )}
-          <button onClick={() => menu.setOpen(menu.open === 'more' ? null : 'more')} className={iconBtn} title="Insert & pages">
-            <MoreHorizontal className="w-6 h-6" />
-          </button>
-          {!folded('export') && (
-            <button onClick={p.onExport} className={iconBtn} title="Export">
-              <Share className="w-6 h-6" />
-            </button>
-          )}
-          {!folded('settings') && (
-            <button onClick={p.onSettings} className={iconBtn} title="Settings">
-              <Settings className="w-6 h-6" />
-            </button>
-          )}
 
-          {menu.open === 'paper' && (
-            <Popover align="right">
-              <div className="text-xs text-gray-500 dark:text-gray-400 mb-3 leading-snug">
-                Note paper: used by new pages and by every page without paper of its own (set that in Pages).
-              </div>
-              <PaperPicker value={p.paper} onChange={p.setPaper} />
-            </Popover>
-          )}
-          {menu.open === 'more' && (
-            <Popover align="right">
-              <div className="flex flex-col text-sm text-gray-800 dark:text-gray-200">
-                {[
-                  // Header buttons without room in the row (useHeaderFold).
-                  ...(folded('paper') ? [{ icon: <LayoutTemplate className="w-5 h-5" />, label: 'Paper', fn: () => menu.setOpen('paper') }] : []),
-                  ...(folded('export') ? [{ icon: <Share className="w-5 h-5" />, label: 'Export', fn: p.onExport }] : []),
-                  ...(folded('settings') ? [{ icon: <Settings className="w-5 h-5" />, label: 'Settings', fn: p.onSettings }] : []),
-                  { icon: <Sparkles className="w-5 h-5" />, label: 'Transcribe page → LaTeX', fn: p.onConvertPage, cls: 'sm:hidden' },
-                  { icon: <Sigma className="w-5 h-5" />, label: 'Insert LaTeX / TikZ', fn: p.onInsertLatex },
-                  { icon: <ImageIcon className="w-5 h-5" />, label: 'Insert image', fn: () => fileRef.current?.click() },
-                  { icon: <FileText className="w-5 h-5" />, label: 'Insert PDF after this page', fn: () => pdfRef.current?.click() },
-                  ...(p.onPaste ? [{ icon: <ClipboardPaste className="w-5 h-5" />, label: 'Paste copied items', fn: p.onPaste }] : []),
-                  { icon: <Bookmark className="w-5 h-5" fill={p.pageBookmarked ? 'currentColor' : 'none'} />, label: p.pageBookmarked ? 'Remove bookmark from this page' : 'Bookmark this page', fn: p.onToggleBookmark },
-                  { icon: <Copy className="w-5 h-5" />, label: 'Duplicate current page', fn: p.onDuplicatePage },
-                  { icon: <Trash2 className="w-5 h-5" />, label: 'Delete current page', fn: p.onDeletePage, danger: true },
-                ].map((it) => (
-                  <button
-                    key={it.label}
-                    onClick={() => {
-                      menu.setOpen(null);
-                      it.fn();
-                    }}
-                    className={`flex items-center gap-3 px-3 py-3 rounded-xl text-[15px] hover:bg-gray-100 dark:hover:bg-white/10 text-left ${it.danger ? 'text-red-600' : ''} ${it.cls ?? ''}`}
-                  >
-                    {it.icon}
-                    {it.label}
-                  </button>
-                ))}
-                <div className="text-[11px] text-gray-400 px-2 pt-1 flex items-center gap-1">
-                  <Shapes className="w-3 h-3" /> Page {p.currentPage} of {p.totalPages}
+          <button
+            onClick={p.onRedo}
+            disabled={!p.canRedo}
+            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition"
+            title="Redo"
+          >
+            <Redo2 className="w-5 h-5" strokeWidth={1.75} />
+          </button>
+
+          <div className="h-5 w-px bg-gray-300 dark:bg-white/10 mx-0.5" />
+
+          {/* Audio slot */}
+          <div className="flex items-center">
+            {p.audioSlot}
+          </div>
+
+          {/* AI Assist button */}
+          <button
+            onClick={() => headerPop.setOpen(headerPop.open === 'ai' ? null : 'ai')}
+            className={`min-w-[36px] min-h-[36px] h-9 px-2.5 rounded-xl flex items-center gap-1.5 text-xs font-semibold active:scale-95 transition ${
+              headerPop.open === 'ai'
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20'
+            }`}
+            title="AI Assist (Qwen3-VL)"
+          >
+            <Sparkles className="w-4 h-4" strokeWidth={1.75} />
+            <span className="hidden md:inline">AI Assist</span>
+          </button>
+
+          {/* Cast button with live indicator */}
+          <button
+            onClick={() => headerPop.setOpen(headerPop.open === 'mirror' ? null : 'mirror')}
+            className={`min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl relative active:scale-95 transition ${
+              headerPop.open === 'mirror' || p.isMirrorActive
+                ? 'bg-blue-600 text-white shadow-sm'
+                : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
+            }`}
+            title="Cast to PC"
+          >
+            <Cast className="w-5 h-5" strokeWidth={1.75} />
+            {p.isMirrorActive && (
+              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-white dark:ring-black animate-pulse" />
+            )}
+          </button>
+
+          {/* More menu */}
+          <button
+            onClick={() => headerPop.setOpen(headerPop.open === 'more' ? null : 'more')}
+            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+            title="More actions"
+          >
+            <MoreHorizontal className="w-5 h-5" strokeWidth={1.75} />
+          </button>
+
+          {/* AI Assist Popover */}
+          {headerPop.open === 'ai' && (
+            <HeaderPopover align="right">
+              <div className="flex flex-col gap-1 text-sm">
+                <div className="px-2 py-1 text-[11px] font-bold text-gray-400 uppercase tracking-wider">
+                  Qwen3-VL Multimodal Assist
                 </div>
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onConvertPage(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left font-medium"
+                >
+                  <Sparkles className="w-5 h-5 text-blue-500" strokeWidth={1.75} />
+                  <div>
+                    <div className="text-gray-900 dark:text-gray-100">Transcribe Page → LaTeX</div>
+                    <div className="text-[11px] text-gray-400">Transcribe handwriting and equations</div>
+                  </div>
+                </button>
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onInsertLatex(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left font-medium"
+                >
+                  <Sigma className="w-5 h-5 text-indigo-500" strokeWidth={1.75} />
+                  <div>
+                    <div className="text-gray-900 dark:text-gray-100">Insert LaTeX / TikZ Block</div>
+                    <div className="text-[11px] text-gray-400">Manual equation or vector diagram</div>
+                  </div>
+                </button>
               </div>
-            </Popover>
+            </HeaderPopover>
           )}
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) p.onInsertImage(f);
-              e.target.value = '';
-            }}
-          />
-          {/* No `accept`: Android's picker greys out PDFs offered by some apps when it is set. */}
-          <input
-            ref={pdfRef}
-            type="file"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) p.onInsertPdf(f);
-              e.target.value = '';
-            }}
-          />
+
+          {/* Mirror Popover */}
+          {headerPop.open === 'mirror' && (
+            <HeaderPopover align="right">
+              <MirrorPopover
+                onClose={() => headerPop.setOpen(null)}
+                cleanPresentation={p.cleanPresentation ?? false}
+                onToggleCleanPresentation={p.onToggleCleanPresentation ?? (() => undefined)}
+              />
+            </HeaderPopover>
+          )}
+
+          {/* More Actions Popover */}
+          {headerPop.open === 'more' && (
+            <HeaderPopover align="right">
+              <div className="flex flex-col text-sm text-gray-800 dark:text-gray-200">
+                <button
+                  onClick={() => headerPop.setOpen('paper')}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <LayoutTemplate className="w-5 h-5" strokeWidth={1.75} /> Paper Template & Pattern
+                </button>
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onExport(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <Share className="w-5 h-5" strokeWidth={1.75} /> Export Note (PDF / Note)
+                </button>
+                {p.onOpenCommandPalette && (
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onOpenCommandPalette?.(); }}
+                    className="flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <span className="flex items-center gap-3">
+                      <Search className="w-5 h-5" strokeWidth={1.75} /> Command Palette
+                    </span>
+                    <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-black/5 dark:bg-white/10 text-gray-400">⌘K</kbd>
+                  </button>
+                )}
+                {p.onToggleZen && (
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onToggleZen?.(); }}
+                    className="flex items-center justify-between px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <span className="flex items-center gap-3">
+                      <Eye className="w-5 h-5" strokeWidth={1.75} /> {p.zenMode ? 'Exit Zen Mode' : 'Zen Focus Mode'}
+                    </span>
+                    <kbd className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-black/5 dark:bg-white/10 text-gray-400">Tab</kbd>
+                  </button>
+                )}
+                <div className="h-px bg-gray-200 dark:bg-white/10 my-1" />
+                <button
+                  onClick={() => fileRef.current?.click()}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <ImageIcon className="w-5 h-5" strokeWidth={1.75} /> Insert Image
+                </button>
+                <button
+                  onClick={() => pdfRef.current?.click()}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <FileText className="w-5 h-5" strokeWidth={1.75} /> Insert PDF After Current Page
+                </button>
+                {p.onPaste && (
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onPaste?.(); }}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <ClipboardPaste className="w-5 h-5" strokeWidth={1.75} /> Paste Copied Items
+                  </button>
+                )}
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onToggleBookmark(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <Bookmark className="w-5 h-5" strokeWidth={1.75} fill={p.pageBookmarked ? 'currentColor' : 'none'} />
+                  {p.pageBookmarked ? 'Remove Bookmark' : 'Bookmark Page'}
+                </button>
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onDuplicatePage(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <Copy className="w-5 h-5" strokeWidth={1.75} /> Duplicate Page
+                </button>
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onDeletePage(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 text-left"
+                >
+                  <Trash2 className="w-5 h-5" strokeWidth={1.75} /> Delete Page
+                </button>
+                <div className="h-px bg-gray-200 dark:bg-white/10 my-1" />
+                <button
+                  onClick={() => { headerPop.setOpen(null); p.onSettings(); }}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                >
+                  <Settings className="w-5 h-5" strokeWidth={1.75} /> App Settings
+                </button>
+              </div>
+            </HeaderPopover>
+          )}
+
+          {/* Paper Picker Popover */}
+          {headerPop.open === 'paper' && (
+            <HeaderPopover align="right">
+              <div className="text-xs text-gray-500 dark:text-gray-400 mb-3 leading-snug">
+                Note paper template used for new pages and default sheets.
+              </div>
+              <PaperPicker value={p.paper} onChange={p.setPaper} adaptDarkPaper={p.adaptDarkPaper} onToggleAdaptDarkPaper={p.onToggleAdaptDarkPaper} />
+            </HeaderPopover>
+          )}
         </div>
       </div>
-    </header>
+
+      {/* =========================================================================
+          FLOATING GLASS TOOL DOCK (Bottom-Center or Docked Left / Right)
+          ========================================================================= */}
+      <div
+        ref={dockPop.ref}
+        data-cutout-clear
+        className={`glass-pill rounded-3xl p-1.5 flex items-center gap-1 shadow-2xl transition-all duration-300 pointer-events-auto ${dockOrientationClass}`}
+      >
+        {/* Pen Button */}
+        <div className="relative">
+          <ToolDockButton
+            active={tools.tool === 'pen'}
+            title="Pen (tap again for options)"
+            onClick={() => selectTool('pen', 'pen')}
+          >
+            <PenLine className="w-5 h-5" strokeWidth={1.75} />
+            <span
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              style={{ backgroundColor: tools.penColor }}
+            />
+          </ToolDockButton>
+
+          {dockPop.open === 'pen' && (
+            <DockPopover position={dockPos}>
+              <NibPreview color={tools.penColor} width={tools.penWidth} style={tools.penLineStyle} />
+              <Label>Pen Type</Label>
+              <div className="flex gap-1.5 mb-2.5">
+                {(['fountain', 'ballpoint'] as PenStyle[]).map((s) => (
+                  <button
+                    key={s}
+                    onClick={() => setTools({ penStyle: s })}
+                    className={`flex-1 text-xs font-semibold py-2 rounded-xl border transition-all ${
+                      tools.penStyle === s
+                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                        : 'border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300'
+                    }`}
+                  >
+                    {s === 'fountain' ? 'Fountain (Pressure)' : 'Ballpoint'}
+                  </button>
+                ))}
+              </div>
+              <Label>Line Pattern</Label>
+              <LineStylePicker value={tools.penLineStyle} onChange={(ls) => setTools({ penLineStyle: ls })} />
+              <Label>Thickness</Label>
+              <LevelControl label="Pen width" value={tools.penWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ penWidth: v })} />
+              <Label>Ink Color</Label>
+              <ColorPicker value={tools.penColor} onChange={(c) => setTools({ penColor: c })} presets={PEN_COLORS} />
+            </DockPopover>
+          )}
+        </div>
+
+        {/* Smart Pen Button */}
+        <div className="relative">
+          <ToolDockButton
+            active={tools.tool === 'shape'}
+            title="Smart Pen: smooth curves, lines, rectangles, ellipses, fills (tap again for options)"
+            onClick={() => selectTool('shape', 'shape')}
+          >
+            {SHAPE_MODES.find((m) => m.id === tools.shapeMode)?.icon ?? <Spline className="w-5 h-5" strokeWidth={1.75} />}
+            <span
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              style={{ backgroundColor: tools.shapeColor }}
+            />
+          </ToolDockButton>
+
+          {dockPop.open === 'shape' && (
+            <DockPopover position={dockPos}>
+              <NibPreview color={tools.shapeColor} width={tools.shapeWidth} style={tools.shapeLineStyle} />
+              {/* 2-Tab Segmented Control */}
+              <div className="flex bg-black/5 dark:bg-white/10 p-0.5 rounded-xl mb-3">
+                <button
+                  onClick={() => setSmartPenTab('shape')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition ${
+                    smartPenTab === 'shape' ? 'bg-white dark:bg-ui-raised text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500'
+                  }`}
+                >
+                  Shape
+                </button>
+                <button
+                  onClick={() => setSmartPenTab('style')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg transition ${
+                    smartPenTab === 'style' ? 'bg-white dark:bg-ui-raised text-blue-600 dark:text-blue-400 shadow-sm' : 'text-gray-500'
+                  }`}
+                >
+                  Style & Fill
+                </button>
+              </div>
+
+              {smartPenTab === 'shape' ? (
+                <>
+                  <Label>Mode</Label>
+                  <div className="grid grid-cols-5 gap-1.5 mb-3">
+                    {SHAPE_MODES.map((m) => (
+                      <button
+                        key={m.id}
+                        onClick={() => setTools({ shapeMode: m.id })}
+                        title={m.label}
+                        className={`h-11 rounded-xl border flex flex-col items-center justify-center gap-1 transition ${
+                          tools.shapeMode === m.id
+                            ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                            : 'border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300'
+                        }`}
+                      >
+                        {m.icon}
+                        <span className="text-[10px] leading-none">{m.label}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="space-y-2 pt-1 border-t border-gray-200/50 dark:border-white/10 text-xs">
+                    <label className="flex items-center justify-between cursor-pointer py-1">
+                      <span>Arrowhead on lines</span>
+                      <input
+                        type="checkbox"
+                        checked={tools.shapeArrow}
+                        onChange={(e) => setTools({ shapeArrow: e.target.checked })}
+                        className="w-4 h-4 accent-blue-600 rounded"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between cursor-pointer py-1">
+                      <span>Snap to shapes & intersections</span>
+                      <input
+                        type="checkbox"
+                        checked={tools.shapeSnap}
+                        onChange={(e) => setTools({ shapeSnap: e.target.checked })}
+                        className="w-4 h-4 accent-blue-600 rounded"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between cursor-pointer py-1">
+                      <span>Snap to grid / dots</span>
+                      <input
+                        type="checkbox"
+                        checked={tools.shapeGridSnap}
+                        onChange={(e) => setTools({ shapeGridSnap: e.target.checked })}
+                        className="w-4 h-4 accent-blue-600 rounded"
+                      />
+                    </label>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <Label>Closed Shape Fill</Label>
+                  <div className="grid grid-cols-6 gap-1 mb-2.5">
+                    {FILL_OPTIONS.map((f) => (
+                      <button
+                        key={f.id}
+                        onClick={() => setTools({ shapeFill: f.id })}
+                        title={f.label}
+                        className={`h-10 rounded-xl border flex items-center justify-center transition ${
+                          tools.shapeFill === f.id ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-white/10'
+                        }`}
+                      >
+                        <FillSwatch fill={f.id} color={tools.shapeColor.toUpperCase() === '#FFFFFF' ? '#9CA3AF' : tools.shapeColor} />
+                      </button>
+                    ))}
+                  </div>
+                  <Label>Line Pattern</Label>
+                  <LineStylePicker value={tools.shapeLineStyle} onChange={(ls) => setTools({ shapeLineStyle: ls })} />
+                  <Label>Stroke Width</Label>
+                  <LevelControl label="Draw width" value={tools.shapeWidth} {...PEN_WIDTH_RANGE} onChange={(v) => setTools({ shapeWidth: v })} />
+                  <Label>Color</Label>
+                  <ColorPicker value={tools.shapeColor} onChange={(c) => setTools({ shapeColor: c })} presets={PEN_COLORS} size="sm" />
+                </>
+              )}
+            </DockPopover>
+          )}
+        </div>
+
+        {/* Highlighter Button */}
+        <div className="relative">
+          <ToolDockButton
+            active={tools.tool === 'highlighter'}
+            title="Highlighter (tap again for options)"
+            onClick={() => selectTool('highlighter', 'hl')}
+          >
+            <Highlighter className="w-5 h-5" strokeWidth={1.75} />
+            <span
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              style={{ backgroundColor: tools.highlighterColor }}
+            />
+          </ToolDockButton>
+
+          {dockPop.open === 'hl' && (
+            <DockPopover position={dockPos}>
+              <NibPreview color={tools.highlighterColor} width={tools.highlighterWidth} opacity={tools.highlighterOpacity} />
+              <Label>Color</Label>
+              <div className="mb-2">
+                <ColorPicker value={tools.highlighterColor} onChange={(c) => setTools({ highlighterColor: c })} presets={HIGHLIGHTER_COLORS} />
+              </div>
+              <Label>Width</Label>
+              <LevelControl label="Highlighter width" value={tools.highlighterWidth} {...HIGHLIGHTER_WIDTH_RANGE} onChange={(v) => setTools({ highlighterWidth: v })} />
+              <Label>Opacity</Label>
+              <LevelControl label="Highlighter opacity" value={tools.highlighterOpacity} min={0.01} max={1} log={false} onChange={(v) => setTools({ highlighterOpacity: v })} />
+            </DockPopover>
+          )}
+        </div>
+
+        {/* Eraser Button */}
+        <div className="relative">
+          <ToolDockButton
+            active={tools.tool === 'eraser'}
+            title="Eraser (tap again for options)"
+            onClick={() => selectTool('eraser', 'eraser')}
+          >
+            <Eraser className="w-5 h-5" strokeWidth={1.75} />
+          </ToolDockButton>
+
+          {dockPop.open === 'eraser' && (
+            <DockPopover position={dockPos}>
+              <Label>Mode</Label>
+              <div className="flex gap-1.5 mb-2.5">
+                {(['stroke', 'partial'] as EraserMode[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setTools({ eraserMode: m })}
+                    className={`flex-1 text-xs font-semibold py-2 rounded-xl border transition ${
+                      tools.eraserMode === m
+                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                        : 'border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300'
+                    }`}
+                  >
+                    {m === 'stroke' ? 'Whole Stroke' : 'Precision (Pixel)'}
+                  </button>
+                ))}
+              </div>
+              <Label>Size</Label>
+              <LevelControl label="Eraser size" value={tools.eraserSize} {...ERASER_SIZE_RANGE} onChange={(v) => setTools({ eraserSize: v })} />
+            </DockPopover>
+          )}
+        </div>
+
+        {/* Lasso Button */}
+        <div className="relative">
+          <ToolDockButton
+            active={tools.tool === 'lasso'}
+            title="Lasso: select, move, recolor, convert to LaTeX/TikZ"
+            onClick={() => selectTool('lasso', 'lasso')}
+          >
+            <Lasso className="w-5 h-5" strokeWidth={1.75} />
+          </ToolDockButton>
+
+          {dockPop.open === 'lasso' && (
+            <DockPopover position={dockPos}>
+              <Label>Selection Shape</Label>
+              <div className="flex gap-1.5 mb-1">
+                {(['freeform', 'rect'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setTools({ lassoMode: m })}
+                    className={`flex-1 text-xs font-semibold py-2 rounded-xl border transition ${
+                      (tools.lassoMode ?? 'freeform') === m
+                        ? 'border-blue-500 bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'
+                        : 'border-gray-200 dark:border-white/10 text-gray-700 dark:text-gray-300'
+                    }`}
+                  >
+                    {m === 'freeform' ? 'Freeform Lasso' : 'Rectangle'}
+                  </button>
+                ))}
+              </div>
+            </DockPopover>
+          )}
+        </div>
+
+        {/* Laser Pointer */}
+        <ToolDockButton
+          active={tools.tool === 'laser'}
+          title="Laser Pointer (broadcasts to connected PCs)"
+          onClick={() => selectTool('laser')}
+        >
+          <Pointer className="w-5 h-5 text-red-500" strokeWidth={1.75} />
+          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
+        </ToolDockButton>
+
+        {/* Text Button */}
+        <ToolDockButton
+          active={tools.tool === 'text'}
+          title="Text Box"
+          onClick={() => selectTool('text')}
+        >
+          <Type className="w-5 h-5" strokeWidth={1.75} />
+        </ToolDockButton>
+
+        {/* Hand Button */}
+        <ToolDockButton
+          active={tools.tool === 'hand'}
+          title="Hand (Pan / Scroll)"
+          onClick={() => selectTool('hand')}
+        >
+          <Hand className="w-5 h-5" strokeWidth={1.75} />
+        </ToolDockButton>
+
+        {/* Stylus-Only Toggle */}
+        <ToolDockButton
+          active={!tools.stylusOnly}
+          title={tools.stylusOnly ? 'Stylus only (fingers scroll). Tap to allow finger ink.' : 'Finger ink allowed. Tap for stylus only.'}
+          onClick={() => setTools({ stylusOnly: !tools.stylusOnly })}
+        >
+          {tools.stylusOnly ? <PointerOff className="w-5 h-5" strokeWidth={1.75} /> : <Pointer className="w-5 h-5" strokeWidth={1.75} />}
+        </ToolDockButton>
+
+        {/* =====================================================================
+            1-TAP FAVORITE COLOR DOTS
+            ===================================================================== */}
+        <div className="h-5 w-px bg-gray-300 dark:bg-white/15 mx-0.5" />
+
+        <div className="flex items-center gap-1">
+          {quickColors.map((color) => {
+            const isSelected = currentStrokeColor.toLowerCase() === color.toLowerCase();
+            return (
+              <button
+                key={color}
+                onClick={() => setQuickColor(color)}
+                className={`min-w-[28px] min-h-[28px] w-7 h-7 rounded-full transition-all active:scale-90 flex items-center justify-center ${
+                  isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white dark:ring-offset-ui-raised scale-105' : 'hover:scale-105 ring-1 ring-black/10 dark:ring-white/10'
+                }`}
+                style={{ backgroundColor: color }}
+                title={`Select color ${color}`}
+              >
+                {isSelected && <Check className="w-3.5 h-3.5 text-white" strokeWidth={2.5} />}
+              </button>
+            );
+          })}
+
+          {/* Plus dot for custom color */}
+          <button
+            onClick={() => selectTool(tools.tool, tools.tool === 'highlighter' ? 'hl' : tools.tool === 'shape' ? 'shape' : 'pen')}
+            className="min-w-[28px] min-h-[28px] w-7 h-7 rounded-full border border-dashed border-gray-400 dark:border-white/30 flex items-center justify-center text-gray-500 hover:text-gray-900 dark:hover:text-white transition active:scale-90"
+            title="Custom color..."
+          >
+            <Plus className="w-3.5 h-3.5" strokeWidth={2.5} />
+          </button>
+        </div>
+
+        {/* =====================================================================
+            1-TAP WIDTH PRESET DOTS
+            ===================================================================== */}
+        <div className="h-5 w-px bg-gray-300 dark:bg-white/15 mx-0.5" />
+
+        <div className="flex items-center gap-1 px-0.5">
+          {widthPresets.map((w, idx) => {
+            const isSelected = Math.abs(currentStrokeWidth - w) < 0.8;
+            const dotSize = idx === 0 ? 'w-2 h-2' : idx === 1 ? 'w-3 h-3' : 'w-4 h-4';
+            return (
+              <button
+                key={w}
+                onClick={() => setWidthPreset(w)}
+                className={`min-w-[28px] min-h-[28px] w-7 h-7 rounded-xl flex items-center justify-center transition-all active:scale-90 ${
+                  isSelected ? 'bg-blue-500/20 text-blue-600 dark:text-blue-400 ring-1 ring-blue-500/50' : 'hover:bg-black/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-300'
+                }`}
+                title={`Width preset: ${w}px`}
+              >
+                <span className={`rounded-full bg-current ${dotSize}`} />
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Hidden file inputs */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) p.onInsertImage(f);
+          e.target.value = '';
+        }}
+      />
+      <input
+        ref={pdfRef}
+        type="file"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) p.onInsertPdf(f);
+          e.target.value = '';
+        }}
+      />
+    </>
   );
 };

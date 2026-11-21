@@ -844,3 +844,29 @@ export function rustViewportShown(seq: number): void {
 export function rustViewportCamera(): Promise<RustCameraReply | null> {
   return viewportCall('viewportCamera', {});
 }
+
+export interface MirrorStatus {
+  active: boolean;
+  url?: string;
+  pin?: string;
+  port?: number;
+  clients: number;
+}
+
+export async function mirrorStart(port?: number, pin?: string): Promise<MirrorStatus> {
+  const req: { port?: number; pin?: string } = {};
+  if (port) req.port = port;
+  if (pin) req.pin = pin;
+  const reply = await rustCall('mirrorStart', req);
+  return reply.meta as unknown as MirrorStatus;
+}
+
+export async function mirrorStop(): Promise<{ active: boolean }> {
+  const reply = await rustCall('mirrorStop', {});
+  return reply.meta as unknown as { active: boolean };
+}
+
+export async function mirrorStatus(): Promise<MirrorStatus> {
+  const reply = await rustCall('mirrorStatus', {});
+  return reply.meta as unknown as MirrorStatus;
+}

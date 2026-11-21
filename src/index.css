@@ -113,12 +113,51 @@
   --ui-app: 242 242 247; --ui-desk: 229 229 234; --ui-card: 249 249 251; --ui-side: 236 236 241;
   --ui-panel: 255 255 255; --ui-raised: 243 244 246; --ui-high: 229 231 235; --ui-bar: 28 28 30;
   --ui-white: 255 255 255;
+  --ui-glass: rgba(255, 255, 255, 0.80);
+  --ui-border: rgba(15, 23, 42, 0.08);
+  --ui-shadow-float: 0 8px 28px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --ui-accent: #2563EB;
 }
 
-/* Note pages are never themed: their paper is the page's own colour (inline style). */
+/* Glass surface utility */
+.glass-pill {
+  background: var(--ui-glass);
+  backdrop-filter: blur(22px) saturate(180%);
+  -webkit-backdrop-filter: blur(22px) saturate(180%);
+  border: 1px solid var(--ui-border);
+  box-shadow: var(--ui-shadow-float);
+}
+
+/* Smooth popover spring entrance */
+.pop-enter {
+  animation: popEnter 180ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes popEnter {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Note pages: default styling */
 .on-page {
   color-scheme: light;
   color: #111827;
+}
+
+/* Adaptive Dark Paper Mode: in dark themes, default white sheets adapt to soft dark charcoal/obsidian */
+html.dark .on-page.on-adaptive-dark {
+  color-scheme: dark;
+  color: #F3F4F6;
 }
 
 /* While the GPU draws the ink of a pinch (src/editor/usePinchInk.ts), the page's own ink is hidden. */

@@ -26,6 +26,8 @@ import { crashLog } from './services/crashLog';
 import { startCutoutClearance } from './services/cutout';
 import { startFrameRate } from './services/frameRate';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { toast, ToastContainer } from './components/Toast';
+import { dialog, DialogContainer } from './components/Dialog';
 
 /** Reads an image file, scaled down to at most 1600 px, as a data URL with its size. */
 function readImage(file: File): Promise<{ dataUrl: string; w: number; h: number }> {
@@ -215,7 +217,10 @@ export const App: React.FC = () => {
       try {
         if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
           const pdf = await importPdf(new Uint8Array(await file.arrayBuffer()), file.name, async (wrong) =>
-            window.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '')
+            dialog.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '', {
+              title: 'Protected PDF',
+              password: true,
+            })
           );
           // Named after the file, exactly (not the title inside the PDF).
           last = { ...blankNote(name), paperStyle: 'blank', sheets: pdf.sheets };
@@ -228,7 +233,12 @@ export const App: React.FC = () => {
           const nb = await importer(new Uint8Array(await file.arrayBuffer()), file.name, {
             readImage: (blob, o) => loadPicture(blob, o),
             storePdf: (name, bytes) =>
-              storePdf(bytes, name, async (wrong) => window.prompt(`${wrong ? 'Wrong password. ' : ''}A PDF in “${file.name}” is protected by a password:`, '')),
+              storePdf(bytes, name, async (wrong) =>
+                dialog.prompt(`${wrong ? 'Wrong password. ' : ''}A PDF in “${file.name}” is protected by a password:`, '', {
+                  title: 'Protected PDF',
+                  password: true,
+                })
+              ),
             solidImage,
           });
           const now = Date.now();
@@ -289,10 +299,10 @@ export const App: React.FC = () => {
     }
     await reload();
     const notImported = partial.length ? `\nLeft out:\n${partial.join('\n')}` : '';
-    if (failed.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Word .docx, Notability .note / .ntb, .opennote, images, .txt / .md / .tex.${notImported}`);
-    else if (partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`);
+    if (failed.length) dialog.alert(`Imported ${made} note${made === 1 ? '' : 's'}.\nNot imported: ${failed.join(', ')}\nSupported: PDF, Word .docx, Notability .note / .ntb, .opennote, images, .txt / .md / .tex.${notImported}`, 'Import Complete');
+    else if (partial.length) dialog.alert(`Imported ${made} note${made === 1 ? '' : 's'}.${notImported}`, 'Import Complete');
     if (!failed.length && files.length === 1 && last) setOpenNoteId(last.id);
-    else if (!failed.length && !partial.length) window.alert(`Imported ${made} note${made === 1 ? '' : 's'}.`);
+    else if (!failed.length && !partial.length) toast.success(`Imported ${made} note${made === 1 ? '' : 's'}.`);
   };
 
   // Files given to OpenNote by other apps (iOS: "Open in…", the share sheet): imported as new notes.
@@ -304,10 +314,10 @@ export const App: React.FC = () => {
     try {
       const data = await exportLibrary();
       const where = await exportFile(`OpenNote-backup-${new Date().toISOString().slice(0, 10)}.opennote`, new Blob([JSON.stringify(data)], { type: 'application/json' }), mode);
-      if (where) window.alert(`Backup: ${where}`);
+      if (where) toast.success(`Backup created: ${where}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (!/cancel/i.test(msg)) window.alert(`Backup failed: ${msg}`);
+      if (!/cancel/i.test(msg)) toast.error(`Backup failed: ${msg}`);
     }
   };
 
@@ -315,9 +325,9 @@ export const App: React.FC = () => {
     try {
       const count = await importBackup(JSON.parse(await file.text()));
       await reload();
-      window.alert(`Imported ${count} note${count === 1 ? '' : 's'}.`);
+      toast.success(`Imported ${count} note${count === 1 ? '' : 's'}.`);
     } catch (err) {
-      window.alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      dialog.alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`, 'Import Error');
     }
   };
 
@@ -385,6 +395,8 @@ export const App: React.FC = () => {
       <SettingsModal isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} settings={settings} onSave={setSettings} onBackup={backup} onImport={importFile} />
       <UpdatePrompt enabled={settings.checkUpdates} />
       {settings.showFps && <FpsOverlay />}
+      <ToastContainer />
+      <DialogContainer />
     </div>
   );
 };

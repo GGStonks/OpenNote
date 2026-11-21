@@ -23,6 +23,8 @@ export interface AppSettings {
   fingerTapUndo: boolean;
   /** Theme of the interface (never of the note pages, see theme.ts). */
   theme: UiTheme;
+  /** Auto-adapt default white paper to dark sheet in dark themes. */
+  adaptDarkPaper: boolean;
   /** At start, look for a newer release on GitHub and offer to update (services/updater.ts). */
   checkUpdates: boolean;
   /** Developer setting: show live frame rate (FPS) on-screen while using the app. */
@@ -56,6 +58,7 @@ export function defaultSettings(): AppSettings {
     pencilDoubleTapEraser: true,
     fingerTapUndo: true,
     theme: 'light',
+    adaptDarkPaper: true,
     checkUpdates: true,
     showFps: false,
   };
@@ -68,6 +71,7 @@ export function loadSettings(): AppSettings {
     if (raw) {
       const s: AppSettings = { ...defaults, ...JSON.parse(raw) };
       if (typeof s.showFps !== 'boolean') s.showFps = false;
+      if (typeof s.adaptDarkPaper !== 'boolean') s.adaptDarkPaper = true;
       // The old placeholder key; the server now issues real ones.
       if (s.apiKey === 'sk-dummy') s.apiKey = '';
       if (s.vlmEndpoint.trim().replace(/\/+$/, '') === OLD_DEFAULT_SERVER) s.vlmEndpoint = DEFAULT_SERVER;

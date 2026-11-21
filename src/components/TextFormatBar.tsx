@@ -37,7 +37,7 @@ const Floating: React.FC<{ anchor: DOMRect; width: number; children: React.React
     <OnScreen
       data-no-pan
       data-text-format
-      className="fixed z-[200] bg-ui-bar/95 backdrop-blur-xl text-white rounded-2xl shadow-2xl ring-1 ring-white/10 p-1.5 max-h-[calc(100dvh-16px)] overflow-y-auto no-scrollbar"
+      className="fixed z-[200] glass-pill text-gray-900 dark:text-gray-100 rounded-2xl shadow-2xl p-2 max-h-[calc(100dvh-16px)] overflow-y-auto no-scrollbar pop-enter"
       style={{ left, top: Math.min(anchor.bottom + 6, window.innerHeight - 60), width }}
       onPointerDown={(e) => {
         e.preventDefault();
@@ -134,7 +134,7 @@ export const TextFormatBar: React.FC<{ block: TextBlock; onChange: (patch: Parti
   const groups = [...new Set(TEXT_FONTS.map((f) => f.group))];
   return (
     <div
-      className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-1.5 overflow-x-auto max-w-full text-sm font-semibold"
+      className="flex items-center gap-1 glass-pill rounded-3xl px-2.5 py-1.5 overflow-x-auto max-w-[94vw] text-sm font-semibold pop-enter shadow-2xl text-gray-900 dark:text-gray-100"
       data-no-pan
       data-text-format
       onPointerDown={(e) => {

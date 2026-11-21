@@ -18,7 +18,10 @@ import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
 import { selectionSvg } from '../services/svgExport';
 import { TextFormatBar } from './TextFormatBar';
+import { CommandPalette } from './CommandPalette';
 import { AudioRecorder } from './AudioRecorder';
+import { dialog } from './Dialog';
+import { toast } from './Toast';
 import { GestureBus } from '../editor/gestures';
 import { MAX_ZOOM, PULL_THRESHOLD, SavedView, useViewport } from '../editor/useViewport';
 import { Selection, computeBounds, isEmptySelection, removeSelection, textHeight } from '../editor/selection';
@@ -94,8 +97,59 @@ type ConvTarget =
   | { kind: 'new'; pageId: string; at: { x: number; y: number } };
 
 const TOOL_KEY = 'opennote_tools_v2';
-const PILL = 'flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl whitespace-nowrap flex-shrink-0 active:scale-95 transition';
-const ICON_BTN = 'w-11 h-11 flex items-center justify-center rounded-2xl hover:bg-white/10 flex-shrink-0 active:scale-95 transition';
+const PILL = 'flex items-center gap-1.5 px-3 py-2 rounded-xl whitespace-nowrap flex-shrink-0 active:scale-95 transition text-xs font-semibold';
+const ICON_BTN = 'min-w-[40px] min-h-[40px] w-10 h-10 flex items-center justify-center rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-200 flex-shrink-0 active:scale-95 transition';
+
+/** Anchors the text formatting bar above or below the active text block */
+const AnchoredTextFormatBar: React.FC<{
+  block: import('../types').TextBlock;
+  onChange: (patch: Partial<import('../types').TextBlock>) => void;
+}> = ({ block, onChange }) => {
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useEffect(() => {
+    const update = () => {
+      const el = document.querySelector(`[data-text-id="${block.id}"]`) as HTMLElement | null;
+      if (!el) {
+        setPos(null);
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const top = rect.top >= 90 ? Math.max(12, rect.top - 56) : Math.min(window.innerHeight - 60, rect.bottom + 12);
+      const left = Math.max(16, Math.min(window.innerWidth - 340, rect.left + rect.width / 2 - 170));
+      setPos({ top, left });
+    };
+
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [block.id, block.x, block.y, block.width, block.height]);
+
+  if (!pos) {
+    return (
+      <div className="fixed top-3 left-0 right-0 z-40 flex justify-center px-3 pointer-events-none">
+        <div className="pointer-events-auto max-w-full">
+          <TextFormatBar block={block} onChange={onChange} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="fixed z-40 pointer-events-none transition-all duration-150"
+      style={{ top: pos.top, left: pos.left }}
+    >
+      <div className="pointer-events-auto max-w-full">
+        <TextFormatBar block={block} onChange={onChange} />
+      </div>
+    </div>
+  );
+};
 /** Characters of shape geometry sent along with a TikZ conversion (~1k tokens). */
 const MAX_TIKZ_HINT = 4000;
 
@@ -292,6 +346,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const editingText = editingTextId ? (surface.textBlocks ?? []).find((t) => t.id === editingTextId) ?? null : null;
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [zenMode, setZenMode] = useState(false);
+  const [cleanPresentation, setCleanPresentation] = useState(false);
+  const [dockPosition, setDockPosition] = useState<'bottom' | 'left' | 'right'>('bottom');
   const [modal, setModal] = useState<LatexModalState | null>(null);
   const [target, setTarget] = useState<ConvTarget | null>(null);
   const [busy, setBusy] = useState<{ label: string; detail?: string } | null>(null);
@@ -409,7 +467,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       const t = e.target as HTMLElement;
       if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
       const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'z') {
+      if (mod && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((o) => !o);
+      } else if (!mod && e.key === 'Tab') {
+        e.preventDefault();
+        setZenMode((z) => !z);
+      } else if (mod && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         e.shiftKey ? editor.redo() : editor.undo();
       } else if (mod && e.key.toLowerCase() === 'y') {
@@ -884,9 +948,9 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     showToast(on ? `Bookmarked ${ids.size > 1 ? `${ids.size} pages` : 'this page'}` : `Bookmark removed`);
   };
 
-  const deletePagesOf = (ids: ReadonlySet<string>, confirm = false) => {
+  const deletePagesOf = async (ids: ReadonlySet<string>, confirm = false) => {
     if (!ids.size) return;
-    if (confirm && !window.confirm(`Delete page ${currentPage + 1} and what is on it? (Undo can bring it back)`)) return;
+    if (confirm && !(await dialog.confirm(`Delete page ${currentPage + 1} and what is on it? (Undo can bring it back)`, 'Delete Page', { destructive: true, confirmText: 'Delete' }))) return;
     editor.commit((d) => deleteSheets(d, ids));
     setSelectedPages(new Set());
     showToast(`Deleted ${ids.size} page${ids.size > 1 ? 's' : ''} — Undo brings ${ids.size > 1 ? 'them' : 'it'} back`);
@@ -1056,7 +1120,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
     try {
       if (!/\.pdf$/i.test(file.name) && file.type !== 'application/pdf') throw new Error(`“${file.name}” is not a PDF`);
       const pdf = await importPdf(new Uint8Array(await file.arrayBuffer()), file.name, async (wrong) =>
-        window.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '')
+        dialog.prompt(`${wrong ? 'Wrong password. ' : ''}“${file.name}” is protected by a password:`, '', {
+          title: 'Protected PDF',
+          password: true,
+        })
       );
       if (token !== busyToken.current) return;
       editor.commit((d) => insertSheets(d, after + 1, pdf.sheets));
@@ -1311,35 +1378,46 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      <MemoizedToolbar
-        tools={tools}
-        setTools={setTools}
-        canUndo={editor.canUndo}
-        canRedo={editor.canRedo}
-        onUndo={editor.undo}
-        onRedo={editor.redo}
-        title={doc.title}
-        setTitle={(title) => editor.commit((d) => ({ ...d, title }))}
-        paper={{ paperStyle: doc.paperStyle, paperColor: doc.paperColor, patternColor: doc.patternColor ?? null, size: doc.pageSize ?? 'letter', orientation: doc.orientation ?? 'portrait' }}
-        setPaper={(patch: SetupPatch) => editor.commit((d) => setNotePaper(d, patch))}
-        pagesOpen={pagesOpen}
-        onTogglePages={() => setPagesOpen(!pagesOpen)}
-        onBack={goHome}
-        onConvertPage={convertPage}
-        onExport={() => setExportOpen(true)}
-        onSettings={onOpenSettings}
-        onDuplicatePage={() => duplicatePagesOf(currentIds())}
-        pageBookmarked={!!curSheet.bookmarked}
-        onToggleBookmark={() => bookmarkPages(currentIds(), !curSheet.bookmarked)}
-        onDeletePage={() => deletePagesOf(currentIds(), true)}
-        onInsertLatex={insertLatexManually}
-        onInsertImage={insertImage}
-        onInsertPdf={(f) => void insertPdf(f)}
-        onPaste={clipboard ? paste : undefined}
-        currentPage={currentPage + 1}
-        totalPages={pageCount}
-        audioSlot={<AudioRecorder noteId={doc.id} onError={(m) => showToast(m, true)} />}
-      />
+      <div className={`transition-opacity duration-300 ${zenMode ? 'opacity-0 pointer-events-none hover:opacity-100 hover:pointer-events-auto' : 'opacity-100'}`}>
+        <MemoizedToolbar
+          tools={tools}
+          setTools={setTools}
+          canUndo={editor.canUndo}
+          canRedo={editor.canRedo}
+          onUndo={editor.undo}
+          onRedo={editor.redo}
+          title={doc.title}
+          setTitle={(title) => editor.commit((d) => ({ ...d, title }))}
+          paper={{ paperStyle: doc.paperStyle, paperColor: doc.paperColor, patternColor: doc.patternColor ?? null, size: doc.pageSize ?? 'letter', orientation: doc.orientation ?? 'portrait' }}
+          setPaper={(patch: SetupPatch) => editor.commit((d) => setNotePaper(d, patch))}
+          pagesOpen={pagesOpen}
+          onTogglePages={() => setPagesOpen(!pagesOpen)}
+          onBack={goHome}
+          onConvertPage={convertPage}
+          onExport={() => setExportOpen(true)}
+          onSettings={onOpenSettings}
+          onDuplicatePage={() => duplicatePagesOf(currentIds())}
+          pageBookmarked={!!curSheet.bookmarked}
+          onToggleBookmark={() => bookmarkPages(currentIds(), !curSheet.bookmarked)}
+          onDeletePage={() => deletePagesOf(currentIds(), true)}
+          onInsertLatex={insertLatexManually}
+          onInsertImage={insertImage}
+          onInsertPdf={(f) => void insertPdf(f)}
+          onPaste={clipboard ? paste : undefined}
+          currentPage={currentPage + 1}
+          totalPages={pageCount}
+          audioSlot={<AudioRecorder noteId={doc.id} onError={(m) => showToast(m, true)} />}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+          zenMode={zenMode}
+          onToggleZen={() => setZenMode((z) => !z)}
+          dockPosition={dockPosition}
+          onSetDockPosition={setDockPosition}
+          cleanPresentation={cleanPresentation}
+          onToggleCleanPresentation={setCleanPresentation}
+          adaptDarkPaper={settings.adaptDarkPaper}
+          onToggleAdaptDarkPaper={(adapt) => setSettings({ ...settings, adaptDarkPaper: adapt })}
+        />
+      </div>
 
       <div className="relative flex-1 flex min-h-0">
         {pagesOpen && (
@@ -1370,13 +1448,17 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           </>
         )}
         <div className="relative flex-1 min-w-0">
-          {/* The text box being edited: its size, style, typeface and colour. */}
+          {/* The text box being edited: dynamic smart anchoring above or below the block */}
           {editingText && (
-            <div className="absolute top-2 left-0 right-0 z-40 flex justify-center px-3 pointer-events-none">
-              <div className="pointer-events-auto max-w-full">
-                <TextFormatBar block={editingText} onChange={(patch) => editor.commitPage(surface.id, (p) => ({ ...p, textBlocks: (p.textBlocks ?? []).map((x) => (x.id === editingText.id ? { ...x, ...patch } : x)) }))} />
-              </div>
-            </div>
+            <AnchoredTextFormatBar
+              block={editingText}
+              onChange={(patch) =>
+                editor.commitPage(surface.id, (p) => ({
+                  ...p,
+                  textBlocks: (p.textBlocks ?? []).map((x) => (x.id === editingText.id ? { ...x, ...patch } : x)),
+                }))
+              }
+            />
           )}
           <div
             ref={scrollRefCallback}
@@ -1417,52 +1499,54 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           <PullIndicator bind={bindPull} />
 
           {/* Page indicator and zoom */}
-          <div
-            data-cutout-clear
-            className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
-            style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
-            data-no-pan
-            data-viewport-hole
-          >
-            <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
-              {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}
+          {!cleanPresentation && (
+            <div
+              data-cutout-clear
+              className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
+              style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
+              data-no-pan
+              data-viewport-hole
+            >
+              <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
+                {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}
+              </div>
+              <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
+                <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={toggleFit}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
+                  title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
+                >
+                  {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
-            <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
-              <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                onClick={toggleFit}
-                className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
-                title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
-              >
-                {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
-                {Math.round(zoom * 100)}%
-              </button>
-              <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
-                <Plus className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
 
       {/* Paste (lasso tool, something copied, nothing selected) */}
       {!selection && clipboard && tools.tool === 'lasso' && (
         <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
-          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-4 py-2.5 text-sm font-semibold active:scale-95 transition" title="Paste the copied items here">
-            <ClipboardPaste className="w-5 h-5" /> Paste
+          <button onClick={paste} className="pointer-events-auto flex items-center gap-2 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-4 py-2.5 text-sm font-semibold active:scale-95 transition pop-enter" title="Paste the copied items here">
+            <ClipboardPaste className="w-5 h-5 text-blue-600 dark:text-blue-400" strokeWidth={1.75} /> Paste
           </button>
         </div>
       )}
 
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
+          <div className="flex items-center gap-1 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
             {FILL_OPTIONS.map((f) => (
-              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-white/10 active:scale-95 transition" title={f.label}>
-                <span className="scale-125"><FillSwatch fill={f.id} color="#E5E7EB" /></span>
+              <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition" title={f.label}>
+                <span className="scale-125"><FillSwatch fill={f.id} color="#3B82F6" /></span>
                 <span>{f.label}</span>
               </button>
             ))}
@@ -1470,46 +1554,46 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         </div>
       )}
       {selection && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
-          <div className="flex items-center gap-1.5 bg-ui-bar/95 backdrop-blur-xl text-white rounded-3xl shadow-2xl ring-1 ring-white/10 px-2.5 py-2 overflow-x-auto max-w-full text-sm font-semibold">
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
+          <div className="flex items-center gap-1 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-2.5 py-1.5 overflow-x-auto max-w-full text-sm font-semibold">
             {selectionHasInk && (
               <>
-                <button onClick={() => convertSelection('math')} className={PILL + ' bg-blue-600'} title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
-                  <Sparkles className="w-5 h-5" /> LaTeX
+                <button onClick={() => convertSelection('math')} className={PILL + ' bg-blue-600 text-white shadow-sm'} title="Transcribe handwriting to LaTeX math (Qwen3-VL)">
+                  <Sparkles className="w-4 h-4" strokeWidth={1.75} /> LaTeX
                 </button>
-                <button onClick={() => convertSelection('text')} className={PILL + ' bg-blue-500/80'} title="Transcribe notes (text + math)">
-                  <FileText className="w-5 h-5" /> Notes
+                <button onClick={() => convertSelection('text')} className={PILL + ' bg-blue-500/15 text-blue-600 dark:text-blue-400 hover:bg-blue-500/25'} title="Transcribe notes (text + math)">
+                  <FileText className="w-4 h-4" strokeWidth={1.75} /> Notes
                 </button>
-                <button onClick={() => convertSelection('tikz')} className={PILL + ' bg-indigo-600'} title="Diagram → TikZ (Qwen3-VL)">
-                  <Share2 className="w-5 h-5" /> TikZ
+                <button onClick={() => convertSelection('tikz')} className={PILL + ' bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-500/25'} title="Diagram → TikZ (Qwen3-VL)">
+                  <Share2 className="w-4 h-4" strokeWidth={1.75} /> TikZ
                 </button>
-                <button onClick={vectorizeSelection} className={PILL + ' bg-white/10'} title="Convert ink geometry to TikZ offline (no AI)">
-                  <Wand2 className="w-5 h-5" /> Vector
+                <button onClick={vectorizeSelection} className={PILL + ' bg-gray-200/50 dark:bg-white/10 hover:bg-gray-200 dark:hover:bg-white/15'} title="Convert ink geometry to TikZ offline (no AI)">
+                  <Wand2 className="w-4 h-4" strokeWidth={1.75} /> Vector
                 </button>
-                <button onClick={snapSelection} className={ICON_BTN} title="Snap to shapes"><Shapes className="w-5 h-5" /></button>
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
+                <button onClick={snapSelection} className={ICON_BTN} title="Snap to shapes"><Shapes className="w-5 h-5" strokeWidth={1.75} /></button>
+                <div className="w-px h-6 bg-gray-200 dark:bg-white/10 mx-1 flex-shrink-0" />
                 {['#111827', '#1A73E8', '#D93025', '#188038', '#9B51E0'].map((c) => (
-                  <button key={c} onClick={() => recolorSelection(c)} className="w-8 h-8 rounded-full ring-2 ring-white/30 flex-shrink-0 active:scale-90 transition" style={{ backgroundColor: c }} title="Recolour" />
+                  <button key={c} onClick={() => recolorSelection(c)} className="w-7 h-7 rounded-full ring-2 ring-black/10 dark:ring-white/20 flex-shrink-0 active:scale-90 transition hover:scale-105" style={{ backgroundColor: c }} title="Recolour" />
                 ))}
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
+                <div className="w-px h-6 bg-gray-200 dark:bg-white/10 mx-1 flex-shrink-0" />
                 {LINE_STYLES.map((ls) => (
                   <button key={ls.id} onClick={() => restyleSelection(ls.id)} className={ICON_BTN} title={ls.label} aria-label={ls.label}>
-                    <LineStyleIcon style={ls.id} width={22} />
+                    <LineStyleIcon style={ls.id} width={20} />
                   </button>
                 ))}
-                <button onClick={() => setFillMenu((v) => !v)} className={`${ICON_BTN} ${fillMenu ? 'bg-white/15' : ''}`} title="Fill closed shapes">
-                  <PaintBucket className="w-5 h-5" />
+                <button onClick={() => setFillMenu((v) => !v)} className={`${ICON_BTN} ${fillMenu ? 'bg-black/10 dark:bg-white/15' : ''}`} title="Fill closed shapes">
+                  <PaintBucket className="w-5 h-5" strokeWidth={1.75} />
                 </button>
-                <button onClick={toggleArrowSelection} className={ICON_BTN} title="Arrowhead on/off"><MoveUpRight className="w-5 h-5" /></button>
-                <div className="w-px h-7 bg-white/15 mx-1 flex-shrink-0" />
+                <button onClick={toggleArrowSelection} className={ICON_BTN} title="Arrowhead on/off"><MoveUpRight className="w-5 h-5" strokeWidth={1.75} /></button>
+                <div className="w-px h-6 bg-gray-200 dark:bg-white/10 mx-1 flex-shrink-0" />
               </>
             )}
-            <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" /></button>
-            <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" /></button>
-            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><Share className="w-5 h-5" /></button>
-            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" /></button>
-            <button onClick={deleteSelection} className={ICON_BTN + ' text-red-400'} title="Delete"><Trash2 className="w-5 h-5" /></button>
-            <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" /></button>
+            <button onClick={cutSelection} className={ICON_BTN} title="Cut"><Scissors className="w-5 h-5" strokeWidth={1.75} /></button>
+            <button onClick={copySelectionToClipboard} className={ICON_BTN} title="Copy (paste it later, on any page)"><ClipboardCopy className="w-5 h-5" strokeWidth={1.75} /></button>
+            <button onClick={() => setSelExportOpen(true)} className={ICON_BTN} title="Export as SVG"><Share className="w-5 h-5" strokeWidth={1.75} /></button>
+            <button onClick={duplicateSelection} className={ICON_BTN} title="Duplicate"><CopyPlus className="w-5 h-5" strokeWidth={1.75} /></button>
+            <button onClick={deleteSelection} className={ICON_BTN + ' text-red-500 hover:bg-red-500/10'} title="Delete"><Trash2 className="w-5 h-5" strokeWidth={1.75} /></button>
+            <button onClick={() => setSelectionState(null)} className={ICON_BTN} title="Done"><X className="w-5 h-5" strokeWidth={1.75} /></button>
           </div>
         </div>
       )}
@@ -1622,6 +1706,35 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         }}
         onDone={(m) => showToast(m)}
         onError={(m) => showToast(m, true)}
+      />
+
+      <CommandPalette
+        isOpen={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        onSelectTool={(t) => setTools({ tool: t })}
+        onAddPage={addPage}
+        onZoomFit={toggleFit}
+        onToggleTheme={() => {
+          const next = settings.theme === 'light' ? 'dark' : settings.theme === 'dark' ? 'oled' : 'light';
+          setSettings({ ...settings, theme: next });
+        }}
+        isDarkTheme={settings.theme === 'dark' || settings.theme === 'midnight' || settings.theme === 'oled'}
+        onOpenMirror={() => {}}
+        onExportPdf={() => setExportOpen(true)}
+        onConvertAi={convertPage}
+        onInsertLatex={insertLatexManually}
+        onInsertImage={() => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = 'image/*';
+          input.onchange = (e) => {
+            const file = (e.target as HTMLInputElement).files?.[0];
+            if (file) insertImage(file);
+          };
+          input.click();
+        }}
+        onToggleZen={() => setZenMode((z) => !z)}
+        onOpenPaper={() => {}}
       />
     </div>
   );

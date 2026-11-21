@@ -15,6 +15,7 @@ import {
   loadLibraryPrefs, matchesSearch, noteFolder, passesTagFilter, saveLibraryPrefs, sortFolders, sortNotes, tagFilterActive,
 } from '../library';
 import { useBack } from '../services/backStack';
+import { dialog } from './Dialog';
 
 /** Pages of a note (not counting the blank page the note always ends with). */
 const pageCountOf = (n: NoteDocument) => (n.sheets?.length ? printedSheets(n).length : 1);
@@ -282,16 +283,20 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     setRenamingNoteId(null);
   };
 
-  const confirmDeleteNote = (n: NoteDocument) => {
-    if (window.confirm(`Delete “${n.title}”? This cannot be undone.`)) p.onDeleteNote(n.id);
+  const confirmDeleteNote = async (n: NoteDocument) => {
     setMenuNoteId(null);
+    if (await dialog.confirm(`Delete “${n.title}”? This cannot be undone.`, 'Delete Note', { destructive: true, confirmText: 'Delete' })) {
+      p.onDeleteNote(n.id);
+    }
   };
 
-  const confirmDeleteFolder = (f: Folder) => {
+  const confirmDeleteFolder = async (f: Folder) => {
     setMenuFolderId(null);
     const inside = folderCounts.get(f.id) ?? 0;
     const where = f.parentId ? `“${folders.find((x) => x.id === f.parentId)?.name ?? 'its parent'}”` : 'the top level';
-    if (window.confirm(`Delete folder “${f.name}”?${inside || childFolders(folders, f.id).length ? ` Its notes and subfolders move to ${where}.` : ''}`)) p.onDeleteFolder(f.id);
+    if (await dialog.confirm(`Delete folder “${f.name}”?${inside || childFolders(folders, f.id).length ? ` Its notes and subfolders move to ${where}.` : ''}`, 'Delete Folder', { destructive: true, confirmText: 'Delete' })) {
+      p.onDeleteFolder(f.id);
+    }
   };
 
   /** Quick filter from the sidebar: tapping a tag adds it to (or removes it from) the whitelist. */
@@ -521,7 +526,12 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
                         <button key={c} onClick={() => { p.onUpdateTag(t.id, { color: c }); setMenuTagId(null); }} className={`w-5 h-5 rounded-full ${t.color === c ? 'ring-2 ring-offset-1 ring-blue-500 dark:ring-offset-ui-raised' : ''}`} style={{ backgroundColor: c }} title="Tag colour" />
                       ))}
                     </div>
-                    <button className={`${MENU_ITEM} !text-red-600`} onClick={() => { setMenuTagId(null); if (window.confirm(`Delete tag “${t.name}”? It is removed from ${tagCounts.get(t.id) ?? 0} note(s).`)) p.onDeleteTag(t.id); }}><Trash2 className="w-4 h-4" /> Delete tag</button>
+                    <button className={`${MENU_ITEM} !text-red-600`} onClick={async () => {
+                      setMenuTagId(null);
+                      if (await dialog.confirm(`Delete tag “${t.name}”? It is removed from ${tagCounts.get(t.id) ?? 0} note(s).`, 'Delete Tag', { destructive: true, confirmText: 'Delete' })) {
+                        p.onDeleteTag(t.id);
+                      }
+                    }}><Trash2 className="w-4 h-4" /> Delete tag</button>
                   </OnScreen>
                 )}
               </div>
@@ -584,14 +594,70 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
     return id ? folders.find((f) => f.id === id) : undefined;
   };
 
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+
+  useEffect(() => {
+    const onDragEnter = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) {
+        e.preventDefault();
+        setIsDraggingFiles(true);
+      }
+    };
+    const onDragOver = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) {
+        e.preventDefault();
+      }
+    };
+    const onDragLeave = (e: DragEvent) => {
+      if (e.relatedTarget === null) {
+        setIsDraggingFiles(false);
+      }
+    };
+    const onDrop = (e: DragEvent) => {
+      setIsDraggingFiles(false);
+      if (e.dataTransfer?.files.length) {
+        e.preventDefault();
+        p.onImportFiles(Array.from(e.dataTransfer.files));
+      }
+    };
+    window.addEventListener('dragenter', onDragEnter);
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragenter', onDragEnter);
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, [p.onImportFiles]);
+
   const emptyText = filterOn ? 'No notes match the tag filter.' : q ? 'Nothing matches the search.' : current ? 'This folder is empty.' : 'No notes yet.';
 
   const content =
     visibleNotes.length === 0 && subfolders.length === 0 ? (
-      <div className="h-full flex flex-col items-center justify-center text-gray-400 text-center px-6">
-        <FileText className="w-12 h-12 stroke-[1.2] mb-3 text-gray-300 dark:text-gray-600" />
-        <div className="font-semibold text-sm">{emptyText}</div>
-        <p className="text-xs mt-1">Tap + to start writing, or hold it to import a file.</p>
+      <div className="h-full min-h-[50vh] flex flex-col items-center justify-center text-center px-6 pop-enter select-none">
+        <div className="w-16 h-16 rounded-3xl bg-blue-500/10 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 flex items-center justify-center mb-4">
+          <BookOpen className="w-8 h-8" strokeWidth={1.75} />
+        </div>
+        <h3 className="font-bold text-lg text-gray-900 dark:text-gray-100">{emptyText}</h3>
+        <p className="text-sm text-gray-500 dark:text-gray-400 max-w-sm mt-1 mb-6">
+          Capture your handwritten notes, mathematical derivations with LaTeX, diagrams, and audio recordings.
+        </p>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={p.onCreateNote}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-blue-600 text-white font-semibold text-sm shadow-md shadow-blue-600/25 hover:bg-blue-700 active:scale-95 transition"
+          >
+            <Plus className="w-4 h-4" strokeWidth={2} /> New Note
+          </button>
+          <button
+            onClick={() => importRef.current?.click()}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl border border-gray-200 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/10 text-gray-700 dark:text-gray-200 font-semibold text-sm active:scale-95 transition"
+          >
+            <Upload className="w-4 h-4" strokeWidth={1.75} /> Import PDF / File
+          </button>
+        </div>
       </div>
     ) : (
       <>
@@ -620,24 +686,36 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
               const folder = !current ? folderOfNote(note) : undefined;
               const nt = noteTags(note);
               return (
-                <div key={note.id} {...dragProps('note', note.id)} onClick={() => p.onOpenNote(note.id)} className="relative bg-ui-card border border-gray-200 dark:border-gray-700/60 rounded-2xl hover:shadow-lg transition cursor-pointer flex flex-col">
-                  <div className="rounded-t-2xl overflow-hidden border-b border-gray-100 dark:border-gray-800 relative">
+                <div
+                  key={note.id}
+                  {...dragProps('note', note.id)}
+                  onClick={() => p.onOpenNote(note.id)}
+                  className="group relative bg-ui-card border border-gray-200/80 dark:border-white/10 rounded-2xl shadow-sm hover:shadow-xl hover:-translate-y-0.5 transition-all duration-200 cursor-pointer flex flex-col overflow-hidden"
+                >
+                  <div className="aspect-[3/4] w-full overflow-hidden border-b border-gray-100 dark:border-white/10 relative bg-gray-50 dark:bg-black/20 flex items-center justify-center">
                     <NoteThumb note={note} />
                     {folder && (
-                      <span className="absolute top-2 left-2 flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full text-white max-w-[80%] truncate" style={{ backgroundColor: folder.color ?? FOLDER_COLORS[0] }}>
+                      <span
+                        className="absolute top-2.5 left-2.5 flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full text-white shadow-sm max-w-[80%] truncate"
+                        style={{ backgroundColor: folder.color ?? FOLDER_COLORS[0] }}
+                      >
                         <FolderIcon className="w-2.5 h-2.5 flex-shrink-0" /> {folder.name}
                       </span>
                     )}
                   </div>
-                  <div className="p-2.5 sm:p-3">
-                    <div className="flex items-start justify-between">
-                      <div className="flex-1 min-w-0 mr-1">{titleOrRename(note)}</div>
-                      {menuButton(note)}
+                  <div className="p-3">
+                    <div className="flex items-start justify-between gap-1">
+                      <div className="flex-1 min-w-0 font-semibold text-sm text-gray-900 dark:text-gray-100 truncate">{titleOrRename(note)}</div>
+                      <div className="opacity-70 group-hover:opacity-100 transition-opacity">
+                        {menuButton(note)}
+                      </div>
                     </div>
-                    {/* The full width of the card: the dates and times are not cut off. */}
-                    <NoteDates note={note} />
+                    <div className="text-[11px] text-gray-400 mt-1 flex items-center justify-between">
+                      <span>{fullDate(note.updatedAt)}</span>
+                      <span>{pageCountOf(note)} page{pageCountOf(note) === 1 ? '' : 's'}</span>
+                    </div>
                     {nt.length > 0 && (
-                      <div className="flex flex-wrap gap-1 mt-1.5">
+                      <div className="flex flex-wrap gap-1 mt-2">
                         {nt.slice(0, 3).map((t) => <TagChip key={t.id} tag={t} small />)}
                         {nt.length > 3 && <span className="text-[10px] text-gray-400">+{nt.length - 3}</span>}
                       </div>
@@ -879,6 +957,16 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             <span data-cutout-item className="text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-500 px-2 py-0.5 rounded-full">{visibleNotes.length}</span>
           </div>
           <div className="flex items-center gap-2">
+            {/* Search Pill */}
+            <div className="hidden md:flex items-center relative max-w-xs w-48 lg:w-60">
+              <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" strokeWidth={1.75} />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search notes..."
+                className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-gray-100 dark:bg-ui-raised border border-gray-200/50 dark:border-white/5 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40 select-text"
+              />
+            </div>
             <div className="hidden sm:flex items-center bg-gray-100 dark:bg-ui-raised p-1 rounded-xl">
               <button onClick={() => setPrefs({ viewMode: 'grid' })} className={`p-1.5 rounded-lg ${prefs.viewMode === 'grid' ? 'bg-white dark:bg-ui-high text-blue-600 shadow-sm' : 'text-gray-400'}`} title="Grid"><GridIcon className="w-4 h-4" /></button>
               <button onClick={() => setPrefs({ viewMode: 'list' })} className={`p-1.5 rounded-lg ${prefs.viewMode === 'list' ? 'bg-white dark:bg-ui-high text-blue-600 shadow-sm' : 'text-gray-400'}`} title="List"><ListIcon className="w-4 h-4" /></button>
@@ -886,15 +974,33 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => { const open = !filterOpen; closeMenus(); setFilterOpen(open); }}
-                className={`relative flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold ${filterOpen || filterOn ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-ui-raised text-gray-600 dark:text-gray-300'}`}
+                className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold ${filterOpen || filterOn ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-ui-raised text-gray-600 dark:text-gray-300'}`}
                 title="Sort and filter"
               >
-                <SlidersHorizontal className="w-4 h-4" />
+                <SlidersHorizontal className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">{filterOn ? (prefs.tagMode === 'whitelist' ? 'Only tagged' : 'Hiding tags') : 'Sort & filter'}</span>
                 {filterOn && <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-blue-600 ring-2 ring-white dark:ring-ui-panel" />}
               </button>
               {filterOpen && filterMenu}
             </div>
+            {/* Visible Import button */}
+            <button
+              onClick={() => importRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+              title="Import PDF, Word, Notability, .opennote, or images"
+            >
+              <Upload className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" strokeWidth={1.75} />
+              <span className="hidden sm:inline">Import</span>
+            </button>
+            {/* Visible + New Note button */}
+            <button
+              onClick={p.onCreateNote}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 text-white shadow-md shadow-blue-600/25 hover:bg-blue-700 active:scale-95 transition"
+              title="Create a new note"
+            >
+              <Plus className="w-3.5 h-3.5" strokeWidth={2.4} />
+              <span>New Note</span>
+            </button>
           </div>
         </header>
 
@@ -965,6 +1071,15 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
 
       {moveSheet}
       {tagSheet}
+
+      {/* Translucent full-window dropzone overlay */}
+      {isDraggingFiles && (
+        <div className="fixed inset-0 z-[200] bg-blue-600/15 backdrop-blur-md border-4 border-dashed border-blue-500/70 rounded-3xl m-4 flex flex-col items-center justify-center pointer-events-none pop-enter select-none">
+          <Upload className="w-16 h-16 text-blue-600 animate-bounce mb-3" strokeWidth={1.75} />
+          <h3 className="text-xl font-bold text-gray-900 dark:text-gray-100">Drop PDF, .note, .docx, or Image to import</h3>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Automatic conversion and instant new note creation</p>
+        </div>
+      )}
     </div>
   );
 };
