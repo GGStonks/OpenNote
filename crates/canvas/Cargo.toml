@@ -15,4 +15,9 @@ bytemuck = { version = "1.16", features = ["derive"] }
 pollster = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Pictures (ImageBlock), decoded here off the render thread: PNG, JPEG, GIF (first frame), WebP;
+# SVG (stickies, box colours) rendered by resvg at the zoom in view. No text, no system fonts.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+resvg = { version = "0.45", default-features = false }
+base64 = "0.22"
 

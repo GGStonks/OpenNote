@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { RotateCw } from 'lucide-react';
 import {
-  EraserMode, FillType, LatexBlock, LineStyle, NotePage, PaperColor, PaperColorName, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
+  EraserMode, FillType, ImageBlock, LatexBlock, LineStyle, NotePage, PaperColor, PaperColorName, PaperStyle, PenStyle, Point, ShapeMode, Stroke,
   TextBlock, ToolType, newId,
 } from '../types';
 import {
@@ -27,7 +27,7 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
 import { haptic } from '../platform';
-import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, rustGetCanvasStats, rustSetCanvasFrame } from '../services/rustCore';
+import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, imageKey, rustCanvasImageStatus, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
 import { useCanvasPageStream, useSheetWindow } from '../services/canvasPages';
 import { GestureBus } from '../editor/gestures';
 import {
@@ -40,6 +40,9 @@ import { ZLayer, zLayers } from '../editor/zorder';
 import { useDragInk, usePinchInk } from '../editor/usePinchInk';
 import { frameRate } from '../services/frameRate';
 import { PdfBackground } from './PdfBackground';
+
+const NO_IDS: ReadonlySet<string> = new Set();
+const NO_BLOCKS: ReadonlySet<ImageBlock> = new Set();
 
 export interface ToolSettings {
   tool: ToolType;
@@ -1254,6 +1257,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
    * draw yet: a PDF page or a picture in the web view would cover the native ink (N4).
    */
   const isNative = !!props.nativeCanvas && !printMode;
+  const hasImages = isNative && (page.imageBlocks?.length ?? 0) > 0;
   /** When the page sent the canvas its first frame (performance.now()): the health checks wait for it. */
   const firstFrameAt = useRef(0);
 
@@ -1315,7 +1319,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if (!firstFrameAt.current) firstFrameAt.current = performance.now();
       if (deskKey !== sentDesk) {
         sentDesk = deskKey;
-        void rustSetCanvasFrame({ clear: desk, papers, sheets, ink: page.id, pages: [], surface });
+        const pages = hasImages ? [{ page: page.id, tf: [k, 0, 0, k, x0, y0] as [number, number, number, number, number, number], paper: null }] : [];
+        const ink = hasImages ? '' : page.id;
+        void rustSetCanvasFrame({ clear: desk, papers, sheets, ink, pages, surface });
       } else if (!owned) void rustSetCanvasFrame({ surface, keep: true });
     };
     raf = requestAnimationFrame(tick);
@@ -1327,7 +1333,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       cancelAnimationFrame(raf);
       clearTimeout(status);
     };
-  }, [isNative, page.id, layout]);
+  }, [isNative, page.id, layout, hasImages]);
 
   // Never a black page: once a second, whether the canvas really draws; if not, the page draws
   // the note itself for the rest of the run (rustCore `fallBackFromNativeCanvas`). Its own effect:
@@ -1351,13 +1357,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
 
   // Strokes being moved / reshaped are drawn on a floating or live layer instead of the page canvas.
   const [hiddenIds, setHiddenIds] = useState<ReadonlySet<string> | null>(null);
+  const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
+
   // The page's strokes for the native canvas: each sheet's as a scene of its own, streamed as the
   // sheets come near the view (services/canvasPages.ts, ADR-007), without those being moved or
   // reshaped (the floating and live layers draw them). `sceneSent` counts the sends made for a
   // change and `sceneIn` is their arrival: a finished stroke's live copy (the shell's) stays until
   // the canvas has it (finishStroke). The note closed: its scenes and the strokes' geometry go.
-  const { sent: sceneSent, arrived: sceneIn } = useCanvasPageStream({
-    enabled: isNative,
+  const { sent: streamSent, arrived: streamIn } = useCanvasPageStream({
+    enabled: isNative && !hasImages,
     surfaceId: page.id,
     strokes: page.strokes,
     hidden: hiddenIds,
@@ -1366,6 +1374,12 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     container: containerRef,
     scrollRoot: scrollRoot ?? null,
   });
+
+  const imgSceneSent = useRef(0);
+  const imgSceneIn = useRef<Promise<unknown>>(Promise.resolve());
+  const sceneSent = hasImages ? imgSceneSent : streamSent;
+  const sceneIn = hasImages ? imgSceneIn : streamIn;
+
   // While the native canvas draws the note, the page keeps in its DOM only the sheets near the
   // view (their page lines and numbers, their blocks; ADR-007): the rest is the content's size
   // alone (Editor's box), so opening and zooming a note of thousands of pages costs what is near.
@@ -1376,7 +1390,53 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   /** A block outside the sheets in the DOM is left out (never one selected or being edited). */
   const blockShown = (y0: number, y1: number, id: string) =>
     !sheetWin || (y1 >= winTop - 200 && y0 <= winBottom + 200) || selectedBlockId === id || editingTextId === id || !!selection?.latexIds.includes(id) || !!selection?.textIds.includes(id) || !!selection?.imageIds.includes(id);
-  const shownStrokes = useMemo(() => (hiddenIds ? page.strokes.filter((s) => !hiddenIds.has(s.id)) : page.strokes), [page.strokes, hiddenIds]);
+
+  // The canvas's scene when pictures are present: the page's z-layers (editor/zorder.ts) as stored,
+  // pictures among them, so ink and pictures stack as the page stacks them. From `page`, not the
+  // dragged copy: a dragged picture is the page's own `<img>` while it moves (`nativeHidden`), as
+  // dragged ink is the floating canvas's (hiddenIds).
+  const nativeLayersRef = useRef<ZLayer[] | undefined>(undefined);
+  const nativeLayers = useMemo(
+    () => (hasImages ? (nativeLayersRef.current = zLayers({ ...page, strokes: shownStrokes }, nativeLayersRef.current)) : null),
+    [hasImages, page, shownStrokes]
+  );
+  const [nativeHidden, setNativeHidden] = useState<ReadonlySet<string>>(NO_IDS);
+  /** Pictures the canvas draws (its scene has them and their files are decoded): the page hides its own. */
+  const [nativeImages, setNativeImages] = useState<ReadonlySet<ImageBlock>>(NO_BLOCKS);
+
+  useEffect(() => {
+    if (!hasImages || !nativeLayers) return;
+    imgSceneSent.current++;
+    const sent = rustSetCanvasScene(page.id, nativeLayers, nativeHidden);
+    imgSceneIn.current = sent;
+    const blocks = nativeLayers.flatMap((l) => (l.kind === 'image' && !nativeHidden.has(l.block.id) ? [l.block] : []));
+    let live = true;
+    // Until a picture's file is decoded by the canvas the page keeps drawing it (no blank picture
+    // while it decodes; a file the canvas cannot read stays the page's).
+    void sent.then(async (ok) => {
+      const keys = [...new Set(blocks.map((b) => imageKey(b.dataUrl)))];
+      const ready = new Set<number>();
+      for (let round = 0; live && ok && keys.length && round < 200; round++) {
+        const st = await rustCanvasImageStatus(keys.filter((k) => !ready.has(k)));
+        if (!st || !live) break;
+        st.ready.forEach((k) => ready.add(k));
+        const left = keys.filter((k) => !ready.has(k) && !st.failed.includes(k));
+        if (!left.length) break;
+        await new Promise((r) => setTimeout(r, round < 20 ? 50 : 250));
+      }
+      if (live) setNativeImages(ok ? new Set(blocks.filter((b) => ready.has(imageKey(b.dataUrl)))) : NO_BLOCKS);
+    });
+    return () => {
+      live = false;
+    };
+  }, [hasImages, page.id, nativeLayers, nativeHidden]);
+
+  // The note closed: its scene, the strokes' geometry and the pictures' files the canvas kept go.
+  useEffect(() => {
+    if (!hasImages) return;
+    const id = page.id;
+    return () => void rustSetCanvasScene(id, []);
+  }, [hasImages, page.id]);
   // While two fingers zoom, the ink is drawn by the GPU from its vectors (sharp at every frame).
 
   const ratio = canvasRatio(zoom, PAGE_W * PAGE_H);
@@ -2784,6 +2844,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   // nothing extra; on release the page draws the moved ink again at full resolution.
   const FLOAT_PAD = 24;
   const layerSel = drag?.sel ?? null;
+  // Pictures being dragged are the page's own `<img>` (moved with the selection), not the canvas's.
+  useEffect(() => setNativeHidden(layerSel?.imageIds.length ? new Set(layerSel.imageIds) : NO_IDS), [layerSel]);
   const glowSel = !drag && selection && !printMode && !hiddenIds && selection.strokeIds.length ? selection : null;
   /**
    * The dragged ink and its glow, at the screen's resolution for this zoom and `k`, the scale the drag has reached (the canvas is CSS-scaled by
@@ -3120,7 +3182,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             />
           ) : null;
         }
-        if (l.kind === 'image') return blockShown(l.block.y, l.block.y + l.block.height, l.block.id) ? <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} /> : null;
+        if (l.kind === 'image') return blockShown(l.block.y, l.block.y + l.block.height, l.block.id) ? <ImageBlockView key={l.key} block={l.block} selected={!!selection?.imageIds.includes(l.block.id)} native={nativeImages.has(l.block)} /> : null;
         if (l.kind === 'latex') {
           const b = l.block;
           if (!blockShown(b.y, b.y + b.height, b.id)) return null;

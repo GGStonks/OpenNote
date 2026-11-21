@@ -40,6 +40,10 @@ pub struct Stats {
     pub suboptimal: u64,
     /// The pages' scenes: held, on the GPU, drawn, waited for (crates/canvas `pages`).
     pub pages: PageStats,
+    /// Pictures' textures on the device, their bytes and the budget (textures.rs).
+    pub pictures: usize,
+    pub picture_bytes: u64,
+    pub picture_budget: u64,
 }
 
 enum Target {
@@ -450,12 +454,47 @@ impl CanvasHost {
     }
 
     pub fn stats(&self) -> Stats {
+        let (pictures, picture_bytes, picture_budget) = self.canvas.picture_memory();
         Stats {
             scenes: self.pages.held(),
             capsules: self.pages.capsules(),
             pages: self.pages.stats(),
+            pictures,
+            picture_bytes,
+            picture_budget,
             ..self.stats.clone()
         }
+    }
+
+    /// The pictures' files this host draws from.
+    pub fn library(&self) -> &crate::picture::Library {
+        self.canvas.library()
+    }
+
+    /// Draws pictures from `lib` (crates/native shares one with the page's bridge).
+    pub fn set_library(&mut self, lib: crate::picture::Library) {
+        self.canvas.set_library(lib);
+        self.dirty = true;
+    }
+
+    /// Draws, then again until every picture in view is decoded and drawn at the size it needs
+    /// (tests, the PC harness: a shell draws them as they arrive, one display frame each). At
+    /// most `rounds` draws.
+    pub fn draw_settled(&mut self, rounds: u32) -> Result<bool, String> {
+        let mut drawn = self.draw()?;
+        for _ in 0..rounds {
+            if !self
+                .library()
+                .wait_idle(std::time::Duration::from_secs(60))
+            {
+                break;
+            }
+            if !self.canvas.pictures.arrived() {
+                break;
+            }
+            drawn |= self.draw()?;
+        }
+        Ok(drawn)
     }
 
     /// Errors the device reported since it was made.
@@ -484,6 +523,10 @@ impl CanvasHost {
     /// error while it was drawn, the surface failed, or the device is lost). A frame that failed
     /// on the GPU is not retried until the page sends something new.
     pub fn draw(&mut self) -> Result<bool, String> {
+        // Pictures the worker decoded since: the frame is drawn again with them.
+        if self.canvas.pictures.arrived() {
+            self.dirty = true;
+        }
         let surface = self.frame.placed.or(self.frame.surface);
         let size = self.target_size();
         if !self.dirty {

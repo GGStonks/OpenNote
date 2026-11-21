@@ -34,3 +34,7 @@ ndk-sys = "0.6"
 
 [features]
 jni = ["dep:jni"]
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"

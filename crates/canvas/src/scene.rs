@@ -100,6 +100,104 @@ pub enum Op {
         col: [f32; 4],
         bx: PageBox,
     },
+    /// A picture (`ImageItem`): its file `key`, the box `quad` (x, y, w, h page px) turned
+    /// `rot` degrees clockwise about its centre, the file's part `uv` (u0, v0, u1, v1: crop,
+    /// a flip swapping a pair) shown in it at `opacity`; `bx` the turned box's bounds.
+    Image {
+        key: u64,
+        quad: [f32; 4],
+        uv: [f32; 4],
+        rot: f32,
+        opacity: f32,
+        bx: PageBox,
+    },
+}
+
+/// A picture as the page places it (Blocks.tsx `ImageBlockView`: an `<img>` at the block's x, y,
+/// width, height, `rotate(rotation deg)` about its centre). The page's blocks have no crop, flip
+/// or opacity of their own (an imported picture's crop and flip are in its file, images.ts
+/// `loadPicture`): `crop` (u0, v0, u1, v1 of the file, 0..1), `flip_h`, `flip_v` and `opacity`
+/// keep their defaults for them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageItem {
+    /// The page's key for the picture's file (crate::picture::Library).
+    pub key: u64,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    /// Degrees, clockwise about the box's centre.
+    pub rotation: f32,
+    pub crop: [f32; 4],
+    pub flip_h: bool,
+    pub flip_v: bool,
+    pub opacity: f32,
+}
+
+impl ImageItem {
+    /// The whole file in the box, upright, opaque.
+    pub fn new(key: u64, x: f32, y: f32, w: f32, h: f32) -> Self {
+        ImageItem {
+            key,
+            x,
+            y,
+            w,
+            h,
+            rotation: 0.0,
+            crop: [0.0, 0.0, 1.0, 1.0],
+            flip_h: false,
+            flip_v: false,
+            opacity: 1.0,
+        }
+    }
+
+    /// The op drawing it; None when its box or numbers cannot be drawn.
+    pub fn op(&self) -> Option<Op> {
+        let n = [self.x, self.y, self.w, self.h, self.rotation, self.opacity];
+        if n.iter().any(|v| !v.is_finite()) || self.w <= 0.0 || self.h <= 0.0 || self.opacity <= 0.0 {
+            return None;
+        }
+        let c = self.crop.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
+        let (mut u0, mut v0, mut u1, mut v1) = (c[0], c[1], c[2], c[3]);
+        if self.flip_h {
+            std::mem::swap(&mut u0, &mut u1);
+        }
+        if self.flip_v {
+            std::mem::swap(&mut v0, &mut v1);
+        }
+        let (cx, cy) = (self.x + self.w / 2.0, self.y + self.h / 2.0);
+        let (sn, cs) = self.rotation.to_radians().sin_cos();
+        let (hw, hh) = (self.w / 2.0, self.h / 2.0);
+        // The turned box's half extents.
+        let (ex, ey) = (hw * cs.abs() + hh * sn.abs(), hw * sn.abs() + hh * cs.abs());
+        Some(Op::Image {
+            key: self.key,
+            quad: [self.x, self.y, self.w, self.h],
+            uv: [u0, v0, u1, v1],
+            rot: self.rotation,
+            opacity: self.opacity.min(1.0),
+            bx: PageBox {
+                x0: cx - ex,
+                y0: cy - ey,
+                x1: cx + ex,
+                y1: cy + ey,
+            },
+        })
+    }
+}
+
+/// One of the page's z-layers (zorder.ts `ZLayer`): an ink layer's strokes, or a picture.
+#[derive(Clone, Copy, Debug)]
+pub enum Layer<'a> {
+    Ink(&'a [Stroke]),
+    Image(ImageItem),
+}
+
+/// A z-layer whose strokes' ops are already made (`Scene::from_layers`).
+#[derive(Clone, Debug)]
+pub enum OpsLayer<'a> {
+    Ink(Vec<&'a [RenderOp]>),
+    Image(ImageItem),
 }
 
 /// The page's draw list; `caps` and `flat` are the GPU buffers' contents.
@@ -135,15 +233,37 @@ impl Scene {
     /// The scene of `layers` (bottom first, strokes in page order within a layer), drawn per
     /// layer in drawStrokes' order: highlighters, fills, ink, arrowheads.
     pub fn build(layers: &[&[Stroke]]) -> Scene {
-        let ops: Vec<Vec<Vec<RenderOp>>> = layers
+        let items: Vec<Layer> = layers.iter().map(|l| Layer::Ink(l)).collect();
+        Scene::build_layers(&items)
+    }
+
+    /// The scene of the page's z-layers, pictures among them (bottom first).
+    pub fn build_layers(layers: &[Layer]) -> Scene {
+        let ops: Vec<Option<Vec<Vec<RenderOp>>>> = layers
             .iter()
-            .map(|l| l.iter().map(build_stroke_ops).collect())
+            .map(|l| match l {
+                Layer::Ink(s) => Some(s.iter().map(build_stroke_ops).collect()),
+                Layer::Image(_) => None,
+            })
             .collect();
-        let refs: Vec<Vec<&[RenderOp]>> = ops
+        let refs: Vec<OpsLayer> = layers
             .iter()
-            .map(|l| l.iter().map(|o| o.as_slice()).collect())
+            .zip(&ops)
+            .map(|(l, o)| match (l, o) {
+                (Layer::Image(im), _) => OpsLayer::Image(*im),
+                (_, Some(o)) => OpsLayer::Ink(o.iter().map(|o| o.as_slice()).collect()),
+                (_, None) => OpsLayer::Ink(Vec::new()),
+            })
             .collect();
-        Scene::from_ops(&refs)
+        Scene::from_layers(&refs)
+    }
+
+    /// The files of the pictures this scene shows (the page's keys).
+    pub fn image_keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ops.iter().filter_map(|o| match o {
+            Op::Image { key, .. } => Some(*key),
+            _ => None,
+        })
     }
 
     /// The scene of strokes whose ops (`build_stroke_ops`, the costly part: each stroke's drawn
@@ -151,8 +271,22 @@ impl Scene {
     /// stroke's ops between scenes (crates/native `canvasSceneBin`), so a new stroke on a long
     /// note costs its own geometry, not the note's.
     pub fn from_ops(layers: &[Vec<&[RenderOp]>]) -> Scene {
+        let items: Vec<OpsLayer> = layers.iter().map(|l| OpsLayer::Ink(l.clone())).collect();
+        Scene::from_layers(&items)
+    }
+
+    /// `from_ops` with pictures among the layers: each picture drawn between the ink layers
+    /// under and over it, as the page stacks its blocks (zorder.ts).
+    pub fn from_layers(layers: &[OpsLayer]) -> Scene {
         let mut sc = Scene::default();
-        for layer in layers {
+        for item in layers {
+            let layer = match item {
+                OpsLayer::Ink(l) => l,
+                OpsLayer::Image(im) => {
+                    sc.ops.extend(im.op());
+                    continue;
+                }
+            };
             let mut hl: Vec<Op> = Vec::new();
             let mut fills: Vec<Op> = Vec::new();
             let mut ink: Vec<Op> = Vec::new();
@@ -304,7 +438,10 @@ impl Scene {
         let mut b: Option<PageBox> = None;
         for op in &self.ops {
             let o = match op {
-                Op::See { bx, .. } | Op::Fill { bx, .. } | Op::Flat { bx, .. } => *bx,
+                Op::See { bx, .. }
+                | Op::Fill { bx, .. }
+                | Op::Flat { bx, .. }
+                | Op::Image { bx, .. } => *bx,
             };
             if !(o.x0.is_finite() && o.y0.is_finite() && o.x1.is_finite() && o.y1.is_finite()) {
                 continue;

@@ -1,7 +1,8 @@
 //! The passes that draw a frame. TypeScript counterpart: `src/ink/glInk.ts` `GlInk.draw` and its
 //! `layOn` (each page through its transform: the desk, the paper, then the ops in order; a
 //! coverage run drawn into the R8 coverage texture with max blend and composited once; fills by
-//! even-odd stencil; holes erase; hatches are capsules under the stencil; arrowheads flat).
+//! even-odd stencil; holes erase; hatches are capsules under the stencil; arrowheads flat), and
+//! the pictures between the ink layers (Blocks.tsx `ImageBlockView`, textures.rs).
 //!
 //! Every scissor is clamped to the size of the pass's own target (the coverage and stencil
 //! textures are made at the target's size each frame), and a page whose transform or box is not
@@ -133,6 +134,9 @@ impl GpuCanvas {
             return false;
         }
         self.ensure_size(w, h);
+        // The pictures' textures: what the worker decoded uploaded, what is in view asked for.
+        self.pictures
+            .prepare(&self.device, &self.queue, frame, (w, h));
         if frame.pages.len() > self.rects_capacity {
             self.rects_capacity = frame.pages.len().next_power_of_two();
             self.rects = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -213,6 +217,22 @@ impl GpuCanvas {
                     Op::Flat { col, .. } => {
                         self.slots_scratch.push(Uniforms {
                             col: premul(*col),
+                            ..base
+                        });
+                        slot_of.push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
+                    }
+                    Op::Image {
+                        quad,
+                        uv,
+                        rot,
+                        opacity,
+                        ..
+                    } => {
+                        let (sn, cs) = rot.to_radians().sin_cos();
+                        self.slots_scratch.push(Uniforms {
+                            i_quad: *quad,
+                            i_uv: *uv,
+                            i_rot: [cs, sn, opacity.clamp(0.0, 1.0), 1.0 / base.px],
                             ..base
                         });
                         slot_of.push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
@@ -433,6 +453,33 @@ impl GpuCanvas {
                             count: *count,
                             sc,
                         });
+                    }
+                    Op::Image { key, bx, .. } => {
+                        // Over what is under it, under what comes after (zorder.ts).
+                        if !see_batch.is_empty() {
+                            self.flush_see(&mut enc, &views, scene.caps.slice(..), &mut see_batch);
+                        }
+                        if !flat_batch.is_empty() {
+                            self.flush_flat(
+                                &mut enc,
+                                &views,
+                                scene.flat.slice(..),
+                                &mut flat_batch,
+                            );
+                        }
+                        let (Some(bg), Some(sc)) =
+                            (self.pictures.bind_group(*key), self.scissor(bx, tf, 1.5))
+                        else {
+                            continue;
+                        };
+                        let mut p = target_pass(&mut enc, target, stencil, "picture", false);
+                        p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
+                        p.set_pipeline(&self.picture);
+                        p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
+                        p.set_bind_group(1, cov_bg, &[]);
+                        p.set_bind_group(2, bg, &[]);
+                        p.set_stencil_reference(0);
+                        p.draw(0..4, 0..1);
                     }
                 }
             }

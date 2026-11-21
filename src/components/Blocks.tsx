@@ -611,12 +611,13 @@ export const TextBlockView = React.memo<TextBlockViewProps>(function TextBlockVi
   );
 }, sameData);
 
-export const ImageBlockView = React.memo<{ block: ImageBlock; selected: boolean }>(({ block, selected }) => (
-  <img
-    src={block.dataUrl}
-    alt=""
-    draggable={false}
-    className={`absolute pointer-events-none select-none ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4' : ''}`}
-    style={{ left: block.x, top: block.y, width: block.width, height: block.height, ...rotationStyle(block.rotation) }}
-  />
-));
+/**
+ * A picture. `native`: the native canvas draws it (crates/canvas picture.rs, in its place among
+ * the ink layers): the page keeps only its box, for the selection's outline.
+ */
+export const ImageBlockView = React.memo<{ block: ImageBlock; selected: boolean; native?: boolean }>(({ block, selected, native }) => {
+  const className = `absolute pointer-events-none select-none ${selected ? 'outline outline-2 outline-blue-500/80 outline-offset-4' : ''}`;
+  const style = { left: block.x, top: block.y, width: block.width, height: block.height, ...rotationStyle(block.rotation) };
+  if (native) return <div data-native-image={block.id} className={className} style={style} />;
+  return <img src={block.dataUrl} alt="" draggable={false} data-image={block.id} className={className} style={style} />;
+});

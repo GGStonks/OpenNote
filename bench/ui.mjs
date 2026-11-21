@@ -1650,6 +1650,245 @@ if (ONLY.has('nativecanvas')) {
   shell.stdin.end();
 }
 
+// Not in the default run (run it alone: it installs a stand-in iOS shell with a native canvas):
+// --native --only nativeimages [--shots <dir>]. docs/rust-native-canvas.md N4 (rust/MAP.md C2): a
+// note of pictures (a PNG photo, a JPEG turned 37°, a PNG with alpha, a cropped and flipped copy
+// turned 90°, the photo again turned 180° (one file), a GIF, a large JPEG shown small, two
+// Notability-style SVG stickies, one turned) with ink under and over them, drawn by the page itself
+// (the native canvas off: <img>, CSS paper, vector ink) and by the native canvas (the stand-in
+// shell, opennote_native_cli --serve: the page over the canvas's picture), at zoom 1 (the whole
+// note) and 2.5 and 5 (each picture centred). Per picture: the canvas's picture against the page's
+// placed within 0.5 device px (sub-pixel registration of the two over the picture and its edges),
+// the mean absolute difference inside it under 2% of 255, and nothing missing.
+if (ONLY.has('nativeimages')) {
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  execFileSync('cargo', ['build', '--release', '-q', '-p', 'opennote_native', '--bin', 'opennote_native_cli'], { cwd: root, stdio: 'inherit' });
+  await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  const vp = page.viewportSize(), dpr = Number(arg('dpr', 2));
+  const W = vp.width * dpr, H = vp.height * dpr;
+  // The pictures, made by the browser as the app makes them (canvas toDataURL; images.ts solidImage).
+  const GIF = 'R0lGODdhMAAwAIEAAPr69R5ayOY8KCigRiwAAAAAMAAwAEAI7QABCBxIsKDBgwgTHgzAsKHDhw4LCphIsSJFhQAgaoQIwKLHjxcxijwI0uJIkQNSqlyp8uRIljBjymwpcqNNhi5P3rQpsKRPhDs39vQJMqdClkaTzlyaMikAplCjDnBKNWlQjQg/6rz6cCBRjwm5dv1acqHYhh3JajV4Fu1QtQKqIpwqEazcgzPvopTaVK9AvkudAh7st7Dhw4iptsV5eHEAg0RrLiYIV6Hjt3Djmm2bNnPIgpc9V9x8trNo0mJNe0bNFXPlxK8Te/2ZmKbsozBv4w2s+6lU2YP7+g2OVC5xmYKP836pPGrv57oDAgA7';
+  const files = await page.evaluate(() => {
+    const scene = (w, h, seed) => {
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const x = c.getContext('2d');
+      const g = x.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, `hsl(${seed},70%,75%)`); g.addColorStop(1, `hsl(${seed + 140},60%,35%)`);
+      x.fillStyle = g; x.fillRect(0, 0, w, h);
+      x.fillStyle = `hsl(${seed + 60},80%,45%)`; x.beginPath(); x.arc(w * 0.3, h * 0.4, h * 0.22, 0, 7); x.fill();
+      x.fillStyle = '#fff'; x.fillRect(w * 0.55, h * 0.15, w * 0.3, h * 0.25);
+      x.strokeStyle = '#202040'; x.lineWidth = Math.max(2, w / 80);
+      for (let i = 0; i < 6; i++) { x.beginPath(); x.moveTo(w * 0.1, h * (0.6 + i * 0.06)); x.lineTo(w * 0.9, h * (0.55 + i * 0.07)); x.stroke(); }
+      x.fillStyle = '#111'; x.font = `bold ${Math.round(h / 7)}px sans-serif`; x.fillText('OpenNote', w * 0.52, h * 0.52);
+      return c;
+    };
+    const photo = scene(320, 240, 200).toDataURL('image/png');
+    const jpeg = scene(320, 240, 20).toDataURL('image/jpeg', 0.9);
+    const big = scene(2048, 1536, 290).toDataURL('image/jpeg', 0.9);
+    const a = document.createElement('canvas'); a.width = a.height = 200;
+    const ax = a.getContext('2d');
+    ax.fillStyle = 'rgba(200,40,120,0.6)'; ax.beginPath(); ax.arc(100, 100, 80, 0, 7); ax.fill();
+    ax.strokeStyle = '#1060c0'; ax.lineWidth = 14; ax.beginPath(); ax.arc(100, 100, 50, 0, 7); ax.stroke();
+    const alpha = a.toDataURL('image/png');
+    // A crop of the photo, flipped as images.ts loadPicture does for an imported picture.
+    const src = scene(320, 240, 200);
+    const f = document.createElement('canvas'); f.width = 240; f.height = 150;
+    const fx = f.getContext('2d');
+    fx.setTransform(-1, 0, 0, 1, f.width, 0);
+    fx.drawImage(src, 40, 50, 240, 150, 0, 0, 240, 150);
+    const cropped = f.toDataURL('image/png');
+    const solid = (color, w, h, radius = 0) => `data:image/svg+xml;charset=utf-8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w.toFixed(2)} ${h.toFixed(2)}" preserveAspectRatio="none"><rect width="${w.toFixed(2)}" height="${h.toFixed(2)}" rx="${radius.toFixed(2)}" fill="${color}"/></svg>`)}`;
+    return { photo, jpeg, big, alpha, cropped, sticky: solid('#FFF48E', 180, 120, 12), box: solid('#A0D8F0', 150, 90, 0) };
+  });
+  files.gif = `data:image/gif;base64,${GIF}`;
+  const T = 1700000000000;
+  const pics = [
+    ['photo', files.photo, 60, 140, 160, 120, 0],
+    ['jpeg37', files.jpeg, 300, 140, 160, 120, 37],
+    ['alpha', files.alpha, 560, 130, 130, 130, 0],
+    ['cropflip90', files.cropped, 70, 360, 160, 100, 90],
+    ['photo180', files.photo, 310, 350, 120, 90, 180],
+    ['gif', files.gif, 560, 340, 96, 96, 0],
+    ['bigjpeg', files.big, 560, 560, 200, 150, 0],
+    ['sticky', files.sticky, 60, 560, 180, 120, 0],
+    ['box20', files.box, 300, 580, 150, 90, 20],
+  ];
+  const imageBlocks = pics.map(([id, dataUrl, x, y, width, height, rotation], i) => ({ id, x, y, width, height, dataUrl, ...(rotation ? { rotation } : {}), createdAt: T + i * 10 }));
+  const line = (id, y0, t, color) => ({
+    id, tool: 'pen', color, width: 3, opacity: 1, penStyle: 'ballpoint', createdAt: t,
+    points: Array.from({ length: 60 }, (_, i) => ({ x: 40 + i * 12, y: y0 + 18 * Math.sin(i / 4), pressure: 0.5, t: i * 8 })),
+  });
+  // Under the first row of pictures (made before them), over the stickies (made after).
+  const strokes = [line('ink_under', 200, T - 1000, '#c01010'), line('ink_over', 610, T + 1000, '#103090')];
+  const note = {
+    id: 'doc_images', title: 'Images note', createdAt: Date.now(), updatedAt: Date.now(), paperStyle: 'blank', paperColor: 'white', schemaVersion: 3,
+    pages: [{ id: 'page_images', pageNumber: 1, strokes, latexBlocks: [], textBlocks: [], imageBlocks }],
+  };
+  await page.evaluate(async (n) => {
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('OpenNote_Database'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    await new Promise((res, rej) => { const tx = db.transaction('notes', 'readwrite'); tx.objectStore('notes').put(n); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+  }, note);
+
+  // The views: the whole note at zoom 1, each picture centred at 2.5 and 5.
+  const views = [{ name: 'z1', zoom: 1, cx: 0, cy: 0 }];
+  for (const z of [2.5, 5]) for (const [id, , x, y, w, h] of pics) views.push({ name: `z${z}-${id}`, zoom: z, cx: x + w / 2 - vp.width / 2 / z, cy: y + h / 2 - vp.height / 2 / z, only: id });
+  const openAt = async (v, native) => {
+    await page.evaluate((v) => localStorage.setItem('opennote_note_views_v1', JSON.stringify({ doc_images: { zoom: v.zoom, cx: v.cx, cy: v.cy, fit: null, at: Date.now() } })), v);
+    await page.reload();
+    await page.getByText('Images note').first().click();
+    await sleep(1500);
+    if (native) {
+      // The page hides each <img> once the canvas has decoded its file.
+      for (let i = 0; i < 100 && (await page.evaluate(() => document.querySelectorAll('img[data-image]').length)) > 0; i++) await sleep(100);
+    }
+    await sleep(600);
+  };
+  // Where each picture is on screen (device px): its box's centre and scale, from the page's own
+  // element (an <img>, or the box the page keeps for a picture the canvas draws).
+  const geometry = () => page.evaluate(([pics, dpr]) => {
+    const view = [...document.querySelectorAll('div')].find((d) => d.scrollHeight > d.clientHeight + 200 && getComputedStyle(d).overflow === 'auto')?.getBoundingClientRect();
+    return {
+      clip: view ? [view.left * dpr, view.top * dpr, view.right * dpr, view.bottom * dpr] : null,
+      pics: pics.map(([id, , , , w, h, rot]) => {
+        const el = document.querySelector(`[data-image="${id}"], [data-native-image="${id}"]`);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const a = (rot * Math.PI) / 180;
+        const s = (r.width / (w * Math.abs(Math.cos(a)) + h * Math.abs(Math.sin(a)))) * dpr;
+        return { id, cx: (r.left + r.width / 2) * dpr, cy: (r.top + r.height / 2) * dpr, s, w, h, rot };
+      }),
+    };
+  }, [pics, dpr]);
+
+  const pageShots = [];
+  for (const v of views) {
+    await openAt(v, false);
+    pageShots.push({ shot: (await page.screenshot()).toString('base64'), geo: await geometry() });
+  }
+
+  // The native canvas: the stand-in shell (as in --only nativecanvas).
+  const shell = spawn(join(root, 'target/release/opennote_native_cli'), ['--serve', String(W), String(H)], { stdio: ['pipe', 'pipe', 'inherit'] });
+  let buf = Buffer.alloc(0);
+  const waiting = [];
+  shell.stdout.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 4 && buf.length >= 4 + buf.readUInt32LE(0)) {
+      const n = buf.readUInt32LE(0);
+      waiting.shift()(buf.subarray(4, 4 + n));
+      buf = buf.subarray(4 + n);
+    }
+  });
+  const rust = (method, req) => new Promise((res) => {
+    waiting.push(res);
+    const m = Buffer.from(method), a = Buffer.alloc(4), b = Buffer.alloc(4);
+    a.writeUInt32LE(m.length);
+    b.writeUInt32LE(req.length);
+    shell.stdin.write(Buffer.concat([a, m, b, req]));
+  });
+  const framed = (obj) => { const m = Buffer.from(JSON.stringify(obj)), h = Buffer.alloc(4); h.writeUInt32LE(m.length); return Buffer.concat([h, m]); };
+  const meta = (reply) => JSON.parse(reply.subarray(4, 4 + reply.readUInt32LE(0)).toString());
+  await page.route('**/__rust/*', async (route) => route.fulfill({
+    status: 200, contentType: 'application/octet-stream',
+    body: await rust(route.request().url().split('/__rust/')[1], route.request().postDataBuffer() ?? Buffer.alloc(0)),
+  }));
+  await page.addInitScript(() => {
+    window.OpenNoteNative = { platform: 'ios', version: 'bench', nativeCanvas: true };
+    window.webkit = { messageHandlers: { opennote: { postMessage: async (m) => (m.cmd === 'pendingFiles' ? { files: [] } : {}) } } };
+  });
+
+  const cpage = await ctx.newPage();
+  let worstShift = 0, worstMad = 0, fails = 0, checked = 0;
+  for (let vi = 0; vi < views.length; vi++) {
+    const v = views[vi];
+    await openAt(v, true);
+    const snap = await rust('canvasSnapshot', framed({}));
+    const canvasPx = Buffer.from(snap.subarray(4 + snap.readUInt32LE(0))).toString('base64');
+    const over = (await page.screenshot({ omitBackground: true })).toString('base64');
+    const shown = await page.evaluate(() => document.querySelectorAll('img[data-image]').length);
+    const { shot, geo } = pageShots[vi];
+    const res = await cpage.evaluate(async ([canvasPx, over, shot, geo, only, w, h, shots]) => {
+      const load = async (b64) => { const i = new Image(); i.src = 'data:image/png;base64,' + b64; await i.decode(); return i; };
+      const nat = document.createElement('canvas'); nat.width = w; nat.height = h;
+      const nx = nat.getContext('2d');
+      const bin = atob(canvasPx), arr = new Uint8ClampedArray(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      nx.putImageData(new ImageData(arr, w, h), 0, 0);
+      nx.drawImage(await load(over), 0, 0, w, h);
+      const pg = document.createElement('canvas'); pg.width = w; pg.height = h;
+      const px = pg.getContext('2d');
+      px.drawImage(await load(shot), 0, 0, w, h);
+      const A = nx.getImageData(0, 0, w, h).data, B = px.getImageData(0, 0, w, h).data;
+      const [c0x, c0y, c1x, c1y] = geo.clip ?? [0, 0, w, h];
+      const out = [];
+      for (const p of geo.pics) {
+        if (!p || (only && p.id !== only)) continue;
+        const a = (p.rot * Math.PI) / 180, cs = Math.cos(a), sn = Math.sin(a);
+        const hw = (p.w * p.s) / 2, hh = (p.h * p.s) / 2;
+        const ex = hw * Math.abs(cs) + hh * Math.abs(sn) + 5, ey = hw * Math.abs(sn) + hh * Math.abs(cs) + 5;
+        const x0 = Math.max(Math.ceil(c0x) + 3, Math.floor(p.cx - ex)), x1 = Math.min(Math.floor(c1x) - 3, Math.ceil(p.cx + ex));
+        const y0 = Math.max(Math.ceil(c0y) + 3, Math.floor(p.cy - ey)), y1 = Math.min(Math.floor(c1y) - 3, Math.ceil(p.cy + ey));
+        const inner = [], ring = [];
+        for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+          const dx = x + 0.5 - p.cx, dy = y + 0.5 - p.cy;
+          const lx = Math.abs(dx * cs + dy * sn), ly = Math.abs(-dx * sn + dy * cs);
+          if (lx <= hw + 3 && ly <= hh + 3) ring.push(y * w + x);
+          if (lx <= hw - 1.5 && ly <= hh - 1.5) inner.push(y * w + x);
+        }
+        if (inner.length < 50) continue;
+        const sad = (sx, sy) => {
+          let s = 0;
+          for (const i of ring) {
+            const j = i + sy * w + sx;
+            s += Math.abs(A[j * 4] - B[i * 4]) + Math.abs(A[j * 4 + 1] - B[i * 4 + 1]) + Math.abs(A[j * 4 + 2] - B[i * 4 + 2]);
+          }
+          return s;
+        };
+        const grid = {};
+        let best = [0, 0], bv = Infinity;
+        for (let sy = -2; sy <= 2; sy++) for (let sx = -2; sx <= 2; sx++) { const v = (grid[`${sx},${sy}`] = sad(sx, sy)); if (v < bv) { bv = v; best = [sx, sy]; } }
+        const g = (sx, sy) => grid[`${sx},${sy}`] ?? sad(sx, sy);
+        const refine = (m, l, r) => { const d = l - 2 * m + r; return d > 0 ? Math.max(-0.5, Math.min(0.5, (l - r) / (2 * d))) : 0; };
+        const [bx, by] = best;
+        const fx = bx + refine(g(bx, by), g(bx - 1, by), g(bx + 1, by));
+        const fy = by + refine(g(bx, by), g(bx, by - 1), g(bx, by + 1));
+        let mad = 0, inkA = 0, inkB = 0;
+        for (const i of inner) {
+          mad += (Math.abs(A[i * 4] - B[i * 4]) + Math.abs(A[i * 4 + 1] - B[i * 4 + 1]) + Math.abs(A[i * 4 + 2] - B[i * 4 + 2])) / 3;
+          if (765 - A[i * 4] - A[i * 4 + 1] - A[i * 4 + 2] > 24) inkA++;
+          if (765 - B[i * 4] - B[i * 4 + 1] - B[i * 4 + 2] > 24) inkB++;
+        }
+        out.push({ id: p.id, shift: Math.hypot(fx, fy), dx: fx, dy: fy, mad: mad / inner.length, px: inner.length, missing: inkB > 100 && inkA < inkB * 0.5 });
+      }
+      let urls = null;
+      if (shots) {
+        const diff = document.createElement('canvas'); diff.width = w; diff.height = h;
+        const dx = diff.getContext('2d'), d = dx.createImageData(w, h);
+        for (let i = 0; i < A.length; i += 4) { const e = Math.min(255, 4 * (Math.abs(A[i] - B[i]) + Math.abs(A[i + 1] - B[i + 1]) + Math.abs(A[i + 2] - B[i + 2])) / 3); d.data[i] = 255; d.data[i + 1] = d.data[i + 2] = 255 - e; d.data[i + 3] = 255; }
+        dx.putImageData(d, 0, 0);
+        urls = [nat.toDataURL(), pg.toDataURL(), diff.toDataURL()];
+      }
+      return { out, urls };
+    }, [canvasPx, over, shot, geo, v.only ?? null, W, H, !!arg('shots')]);
+    if (res.urls) ['native', 'page', 'diff'].forEach((k, i) => writeFileSync(join(arg('shots'), `nativeimages-${v.name}-${k}.png`), Buffer.from(res.urls[i].split(',')[1], 'base64')));
+    for (const r of res.out) {
+      checked++;
+      const bad = r.shift > 0.5 || r.mad > 0.02 * 255 || r.missing;
+      if (bad) fails++;
+      worstShift = Math.max(worstShift, r.shift);
+      worstMad = Math.max(worstMad, r.mad);
+      console.log(`nativeimages ${v.name.padEnd(16)} ${r.id.padEnd(10)} placed ${r.shift.toFixed(2)} device px (${r.dx.toFixed(2)}, ${r.dy.toFixed(2)}), mean abs difference ${r.mad.toFixed(2)} (${((100 * r.mad) / 255).toFixed(2)}%) over ${r.px} px${r.missing ? ', MISSING' : ''}${bad ? '  FAIL' : ''}`);
+    }
+    if (shown) console.log(`nativeimages ${v.name}: the page still draws ${shown} picture(s) itself`);
+  }
+  const stats = meta(await rust('canvasStats', framed({})));
+  console.log(`nativeimages canvas pictures ${JSON.stringify(stats.pictures)}, errors ${stats.errors}`);
+  const want = 3 * pics.length;
+  console.log(`nativeimages ${checked} picture views (want ${want}): worst placement ${worstShift.toFixed(2)} device px, worst mean abs difference ${worstMad.toFixed(2)} (${((100 * worstMad) / 255).toFixed(2)}% of 255)${fails || checked < want || stats.errors ? '  FAIL' : ''}`);
+  if (fails || checked < want || stats.errors) process.exitCode = 1;
+  await cpage.close();
+  shell.stdin.end();
+}
+
 // Not in the default run (run it alone: it installs a stand-in iOS shell with the native canvas and
 // the Rust camera): --native --only rustcamera [--record <file>]. rust/DECISIONS.md ADR-006: two
 // fingers move crates/viewport, the canvas follows at the display's rate, the page mirrors it. The

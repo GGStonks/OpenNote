@@ -27,6 +27,11 @@ struct Uniforms {
   p_major: vec4<f32>,
   p_minor: vec4<f32>,
   p_dot: vec4<f32>,
+  // A picture (fs_pic): its box (x, y, w, h page px), the file's part shown (u0, v0, u1, v1),
+  // (cos, sin) of its clockwise turn, its opacity, one device px in page px.
+  i_quad: vec4<f32>,
+  i_uv: vec4<f32>,
+  i_rot: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -223,4 +228,46 @@ fn fs_paper(i: PageOut) -> @location(0) vec4<f32> {
     c = over(c, u.p_dot, a / 16.0);
   }
   return vec4<f32>(c.rgb * c.a, c.a);
+}
+
+// ---------------------------------------------------------------------------------- pictures
+
+@group(2) @binding(0) var pic_tex: texture_2d<f32>;
+@group(2) @binding(1) var pic_samp: sampler;
+
+struct PicOut {
+  @builtin(position) pos: vec4<f32>,
+  // Page px from the box's top left corner, before the turn.
+  @location(0) l: vec2<f32>,
+};
+
+/** The block's box (Blocks.tsx ImageBlockView: left, top, width, height, then `rotate(deg)` about
+ *  its centre: clockwise on screen), one device px larger on each side for its edges' coverage. */
+@vertex
+fn vs_pic(@builtin(vertex_index) vi: u32) -> PicOut {
+  let corner = vec2<f32>(f32(vi & 1u), f32(vi >> 1u));
+  let wh = u.i_quad.zw;
+  let pad = u.i_rot.w;
+  let l = corner * (wh + 2.0 * pad) - pad;
+  let d = l - wh * 0.5;
+  let cs = u.i_rot.x;
+  let sn = u.i_rot.y;
+  let p = u.i_quad.xy + wh * 0.5 + vec2<f32>(d.x * cs - d.y * sn, d.x * sn + d.y * cs);
+  var o: PicOut;
+  o.l = l;
+  o.pos = clip(u.m * p + u.t);
+  return o;
+}
+
+/** The file's pixel there (premultiplied, trilinear), at the block's opacity, times the share of
+ *  the device pixel inside the box (its edges antialiased as the browser draws a turned image). */
+@fragment
+fn fs_pic(i: PicOut) -> @location(0) vec4<f32> {
+  let wh = u.i_quad.zw;
+  let t = i.l / wh;
+  let uv = mix(u.i_uv.xy, u.i_uv.zw, t);
+  let c = textureSample(pic_tex, pic_samp, uv);
+  let e = min(min(i.l.x, wh.x - i.l.x), min(i.l.y, wh.y - i.l.y)) * u.px;
+  let cov = clamp(e + 0.5, 0.0, 1.0);
+  return c * (u.i_rot.z * cov);
 }

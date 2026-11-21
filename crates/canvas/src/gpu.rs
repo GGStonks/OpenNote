@@ -10,7 +10,9 @@
 //! whatever wgpu still reports is recorded (`GpuHealth`), never a panic.
 
 use crate::frame::{Frame, PageDraw};
+use crate::picture::Library;
 use crate::scene::{CapInst, Op, Scene, Transform};
+use crate::textures::Pictures;
 use bytemuck::{Pod, Zeroable};
 use renderer::color::Rgba;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,6 +42,11 @@ pub(crate) struct Uniforms {
     pub(crate) p_major: [f32; 4],
     pub(crate) p_minor: [f32; 4],
     pub(crate) p_dot: [f32; 4],
+    /// A picture (fs_pic): its box (x, y, w, h page px), the file's part shown (u0, v0, u1, v1),
+    /// and (cos, sin) of its turn, its opacity, 1 device px in page px.
+    pub(crate) i_quad: [f32; 4],
+    pub(crate) i_uv: [f32; 4],
+    pub(crate) i_rot: [f32; 4],
 }
 
 pub(crate) type PagePlan = (usize, Option<usize>, Vec<(usize, usize)>);
@@ -70,6 +77,9 @@ pub struct GpuCanvas {
     pub(crate) caps_hatch: wgpu::RenderPipeline,
     pub(crate) flat_plain: wgpu::RenderPipeline,
     pub(crate) paper: wgpu::RenderPipeline,
+    pub(crate) picture: wgpu::RenderPipeline,
+    /// The pictures' textures (textures.rs).
+    pub(crate) pictures: Pictures,
     /// The pages' rectangles of the frame being drawn (6 vertices each).
     pub(crate) rects: wgpu::Buffer,
     pub(crate) rects_capacity: usize,
@@ -421,6 +431,46 @@ impl GpuCanvas {
             W::ALL,
             keep(),
         );
+        let pic_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("picture"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let layout_pic = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("picture"),
+            bind_group_layouts: &[&uniform_bgl, &tex_bgl, &pic_bgl],
+            push_constant_ranges: &[],
+        });
+        // A picture: a quad (triangle strip) turned about its centre, premultiplied over.
+        let picture = make(
+            &layout_pic,
+            "picture",
+            "vs_pic",
+            "fs_pic",
+            &[],
+            T::TriangleStrip,
+            format,
+            Some(OVER),
+            W::ALL,
+            keep(),
+        );
+        let pictures = Pictures::new(&device, pic_bgl, &limits, Library::new());
         let rects_capacity = 16;
         let rects = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rects"),
@@ -447,6 +497,8 @@ impl GpuCanvas {
             caps_hatch,
             flat_plain,
             paper,
+            picture,
+            pictures,
             rects,
             rects_capacity,
             uniforms,
@@ -541,6 +593,21 @@ impl GpuCanvas {
     /// What the device reported (shared with its error handler).
     pub fn health(&self) -> &Arc<GpuHealth> {
         &self.health
+    }
+
+    /// The pictures' files this canvas draws from (shared with the page's bridge).
+    pub fn library(&self) -> &Library {
+        self.pictures.library()
+    }
+
+    /// Draws pictures from `lib` from now on (its textures made again as they are shown).
+    pub fn set_library(&mut self, lib: Library) {
+        self.pictures.set_library(lib);
+    }
+
+    /// The pictures' textures: how many, their bytes, the budget.
+    pub fn picture_memory(&self) -> (usize, u64, u64) {
+        self.pictures.memory()
     }
 
     /// The largest texture side this device makes (`max_texture_dimension_2d`).

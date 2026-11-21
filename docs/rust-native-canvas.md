@@ -61,8 +61,8 @@ canvas (iOS CAMetalLayer, Android SurfaceView through ANativeWindow) under a see
 view; the page keeps every touch and all logic, sends its strokes (`canvasScene`) and, every
 animation frame it changed, where they are (`canvasFrame`: from the page's own box, so scroll,
 zoom and pinch are followed, device px; each sheet's paper as its own placement) and hides only
-its committed ink. Notes with PDF pages or pictures keep the page's drawing (they would cover the
-native ink until N4). rs.18 had made this the default with the page's touches handed to a Rust
+its committed ink. Notes with PDF pages keep the page's drawing (they would cover the native ink
+until C3); pictures are the canvas's since C2 (N4). rs.18 had made this the default with the page's touches handed to a Rust
 view that ignored the pen, a frame that ignored scrolling and pixel density, every sheet
 repeating all the ink, and Android drawing offscreen: rs.19 fixed those and made it opt-in.
 rs.20: one decision for the whole note (rustCore `nativeCanvasFor`, used by App, Editor and
@@ -104,8 +104,29 @@ page's own frame messages through the bridge.
 
 ### N4. Pictures and PDF pages
 
-- Pictures: decoded by the shell (UIImage / BitmapFactory), uploaded as textures, drawn in
-  z-order with crop, flip, rotation (ImageBlock).
+- Pictures (C2, done): decoded in Rust, not by the shells (one decoder for both: `image` for
+  PNG, JPEG, GIF's first frame, WebP; `resvg` for SVG, the stickies and box colours of
+  `solidImage`). The page sends each file once (`canvasImage`: the block's data URL, by a key per
+  distinct data URL, rustCore `imageKey`; identical bytes kept once) and the pictures as scene
+  items among the ink layers (`canvasSceneBin` `z`: ink layers of `n` strokes and `img` boxes in
+  zorder.ts's order; text boxes and formulas only separate ink layers). Nothing is decoded on the
+  bridge or the render thread: crates/canvas `picture.rs` decodes on a worker of its own, one
+  file at a time, at the size the zoom needs (a raster file halved while that still covers its
+  size on screen, an SVG at its size times a power of two, each with area-averaged mip levels,
+  premultiplied), and the render thread uploads it at its next frame (`textures.rs`). A texture
+  never exceeds `max_texture_dimension_2d` nor half the budget, and textures not drawn go, least
+  recently drawn first, while over the budget (max texture side squared bytes, 64-256 MiB); a
+  file is decoded again when it comes back into view. Drawn as the page's `<img>`: the block's box
+  turned `rotation` degrees clockwise about its centre, the file's part `uv` (crop; a flip swaps
+  it; the page's blocks have their crop and flip in their files), trilinear sampling,
+  premultiplied over, its edges antialiased; `ImageItem` also takes opacity. The page keeps its
+  own `<img>` until the canvas has decoded the file (`canvasImageStatus`; a file the canvas cannot
+  read stays the page's), then keeps only the box (`ImageBlockView` `native`: the selection's
+  outline); a dragged picture is the page's own `<img>` while it moves (the scene leaves it out,
+  as dragged ink). A closed note's files go (`Library::retain`). Checks:
+  `crates/canvas/tests/images.rs`, `crates/native/tests/canvas_images.rs`, `bench:ui --native
+  --only nativeimages --shots <dir>` (the canvas against the page's own drawing at zoom 1, 2.5, 5:
+  placement, mean difference, nothing missing).
 - PDF pages: rendered by the platform (PDFKit on iOS, PdfRenderer on Android) into textures at
   the zoom in view, as `PdfBackground` does today, under the ink.
 - **Acceptance**: `pdfimport`, `pdfthumb` shots match the web view's; the owner's PDF notes

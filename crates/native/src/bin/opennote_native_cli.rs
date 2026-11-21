@@ -5,7 +5,8 @@
 //! - `opennote_native_cli --serve <w> <h>`: a running shell with a native canvas (an offscreen
 //!   host of w x h device px, the active one), as the iOS / Android shells keep it: calls in a
 //!   row, each `u32 method length, method, u32 request length, request` in, `u32 reply length,
-//!   reply` out (little endian). `canvasSnapshot` draws the frame and replies its RGBA pixels.
+//!   reply` out (little endian). `canvasSnapshot` draws the frame (the pictures in view decoded
+//!   first) and replies its RGBA pixels.
 //!   `--serve <w> <h> --tick <hz>`: also a display link: `draw_active` every 1/hz s on a thread
 //!   of its own, as the shells' render threads call it (the Rust camera advances there).
 //!   `--gpu-wait`: each drawn frame waits for the GPU to finish it (a surface's next image waits
@@ -62,7 +63,14 @@ fn main() {
             input.read_exact(&mut request).expect("request");
             let method = String::from_utf8_lossy(&method).to_string();
             let reply = if method == "canvasSnapshot" {
+                // Pictures in view decoded and drawn first (a shell draws them as they arrive).
                 opennote_native::canvas_service::draw_active();
+                for _ in 0..4 {
+                    opennote_native::canvas_service::settle_pictures(20_000);
+                    if !opennote_native::canvas_service::draw_active() {
+                        break;
+                    }
+                }
                 let px = opennote_native::canvas_service::offscreen_pixels();
                 opennote_native::frame(&format!("{{\"width\":{w},\"height\":{h}}}"), &px)
             } else {

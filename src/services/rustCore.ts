@@ -12,7 +12,8 @@
  */
 import { useEffect, useState } from 'react';
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import { NoteDocument, Stroke } from '../types';
+import { ImageBlock, NoteDocument, Stroke } from '../types';
+import type { ZLayer } from '../editor/zorder';
 import { bytesToBase64, fromBase64, hasNativeCanvas, hasNativeViewport, platformKind } from '../platform';
 import { computeStrokeGeometry, hasStrokeGeometry, setStrokeGeometry, type InkGeometry } from '../ink/strokeRenderer';
 import { packedPoints, PACKED_STRIDE } from '../storage/packedPoints';
@@ -402,18 +403,45 @@ const sceneKey = (s: Stroke) => {
 /** The keys the canvas holds for each page: those of the page's last scene (crates/native SCENE_OPS). */
 const canvasHolds = new Map<string, Set<number>>();
 
+const imageKeys = new Map<string, number>();
+let nextImageKey = 1;
+export const imageKey = (dataUrl: string) => {
+  let k = imageKeys.get(dataUrl);
+  if (k === undefined) imageKeys.set(dataUrl, (k = nextImageKey++));
+  return k;
+};
+/** The picture keys whose file the canvas holds (sent with `canvasImage`). */
+const imagesHeld = new Set<number>();
+
+/** Sends the files of `blocks` the canvas does not hold yet (each once: the block's data URL). */
+async function sendImages(blocks: ImageBlock[], force: ReadonlySet<number> = new Set()): Promise<void> {
+  for (const b of blocks) {
+    const k = imageKey(b.dataUrl);
+    if (imagesHeld.has(k) && !force.has(k)) continue;
+    const t0 = performance.now();
+    try {
+      const { meta } = await rustCall('canvasImage', { key: k }, new TextEncoder().encode(b.dataUrl));
+      if (meta.error) throw new Error(String(meta.error));
+      imagesHeld.add(k);
+      crashLog.event('canvas-image', { key: k, bytes: b.dataUrl.length, width: meta.width ?? null, height: meta.height ?? null, ms: Math.round(performance.now() - t0) });
+    } catch (err) {
+      crashLog.event('canvas-image', { key: k, bytes: b.dataUrl.length, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
 /**
- * Updates a page's stroke scene in the native Rust CanvasHost. Only strokes the canvas does not
- * hold yet go with their style (JSON, without the points) and points (raw f64 x, y, pressure, t,
- * read from the stored packed arrays); the others by their key alone, and Rust reuses their
- * geometry. rs.22-25 sent and rebuilt the whole note at every lift: 140-200 ms on the iPad for a
- * 6,000-stroke note, the new stroke missing from the screen meanwhile. No strokes: the page's
- * scene goes (the note closed). Logged as `canvas-scene` (crash report).
+ * Updates a page's scene in the native Rust CanvasHost: either a list of strokes (streamed sheets,
+ * ADR-007) or full z-layers with images (editor/zorder.ts).
  */
-export function rustSetCanvasScene(pageId: string, strokes: readonly Stroke[], keep = false): Promise<boolean> {
+export function rustSetCanvasScene(
+  pageId: string,
+  items: readonly Stroke[] | readonly ZLayer[],
+  arg3?: boolean | ReadonlySet<string>,
+): Promise<boolean> {
   // One after the other, in the page's order: what the canvas holds is then known when each is
   // made, and an older scene never lands after a newer one.
-  const run = sceneTail.then(() => setCanvasScene(pageId, strokes, keep));
+  const run = sceneTail.then(() => setCanvasScene(pageId, items, arg3));
   sceneTail = run.catch(() => undefined);
   return run;
 }
@@ -444,10 +472,49 @@ export function rustForgetCanvasScenes(what: { prefix?: string; ids?: string[] }
   return run;
 }
 
-async function setCanvasScene(pageId: string, strokes: readonly Stroke[], keep: boolean): Promise<boolean> {
+async function setCanvasScene(
+  pageId: string,
+  items: readonly Stroke[] | readonly ZLayer[],
+  arg3?: boolean | ReadonlySet<string>,
+): Promise<boolean> {
   // The native canvas is its own switch (Settings > Diagnostics), not "Rust ink preparation".
   const t0 = performance.now();
   let total = 0;
+  const keep = typeof arg3 === 'boolean' ? arg3 : false;
+  const hiddenImages = typeof arg3 === 'object' && arg3 !== null && 'has' in arg3 ? (arg3 as ReadonlySet<string>) : undefined;
+
+  let strokes: readonly Stroke[];
+  let z: Record<string, unknown>[] | undefined = undefined;
+  const images: ImageBlock[] = [];
+
+  const isZLayers = items.length > 0 && typeof (items[0] as unknown as Record<string, unknown>).kind === 'string';
+  if (isZLayers) {
+    const layers = items as readonly ZLayer[];
+    const strokeList: Stroke[] = [];
+    z = [];
+    for (const l of layers) {
+      if (l.kind === 'ink') {
+        strokeList.push(...l.strokes);
+        z.push({ n: l.strokes.length });
+      } else if (l.kind === 'image' && !hiddenImages?.has(l.block.id)) {
+        const b = l.block;
+        images.push(b);
+        z.push({ img: { k: imageKey(b.dataUrl), x: b.x, y: b.y, w: b.width, h: b.height, r: b.rotation ?? 0 } });
+      }
+    }
+    strokes = strokeList;
+  } else {
+    strokes = items as readonly Stroke[];
+  }
+
+  if (images.length) await sendImages(images);
+
+  if (strokes.length === 0 && images.length === 0) {
+    if (!keep) canvasHolds.delete(pageId);
+    await rustCall('canvasSceneBin', { page: pageId, strokes: [], ...(keep ? { keep: true } : {}) }, new Uint8Array());
+    return true;
+  }
+
   const send = async (held: ReadonlySet<number>) => {
     const keys = strokes.map(sceneKey);
     const fresh = strokes.filter((_, i) => !held.has(keys[i]));
@@ -467,7 +534,10 @@ async function setCanvasScene(pageId: string, strokes: readonly Stroke[], keep: 
       for (const k of Object.keys(st)) if (k !== 'points') head[k] = (st as unknown as Record<string, unknown>)[k];
       return { k: keys[i], n: parts[f++].n, s: head };
     });
-    const { meta } = await rustCall('canvasSceneBin', { page: pageId, strokes: heads, ...(keep ? { keep: true } : {}) }, new Uint8Array(vals.buffer));
+    const req: Record<string, unknown> = { page: pageId, strokes: heads };
+    if (keep) req.keep = true;
+    if (z) req.z = z;
+    const { meta } = await rustCall('canvasSceneBin', req, new Uint8Array(vals.buffer));
     if (!meta.missing) {
       if (strokes.length) canvasHolds.set(pageId, new Set(keys));
       else canvasHolds.delete(pageId);
@@ -483,12 +553,34 @@ async function setCanvasScene(pageId: string, strokes: readonly Stroke[], keep: 
     let meta = await send(canvasHolds.get(pageId) ?? new Set());
     // The canvas lost strokes the page thought it held (an earlier call failed): all of them again.
     if (meta.missing) meta = await send(new Set());
-    crashLog.event('canvas-scene', { strokes: strokes.length, sent: meta.built ?? null, points: total, capsules: meta.capsules ?? null, attached: meta.attached ?? null, error: meta.error ?? null, ms: Math.round(performance.now() - t0) });
+    // Files the canvas does not hold (dropped with a closed note, or a send failed): sent now; the
+    // scene shows them as they come.
+    const missingImages = Array.isArray(meta.missingImages) ? new Set(meta.missingImages as number[]) : new Set<number>();
+    if (missingImages.size) await sendImages(images.filter((b) => missingImages.has(imageKey(b.dataUrl))), missingImages);
+    // The note closed: the canvas dropped its files.
+    if (!items.length) {
+      imagesHeld.clear();
+      imageKeys.clear();
+    }
+    crashLog.event('canvas-scene', { strokes: strokes.length, images: images.length, sent: meta.built ?? null, points: total, capsules: meta.capsules ?? null, attached: meta.attached ?? null, error: meta.error ?? null, ms: Math.round(performance.now() - t0) });
     return Boolean(meta.ok);
   } catch (err) {
     canvasHolds.delete(pageId);
-    crashLog.event('canvas-scene', { strokes: strokes.length, points: total, error: err instanceof Error ? err.message : String(err), ms: Math.round(performance.now() - t0) });
+    crashLog.event('canvas-scene', { strokes: strokes.length, images: images.length, points: total, error: err instanceof Error ? err.message : String(err), ms: Math.round(performance.now() - t0) });
     return false;
+  }
+}
+
+/**
+ * Of these picture keys, those the native canvas has decoded (`ready`: the page may hide its own
+ * `<img>`) and those it cannot decode (`failed`: the page keeps drawing them).
+ */
+export async function rustCanvasImageStatus(keys: number[]): Promise<{ ready: number[]; failed: number[] } | null> {
+  try {
+    const { meta } = await rustCall('canvasImageStatus', { keys });
+    return { ready: (meta.ready as number[]) ?? [], failed: (meta.failed as number[]) ?? [] };
+  } catch {
+    return null;
   }
 }
 
@@ -516,14 +608,14 @@ export async function rustGetCanvasStats(): Promise<Record<string, unknown> | nu
 /**
  * Whether the native canvas draws this note (the one decision App, Editor and CanvasPage share:
  * the desk and pages are see-through exactly when the canvas draws what is under them). Not for
- * notes with PDF pages or pictures: those, in the web view, would cover the native ink (N4).
- * Made separately, a note with a picture got a see-through desk over a canvas nobody drew: black.
+ * notes with PDF pages: those, in the web view, would cover the native ink (N4, C3). Pictures are
+ * the canvas's since C2 (crates/canvas picture.rs). Made separately, a note with a picture got a
+ * see-through desk over a canvas nobody drew: black.
  */
 export function nativeCanvasFor(note?: Pick<NoteDocument, 'sheets' | 'pages'> | null): boolean {
   if (!note || !hasNativeCanvas() || canvasFallback) return false;
   const sheets = note.sheets ?? [];
-  const pages = note.pages ?? [];
-  return !sheets.some((s) => s?.pdf) && !pages.some((p) => (p?.imageBlocks ?? []).length > 0);
+  return !sheets.some((s) => s?.pdf);
 }
 
 /**

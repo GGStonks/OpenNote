@@ -25,14 +25,14 @@
 
 use crate::{clock_ms, f64s};
 use canvas::host::{CanvasHost, FrameSpec, PagePlacement};
-use canvas::Scene;
+use canvas::{ImageItem, Library, OpsLayer, Scene};
 use model::Stroke;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 /// A lock taken whatever a panicking thread left behind (every value here stays consistent:
 /// each is replaced whole).
@@ -84,6 +84,25 @@ struct Page {
 }
 
 static PAGE: Mutex<Option<Page>> = Mutex::new(None);
+
+/// The pictures' files the page sent (`canvasImage`), shared by every host made: a host made
+/// again (lost device, Android's surface back) decodes them again as they come into view.
+static LIBRARY: OnceLock<Library> = OnceLock::new();
+
+pub fn library() -> &'static Library {
+    LIBRARY.get_or_init(Library::new)
+}
+
+/// Drops the files no page's scene shows any more (a note closed).
+fn collect_pictures() {
+    let keys: HashSet<u64> = with_page(|p| {
+        p.scenes
+            .values()
+            .flat_map(|s| s.scene.image_keys().collect::<Vec<_>>())
+            .collect()
+    });
+    library().retain(&keys);
+}
 
 fn with_page<R>(f: impl FnOnce(&mut Page) -> R) -> R {
     f(lock(&PAGE).get_or_insert_with(Default::default))
@@ -309,6 +328,10 @@ struct Status {
     ink_complete_ms: f64,
     /// The GPU's own time per frame (the PC's stand-in waits for it): last, worst.
     gpu_ms: (f64, f64),
+    /// The pictures' textures on the device (count, bytes) and their budget.
+    pictures: usize,
+    picture_bytes: u64,
+    picture_budget: u64,
 }
 
 static STATUS: Mutex<Option<Status>> = Mutex::new(None);
@@ -330,6 +353,7 @@ fn note_error(e: String) {
 /// `canvasStats`: the GPU, frames, errors, never waiting for a draw.
 pub fn status_json() -> Value {
     let s = with_status(|s| s.clone());
+    let l = library().stats();
     let (scenes, capsules, bytes, missing, dropped, sample) = with_page(|p| {
         // A few ids, for the crash report: what the view misses, and some of what is held.
         let mut sample: Vec<String> = p
@@ -378,6 +402,18 @@ pub fn status_json() -> Value {
         "fallback": s.fallback,
         "diag": s.diag,
         "firstError": s.first_error,
+        "pictures": json!({
+                "files": l.files,
+                "fileBytes": l.file_bytes,
+                "pending": l.pending,
+                "decodes": l.decodes,
+                "decodeMs": l.decode_ms.round(),
+                "failed": l.failed,
+                "lastFailure": l.last_failure,
+                "textures": s.pictures,
+                "textureBytes": s.picture_bytes,
+                "budget": s.picture_budget,
+            }),
         "viewport": crate::viewport_service::status(),
         "pages": pages,
     })
@@ -565,6 +601,7 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
     match make_host(surface, w, h) {
         Ok((mut host, name)) => {
             host.set_gpu_budget(budgets().0);
+            host.set_library(library().clone());
             let backend = format!("{:?}", host.backend());
             let diag = host.diag().to_string();
             slot.host = Some(host);
@@ -645,6 +682,12 @@ pub fn detach() {
     slot.surface = None;
     slot.remake = false;
     with_status(|s| s.attached = false);
+}
+
+/// Waits (at most `ms`) until no picture is being decoded (tests, the PC harness's snapshot: a
+/// shell draws decoded pictures at its next display frame). True when idle.
+pub fn settle_pictures(ms: u64) -> bool {
+    library().wait_idle(std::time::Duration::from_millis(ms))
 }
 
 /// The offscreen host's pixels (tests): RGBA8, empty when there is none.
@@ -820,6 +863,9 @@ fn draw_locked(present_ms: f64) -> bool {
         if let Some(g) = gpu_ms {
             st.gpu_ms = (g, st.gpu_ms.1.max(g));
         }
+        st.pictures = s.pictures;
+        st.picture_bytes = s.picture_bytes;
+        st.picture_budget = s.picture_budget;
         st.errors += new_errors;
         if new_errors > 0 {
             st.error = last.clone().map(|e| format!("gpu: {e}"));
@@ -857,10 +903,79 @@ type StrokeOps = Arc<Vec<renderer::builder::RenderOp>>;
 type PageOps = Vec<(u64, StrokeOps)>;
 static SCENE_OPS: Mutex<Option<HashMap<String, PageOps>>> = Mutex::new(None);
 
-fn scene_of(ops: &PageOps) -> Scene {
-    let layer: Vec<&[renderer::builder::RenderOp]> =
-        ops.iter().map(|(_, o)| o.as_slice()).collect();
-    Scene::from_ops(&[layer])
+/// One of the page's z-layers as `canvasSceneBin` sends them (rustCore.ts `setCanvasScene`): the
+/// next `n` strokes as one ink layer, or a picture (zorder.ts).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ZLayer {
+    Ink { n: usize },
+    Image { img: ZImage },
+}
+
+/// A picture's block (Blocks.tsx `ImageBlockView`): its file's key, box, rotation (degrees,
+/// clockwise); crop (u0, v0, u1, v1), flips and opacity when given. A number sent as null (NaN on
+/// the page) leaves the picture out.
+#[derive(Deserialize)]
+struct ZImage {
+    k: u64,
+    x: Option<f32>,
+    y: Option<f32>,
+    w: Option<f32>,
+    h: Option<f32>,
+    #[serde(default)]
+    r: Option<f32>,
+    #[serde(default)]
+    crop: Option<[f32; 4]>,
+    #[serde(default)]
+    fh: bool,
+    #[serde(default)]
+    fv: bool,
+    #[serde(default)]
+    o: Option<f32>,
+}
+
+impl ZImage {
+    fn item(&self) -> Option<ImageItem> {
+        let mut it = ImageItem::new(self.k, self.x?, self.y?, self.w?, self.h?);
+        it.rotation = self.r.unwrap_or(0.0);
+        it.crop = self.crop.unwrap_or(it.crop);
+        it.flip_h = self.fh;
+        it.flip_v = self.fv;
+        it.opacity = self.o.unwrap_or(1.0);
+        Some(it)
+    }
+}
+
+/// The scene of a page's strokes (their ops, in z-order) and pictures: `z` the layers (None: the
+/// strokes as one layer).
+fn scene_of(ops: &PageOps, z: Option<&[ZLayer]>) -> Result<Scene, String> {
+    let all: Vec<&[renderer::builder::RenderOp]> = ops.iter().map(|(_, o)| o.as_slice()).collect();
+    let Some(z) = z else {
+        return Ok(Scene::from_ops(&[all]));
+    };
+    let mut at = 0;
+    let mut layers = Vec::with_capacity(z.len());
+    for l in z {
+        match l {
+            ZLayer::Ink { n } => {
+                let end = at + n;
+                if end > all.len() {
+                    return Err(format!("layers of {end} strokes, {} sent", all.len()));
+                }
+                layers.push(OpsLayer::Ink(all[at..end].to_vec()));
+                at = end;
+            }
+            ZLayer::Image { img } => {
+                if let Some(it) = img.item() {
+                    layers.push(OpsLayer::Image(it));
+                }
+            }
+        }
+    }
+    if at != all.len() {
+        return Err(format!("layers of {at} strokes, {} sent", all.len()));
+    }
+    Ok(Scene::from_layers(&layers))
 }
 
 /// `canvasScene`: a page's strokes (or z-layers of strokes) as JSON, the scene built here.
@@ -910,6 +1025,8 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
         strokes: Vec<Head>,
         #[serde(default)]
         keep: bool,
+        #[serde(default)]
+        z: Option<Vec<ZLayer>>,
     }
     let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasSceneBin request: {e}"))?;
     let vals = f64s(data)?;
@@ -926,7 +1043,16 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
             vals.len()
         ));
     }
-    if r.strokes.is_empty() {
+    let pictures: Vec<u64> = r
+        .z
+        .iter()
+        .flatten()
+        .filter_map(|l| match l {
+            ZLayer::Image { img } => Some(img.k),
+            _ => None,
+        })
+        .collect();
+    if r.strokes.is_empty() && pictures.is_empty() {
         let mut ops = lock(&SCENE_OPS);
         let map = ops.get_or_insert_with(Default::default);
         if r.keep {
@@ -936,6 +1062,7 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
         }
         drop(ops);
         put_scene(&r.page, r.keep.then(Scene::default));
+        collect_pictures();
         let attached = attached();
         return Ok((json!({ "ok": attached, "capsules": 0, "attached": attached, "strokes": 0, "built": 0, "dropped": [] }).to_string(), Vec::new()));
     }
@@ -986,8 +1113,12 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
             (h.k, o)
         })
         .collect();
-    let scene = scene_of(&ops);
+    let scene = scene_of(&ops, r.z.as_deref())?;
     let strokes = ops.len();
+    // Pictures whose file the canvas does not hold: the page sends them (`canvasImage`); the scene
+    // shows them once they come.
+    let lib = library();
+    let missing_images: Vec<u64> = pictures.into_iter().filter(|k| !lib.contains(*k)).collect();
     let count = scene.caps.len();
     lock(&SCENE_OPS)
         .get_or_insert_with(Default::default)
@@ -995,7 +1126,56 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
     put_scene(&r.page, Some(scene));
     let dropped = evict_for_memory(&r.page);
     let attached = attached();
-    Ok((json!({ "ok": attached, "capsules": count, "attached": attached, "strokes": strokes, "built": built, "dropped": dropped }).to_string(), Vec::new()))
+    Ok((json!({ "ok": attached, "capsules": count, "attached": attached, "strokes": strokes, "built": built, "dropped": dropped, "missingImages": missing_images }).to_string(), Vec::new()))
+}
+
+/// `canvasImage`: a picture's file (meta `{ key }`, data the block's data URL as UTF-8, or the
+/// file's bytes), kept by the page's key; identical files once. Nothing is decoded here: the
+/// render thread asks for it at the size the zoom needs when it comes into view (crates/canvas
+/// picture.rs). Replies its size and kind.
+pub fn canvas_image(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        key: u64,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("canvasImage request: {e}"))?;
+    let src = library().insert(r.key, data)?;
+    Ok((
+        json!({
+            "ok": true,
+            "width": src.width,
+            "height": src.height,
+            "svg": src.kind == canvas::picture::Kind::Svg,
+        })
+        .to_string(),
+        Vec::new(),
+    ))
+}
+
+/// `canvasImageStatus`: of the page's picture keys (meta `{ keys }`), those the canvas has
+/// decoded (`ready`: the page may hide its own `<img>`) and those it cannot decode (`failed`: the
+/// page keeps drawing them), the others still on their way.
+pub fn canvas_image_status(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        keys: Vec<u64>,
+    }
+    let r: Req =
+        serde_json::from_str(meta).map_err(|e| format!("canvasImageStatus request: {e}"))?;
+    let lib = library();
+    let (mut ready, mut failed, mut missing) = (Vec::new(), Vec::new(), Vec::new());
+    for k in r.keys {
+        match lib.source(k).map(|s| lib.decodable(s.id)) {
+            None => missing.push(k),
+            Some(Some(true)) => ready.push(k),
+            Some(Some(false)) => failed.push(k),
+            Some(None) => {}
+        }
+    }
+    Ok((
+        json!({ "ready": ready, "failed": failed, "missing": missing }).to_string(),
+        Vec::new(),
+    ))
 }
 
 /// `canvasForget`: the scenes of `ids`, or of every id starting with `prefix` (a note's sheets,
