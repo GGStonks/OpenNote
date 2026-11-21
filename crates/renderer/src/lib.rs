@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub mod builder;
 pub mod capsule;
 pub mod color;

@@ -1043,15 +1043,14 @@ pub fn canvas_scene_bin(meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), St
             vals.len()
         ));
     }
-    let pictures: Vec<u64> = r
-        .z
-        .iter()
-        .flatten()
-        .filter_map(|l| match l {
-            ZLayer::Image { img } => Some(img.k),
-            _ => None,
-        })
-        .collect();
+    let pictures: Vec<u64> =
+        r.z.iter()
+            .flatten()
+            .filter_map(|l| match l {
+                ZLayer::Image { img } => Some(img.k),
+                _ => None,
+            })
+            .collect();
     if r.strokes.is_empty() && pictures.is_empty() {
         let mut ops = lock(&SCENE_OPS);
         let map = ops.get_or_insert_with(Default::default);

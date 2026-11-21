@@ -406,7 +406,8 @@ fn is_svg(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(512)];
     let text = String::from_utf8_lossy(head);
     let t = text.trim_start_matches('\u{feff}').trim_start();
-    t.starts_with("<svg") || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
+    t.starts_with("<svg")
+        || ((t.starts_with("<?xml") || t.starts_with("<!--")) && text.contains("<svg"))
 }
 
 fn svg_tree(bytes: &[u8]) -> Result<resvg::usvg::Tree, String> {
@@ -427,7 +428,8 @@ fn probe(bytes: &[u8]) -> Result<(Kind, u32, u32), String> {
     }
     let mut dec = raster_decoder(bytes)?;
     let (w, h) = image::ImageDecoder::dimensions(&dec);
-    let o = image::ImageDecoder::orientation(&mut dec).unwrap_or(image::metadata::Orientation::NoTransforms);
+    let o = image::ImageDecoder::orientation(&mut dec)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     if w == 0 || h == 0 {
         return Err("a picture of no pixels".into());
     }
@@ -531,7 +533,8 @@ fn render_svg(bytes: &[u8], size: Size) -> Result<Level, String> {
 
 fn decode_raster(bytes: &[u8], size: Size) -> Result<Level, String> {
     let mut dec = raster_decoder(bytes)?;
-    let o = image::ImageDecoder::orientation(&mut dec).unwrap_or(image::metadata::Orientation::NoTransforms);
+    let o = image::ImageDecoder::orientation(&mut dec)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
     let mut img = image::DynamicImage::from_decoder(dec).map_err(|e| format!("picture: {e}"))?;
     if o != image::metadata::Orientation::NoTransforms {
         img.apply_orientation(o);
@@ -760,6 +763,9 @@ mod tests {
             height: 50,
             ..src
         };
-        assert_eq!(band(&svg, 300.0, 150.0, 8192, 1 << 26), Size { w: 400, h: 200 });
+        assert_eq!(
+            band(&svg, 300.0, 150.0, 8192, 1 << 26),
+            Size { w: 400, h: 200 }
+        );
     }
 }

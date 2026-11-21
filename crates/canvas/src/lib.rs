@@ -19,6 +19,7 @@
 //!
 //! `render_offscreen` is the PC path (tests, the CLI).
 
+#![allow(clippy::type_complexity, clippy::chunks_exact_to_as_chunks)]
 pub mod cull;
 pub mod frame;
 pub mod gpu;
@@ -28,6 +29,7 @@ pub mod pages;
 pub mod paper;
 pub mod picture;
 pub mod scene;
+pub mod telemetry;
 pub mod textures;
 pub use wgpu;
 
@@ -38,3 +40,4 @@ pub use gpu::{
 pub use paper::Paper;
 pub use picture::Library;
 pub use scene::{CapInst, ImageItem, Layer, Op, OpsLayer, PageBox, Scene, Transform};
+pub use telemetry::{FrameSample, FrameStats, StatsSummary};

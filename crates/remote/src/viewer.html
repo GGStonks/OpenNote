@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>OpenNote Live Mirror</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #121214; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #fff; }
+  #canvas-container { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; }
+  
+  /* HUD overlay */
+  #hud {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: rgba(24, 24, 28, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 9999px;
+    padding: 6px 14px;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    transition: opacity 0.3s ease;
+    z-index: 10;
+  }
+  #hud.autohide { opacity: 0.15; }
+  #hud:hover { opacity: 1; }
+
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+  .dot.live { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .status-text { color: #f3f4f6; }
+  .stat-pill { color: #9ca3af; font-variant-numeric: tabular-nums; }
+  .btn-fullscreen {
+    background: transparent;
+    border: none;
+    color: #e5e7eb;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    border-radius: 4px;
+  }
+  .btn-fullscreen:hover { color: #38bdf8; }
+
+  /* PIN Modal */
+  #pin-modal {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+  }
+  .modal-box {
+    background: #1e1e24;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 16px;
+    padding: 28px 32px;
+    max-width: 360px;
+    width: 90%;
+    text-align: center;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  }
+  .modal-box h2 { font-size: 20px; font-weight: 600; margin-bottom: 8px; color: #f9fafb; }
+  .modal-box p { font-size: 13px; color: #9ca3af; margin-bottom: 20px; line-height: 1.4; }
+  .modal-box input {
+    width: 100%;
+    padding: 12px 16px;
+    font-size: 20px;
+    font-weight: 600;
+    text-align: center;
+    letter-spacing: 4px;
+    background: #111115;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    color: #fff;
+    outline: none;
+    margin-bottom: 20px;
+  }
+  .modal-box input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2); }
+  .modal-box button {
+    width: 100%;
+    padding: 12px;
+    background: #3b82f6;
+    color: #fff;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  .modal-box button:hover { background: #2563eb; }
+</style>
+</head>
+<body>
+
+<div id="canvas-container">
+  <canvas id="view"></canvas>
+</div>
+
+<div id="hud">
+  <div id="status-dot" class="dot"></div>
+  <span id="status-label" class="status-text">Connecting...</span>
+  <span class="stat-pill" id="stat-fps">0 fps</span>
+  <span class="stat-pill" id="stat-pkt">0 pkt/s</span>
+  <button class="btn-fullscreen" id="btn-fs" title="Toggle Fullscreen (F11)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+  </button>
+</div>
+
+<div id="pin-modal" style="display: none;">
+  <div class="modal-box">
+    <h2>OpenNote Mirror</h2>
+    <p>Enter the 4-digit PIN displayed on your tablet to start mirroring.</p>
+    <input type="text" id="pin-input" maxlength="8" placeholder="PIN" autofocus>
+    <button id="pin-submit">Connect</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // 128-bit FNV-1a hash matching Rust protocol.rs
+  const FNV_OFFSET_BASIS = 0x6c62272e07bb014262b821756295c58dn;
+  const FNV_PRIME = 0x0000000001000000000000000000013bn;
+  const MASK128 = (1n << 128n) - 1n;
+
+  function hashPin(pin) {
+    let hash = FNV_OFFSET_BASIS;
+    const bytes = new TextEncoder().encode(pin);
+    for (let i = 0; i < bytes.length; i++) {
+      hash = (hash ^ BigInt(bytes[i])) & MASK128;
+      hash = (hash * FNV_PRIME) & MASK128;
+    }
+    const out = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) {
+      out[i] = Number((hash >> BigInt(i * 8)) & 0xffn);
+    }
+    return out;
+  }
+
+  const canvas = document.getElementById('view');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  const hud = document.getElementById('hud');
+  const statusDot = document.getElementById('status-dot');
+  const statusLabel = document.getElementById('status-label');
+  const statFps = document.getElementById('stat-fps');
+  const statPkt = document.getElementById('stat-pkt');
+  const btnFs = document.getElementById('btn-fs');
+  const pinModal = document.getElementById('pin-modal');
+  const pinInput = document.getElementById('pin-input');
+  const pinSubmit = document.getElementById('pin-submit');
+
+  let dpr = window.devicePixelRatio || 1;
+  let width = 0, height = 0;
+
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Fullscreen toggle
+  btnFs.addEventListener('click', () => {
+    if (!document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else {
+      document.exitFullscreen().catch(() => {});
+    }
+  });
+
+  // Autohide HUD
+  let hudTimeout;
+  window.addEventListener('mousemove', () => {
+    hud.classList.remove('autohide');
+    clearTimeout(hudTimeout);
+    hudTimeout = setTimeout(() => hud.classList.add('autohide'), 3000);
+  });
+
+  // State
+  const camera = { x: 0, y: 0, zoom: 1.0, rotation: 0 };
+  const committedStrokes = [];
+  const activeStrokes = new Map();
+  const laser = { x: 0, y: 0, intensity: 0, color: '#ef4444', trail: [] };
+
+  let packetsCount = 0;
+  let framesCount = 0;
+  let lastStatsTime = performance.now();
+
+  function rgbaToString(rgba) {
+    const r = (rgba >> 24) & 0xff;
+    const g = (rgba >> 16) & 0xff;
+    const b = (rgba >> 8) & 0xff;
+    const a = (rgba & 0xff) / 255;
+    return `rgba(${r},${g},${b},${a})`;
+  }
+
+  // Pure JS LZ4 block decompressor for 0x06 DocumentSync
+  function decompressLz4(src) {
+    if (src.length < 4) return new Uint8Array(0);
+    const uncompressedSize = src[0] | (src[1] << 8) | (src[2] << 16) | (src[3] << 24);
+    const dst = new Uint8Array(uncompressedSize);
+    let sIdx = 4, dIdx = 0;
+    while (sIdx < src.length && dIdx < uncompressedSize) {
+      const token = src[sIdx++];
+      let litLen = token >> 4;
+      if (litLen === 15) {
+        let b;
+        do { b = src[sIdx++]; litLen += b; } while (b === 255);
+      }
+      for (let i = 0; i < litLen; i++) dst[dIdx++] = src[sIdx++];
+      if (dIdx >= uncompressedSize) break;
+      const offset = src[sIdx++] | (src[sIdx++] << 8);
+      if (offset === 0) break;
+      let matchLen = (token & 0x0f) + 4;
+      if (matchLen === 19) {
+        let b;
+        do { b = src[sIdx++]; matchLen += b; } while (b === 255);
+      }
+      let matchPos = dIdx - offset;
+      for (let i = 0; i < matchLen; i++) dst[dIdx++] = dst[matchPos++];
+    }
+    return dst;
+  }
+
+  // WebSocket connection
+  let ws = null;
+  let currentPin = '';
+
+  function connect(pin) {
+    currentPin = pin;
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    const host = window.location.host || '127.0.0.1:38400';
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    statusLabel.textContent = 'Connecting...';
+    statusDot.className = 'dot';
+
+    try {
+      ws = new WebSocket(`${protocol}//${host}/ws`);
+    } catch (e) {
+      statusLabel.textContent = 'Connection Failed';
+      return;
+    }
+
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      // Send 0x01 Handshake
+      const hash = hashPin(currentPin);
+      const buf = new ArrayBuffer(8 + 24);
+      const view = new DataView(buf);
+      view.setUint16(0, 0x4F4E, true); // Magic
+      view.setUint8(2, 0x01);          // Version
+      view.setUint8(3, 0x01);          // MsgType::Handshake
+      view.setUint32(4, 24, true);     // PayloadLen
+      view.setUint32(8, 1, true);      // client_version
+      view.setFloat32(12, dpr * 96, true); // display_dpi
+      const u8 = new Uint8Array(buf);
+      u8.set(hash, 16);
+      ws.send(buf);
+
+      statusLabel.textContent = 'Live (Vector)';
+      statusDot.className = 'dot live';
+    };
+
+    ws.onmessage = (ev) => {
+      packetsCount++;
+      if (!(ev.data instanceof ArrayBuffer)) return;
+      const view = new DataView(ev.data);
+      if (view.byteLength < 8) return;
+      const magic = view.getUint16(0, true);
+      const version = view.getUint8(2);
+      if (magic !== 0x4F4E || version !== 0x01) return;
+      const msgType = view.getUint8(3);
+      const payloadLen = view.getUint32(4, true);
+      if (view.byteLength < 8 + payloadLen) return;
+
+      switch (msgType) {
+        case 0x02: { // Camera
+          camera.timestamp = Number(view.getBigUint64(8, true));
+          camera.x = view.getFloat32(16, true);
+          camera.y = view.getFloat32(20, true);
+          camera.zoom = view.getFloat32(24, true);
+          camera.rotation = view.getFloat32(28, true);
+          camera.flags = view.getUint32(32, true);
+          break;
+        }
+        case 0x03: { // StrokeLiveAdd
+          const strokeId = view.getUint32(8, true);
+          const toolType = view.getUint8(12);
+          const colorRgba = view.getUint32(13, true);
+          const baseWidth = view.getFloat32(17, true);
+          const count = view.getUint16(21, true);
+          let stroke = activeStrokes.get(strokeId);
+          if (!stroke) {
+            stroke = { id: strokeId, tool: toolType, color: rgbaToString(colorRgba), width: baseWidth, points: [] };
+            activeStrokes.set(strokeId, stroke);
+          }
+          let off = 23;
+          for (let i = 0; i < count; i++) {
+            const x = view.getFloat32(off, true);
+            const y = view.getFloat32(off + 4, true);
+            const pressure = view.getFloat32(off + 8, true);
+            const t_ms = view.getFloat32(off + 12, true);
+            stroke.points.push({ x, y, pressure, t_ms });
+            off += 16;
+          }
+          break;
+        }
+        case 0x04: { // StrokeCommit
+          const strokeId = view.getUint32(8, true);
+          const pageIdLen = view.getUint16(12, true);
+          const strokeKey = view.getBigUint64(14 + pageIdLen, true);
+          const stroke = activeStrokes.get(strokeId);
+          if (stroke) {
+            activeStrokes.delete(strokeId);
+            committedStrokes.push(stroke);
+          }
+          break;
+        }
+        case 0x05: { // LaserPointer
+          laser.x = view.getFloat32(8, true);
+          laser.y = view.getFloat32(12, true);
+          laser.intensity = view.getFloat32(16, true);
+          laser.color = rgbaToString(view.getUint32(20, true));
+          if (laser.intensity > 0.05) {
+            laser.trail.push({ x: laser.x, y: laser.y, t: performance.now() });
+          }
+          break;
+        }
+        case 0x06: { // DocumentSync
+          const compressed = new Uint8Array(ev.data, 8, payloadLen);
+          const decompressed = decompressLz4(compressed);
+          committedStrokes.length = 0;
+          activeStrokes.clear();
+          break;
+        }
+      }
+    };
+
+    ws.onclose = () => {
+      statusLabel.textContent = 'Disconnected';
+      statusDot.className = 'dot';
+      setTimeout(() => connect(currentPin), 2000);
+    };
+
+    ws.onerror = () => {
+      statusLabel.textContent = 'Error';
+      statusDot.className = 'dot';
+    };
+  }
+
+  // URL PIN inspection or prompt
+  const urlParams = new URLSearchParams(window.location.search);
+  const pinFromUrl = urlParams.get('pin');
+  if (pinFromUrl) {
+    connect(pinFromUrl);
+  } else {
+    pinModal.style.display = 'flex';
+    pinSubmit.onclick = () => {
+      const val = pinInput.value.trim();
+      if (val) {
+        pinModal.style.display = 'none';
+        connect(val);
+      }
+    };
+    pinInput.onkeydown = (e) => {
+      if (e.key === 'Enter') pinSubmit.click();
+    };
+  }
+
+  // Stroke rendering helper
+  function drawStroke(ctx, stroke) {
+    const pts = stroke.points;
+    if (pts.length === 0) return;
+
+    ctx.save();
+    if (stroke.tool === 2) { // Highlighter
+      ctx.globalAlpha = 0.35;
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.strokeStyle = stroke.color;
+      ctx.lineCap = 'square';
+      ctx.lineJoin = 'miter';
+    } else if (stroke.tool === 3) { // Eraser
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.strokeStyle = '#000000';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    } else { // Pen or Pencil
+      ctx.strokeStyle = stroke.color;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+    }
+
+    if (pts.length === 1) {
+      const p = pts[0];
+      const rad = Math.max(1, (stroke.width * (0.3 + 0.7 * (p.pressure || 0.5))) / 2);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+
+    for (let i = 1; i < pts.length; i++) {
+      const p0 = pts[i - 1];
+      const p1 = pts[i];
+      const pressure = (p0.pressure + p1.pressure) / 2 || 0.5;
+      const w = Math.max(0.75, stroke.width * (0.3 + 0.7 * pressure));
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Render loop
+  function render(now) {
+    framesCount++;
+    if (now - lastStatsTime >= 1000) {
+      statFps.textContent = `${framesCount} fps`;
+      statPkt.textContent = `${packetsCount} pkt/s`;
+      framesCount = 0;
+      packetsCount = 0;
+      lastStatsTime = now;
+    }
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#1e1e24';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Apply viewport camera
+    const scale = dpr * camera.zoom;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    if (camera.rotation) ctx.rotate(camera.rotation);
+    ctx.scale(scale, scale);
+    ctx.translate(-camera.x, -camera.y);
+
+    // Draw document background paper
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 816, 1056); // standard page
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 1 / scale;
+    ctx.strokeRect(0, 0, 816, 1056);
+
+    // Draw committed strokes
+    for (let i = 0; i < committedStrokes.length; i++) {
+      drawStroke(ctx, committedStrokes[i]);
+    }
+
+    // Draw active live strokes
+    for (const stroke of activeStrokes.values()) {
+      drawStroke(ctx, stroke);
+    }
+
+    // Draw laser pointer
+    if (laser.intensity > 0.05 || laser.trail.length > 0) {
+      // Trail
+      const cutoff = now - 350;
+      laser.trail = laser.trail.filter(pt => pt.t > cutoff);
+      for (let i = 0; i < laser.trail.length; i++) {
+        const pt = laser.trail[i];
+        const age = (now - pt.t) / 350;
+        const alpha = (1 - age) * 0.6;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, (8 * (1 - age * 0.5)) / camera.zoom, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
+        ctx.fill();
+      }
+      if (laser.intensity > 0.05) {
+        ctx.beginPath();
+        ctx.arc(laser.x, laser.y, 6 / camera.zoom, 0, Math.PI * 2);
+        ctx.fillStyle = '#ef4444';
+        ctx.shadowColor = '#ef4444';
+        ctx.shadowBlur = 12;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
+    ctx.restore();
+    requestAnimationFrame(render);
+  }
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>

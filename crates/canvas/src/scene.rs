@@ -154,10 +154,17 @@ impl ImageItem {
     /// The op drawing it; None when its box or numbers cannot be drawn.
     pub fn op(&self) -> Option<Op> {
         let n = [self.x, self.y, self.w, self.h, self.rotation, self.opacity];
-        if n.iter().any(|v| !v.is_finite()) || self.w <= 0.0 || self.h <= 0.0 || self.opacity <= 0.0 {
+        if n.iter().any(|v| !v.is_finite()) || self.w <= 0.0 || self.h <= 0.0 || self.opacity <= 0.0
+        {
             return None;
         }
-        let c = self.crop.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
+        let c = self.crop.map(|v| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        });
         let (mut u0, mut v0, mut u1, mut v1) = (c[0], c[1], c[2], c[3]);
         if self.flip_h {
             std::mem::swap(&mut u0, &mut u1);

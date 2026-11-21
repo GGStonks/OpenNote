@@ -109,6 +109,21 @@ pub fn momentum_step(vx: f64, vy: f64, dt_ms: f64) -> (f64, f64, f64, f64) {
     (vx * dt, vy * dt, vx * decay, vy * decay)
 }
 
+/// Exact continuous exponential integration:
+/// \int_0^{dt} v(t) dt = v0 * (1 - decay) / (-ln(MOMENTUM_DECAY))
+/// Mathematically invariant across any refresh rate (60 Hz, 120 Hz, 240 Hz).
+pub fn momentum_step_exact(vx: f64, vy: f64, dt_ms: f64) -> (f64, f64, f64, f64) {
+    let dt = js_min(MOMENTUM_MAX_DT, js_max(0.0, dt_ms));
+    let decay = MOMENTUM_DECAY.powf(dt);
+    const LAMBDA: f64 = 0.0020020026706730793; // -0.998f64.ln()
+    let int_dt = if dt > 1e-6 {
+        (1.0 - decay) / LAMBDA
+    } else {
+        dt
+    };
+    (vx * int_dt, vy * int_dt, vx * decay, vy * decay)
+}
+
 /// `releaseVelocity`: px/ms from recent positions `(x, y, t_ms)`, oldest first.
 pub fn release_velocity(h: &[(f64, f64, f64)]) -> (f64, f64) {
     match (h.first(), h.last()) {

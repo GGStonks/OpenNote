@@ -25,6 +25,8 @@ pub use canvas_service::{
     opennote_canvas_detach, opennote_canvas_draw_active, opennote_canvas_resize,
 };
 pub mod live;
+pub mod one_euro;
+pub mod remote_service;
 pub mod viewport_service;
 
 use ink::stroke_geometry;
@@ -147,6 +149,9 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "uiThemeTokens" => ui_theme_tokens(meta),
         "uiLayoutCompute" => ui_layout_compute(meta),
         "uiFormatPill" => ui_format_pill(meta),
+        "mirrorStart" => remote_service::mirror_start(meta),
+        "mirrorStop" => remote_service::mirror_stop(meta),
+        "mirrorStatus" => remote_service::mirror_status(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
@@ -712,6 +717,14 @@ pub unsafe extern "C" fn opennote_live_add(
     t: f64,
 ) -> bool {
     let Some(h) = h.as_mut() else { return false };
+    remote_service::broadcast_live_point(
+        1,
+        x as f32,
+        y as f32,
+        force as f32,
+        (t * 1000.0) as f32,
+        3.0,
+    );
     catch_unwind(AssertUnwindSafe(|| h.live.add(x, y, force, t))).is_ok()
 }
 

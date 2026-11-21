@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub mod edit;
 pub mod recognition;
 pub mod selection;

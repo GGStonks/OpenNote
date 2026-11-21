@@ -51,7 +51,11 @@ fn pictures_go_through_the_bridge_and_lie_between_the_ink_layers() {
         base64::engine::general_purpose::STANDARD.encode(png.into_inner())
     );
     let r = call("canvasImage", json!({ "key": 9 }), url.as_bytes());
-    assert_eq!((r["width"].as_u64(), r["height"].as_u64()), (Some(30), Some(25)), "{r}");
+    assert_eq!(
+        (r["width"].as_u64(), r["height"].as_u64()),
+        (Some(30), Some(25)),
+        "{r}"
+    );
     let st = call("canvasImageStatus", json!({ "keys": [9, 10] }), &[]);
     assert_eq!(st["missing"], json!([10]), "{st}");
 
@@ -64,11 +68,24 @@ fn pictures_go_through_the_bridge_and_lie_between_the_ink_layers() {
     assert!(settle_pictures(20_000));
     draw_active();
     let px = offscreen_pixels();
-    let at = |x: usize, y: usize| [px[(y * w as usize + x) * 4], px[(y * w as usize + x) * 4 + 1], px[(y * w as usize + x) * 4 + 2]];
-    assert_eq!(at(100, 60), [220, 30, 30], "the picture over the older stroke");
+    let at = |x: usize, y: usize| {
+        [
+            px[(y * w as usize + x) * 4],
+            px[(y * w as usize + x) * 4 + 1],
+            px[(y * w as usize + x) * 4 + 2],
+        ]
+    };
+    assert_eq!(
+        at(100, 60),
+        [220, 30, 30],
+        "the picture over the older stroke"
+    );
     assert!(at(20, 60)[0] < 80, "the older stroke beside it");
     let over = at(100, 120);
-    assert!(over[2] > 200 && over[0] < 60, "the newer stroke over the picture: {over:?}");
+    assert!(
+        over[2] > 200 && over[0] < 60,
+        "the newer stroke over the picture: {over:?}"
+    );
     let st = call("canvasImageStatus", json!({ "keys": [9] }), &[]);
     assert_eq!(st["ready"], json!([9]), "{st}");
     let stats = call("canvasStats", json!({}), &[]);
@@ -85,12 +102,22 @@ fn pictures_go_through_the_bridge_and_lie_between_the_ink_layers() {
     assert_eq!(r["missingImages"], json!([]), "{r}");
     draw_active();
     let px = offscreen_pixels();
-    let at = |x: usize, y: usize| [px[(y * w as usize + x) * 4], px[(y * w as usize + x) * 4 + 1], px[(y * w as usize + x) * 4 + 2]];
+    let at = |x: usize, y: usize| {
+        [
+            px[(y * w as usize + x) * 4],
+            px[(y * w as usize + x) * 4 + 1],
+            px[(y * w as usize + x) * 4 + 2],
+        ]
+    };
     assert_eq!(at(30, 165), [220, 30, 30], "at its new place");
     assert_eq!(at(100, 90), [255, 255, 255], "gone from the old one");
 
     // The note closed: its scene and its files go.
-    call("canvasSceneBin", json!({ "page": "p", "strokes": [], "z": [] }), &[]);
+    call(
+        "canvasSceneBin",
+        json!({ "page": "p", "strokes": [], "z": [] }),
+        &[],
+    );
     let stats = call("canvasStats", json!({}), &[]);
     assert_eq!(stats["pictures"]["files"], 0, "{stats}");
 }

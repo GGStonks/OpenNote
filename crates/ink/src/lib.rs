@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 pub mod dashes;
 pub mod densify;
 pub mod eraser;

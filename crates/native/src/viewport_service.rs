@@ -300,7 +300,11 @@ fn feed(v: &mut View, s: Sample) {
 /// placed at `upto` itself: between its last sample and the next (queued) one, or a little past
 /// its last when the next is late.
 fn process(v: &mut View, upto: f64, resample: bool) {
-    let target = if v.vp.layout().legacy { upto } else { upto.max(clock_ms()) };
+    let target = if v.vp.layout().legacy {
+        upto
+    } else {
+        upto.max(clock_ms())
+    };
     while v.queue.front().is_some_and(|s| s.t <= target) {
         if let Some(s) = v.queue.pop_front() {
             feed(v, s);
@@ -454,6 +458,14 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             v.vp.tick((t_ms - RESAMPLE_MS) / 1000.0);
         }
         let c = v.vp.camera().clone();
+        crate::remote_service::broadcast_camera(
+            c.x as f32,
+            c.y as f32,
+            c.ez as f32,
+            0.0,
+            c.gesture,
+            c.moving,
+        );
         if hist_get(v, 0).is_none_or(|h| h.seq != c.seq) {
             v.moved_at = clock_ms();
         }
@@ -556,7 +568,9 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
                 f64::NAN
             }
         };
-        let placed = v.vp.layout().surface_at(draw_cam_x, draw_cam_y, draw_cam_ez);
+        let placed =
+            v.vp.layout()
+                .surface_at(draw_cam_x, draw_cam_y, draw_cam_ez);
         if let Some(tr) = v.trace.as_mut() {
             if tr.len() < TRACE {
                 tr.push(TraceRec {

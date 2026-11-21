@@ -164,13 +164,17 @@ impl PageStore {
         let caps = scene.caps.len();
         let bounds = scene.bounds();
         let bytes = scene.gpu_bytes();
-        self.drop_scene(id);
-        self.caps_total += caps;
+        let old_held = self.scenes.remove(id);
+        let (old_caps, old_gpu) = match old_held {
+            Some(h) => (h.caps, h.gpu),
+            None => (0, None),
+        };
+        self.caps_total = self.caps_total.saturating_sub(old_caps) + caps;
         self.scenes.insert(
             id.to_string(),
             Held {
                 cpu: scene,
-                gpu: None,
+                gpu: old_gpu,
                 caps,
                 bytes,
                 bounds,
@@ -320,8 +324,10 @@ impl PageStore {
         let Some(h) = self.scenes.get_mut(id) else {
             return false;
         };
-        if h.gpu.is_some() {
-            return true;
+        if let Some(ref mut gpu) = h.gpu {
+            if canvas.update(gpu, &h.cpu) {
+                return true;
+            }
         }
         h.gpu = Some(canvas.upload(&h.cpu));
         self.gpu_bytes += h.bytes;

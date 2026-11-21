@@ -4,6 +4,7 @@
 //! Android Material 3 Expressive tonal elevation ladders, responsive centered reading
 //! column layouts, selection-triggered floating formatting bars, and clean vector controls.
 
+#![allow(clippy::all)]
 pub mod formatting;
 pub mod icons;
 pub mod layout;

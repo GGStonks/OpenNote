@@ -194,7 +194,10 @@ impl Pictures {
                 continue;
             }
             for op in &page.scene.ops {
-                let Op::Image { key, quad, uv, bx, .. } = op else {
+                let Op::Image {
+                    key, quad, uv, bx, ..
+                } = op
+                else {
                     continue;
                 };
                 if !on_screen(bx, &page.tf, size) {
@@ -262,11 +265,11 @@ fn on_screen(b: &crate::scene::PageBox, tf: &Transform, size: (u32, u32)) -> boo
         tf.apply(b.x0, b.y1),
         tf.apply(b.x1, b.y1),
     ];
-    let (x0, x1) = c
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |a, p| (a.0.min(p.0), a.1.max(p.0)));
-    let (y0, y1) = c
-        .iter()
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |a, p| (a.0.min(p.1), a.1.max(p.1)));
+    let (x0, x1) = c.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |a, p| {
+        (a.0.min(p.0), a.1.max(p.0))
+    });
+    let (y0, y1) = c.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |a, p| {
+        (a.0.min(p.1), a.1.max(p.1))
+    });
     x1 >= 0.0 && y1 >= 0.0 && x0 <= size.0 as f32 && y0 <= size.1 as f32
 }

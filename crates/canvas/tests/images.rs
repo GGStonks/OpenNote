@@ -126,15 +126,56 @@ fn rotations_crop_and_flips_place_the_files_pixels() {
     h.library().insert(1, &quad_png(64, 48)).expect("png");
     let cases: Vec<(&str, ImageItem)> = vec![
         ("upright", item(1)),
-        ("37 degrees", ImageItem { rotation: 37.0, ..item(1) }),
-        ("90 degrees", ImageItem { rotation: 90.0, ..item(1) }),
-        ("180 degrees", ImageItem { rotation: 180.0, ..item(1) }),
-        ("flipped horizontally", ImageItem { flip_h: true, ..item(1) }),
-        ("flipped vertically", ImageItem { flip_v: true, ..item(1) }),
-        ("cropped", ImageItem { crop: [0.25, 0.1, 1.0, 0.8], ..item(1) }),
+        (
+            "37 degrees",
+            ImageItem {
+                rotation: 37.0,
+                ..item(1)
+            },
+        ),
+        (
+            "90 degrees",
+            ImageItem {
+                rotation: 90.0,
+                ..item(1)
+            },
+        ),
+        (
+            "180 degrees",
+            ImageItem {
+                rotation: 180.0,
+                ..item(1)
+            },
+        ),
+        (
+            "flipped horizontally",
+            ImageItem {
+                flip_h: true,
+                ..item(1)
+            },
+        ),
+        (
+            "flipped vertically",
+            ImageItem {
+                flip_v: true,
+                ..item(1)
+            },
+        ),
+        (
+            "cropped",
+            ImageItem {
+                crop: [0.25, 0.1, 1.0, 0.8],
+                ..item(1)
+            },
+        ),
         (
             "cropped, flipped and turned",
-            ImageItem { crop: [0.0, 0.3, 0.7, 1.0], flip_h: true, rotation: -63.0, ..item(1) },
+            ImageItem {
+                crop: [0.0, 0.3, 0.7, 1.0],
+                flip_h: true,
+                rotation: -63.0,
+                ..item(1)
+            },
         ),
     ];
     for scale in [1.0, 1.5] {
@@ -163,21 +204,36 @@ fn opacity_and_the_files_alpha_lie_over_the_paper() {
         }
     });
     h.library()
-        .insert(2, &encode(image::DynamicImage::ImageRgba8(img), image::ImageFormat::Png))
+        .insert(
+            2,
+            &encode(
+                image::DynamicImage::ImageRgba8(img),
+                image::ImageFormat::Png,
+            ),
+        )
         .expect("png");
     h.library().insert(1, &quad_png(64, 48)).expect("png");
     let alpha = ImageItem::new(2, 20.0, 20.0, 200.0, 100.0);
     let px = draw(&mut h, &[Layer::Image(alpha)], 1.0);
     assert_eq!(at(&px, 60.0, 70.0), [255, 255, 255], "the see-through half");
     let red = at(&px, 180.0, 70.0);
-    assert!(red[0] == 255 && (red[1] as i32 - 127).abs() <= 2, "red at half alpha: {red:?}");
-    let half = ImageItem { opacity: 0.5, ..item(1) };
+    assert!(
+        red[0] == 255 && (red[1] as i32 - 127).abs() <= 2,
+        "red at half alpha: {red:?}"
+    );
+    let half = ImageItem {
+        opacity: 0.5,
+        ..item(1)
+    };
     let px = draw(&mut h, &[Layer::Image(half)], 1.0);
     let (x, y) = screen(&half, 0.25, 0.25, 1.0);
     let got = at(&px, x, y);
     let want = QUAD[0].map(|c| ((c as f32 + 255.0) / 2.0).round() as i32);
     for c in 0..3 {
-        assert!((got[c] as i32 - want[c]).abs() <= 2, "half opacity: {got:?}, want {want:?}");
+        assert!(
+            (got[c] as i32 - want[c]).abs() <= 2,
+            "half opacity: {got:?}, want {want:?}"
+        );
     }
 }
 
@@ -202,7 +258,12 @@ fn jpeg_gif_and_webp_files() {
         base64_of(&encode(quad, image::ImageFormat::Jpeg))
     );
     h.library().insert(6, url.as_bytes()).expect("data URL");
-    for (key, what, tol) in [(3, "jpeg", 14), (4, "gif", 24), (5, "webp", 4), (6, "jpeg data URL", 14)] {
+    for (key, what, tol) in [
+        (3, "jpeg", 14),
+        (4, "gif", 24),
+        (5, "webp", 4),
+        (6, "jpeg data URL", 14),
+    ] {
         let it = item(key);
         let px = draw(&mut h, &[Layer::Image(it)], 1.0);
         assert!(check_grid(&px, &it, 1.0, tol, what) >= 30);
@@ -213,7 +274,9 @@ fn base64_of(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::new();
     for c in b.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = (c[0] as u32) << 16
+            | (*c.get(1).unwrap_or(&0) as u32) << 8
+            | *c.get(2).unwrap_or(&0) as u32;
         for i in 0..4 {
             if i <= c.len() {
                 s.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -245,10 +308,18 @@ fn an_svg_sticky_is_sharp_at_every_zoom() {
     for scale in [1.0f32, 2.5, 4.0] {
         let px = draw(&mut h, &[Layer::Image(it)], scale);
         let (x, y) = screen(&it, 0.5, 0.5, scale);
-        assert_eq!(at(&px, x, y), [0xFF, 0xF4, 0x8E], "the sticky's colour at {scale}x");
+        assert_eq!(
+            at(&px, x, y),
+            [0xFF, 0xF4, 0x8E],
+            "the sticky's colour at {scale}x"
+        );
         // The rounded corner: paper just inside the box's corner.
         let (x, y) = ((it.x + 1.0) * scale, (it.y + 1.0) * scale);
-        assert_eq!(at(&px, x, y), [255, 255, 255], "the rounded corner at {scale}x");
+        assert_eq!(
+            at(&px, x, y),
+            [255, 255, 255],
+            "the rounded corner at {scale}x"
+        );
         // The straight edge is sharp: one device px across from paper to the colour.
         let y = (it.y + it.h / 2.0) * scale;
         let x0 = it.x * scale;
@@ -292,11 +363,21 @@ fn pictures_lie_between_the_ink_layers() {
         1.0,
     );
     // The stroke made before the picture: hidden under it, shown beside it.
-    assert_eq!(at(&px, 100.0, 80.0), QUAD[0], "the picture over the older stroke");
-    assert!(at(&px, 30.0, 80.0)[0] < 80, "the older stroke beside the picture");
+    assert_eq!(
+        at(&px, 100.0, 80.0),
+        QUAD[0],
+        "the picture over the older stroke"
+    );
+    assert!(
+        at(&px, 30.0, 80.0)[0] < 80,
+        "the older stroke beside the picture"
+    );
     // The stroke made after it: over it.
     let o = at(&px, 100.0, 140.0);
-    assert!(o[2] > 200 && o[0] < 60, "the newer stroke over the picture: {o:?}");
+    assert!(
+        o[2] > 200 && o[0] < 60,
+        "the newer stroke over the picture: {o:?}"
+    );
 }
 
 #[test]
@@ -337,7 +418,11 @@ fn a_huge_file_is_drawn_from_a_band_within_the_limits() {
     let px = draw(&mut h, &[Layer::Image(it)], 0.5);
     drop(px);
     let st = h.stats();
-    assert!(st.picture_bytes < 1 << 20, "a small band once small again: {}", st.picture_bytes);
+    assert!(
+        st.picture_bytes < 1 << 20,
+        "a small band once small again: {}",
+        st.picture_bytes
+    );
 }
 
 #[test]
@@ -361,7 +446,12 @@ fn the_textures_stay_within_their_budget() {
         let it = ImageItem::new(*key, 0.0, 0.0, side as f32, side as f32);
         let px = draw(&mut h, &[Layer::Image(it)], 1.0);
         let st = h.stats();
-        assert!(st.picture_bytes <= st.picture_budget, "{} > {}", st.picture_bytes, st.picture_budget);
+        assert!(
+            st.picture_bytes <= st.picture_budget,
+            "{} > {}",
+            st.picture_bytes,
+            st.picture_budget
+        );
         assert_eq!(at(&px, 100.0, 100.0), *c, "picture {key}");
     }
 }

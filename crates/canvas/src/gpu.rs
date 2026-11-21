@@ -58,7 +58,9 @@ pub(crate) const STENCIL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Sten
 /// A scene's buffers on the device.
 pub struct GpuScene {
     pub(crate) caps: wgpu::Buffer,
+    pub(crate) caps_capacity: usize,
     pub(crate) flat: wgpu::Buffer,
+    pub(crate) flat_capacity: usize,
     pub(crate) ops: Vec<Op>,
 }
 
@@ -557,36 +559,60 @@ impl GpuCanvas {
                 self.max_buffer
             ));
         }
-        let zero_cap = [CapInst::zeroed()];
-        let zero_flat = [[0.0f32; 2]];
-        let caps: &[CapInst] = if scene.caps.is_empty() || !fits {
-            &zero_cap
-        } else {
-            &scene.caps
-        };
-        let flat: &[[f32; 2]] = if scene.flat.is_empty() || !fits {
-            &zero_flat
-        } else {
-            &scene.flat
-        };
+        let cap_capacity = scene.caps.len().max(16384).next_power_of_two();
+        let flat_capacity = scene.flat.len().max(1024).next_power_of_two();
+        let mut caps_data = vec![CapInst::zeroed(); cap_capacity];
+        if !scene.caps.is_empty() && fits {
+            caps_data[..scene.caps.len()].copy_from_slice(&scene.caps);
+        }
+        let mut flat_data = vec![[0.0f32; 2]; flat_capacity];
+        if !scene.flat.is_empty() && fits {
+            flat_data[..scene.flat.len()].copy_from_slice(&scene.flat);
+        }
         let caps = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("caps"),
-                contents: bytemuck::cast_slice(caps),
-                usage: wgpu::BufferUsages::VERTEX,
+                contents: bytemuck::cast_slice(&caps_data),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
         let flat = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("flat"),
-                contents: bytemuck::cast_slice(flat),
-                usage: wgpu::BufferUsages::VERTEX,
+                contents: bytemuck::cast_slice(&flat_data),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             });
         GpuScene {
             caps,
+            caps_capacity: cap_capacity,
             flat,
+            flat_capacity,
             ops: if fits { scene.ops.clone() } else { Vec::new() },
+        }
+    }
+
+    /// Incremental GPU update without buffer deallocation if capacity allows.
+    pub fn update(&self, gpu: &mut GpuScene, scene: &Scene) -> bool {
+        let cap_bytes = (scene.caps.len() * std::mem::size_of::<CapInst>()) as u64;
+        let flat_bytes = (scene.flat.len() * std::mem::size_of::<[f32; 2]>()) as u64;
+        let fits = cap_bytes <= self.max_buffer && flat_bytes <= self.max_buffer;
+        if !fits {
+            return false;
+        }
+        if scene.caps.len() <= gpu.caps_capacity && scene.flat.len() <= gpu.flat_capacity {
+            if !scene.caps.is_empty() {
+                self.queue
+                    .write_buffer(&gpu.caps, 0, bytemuck::cast_slice(&scene.caps));
+            }
+            if !scene.flat.is_empty() {
+                self.queue
+                    .write_buffer(&gpu.flat, 0, bytemuck::cast_slice(&scene.flat));
+            }
+            gpu.ops = scene.ops.clone();
+            true
+        } else {
+            false
         }
     }
 

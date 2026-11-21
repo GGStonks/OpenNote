@@ -1,0 +1,20 @@
+[package]
+name = "opennote-remote"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.7"
+futures-util = "0.3"
+lz4_flex = "0.11"
+thiserror = "2.0"
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = "0.24"
+
+[[example]]
+name = "sim_120hz"
+path = "examples/sim_120hz.rs"
+
+[[bin]]
+name = "opennote-receiver"
+path = "src/bin/receiver.rs"
