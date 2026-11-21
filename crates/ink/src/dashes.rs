@@ -1,5 +1,5 @@
-use nib::geometry::JsMath;
 use model::LineStyle;
+use nib::geometry::JsMath;
 use nib::geometry::XY;
 
 pub const DOT: f64 = 0.1;
@@ -132,4 +132,3 @@ pub fn ink_runs(
     };
     Some(dash_runs(&pts, &radii, &pattern, offset, HAND_DOT))
 }
-

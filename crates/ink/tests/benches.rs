@@ -1,6 +1,4 @@
-use ink::{
-    dist_to_polyline, erase_strokes_partial, stroke_geometry, SampleDensifier,
-};
+use ink::{dist_to_polyline, erase_strokes_partial, stroke_geometry, SampleDensifier};
 use model::{LineStyle, PenStyle, Point, Stroke};
 use nib::geometry::XY;
 use serde_json::Value;
@@ -28,7 +26,11 @@ fn load_recordings() -> Vec<(String, Vec<RecordedStroke>)> {
         .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("json"))
         // The four October 2026 recordings (292 pen strokes) the expected numbers below were
         // measured on with the TypeScript benches: later recordings change the totals.
-        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with("pen-202610")))
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| n.starts_with("pen-202610"))
+        })
         .collect();
     entries.sort_by_key(|e| e.path());
 
@@ -368,10 +370,7 @@ fn test_bench_hooks() {
             let mut pts: Vec<Point> = Vec::new();
             let mut dens = SampleDensifier::new();
             let is_web = s.source.as_deref() == Some("web");
-            let lift = if is_web
-                && s.samples.len() > 1
-                && s.samples.last().unwrap()[3] == 0.0
-            {
+            let lift = if is_web && s.samples.len() > 1 && s.samples.last().unwrap()[3] == 0.0 {
                 Some(*s.samples.last().unwrap())
             } else {
                 None
@@ -465,7 +464,10 @@ fn test_bench_hooks() {
         total, now_hooks
     );
     assert_eq!(total, 275);
-    assert_eq!(now_hooks, 0, "Hooks reduced to 0 with liftoff turn cos = 0.0");
+    assert_eq!(
+        now_hooks, 0,
+        "Hooks reduced to 0 with liftoff turn cos = 0.0"
+    );
 }
 
 #[test]

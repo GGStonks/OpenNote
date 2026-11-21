@@ -17,13 +17,25 @@ fn js_hypot_is_math_hypot() {
     for i in 0..200_000 {
         let k = i % 4;
         let a = (next() - 0.5) * [2.0, 2000.0, 1e-3, 4e4][k];
-        let b = if k == 3 { a * if next() < 0.5 { 1.0 } else { -1.0 } } else { (next() - 0.5) * if k == 2 { 1e-3 } else { 2000.0 } };
+        let b = if k == 3 {
+            a * if next() < 0.5 { 1.0 } else { -1.0 }
+        } else {
+            (next() - 0.5) * if k == 2 { 1e-3 } else { 2000.0 }
+        };
         x ^= a.js_hypot(b).to_bits();
         libm ^= a.hypot(b).to_bits();
     }
-    assert_eq!(format!("{x:x}"), "4f27643d3b7035", "js_hypot differs from Math.hypot");
+    assert_eq!(
+        format!("{x:x}"),
+        "4f27643d3b7035",
+        "js_hypot differs from Math.hypot"
+    );
     // libm's hypot does differ (why js_hypot exists).
-    assert_ne!(format!("{libm:x}"), "4f27643d3b7035", "libm's hypot now matches: js_hypot may be unneeded");
+    assert_ne!(
+        format!("{libm:x}"),
+        "4f27643d3b7035",
+        "libm's hypot now matches: js_hypot may be unneeded"
+    );
     assert_eq!(0.0f64.js_hypot(0.0), 0.0);
     assert!(f64::NAN.js_hypot(1.0).is_nan() && f64::INFINITY.js_hypot(f64::NAN).is_infinite());
 }

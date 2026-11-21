@@ -1,18 +1,23 @@
-use std::fs;
-use std::time::Instant;
-use hayro::{render_pdf, RenderSettings};
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
+use hayro::{render_pdf, RenderSettings};
+use std::fs;
+use std::time::Instant;
 
 fn main() {
-    let sample_pdf = "/home/ds/.cache/uv/archive-v0/qibrl6lvPBfhNs7H/matplotlib/mpl-data/images/back.pdf";
+    let sample_pdf =
+        "/home/ds/.cache/uv/archive-v0/qibrl6lvPBfhNs7H/matplotlib/mpl-data/images/back.pdf";
     println!("=== Spike D: PDF Rendering (Pure-Rust hayro vs PDFium) ===");
 
     if let Ok(data) = fs::read(sample_pdf) {
         let t0 = Instant::now();
         if let Ok(pdf) = Pdf::new(data) {
             let parse_time = t0.elapsed();
-            println!("[hayro] Parsed PDF with {} page(s) in {:?}", pdf.pages().len(), parse_time);
+            println!(
+                "[hayro] Parsed PDF with {} page(s) in {:?}",
+                pdf.pages().len(),
+                parse_time
+            );
 
             let t_render = Instant::now();
             let pixmaps = render_pdf(
@@ -24,9 +29,18 @@ fn main() {
             );
             let render_time = t_render.elapsed();
             if let Some(imgs) = pixmaps {
-                println!("[hayro] Rendered {} page(s) in {:?}", imgs.len(), render_time);
+                println!(
+                    "[hayro] Rendered {} page(s) in {:?}",
+                    imgs.len(),
+                    render_time
+                );
                 for (i, img) in imgs.iter().enumerate() {
-                    println!("        Page {}: {}x{} px", i + 1, img.width(), img.height());
+                    println!(
+                        "        Page {}: {}x{} px",
+                        i + 1,
+                        img.width(),
+                        img.height()
+                    );
                 }
             } else {
                 println!("[hayro] Render returned None");
@@ -40,7 +54,9 @@ fn main() {
     println!("1. Pure-Rust 'hayro':");
     println!("   - Footprint: < 2 MB binary overhead.");
     println!("   - Platforms: 100% portable, zero C++ glue on iOS and Android.");
-    println!("   - Caveats: No support for encrypted/password PDFs, no knockout/isolated blend groups.");
+    println!(
+        "   - Caveats: No support for encrypted/password PDFs, no knockout/isolated blend groups."
+    );
     println!("2. PDFium ('pdfium-render'):");
     println!("   - Footprint: ~12-18 MB native binaries per architecture.");
     println!("   - Platforms: Requires libpdfium.dylib on iOS and libpdfium.so on Android.");

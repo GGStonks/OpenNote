@@ -258,14 +258,6 @@ fn feed(v: &mut View, s: Sample) {
     let i = v.fingers.iter().position(|f| f.id == s.id);
     // Never back in time (a sample delivered after a resampled one past it).
     let t = i.map_or(s.t, |i| s.t.max(v.fingers[i].fed.2));
-    if let (Phase::Ended | Phase::Cancelled, Some(i)) = (s.phase, i) {
-        // A finger leaves from where it really was: a resampled place past its last sample (the
-        // extrapolation) would stay in the camera (a lift carries no movement).
-        let f = v.fingers[i];
-        if (f.fed.0, f.fed.1) != (f.last.0, f.last.1) {
-            v.vp.touch(s.id, Phase::Moved, f.last.0, f.last.1, t / 1000.0);
-        }
-    }
     v.vp.touch(s.id, s.phase, s.x, s.y, t / 1000.0);
     let p = (s.x, s.y, t);
     // The real samples keep their own times (the finger's velocity).
@@ -300,12 +292,7 @@ fn feed(v: &mut View, s: Sample) {
 /// placed at `upto` itself: between its last sample and the next (queued) one, or a little past
 /// its last when the next is late.
 fn process(v: &mut View, upto: f64, resample: bool) {
-    let target = if v.vp.layout().legacy {
-        upto
-    } else {
-        upto.max(clock_ms())
-    };
-    while v.queue.front().is_some_and(|s| s.t <= target) {
+    while v.queue.front().is_some_and(|s| s.t <= upto) {
         if let Some(s) = v.queue.pop_front() {
             feed(v, s);
         }
@@ -448,14 +435,19 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             return None;
         }
         let old = legacy(v);
+        let resample_lead = if v.hz > 0.0 {
+            (1000.0 / v.hz * 0.65).clamp(3.0, 8.0)
+        } else {
+            RESAMPLE_MS
+        };
         if old {
             // 2.9.6: the camera advanced to the moment of the tick.
             v.vp.tick(clock_ms() / 1000.0);
         } else {
             // Fingers, momentum and animations all at one time, the resampling's: a fling goes
             // on from where the fingers left the camera, with no extra step at the release.
-            process(v, t_ms - RESAMPLE_MS, true);
-            v.vp.tick((t_ms - RESAMPLE_MS) / 1000.0);
+            process(v, t_ms - resample_lead, true);
+            v.vp.tick((t_ms - resample_lead) / 1000.0);
         }
         let c = v.vp.camera().clone();
         crate::remote_service::broadcast_camera(
@@ -506,25 +498,41 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         // itself (never in the steps of the reports' arrival) and with the DOM. A DOM that stops
         // reporting (a long page frame) is not waited for: the trail is kept and the canvas goes
         // on; one that comes back later raises the trail gradually (no jump either way).
+        let dt = (t_ms - v.tick_t).clamp(0.0, 100.0);
         let fresh = v.shown.map(|s| s.0) != v.last_shown;
         v.last_shown = v.shown.map(|s| s.0);
         let alone = shown_t.is_some_and(|st| t_ms - st > lag);
         match shown_t {
             Some(st) if fresh => {
                 let obs = (t_ms - st).clamp(0.0, lag);
+                let alpha = if dt > 0.0 {
+                    1.0 - (-dt / 80.0).exp()
+                } else {
+                    0.25
+                };
                 v.trail = if v.trail.is_finite() {
-                    v.trail + (obs - v.trail) * 0.25
+                    v.trail + (obs - v.trail) * alpha
                 } else {
                     obs
                 };
             }
             Some(_) => {}
-            None => v.trail = 0.0,
+            None => {
+                let alpha = if dt > 0.0 {
+                    1.0 - (-dt / 80.0).exp()
+                } else {
+                    0.25
+                };
+                v.trail = if v.trail.is_finite() {
+                    v.trail * (1.0 - alpha)
+                } else {
+                    0.0
+                };
+            }
         }
-        let (draw_cam_x, draw_cam_y, draw_cam_ez, draw_cam_t) = if v.vp.layout().legacy {
+        let (draw_cam_x, draw_cam_y, draw_cam_ez, draw_cam_t) = if !v.vp.layout().legacy {
             let trail = if v.trail.is_finite() { v.trail } else { 0.0 };
             let mut draw_t = t_ms - trail;
-            let dt = t_ms - v.tick_t;
             if dt.is_finite() && dt > 0.0 && dt < 100.0 && v.drawn_t.is_finite() {
                 // Never back.
                 draw_t = draw_t.max(v.drawn_t).min(t_ms);

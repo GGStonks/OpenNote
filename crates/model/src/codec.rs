@@ -42,9 +42,7 @@ fn deserialize_note_value(value: serde_json::Value) -> Result<NoteDocument, Code
             pages.iter().any(|page| {
                 page.get("strokes")
                     .and_then(|s| s.as_array())
-                    .map(|strokes| {
-                        strokes.iter().any(|st| st.get("pts").is_some())
-                    })
+                    .map(|strokes| strokes.iter().any(|st| st.get("pts").is_some()))
                     .unwrap_or(false)
             })
         })
@@ -154,8 +152,7 @@ pub fn export_opennote_zip<W: Write + Seek>(
     backup: &LibraryBackup,
 ) -> Result<(), CodecError> {
     let mut zip = ZipWriter::new(writer);
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     zip.start_file("backup.json", options)?;
     let json = serde_json::to_vec_pretty(backup)?;
@@ -163,10 +160,9 @@ pub fn export_opennote_zip<W: Write + Seek>(
 
     if let Some(files) = &backup.files {
         for file in files {
-            if let Ok(bytes) = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &file.base64,
-            ) {
+            if let Ok(bytes) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &file.base64)
+            {
                 let filename = format!("files/{}", file.id);
                 zip.start_file(filename, options)?;
                 zip.write_all(&bytes)?;
@@ -199,4 +195,3 @@ pub fn import_opennote_zip<R: Read + Seek>(reader: R) -> Result<LibraryBackup, C
 
     import_backup_json(&backup_content)
 }
-

@@ -1,18 +1,21 @@
 //! Smart Pen reference: hold-to-snap and pure state machine against TypeScript.
 
-use std::collections::BTreeSet;
 use model::{NotePage, Point, ShapeKind, Stroke};
+use nib::geometry::XY;
 use serde_json::Value;
 use shapes::{
-    adjust_snapped_shape, erase_along_snapped_points, ShapeMode, SnapAdjust, SmartPen,
-    SmartPenConfig, SmartPenTool,
+    adjust_snapped_shape, erase_along_snapped_points, ShapeMode, SmartPen, SmartPenConfig,
+    SmartPenTool, SnapAdjust,
 };
-use nib::geometry::XY;
+use std::collections::BTreeSet;
 
 const TOL: f64 = 1e-4;
 
 fn ensure_reference_json() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/smartpen.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/rust-ref/smartpen.json"
+    );
     if !std::path::Path::new(path).exists() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let root = std::path::Path::new(manifest_dir).join("../..");
@@ -28,15 +31,22 @@ fn ensure_reference_json() {
             ])
             .status()
             .expect("failed to execute npm run bench:rustref");
-        assert!(status.success(), "bench:rustref failed with status {status}");
+        assert!(
+            status.success(),
+            "bench:rustref failed with status {status}"
+        );
     }
 }
 
 fn reference() -> Value {
     ensure_reference_json();
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/smartpen.json");
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("{path} is missing: run bench:rustref to generate smartpen.json"));
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/rust-ref/smartpen.json"
+    );
+    let text = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("{path} is missing: run bench:rustref to generate smartpen.json")
+    });
     serde_json::from_str(&text).expect("smartpen.json is valid JSON")
 }
 
@@ -136,13 +146,20 @@ fn smart_pen_reference_matches_typescript() {
             let want_snapped50 = want50["snapped"].as_bool().unwrap_or(false);
             if pen50.is_snapped() != want_snapped50 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.5s rest): is_snapped is {}, want {want_snapped50}", pen50.is_snapped()));
+                failures.push(format!(
+                    "{id} (0.5s rest): is_snapped is {}, want {want_snapped50}",
+                    pen50.is_snapped()
+                ));
             }
 
             let want_sample50 = want50["sample"].as_u64().map(|v| v as usize);
             if pen50.snapped_sample() != want_sample50 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.5s rest): snapped_sample is {:?}, want {:?}", pen50.snapped_sample(), want_sample50));
+                failures.push(format!(
+                    "{id} (0.5s rest): snapped_sample is {:?}, want {:?}",
+                    pen50.snapped_sample(),
+                    want_sample50
+                ));
             }
 
             if want_snapped50 {
@@ -153,38 +170,57 @@ fn smart_pen_reference_matches_typescript() {
                         .expect("valid ShapeKind in want_stroke");
                     if snapped_st.shape_kind != Some(want_kind) {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: shape_kind is {:?}, want {:?}", snapped_st.shape_kind, Some(want_kind)));
+                        failures.push(format!(
+                            "{id}: shape_kind is {:?}, want {:?}",
+                            snapped_st.shape_kind,
+                            Some(want_kind)
+                        ));
                     }
 
                     let want_closed = want_stroke["closed"].as_bool().unwrap();
                     if snapped_st.closed != Some(want_closed) {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: closed is {:?}, want {want_closed}", snapped_st.closed));
+                        failures.push(format!(
+                            "{id}: closed is {:?}, want {want_closed}",
+                            snapped_st.closed
+                        ));
                     }
 
                     let want_w = want_stroke["width"].as_f64().unwrap();
                     if (snapped_st.width - want_w).abs() > TOL {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: width is {}, want {want_w}", snapped_st.width));
+                        failures.push(format!(
+                            "{id}: width is {}, want {want_w}",
+                            snapped_st.width
+                        ));
                     }
 
                     let want_pts = want_stroke["points"].as_array().unwrap();
                     if snapped_st.points.len() != want_pts.len() {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: points len is {}, want {}", snapped_st.points.len(), want_pts.len()));
+                        failures.push(format!(
+                            "{id}: points len is {}, want {}",
+                            snapped_st.points.len(),
+                            want_pts.len()
+                        ));
                     } else {
                         for (i, (gp, wp)) in snapped_st.points.iter().zip(want_pts).enumerate() {
                             let w_xy = nums(wp);
                             if (gp.x - w_xy[0]).abs() > TOL || (gp.y - w_xy[1]).abs() > TOL {
                                 differing_cases.insert(id.to_string());
-                                failures.push(format!("{id}: point {i} is ({}, {}), want ({}, {})", gp.x, gp.y, w_xy[0], w_xy[1]));
+                                failures.push(format!(
+                                    "{id}: point {i} is ({}, {}), want ({}, {})",
+                                    gp.x, gp.y, w_xy[0], w_xy[1]
+                                ));
                                 break;
                             }
                         }
                     }
                 } else {
                     differing_cases.insert(id.to_string());
-                    failures.push(format!("{id} (0.5s rest): snapped_stroke is None, want some"));
+                    failures.push(format!(
+                        "{id} (0.5s rest): snapped_stroke is None, want some"
+                    ));
                 }
             }
 
@@ -203,12 +239,19 @@ fn smart_pen_reference_matches_typescript() {
             let want_snapped30 = want30["snapped"].as_bool().unwrap_or(false);
             if pen30.is_snapped() != want_snapped30 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.3s rest): is_snapped is {}, want {want_snapped30}", pen30.is_snapped()));
+                failures.push(format!(
+                    "{id} (0.3s rest): is_snapped is {}, want {want_snapped30}",
+                    pen30.is_snapped()
+                ));
             }
             let want_sample30 = want30["sample"].as_u64().map(|v| v as usize);
             if pen30.snapped_sample() != want_sample30 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.3s rest): snapped_sample is {:?}, want {:?}", pen30.snapped_sample(), want_sample30));
+                failures.push(format!(
+                    "{id} (0.3s rest): snapped_sample is {:?}, want {:?}",
+                    pen30.snapped_sample(),
+                    want_sample30
+                ));
             }
         } else {
             // 1. Replay with 1.1s rest (1100 ms)
@@ -226,13 +269,20 @@ fn smart_pen_reference_matches_typescript() {
             let want_snapped11 = want11["snapped"].as_bool().unwrap_or(false);
             if pen11.is_snapped() != want_snapped11 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (1.1s rest): is_snapped is {}, want {want_snapped11}", pen11.is_snapped()));
+                failures.push(format!(
+                    "{id} (1.1s rest): is_snapped is {}, want {want_snapped11}",
+                    pen11.is_snapped()
+                ));
             }
 
             let want_sample11 = want11["sample"].as_u64().map(|v| v as usize);
             if pen11.snapped_sample() != want_sample11 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (1.1s rest): snapped_sample is {:?}, want {:?}", pen11.snapped_sample(), want_sample11));
+                failures.push(format!(
+                    "{id} (1.1s rest): snapped_sample is {:?}, want {:?}",
+                    pen11.snapped_sample(),
+                    want_sample11
+                ));
             }
 
             if want_snapped11 {
@@ -243,38 +293,57 @@ fn smart_pen_reference_matches_typescript() {
                         .expect("valid ShapeKind in want_stroke");
                     if snapped_st.shape_kind != Some(want_kind) {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: shape_kind is {:?}, want {:?}", snapped_st.shape_kind, Some(want_kind)));
+                        failures.push(format!(
+                            "{id}: shape_kind is {:?}, want {:?}",
+                            snapped_st.shape_kind,
+                            Some(want_kind)
+                        ));
                     }
 
                     let want_closed = want_stroke["closed"].as_bool().unwrap();
                     if snapped_st.closed != Some(want_closed) {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: closed is {:?}, want {want_closed}", snapped_st.closed));
+                        failures.push(format!(
+                            "{id}: closed is {:?}, want {want_closed}",
+                            snapped_st.closed
+                        ));
                     }
 
                     let want_w = want_stroke["width"].as_f64().unwrap();
                     if (snapped_st.width - want_w).abs() > TOL {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: width is {}, want {want_w}", snapped_st.width));
+                        failures.push(format!(
+                            "{id}: width is {}, want {want_w}",
+                            snapped_st.width
+                        ));
                     }
 
                     let want_pts = want_stroke["points"].as_array().unwrap();
                     if snapped_st.points.len() != want_pts.len() {
                         differing_cases.insert(id.to_string());
-                        failures.push(format!("{id}: points len is {}, want {}", snapped_st.points.len(), want_pts.len()));
+                        failures.push(format!(
+                            "{id}: points len is {}, want {}",
+                            snapped_st.points.len(),
+                            want_pts.len()
+                        ));
                     } else {
                         for (i, (gp, wp)) in snapped_st.points.iter().zip(want_pts).enumerate() {
                             let w_xy = nums(wp);
                             if (gp.x - w_xy[0]).abs() > TOL || (gp.y - w_xy[1]).abs() > TOL {
                                 differing_cases.insert(id.to_string());
-                                failures.push(format!("{id}: point {i} is ({}, {}), want ({}, {})", gp.x, gp.y, w_xy[0], w_xy[1]));
+                                failures.push(format!(
+                                    "{id}: point {i} is ({}, {}), want ({}, {})",
+                                    gp.x, gp.y, w_xy[0], w_xy[1]
+                                ));
                                 break;
                             }
                         }
                     }
                 } else {
                     differing_cases.insert(id.to_string());
-                    failures.push(format!("{id} (1.1s rest): snapped_stroke is None, want some"));
+                    failures.push(format!(
+                        "{id} (1.1s rest): snapped_stroke is None, want some"
+                    ));
                 }
             }
 
@@ -282,20 +351,34 @@ fn smart_pen_reference_matches_typescript() {
                 let (erased, put_back) = pen11.erase_along_snapped_on_page(&page);
                 let want_erased: Vec<String> = want11["erased"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let want_put_back: Vec<String> = want11["putBack"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 if erased != want_erased {
                     differing_cases.insert(id.to_string());
-                    failures.push(format!("{id} (eraser erased): got {:?}, want {:?}", erased, want_erased));
+                    failures.push(format!(
+                        "{id} (eraser erased): got {:?}, want {:?}",
+                        erased, want_erased
+                    ));
                 }
                 if put_back != want_put_back {
                     differing_cases.insert(id.to_string());
-                    failures.push(format!("{id} (eraser putBack): got {:?}, want {:?}", put_back, want_put_back));
+                    failures.push(format!(
+                        "{id} (eraser putBack): got {:?}, want {:?}",
+                        put_back, want_put_back
+                    ));
                 }
             }
 
@@ -303,12 +386,19 @@ fn smart_pen_reference_matches_typescript() {
                 let selected = pen11.lasso_select_on_page(&page);
                 let want_selected: Vec<String> = want11["selectedIds"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 if selected != want_selected {
                     differing_cases.insert(id.to_string());
-                    failures.push(format!("{id} (lasso selectedIds): got {:?}, want {:?}", selected, want_selected));
+                    failures.push(format!(
+                        "{id} (lasso selectedIds): got {:?}, want {:?}",
+                        selected, want_selected
+                    ));
                 }
             }
 
@@ -327,12 +417,19 @@ fn smart_pen_reference_matches_typescript() {
             let want_snapped30 = want30["snapped"].as_bool().unwrap_or(false);
             if pen30.is_snapped() != want_snapped30 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.3s rest): is_snapped is {}, want {want_snapped30}", pen30.is_snapped()));
+                failures.push(format!(
+                    "{id} (0.3s rest): is_snapped is {}, want {want_snapped30}",
+                    pen30.is_snapped()
+                ));
             }
             let want_sample30 = want30["sample"].as_u64().map(|v| v as usize);
             if pen30.snapped_sample() != want_sample30 {
                 differing_cases.insert(id.to_string());
-                failures.push(format!("{id} (0.3s rest): snapped_sample is {:?}, want {:?}", pen30.snapped_sample(), want_sample30));
+                failures.push(format!(
+                    "{id} (0.3s rest): snapped_sample is {:?}, want {:?}",
+                    pen30.snapped_sample(),
+                    want_sample30
+                ));
             }
         }
     }
@@ -351,10 +448,38 @@ fn smart_pen_reference_matches_typescript() {
 #[test]
 fn test_regular_square_adjust() {
     let base = vec![
-        Point { x: 100.0, y: 100.0, pressure: 0.5, t: None, alt: None, az: None },
-        Point { x: 200.0, y: 100.0, pressure: 0.5, t: None, alt: None, az: None },
-        Point { x: 200.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
-        Point { x: 100.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
+        Point {
+            x: 100.0,
+            y: 100.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 200.0,
+            y: 100.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 200.0,
+            y: 200.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 100.0,
+            y: 200.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
     ];
     let adj = SnapAdjust {
         kind: ShapeKind::Rectangle,
@@ -372,16 +497,39 @@ fn test_regular_square_adjust() {
     let side2 = (adjusted[3].x - adjusted[2].x).hypot(adjusted[3].y - adjusted[2].y);
     let side3 = (adjusted[0].x - adjusted[3].x).hypot(adjusted[0].y - adjusted[3].y);
 
-    assert!((side0 - side1).abs() < 1e-6, "square sides must be equal: {side0} vs {side1}");
-    assert!((side1 - side2).abs() < 1e-6, "square sides must be equal: {side1} vs {side2}");
-    assert!((side2 - side3).abs() < 1e-6, "square sides must be equal: {side2} vs {side3}");
+    assert!(
+        (side0 - side1).abs() < 1e-6,
+        "square sides must be equal: {side0} vs {side1}"
+    );
+    assert!(
+        (side1 - side2).abs() < 1e-6,
+        "square sides must be equal: {side1} vs {side2}"
+    );
+    assert!(
+        (side2 - side3).abs() < 1e-6,
+        "square sides must be equal: {side2} vs {side3}"
+    );
 }
 
 #[test]
 fn test_erase_along_snapped() {
     let pts = vec![
-        Point { x: 0.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
-        Point { x: 100.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
+        Point {
+            x: 0.0,
+            y: 0.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 100.0,
+            y: 0.0,
+            pressure: 0.5,
+            t: None,
+            alt: None,
+            az: None,
+        },
     ];
     let eraser_size = 16.0;
     let path = erase_along_snapped_points(&pts, false, eraser_size);

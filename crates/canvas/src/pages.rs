@@ -27,7 +27,7 @@ const AHEAD_MS: f32 = 500.0;
 const AHEAD_MAX_SCREENS: f32 = 4.0;
 /// A page beyond the view is uploaded ahead with at most this many bytes per frame (one in view
 /// is uploaded whatever its size: it is drawn now).
-const PREFETCH_BYTES_PER_FRAME: u64 = 8 << 20;
+const PREFETCH_BYTES_PER_FRAME: u64 = 1 << 20;
 /// The GPU budget unless the owner sets one (`set_budget`).
 pub const DEFAULT_BUDGET: u64 = 128 << 20;
 /// Time-to-ink samples kept (ms).
@@ -38,6 +38,8 @@ struct Held {
     gpu: Option<GpuScene>,
     caps: usize,
     bytes: u64,
+    gpu_bytes: u64,
+    gpu_dirty: bool,
     bounds: Option<PageBox>,
     /// The frame (`tick`) it was last in view, and last near.
     seen: u64,
@@ -103,6 +105,9 @@ pub struct PageStore {
     last_view: Option<(Instant, f32, f32)>,
     speed: (f32, f32),
     scratch: Vec<usize>,
+    found_scratch: Vec<usize>,
+    near_ids_scratch: Vec<(f32, String)>,
+    vis_missing_scratch: Vec<String>,
 }
 
 impl Default for PageStore {
@@ -130,6 +135,9 @@ impl Default for PageStore {
             last_view: None,
             speed: (0.0, 0.0),
             scratch: Vec::new(),
+            found_scratch: Vec::new(),
+            near_ids_scratch: Vec::new(),
+            vis_missing_scratch: Vec::new(),
         }
     }
 }
@@ -165,9 +173,9 @@ impl PageStore {
         let bounds = scene.bounds();
         let bytes = scene.gpu_bytes();
         let old_held = self.scenes.remove(id);
-        let (old_caps, old_gpu) = match old_held {
-            Some(h) => (h.caps, h.gpu),
-            None => (0, None),
+        let (old_caps, old_gpu, old_gpu_bytes) = match old_held {
+            Some(h) => (h.caps, h.gpu, h.gpu_bytes),
+            None => (0, None, 0),
         };
         self.caps_total = self.caps_total.saturating_sub(old_caps) + caps;
         self.scenes.insert(
@@ -177,6 +185,8 @@ impl PageStore {
                 gpu: old_gpu,
                 caps,
                 bytes,
+                gpu_bytes: old_gpu_bytes,
+                gpu_dirty: true,
                 bounds,
                 seen: 0,
                 used: 0,
@@ -203,12 +213,14 @@ impl PageStore {
 
     fn drop_scene(&mut self, id: &str) -> bool {
         match self.scenes.remove(id) {
-            Some(h) => {
-                self.caps_total -= h.caps;
-                if h.gpu.is_some() {
-                    self.gpu_bytes -= h.bytes;
+            Some(mut h) => {
+                self.caps_total = self.caps_total.saturating_sub(h.caps);
+                if h.gpu.take().is_some() {
+                    self.gpu_bytes = self.gpu_bytes.saturating_sub(h.gpu_bytes);
                     self.resident.remove(id);
                 }
+                h.gpu_bytes = 0;
+                h.gpu_dirty = true;
                 true
             }
             None => false,
@@ -324,13 +336,22 @@ impl PageStore {
         let Some(h) = self.scenes.get_mut(id) else {
             return false;
         };
+        if h.gpu.is_some() && !h.gpu_dirty {
+            return true;
+        }
         if let Some(ref mut gpu) = h.gpu {
             if canvas.update(gpu, &h.cpu) {
+                h.gpu_dirty = false;
                 return true;
             }
         }
-        h.gpu = Some(canvas.upload(&h.cpu));
-        self.gpu_bytes += h.bytes;
+        self.gpu_bytes = self.gpu_bytes.saturating_sub(h.gpu_bytes);
+        let new_gpu = canvas.upload(&h.cpu);
+        let allocated = new_gpu.allocated_bytes();
+        h.gpu = Some(new_gpu);
+        h.gpu_bytes = allocated;
+        h.gpu_dirty = false;
+        self.gpu_bytes += allocated;
         self.resident.insert(id.to_string());
         self.uploads += 1;
         true
@@ -392,7 +413,7 @@ impl PageStore {
         if let Some(view) = Self::view_of(surface, size) {
             self.tick += 1;
             let vis = std::mem::take(&mut self.visible);
-            self.near_pass(canvas, frame, view, &vis);
+            self.near_pass(canvas, frame, view, &vis, false);
             self.visible = vis;
             self.evict();
         }
@@ -438,9 +459,11 @@ impl PageStore {
         }
         // In view: uploaded now; what is not here yet waits (its paper is drawn).
         let now = Instant::now();
+        let uploads_before = self.uploads;
         let mut visible: HashSet<String> = HashSet::with_capacity(order.len());
         let mut caps = 0;
-        let mut vis_missing = Vec::new();
+        let mut vis_missing = std::mem::take(&mut self.vis_missing_scratch);
+        vis_missing.clear();
         for &i in &order {
             let id = &frame.pages[i].page;
             if id.is_empty() {
@@ -486,11 +509,12 @@ impl PageStore {
         self.drawn = order.len();
         self.drawn_caps = caps;
         self.visible_missing = vis_missing.len();
+        let uploaded_in_view = self.uploads > uploads_before;
         let vis = std::mem::take(&mut self.visible);
-        self.near_pass(canvas, frame, view, &vis);
+        self.near_pass(canvas, frame, view, &vis, uploaded_in_view);
         self.visible = vis;
         // Those in view are asked for first.
-        let mut missing = vis_missing;
+        let mut missing = vis_missing.clone();
         for id in &self.missing {
             if !missing.contains(id) {
                 missing.push(id.clone());
@@ -500,6 +524,7 @@ impl PageStore {
             self.missing = missing;
             self.near_gen += 1;
         }
+        self.vis_missing_scratch = vis_missing;
         self.evict();
         let out = order.clone();
         self.scratch = order;
@@ -521,14 +546,17 @@ impl PageStore {
         frame: &FrameSpec,
         view: Rect,
         visible: &HashSet<String>,
+        skip_prefetch: bool,
     ) {
         let near = self.near_of(view);
         let tick = self.tick;
-        let mut found = Vec::new();
+        let mut found = std::mem::take(&mut self.found_scratch);
+        found.clear();
         self.index.tree.query(&near, &mut found);
         let (cx, cy) = ((view[0] + view[2]) / 2.0, (view[1] + view[3]) / 2.0);
-        let mut ids: Vec<(f32, String)> = Vec::new();
-        for i in found {
+        let mut ids = std::mem::take(&mut self.near_ids_scratch);
+        ids.clear();
+        for i in found.iter().copied() {
             let id = &frame.pages[i].page;
             if id.is_empty() {
                 continue;
@@ -552,7 +580,11 @@ impl PageStore {
         }
         ids.sort_by(|a, b| a.0.total_cmp(&b.0));
         ids.dedup_by(|a, b| a.1 == b.1);
-        let mut budget = PREFETCH_BYTES_PER_FRAME;
+        let mut budget = if skip_prefetch {
+            0
+        } else {
+            PREFETCH_BYTES_PER_FRAME
+        };
         let mut missing = Vec::new();
         for (_, id) in &ids {
             match self.scenes.get_mut(id) {
@@ -570,7 +602,7 @@ impl PageStore {
                 None => missing.push(id.clone()),
             }
         }
-        let near: Vec<String> = ids.into_iter().map(|(_, id)| id).collect();
+        let near: Vec<String> = ids.iter().map(|(_, id)| id.clone()).collect();
         if near != self.near {
             self.near = near;
             self.near_gen += 1;
@@ -579,6 +611,8 @@ impl PageStore {
             self.missing = missing;
             self.near_gen += 1;
         }
+        self.found_scratch = found;
+        self.near_ids_scratch = ids;
     }
 
     /// Beyond the budget: the least recently used scenes leave the GPU (they stay on the CPU),
@@ -604,7 +638,9 @@ impl PageStore {
             }
             if let Some(h) = self.scenes.get_mut(&id) {
                 if h.gpu.take().is_some() {
-                    self.gpu_bytes -= h.bytes;
+                    self.gpu_bytes = self.gpu_bytes.saturating_sub(h.gpu_bytes);
+                    h.gpu_bytes = 0;
+                    h.gpu_dirty = true;
                     self.evictions += 1;
                 }
             }

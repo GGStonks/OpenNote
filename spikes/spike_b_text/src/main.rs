@@ -61,12 +61,21 @@ fn main() {
     for span in &block.spans {
         let len = span.text.len();
         let range = offset..(offset + len);
-        builder.push(parley::style::StyleProperty::FontSize(span.font_size), range.clone());
+        builder.push(
+            parley::style::StyleProperty::FontSize(span.font_size),
+            range.clone(),
+        );
         if span.bold {
-            builder.push(parley::style::StyleProperty::FontWeight(parley::style::FontWeight::BOLD), range.clone());
+            builder.push(
+                parley::style::StyleProperty::FontWeight(parley::style::FontWeight::BOLD),
+                range.clone(),
+            );
         }
         if span.italic {
-            builder.push(parley::style::StyleProperty::FontStyle(parley::style::FontStyle::Italic), range.clone());
+            builder.push(
+                parley::style::StyleProperty::FontStyle(parley::style::FontStyle::Italic),
+                range.clone(),
+            );
         }
         offset += len;
     }
@@ -78,7 +87,11 @@ fn main() {
     println!("[parley] Layout computed in {:?}", layout_time);
     println!("         Full text: \"{}\"", full_text);
     println!("         Total lines: {}", layout.len());
-    println!("         Bounds: width={:.1}, height={:.1}", layout.width(), layout.height());
+    println!(
+        "         Bounds: width={:.1}, height={:.1}",
+        layout.width(),
+        layout.height()
+    );
 
     println!("\n=== IME / Scribble / TextInput Risk Assessment ===");
     println!("1. Pure custom UITextInput (iOS) & InputConnection (Android):");
@@ -87,15 +100,18 @@ fn main() {
     println!("2. Active-Overlay Architecture (Recommended):");
     println!("   - View mode: Fast, sharp, unified GPU text layout with parley.");
     println!("   - Edit mode: Floating native UITextView / EditText transparently positioned");
-    println!("     over the active text box. Receives 100% native Scribble, dictation, autocorrect,");
-    println!("     and IME without implementing hundreds of lines of fragile low-level protocol glue.");
+    println!(
+        "     over the active text box. Receives 100% native Scribble, dictation, autocorrect,"
+    );
+    println!(
+        "     and IME without implementing hundreds of lines of fragile low-level protocol glue."
+    );
     println!("   - When editing finishes: text & spans commit back to parley GPU buffer.");
     println!("Verdict: Active-Overlay Architecture eliminates the highest risk identified in the roadmap.");
 }
 
 #[cfg(test)]
 mod tests {
-    
 
     #[test]
     fn test_parley_layout_builder() {

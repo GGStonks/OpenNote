@@ -1,7 +1,5 @@
 pub use ink::RectBounds;
-use ink::{
-    catmull_rom_beziers, flatten_beziers, inside_polygon, stroke_bounds, stroke_geometry,
-};
+use ink::{catmull_rom_beziers, flatten_beziers, inside_polygon, stroke_bounds, stroke_geometry};
 use model::{NotePage, Point, ShapeKind, Stroke};
 use nib::geometry::XY;
 
@@ -105,7 +103,8 @@ fn segments_meet(a: XY, b: XY, c: XY, d: XY) -> bool {
 fn stroke_touches_rect(s: &Stroke, rect: &RectBounds) -> bool {
     let b = stroke_bounds(s);
     // Two-stage AABB culling: fast reject if stroke bounding box doesn't touch rect
-    if b.max_x < rect.min_x || b.min_x > rect.max_x || b.max_y < rect.min_y || b.min_y > rect.max_y {
+    if b.max_x < rect.min_x || b.min_x > rect.max_x || b.max_y < rect.min_y || b.min_y > rect.max_y
+    {
         return false;
     }
 
@@ -161,9 +160,11 @@ pub struct Rect {
 pub fn text_height(t: &model::TextBlock) -> f64 {
     let pad = t.padding.unwrap_or([0.0, 0.0]);
     let chars_per_line = ((t.width - 2.0 * pad[0]) / (t.font_size * 0.5)).max(8.0);
-    let lines: usize = t.text.split('\n').map(|l| {
-        (l.len() as f64 / chars_per_line).ceil().max(1.0) as usize
-    }).sum();
+    let lines: usize = t
+        .text
+        .split('\n')
+        .map(|l| (l.len() as f64 / chars_per_line).ceil().max(1.0) as usize)
+        .sum();
     let line_height = t.line_height.unwrap_or(1.35);
     let calculated = (lines as f64) * t.font_size * line_height + 2.0 * pad[1];
     calculated.max(t.height.unwrap_or(0.0))
@@ -188,12 +189,7 @@ pub fn box_corners(x: f64, y: f64, w: f64, h: f64, deg: f64) -> [XY; 4] {
     let s = rad.sin();
     let hw = w * 0.5;
     let hh = h * 0.5;
-    let offsets = [
-        (-hw, -hh),
-        (hw, -hh),
-        (hw, hh),
-        (-hw, hh),
-    ];
+    let offsets = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)];
     let mut out = [XY { x: 0.0, y: 0.0 }; 4];
     for (i, (u, v)) in offsets.iter().enumerate() {
         out[i] = XY {
@@ -396,16 +392,34 @@ pub fn points_in_lasso(lasso: &[XY], item_points: &[Point]) -> bool {
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
     for p in lasso {
-        if p.x < min_x { min_x = p.x; }
-        if p.y < min_y { min_y = p.y; }
-        if p.x > max_x { max_x = p.x; }
-        if p.y > max_y { max_y = p.y; }
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
     }
-    let lasso_rect = RectBounds { min_x, min_y, max_x, max_y };
+    let lasso_rect = RectBounds {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    };
 
     let mut inside_count = 0;
     for p in item_points {
-        if p.x >= min_x && p.x <= max_x && p.y >= min_y && p.y <= max_y && inside_polygon(p.x, p.y, lasso) {
+        if p.x >= min_x
+            && p.x <= max_x
+            && p.y >= min_y
+            && p.y <= max_y
+            && inside_polygon(p.x, p.y, lasso)
+        {
             inside_count += 1;
         }
     }
@@ -416,8 +430,14 @@ pub fn points_in_lasso(lasso: &[XY], item_points: &[Point]) -> bool {
     // Check segment intersections
     let n = item_points.len();
     for i in 1..n {
-        let a = XY { x: item_points[i - 1].x, y: item_points[i - 1].y };
-        let b = XY { x: item_points[i].x, y: item_points[i].y };
+        let a = XY {
+            x: item_points[i - 1].x,
+            y: item_points[i - 1].y,
+        };
+        let b = XY {
+            x: item_points[i].x,
+            y: item_points[i].y,
+        };
         if a.x.max(b.x) < lasso_rect.min_x
             || a.x.min(b.x) > lasso_rect.max_x
             || a.y.max(b.y) < lasso_rect.min_y
@@ -457,12 +477,25 @@ pub fn lasso_select_page(lasso: &[XY], page: &NotePage) -> PageSelection {
     let mut max_x = f64::NEG_INFINITY;
     let mut max_y = f64::NEG_INFINITY;
     for p in &poly {
-        if p.x < min_x { min_x = p.x; }
-        if p.y < min_y { min_y = p.y; }
-        if p.x > max_x { max_x = p.x; }
-        if p.y > max_y { max_y = p.y; }
+        if p.x < min_x {
+            min_x = p.x;
+        }
+        if p.y < min_y {
+            min_y = p.y;
+        }
+        if p.x > max_x {
+            max_x = p.x;
+        }
+        if p.y > max_y {
+            max_y = p.y;
+        }
     }
-    let lasso_rect = RectBounds { min_x, min_y, max_x, max_y };
+    let lasso_rect = RectBounds {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+    };
 
     let mut stroke_ids = Vec::new();
     for s in &page.strokes {
@@ -534,10 +567,18 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
     for s in &page.strokes {
         if id_set.contains(s.id.as_str()) {
             let b = stroke_bounds(s);
-            if b.min_x < min_x { min_x = b.min_x; }
-            if b.min_y < min_y { min_y = b.min_y; }
-            if b.max_x > max_x { max_x = b.max_x; }
-            if b.max_y > max_y { max_y = b.max_y; }
+            if b.min_x < min_x {
+                min_x = b.min_x;
+            }
+            if b.min_y < min_y {
+                min_y = b.min_y;
+            }
+            if b.max_x > max_x {
+                max_x = b.max_x;
+            }
+            if b.max_y > max_y {
+                max_y = b.max_y;
+            }
             found = true;
         }
     }
@@ -546,10 +587,18 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
         if id_set.contains(b.id.as_str()) {
             let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
             for c in &cs {
-                if c.x < min_x { min_x = c.x; }
-                if c.y < min_y { min_y = c.y; }
-                if c.x > max_x { max_x = c.x; }
-                if c.y > max_y { max_y = c.y; }
+                if c.x < min_x {
+                    min_x = c.x;
+                }
+                if c.y < min_y {
+                    min_y = c.y;
+                }
+                if c.x > max_x {
+                    max_x = c.x;
+                }
+                if c.y > max_y {
+                    max_y = c.y;
+                }
             }
             found = true;
         }
@@ -561,10 +610,18 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
                 let h = text_height(b);
                 let cs = box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
                 for c in &cs {
-                    if c.x < min_x { min_x = c.x; }
-                    if c.y < min_y { min_y = c.y; }
-                    if c.x > max_x { max_x = c.x; }
-                    if c.y > max_y { max_y = c.y; }
+                    if c.x < min_x {
+                        min_x = c.x;
+                    }
+                    if c.y < min_y {
+                        min_y = c.y;
+                    }
+                    if c.x > max_x {
+                        max_x = c.x;
+                    }
+                    if c.y > max_y {
+                        max_y = c.y;
+                    }
                 }
                 found = true;
             }
@@ -576,10 +633,18 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
             if id_set.contains(b.id.as_str()) {
                 let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
                 for c in &cs {
-                    if c.x < min_x { min_x = c.x; }
-                    if c.y < min_y { min_y = c.y; }
-                    if c.x > max_x { max_x = c.x; }
-                    if c.y > max_y { max_y = c.y; }
+                    if c.x < min_x {
+                        min_x = c.x;
+                    }
+                    if c.y < min_y {
+                        min_y = c.y;
+                    }
+                    if c.x > max_x {
+                        max_x = c.x;
+                    }
+                    if c.y > max_y {
+                        max_y = c.y;
+                    }
                 }
                 found = true;
             }
@@ -587,7 +652,12 @@ pub fn selection_bounds(page: &NotePage, ids: &[String]) -> Option<RectBounds> {
     }
 
     if found {
-        Some(RectBounds { min_x, min_y, max_x, max_y })
+        Some(RectBounds {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
     } else {
         None
     }
@@ -607,7 +677,15 @@ pub fn transform_stroke(
     if s.shape_kind == Some(ShapeKind::Circle) && (scale_x - scale_y).abs() > 1e-4 {
         s.shape_kind = Some(ShapeKind::Ellipse);
     }
-    transform_points(&mut s.points, dx, dy, scale_x, scale_y, rotation_rad, origin);
+    transform_points(
+        &mut s.points,
+        dx,
+        dy,
+        scale_x,
+        scale_y,
+        rotation_rad,
+        origin,
+    );
 }
 
 pub fn transform_points(
@@ -650,24 +728,31 @@ pub fn transform_page_items(
     }
     let cos_r = rotation_rad.cos();
     let sin_r = rotation_rad.sin();
-    let transform_box = |x: &mut f64, y: &mut f64, w: &mut f64, h: &mut f64, rot: &mut Option<f64>| {
-        let cx = *x + *w * 0.5;
-        let cy = *y + *h * 0.5;
-        let rcx = (cx - origin.x) * scale_x;
-        let rcy = (cy - origin.y) * scale_y;
-        let new_cx = origin.x + (rcx * cos_r - rcy * sin_r) + dx;
-        let new_cy = origin.y + (rcx * sin_r + rcy * cos_r) + dy;
-        *w *= scale_x.abs();
-        *h *= scale_y.abs();
-        *x = new_cx - *w * 0.5;
-        *y = new_cy - *h * 0.5;
-        let cur_deg = rot.unwrap_or(0.0);
-        *rot = Some(cur_deg + rotation_rad.to_degrees());
-    };
+    let transform_box =
+        |x: &mut f64, y: &mut f64, w: &mut f64, h: &mut f64, rot: &mut Option<f64>| {
+            let cx = *x + *w * 0.5;
+            let cy = *y + *h * 0.5;
+            let rcx = (cx - origin.x) * scale_x;
+            let rcy = (cy - origin.y) * scale_y;
+            let new_cx = origin.x + (rcx * cos_r - rcy * sin_r) + dx;
+            let new_cy = origin.y + (rcx * sin_r + rcy * cos_r) + dy;
+            *w *= scale_x.abs();
+            *h *= scale_y.abs();
+            *x = new_cx - *w * 0.5;
+            *y = new_cy - *h * 0.5;
+            let cur_deg = rot.unwrap_or(0.0);
+            *rot = Some(cur_deg + rotation_rad.to_degrees());
+        };
 
     for b in &mut page.latex_blocks {
         if id_set.contains(b.id.as_str()) {
-            transform_box(&mut b.x, &mut b.y, &mut b.width, &mut b.height, &mut b.rotation);
+            transform_box(
+                &mut b.x,
+                &mut b.y,
+                &mut b.width,
+                &mut b.height,
+                &mut b.rotation,
+            );
         }
     }
     if let Some(text_blocks) = &mut page.text_blocks {
@@ -682,7 +767,13 @@ pub fn transform_page_items(
     if let Some(image_blocks) = &mut page.image_blocks {
         for b in image_blocks {
             if id_set.contains(b.id.as_str()) {
-                transform_box(&mut b.x, &mut b.y, &mut b.width, &mut b.height, &mut b.rotation);
+                transform_box(
+                    &mut b.x,
+                    &mut b.y,
+                    &mut b.width,
+                    &mut b.height,
+                    &mut b.rotation,
+                );
             }
         }
     }
@@ -702,13 +793,22 @@ pub fn compute_bounds(
     let mut max_y = f64::NEG_INFINITY;
 
     let mut add = |x0: f64, y0: f64, x1: f64, y1: f64| {
-        if x0 < min_x { min_x = x0; }
-        if y0 < min_y { min_y = y0; }
-        if x1 > max_x { max_x = x1; }
-        if y1 > max_y { max_y = y1; }
+        if x0 < min_x {
+            min_x = x0;
+        }
+        if y0 < min_y {
+            min_y = y0;
+        }
+        if x1 > max_x {
+            max_x = x1;
+        }
+        if y1 > max_y {
+            max_y = y1;
+        }
     };
 
-    let stroke_set: std::collections::HashSet<&str> = stroke_ids.iter().map(|s| s.as_str()).collect();
+    let stroke_set: std::collections::HashSet<&str> =
+        stroke_ids.iter().map(|s| s.as_str()).collect();
     for s in &page.strokes {
         if stroke_set.contains(s.id.as_str()) {
             let b = ink::stroke_bounds(s);
@@ -727,7 +827,8 @@ pub fn compute_bounds(
     }
 
     if let Some(text_blocks) = &page.text_blocks {
-        let text_set: std::collections::HashSet<&str> = text_ids.iter().map(|s| s.as_str()).collect();
+        let text_set: std::collections::HashSet<&str> =
+            text_ids.iter().map(|s| s.as_str()).collect();
         for b in text_blocks {
             if text_set.contains(b.id.as_str()) {
                 let h = text_height(b);
@@ -740,7 +841,8 @@ pub fn compute_bounds(
     }
 
     if let Some(image_blocks) = &page.image_blocks {
-        let img_set: std::collections::HashSet<&str> = image_ids.iter().map(|s| s.as_str()).collect();
+        let img_set: std::collections::HashSet<&str> =
+            image_ids.iter().map(|s| s.as_str()).collect();
         for b in image_blocks {
             if img_set.contains(b.id.as_str()) {
                 let cs = box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
@@ -817,12 +919,20 @@ pub fn transform_selection(
         }
     };
 
-    let transform_box = |bx: f64, by: f64, w: f64, h: f64, nw: f64, nh: f64, rot_deg: Option<f64>| -> (f64, f64, Option<f64>) {
+    let transform_box = |bx: f64,
+                         by: f64,
+                         w: f64,
+                         h: f64,
+                         nw: f64,
+                         nh: f64,
+                         rot_deg: Option<f64>|
+     -> (f64, f64, Option<f64>) {
         let center = transform_pt(bx + w * 0.5, by + h * 0.5);
         (center.x - nw * 0.5, center.y - nh * 0.5, turned(rot_deg))
     };
 
-    let stroke_set: std::collections::HashSet<&str> = stroke_ids.iter().map(|s| s.as_str()).collect();
+    let stroke_set: std::collections::HashSet<&str> =
+        stroke_ids.iter().map(|s| s.as_str()).collect();
     let latex_set: std::collections::HashSet<&str> = latex_ids.iter().map(|s| s.as_str()).collect();
     let text_set: std::collections::HashSet<&str> = text_ids.iter().map(|s| s.as_str()).collect();
     let image_set: std::collections::HashSet<&str> = image_ids.iter().map(|s| s.as_str()).collect();
@@ -831,90 +941,113 @@ pub fn transform_selection(
 
     let mut out_page = page.clone();
 
-    out_page.strokes = page.strokes.iter().map(|st| {
-        if !stroke_set.contains(st.id.as_str()) {
-            return st.clone();
-        }
-        let mut out = st.clone();
-        if (ink_scale - 1.0).abs() > 1e-9 {
-            out.width *= ink_scale.sqrt();
-        }
-        out.points = st.points.iter().map(|p| {
-            let transformed = transform_pt(p.x, p.y);
-            let mut pt = p.clone();
-            pt.x = transformed.x;
-            pt.y = transformed.y;
-            pt
-        }).collect();
-        if st.shape_kind == Some(model::ShapeKind::Circle) && (fx - fy).abs() > 1e-4 {
-            out.shape_kind = Some(model::ShapeKind::Ellipse);
-        }
-        out.rotation = turned(st.rotation);
-        out
-    }).collect();
-
-    out_page.latex_blocks = page.latex_blocks.iter().map(|b| {
-        if !latex_set.contains(b.id.as_str()) {
-            return b.clone();
-        }
-        let nw = b.width * fx;
-        let nh = b.height * fy;
-        let (nx, ny, nrot) = transform_box(b.x, b.y, b.width, b.height, nw, nh, b.rotation);
-        let mut out = b.clone();
-        out.x = nx;
-        out.y = ny;
-        out.width = nw;
-        out.height = nh;
-        out.scale = Some(b.scale.unwrap_or(1.0) * fy);
-        if (fx - fy).abs() > 1e-9 {
-            out.stretch_x = Some(b.stretch_x.unwrap_or(1.0) * (fx / fy));
-        }
-        out.rotation = nrot;
-        out
-    }).collect();
-
-    if let Some(text_blocks) = &page.text_blocks {
-        out_page.text_blocks = Some(text_blocks.iter().map(|t| {
-            if !text_set.contains(t.id.as_str()) {
-                return t.clone();
+    out_page.strokes = page
+        .strokes
+        .iter()
+        .map(|st| {
+            if !stroke_set.contains(st.id.as_str()) {
+                return st.clone();
             }
-            let th = text_height(t);
-            let nw = t.width * fx;
-            let nh = th * fy;
-            let (nx, ny, nrot) = transform_box(t.x, t.y, t.width, th, nw, nh, t.rotation);
-            let mut out = t.clone();
-            out.x = nx;
-            out.y = ny;
-            out.width = nw;
-            if (fx - fy).abs() < 1e-9 {
-                out.font_size *= fx;
-                if let Some(h) = t.height {
-                    out.height = Some(h * fx);
-                }
-            } else {
-                out.height = Some(nh);
+            let mut out = st.clone();
+            if (ink_scale - 1.0).abs() > 1e-9 {
+                out.width *= ink_scale.sqrt();
             }
-            out.rotation = nrot;
+            out.points = st
+                .points
+                .iter()
+                .map(|p| {
+                    let transformed = transform_pt(p.x, p.y);
+                    let mut pt = p.clone();
+                    pt.x = transformed.x;
+                    pt.y = transformed.y;
+                    pt
+                })
+                .collect();
+            if st.shape_kind == Some(model::ShapeKind::Circle) && (fx - fy).abs() > 1e-4 {
+                out.shape_kind = Some(model::ShapeKind::Ellipse);
+            }
+            out.rotation = turned(st.rotation);
             out
-        }).collect());
-    }
+        })
+        .collect();
 
-    if let Some(image_blocks) = &page.image_blocks {
-        out_page.image_blocks = Some(image_blocks.iter().map(|im| {
-            if !image_set.contains(im.id.as_str()) {
-                return im.clone();
+    out_page.latex_blocks = page
+        .latex_blocks
+        .iter()
+        .map(|b| {
+            if !latex_set.contains(b.id.as_str()) {
+                return b.clone();
             }
-            let nw = im.width * fx;
-            let nh = im.height * fy;
-            let (nx, ny, nrot) = transform_box(im.x, im.y, im.width, im.height, nw, nh, im.rotation);
-            let mut out = im.clone();
+            let nw = b.width * fx;
+            let nh = b.height * fy;
+            let (nx, ny, nrot) = transform_box(b.x, b.y, b.width, b.height, nw, nh, b.rotation);
+            let mut out = b.clone();
             out.x = nx;
             out.y = ny;
             out.width = nw;
             out.height = nh;
+            out.scale = Some(b.scale.unwrap_or(1.0) * fy);
+            if (fx - fy).abs() > 1e-9 {
+                out.stretch_x = Some(b.stretch_x.unwrap_or(1.0) * (fx / fy));
+            }
             out.rotation = nrot;
             out
-        }).collect());
+        })
+        .collect();
+
+    if let Some(text_blocks) = &page.text_blocks {
+        out_page.text_blocks = Some(
+            text_blocks
+                .iter()
+                .map(|t| {
+                    if !text_set.contains(t.id.as_str()) {
+                        return t.clone();
+                    }
+                    let th = text_height(t);
+                    let nw = t.width * fx;
+                    let nh = th * fy;
+                    let (nx, ny, nrot) = transform_box(t.x, t.y, t.width, th, nw, nh, t.rotation);
+                    let mut out = t.clone();
+                    out.x = nx;
+                    out.y = ny;
+                    out.width = nw;
+                    if (fx - fy).abs() < 1e-9 {
+                        out.font_size *= fx;
+                        if let Some(h) = t.height {
+                            out.height = Some(h * fx);
+                        }
+                    } else {
+                        out.height = Some(nh);
+                    }
+                    out.rotation = nrot;
+                    out
+                })
+                .collect(),
+        );
+    }
+
+    if let Some(image_blocks) = &page.image_blocks {
+        out_page.image_blocks = Some(
+            image_blocks
+                .iter()
+                .map(|im| {
+                    if !image_set.contains(im.id.as_str()) {
+                        return im.clone();
+                    }
+                    let nw = im.width * fx;
+                    let nh = im.height * fy;
+                    let (nx, ny, nrot) =
+                        transform_box(im.x, im.y, im.width, im.height, nw, nh, im.rotation);
+                    let mut out = im.clone();
+                    out.x = nx;
+                    out.y = ny;
+                    out.width = nw;
+                    out.height = nh;
+                    out.rotation = nrot;
+                    out
+                })
+                .collect(),
+        );
     }
 
     out_page

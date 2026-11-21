@@ -1,4 +1,4 @@
-use nib::nib::{DEFAULT_NIB, NibModeler};
+use nib::nib::{NibModeler, DEFAULT_NIB};
 
 #[test]
 fn test_has_force_trims_trailing_zero_pressure() {

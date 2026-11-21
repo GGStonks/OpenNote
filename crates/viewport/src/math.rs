@@ -135,6 +135,71 @@ pub fn release_velocity(h: &[(f64, f64, f64)]) -> (f64, f64) {
     }
 }
 
+/// `releaseVelocityWeighted`: computes release velocity (px/ms) over the last 40-60 ms of samples
+/// using exponentially-weighted linear regression. Falls back to endpoint delta if not enough samples.
+pub fn release_velocity_weighted(h: &[(f64, f64, f64)]) -> (f64, f64) {
+    if h.len() < 2 {
+        return (0.0, 0.0);
+    }
+    let last = match h.last() {
+        Some(l) => l,
+        None => return (0.0, 0.0),
+    };
+    let window_ms = 60.0;
+    let t_min = last.2 - window_ms;
+
+    let window: Vec<&(f64, f64, f64)> = h.iter().filter(|p| p.2 >= t_min).collect();
+    if window.len() < 3 {
+        return release_velocity(h);
+    }
+
+    let dt_span = last.2 - window.first().unwrap().2;
+    if dt_span < VELOCITY_MIN_DT {
+        return (0.0, 0.0);
+    }
+
+    let tau = 30.0;
+    let mut sum_w = 0.0;
+    let mut sum_wt = 0.0;
+    let mut sum_wx = 0.0;
+    let mut sum_wy = 0.0;
+
+    for p in &window {
+        let w = (-(last.2 - p.2) / tau).exp();
+        sum_w += w;
+        sum_wt += w * p.2;
+        sum_wx += w * p.0;
+        sum_wy += w * p.1;
+    }
+
+    let mean_t = sum_wt / sum_w;
+    let mean_x = sum_wx / sum_w;
+    let mean_y = sum_wy / sum_w;
+
+    let mut var_t = 0.0;
+    let mut cov_tx = 0.0;
+    let mut cov_ty = 0.0;
+
+    for p in &window {
+        let w = (-(last.2 - p.2) / tau).exp();
+        let dt = p.2 - mean_t;
+        var_t += w * dt * dt;
+        cov_tx += w * dt * (p.0 - mean_x);
+        cov_ty += w * dt * (p.1 - mean_y);
+    }
+
+    if var_t > 1e-4 {
+        let vx = cov_tx / var_t;
+        let vy = cov_ty / var_t;
+        (
+            if vx.abs() > 1e-6 { vx } else { 0.0 },
+            if vy.abs() > 1e-6 { vy } else { 0.0 },
+        )
+    } else {
+        release_velocity(h)
+    }
+}
+
 /// `cubicBezier`: CSS cubic-bezier(x1, y1, x2, y2) at progress `u`.
 pub fn cubic_bezier(x1: f64, y1: f64, x2: f64, y2: f64, u: f64) -> f64 {
     if u <= 0.0 {

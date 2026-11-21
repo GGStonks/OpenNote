@@ -193,7 +193,8 @@ impl LayoutShell {
         let min_pad = tokens.spacing.reading_column_padding_min_h; // 24.0 lp
 
         let (content_w, offset_x, padding_h) = if available_w > max_reading_w + min_pad * 2.0 {
-            let pad = ((available_w - max_reading_w) / 4.0).clamp(min_pad, tokens.spacing.reading_column_padding_max_h);
+            let pad = ((available_w - max_reading_w) / 4.0)
+                .clamp(min_pad, tokens.spacing.reading_column_padding_max_h);
             let w = max_reading_w;
             let start_x = if mode == LayoutMode::Mobile {
                 (available_w - w) / 2.0

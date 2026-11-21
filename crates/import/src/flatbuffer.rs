@@ -142,12 +142,7 @@ impl<'a> FlatBuffer<'a> {
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
             let x = f32::from_le_bytes([b[i * 8], b[i * 8 + 1], b[i * 8 + 2], b[i * 8 + 3]]);
-            let y = f32::from_le_bytes([
-                b[i * 8 + 4],
-                b[i * 8 + 5],
-                b[i * 8 + 6],
-                b[i * 8 + 7],
-            ]);
+            let y = f32::from_le_bytes([b[i * 8 + 4], b[i * 8 + 5], b[i * 8 + 6], b[i * 8 + 7]]);
             out.push([x, y]);
         }
         out
@@ -202,4 +197,3 @@ pub fn half(bits: u16) -> f64 {
     }
     sign * (1.0 + f / 1024.0) * 2.0f64.powi(e - 15)
 }
-

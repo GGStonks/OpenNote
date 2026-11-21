@@ -80,4 +80,3 @@ fn test_flatbuffer_reader() {
     assert_eq!(fb.u16(4), Some(42));
     assert_eq!(fb.root(), Some(12));
 }
-

@@ -49,10 +49,38 @@ fn wave_points(y0: f64, amp: f64, n: usize) -> Vec<Point> {
 
 fn rect_points(x: f64, y: f64, w: f64, h: f64) -> Vec<Point> {
     vec![
-        Point { x, y, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-        Point { x: x + w, y, pressure: 0.5, t: Some(10.0), alt: None, az: None },
-        Point { x: x + w, y: y + h, pressure: 0.5, t: Some(20.0), alt: None, az: None },
-        Point { x, y: y + h, pressure: 0.5, t: Some(30.0), alt: None, az: None },
+        Point {
+            x,
+            y,
+            pressure: 0.5,
+            t: Some(0.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: x + w,
+            y,
+            pressure: 0.5,
+            t: Some(10.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: x + w,
+            y: y + h,
+            pressure: 0.5,
+            t: Some(20.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x,
+            y: y + h,
+            pressure: 0.5,
+            t: Some(30.0),
+            alt: None,
+            az: None,
+        },
     ]
 }
 
@@ -94,7 +122,7 @@ fn test_glcompare_all_16_cases_rasterize() {
     let mut trans_pts = Vec::new();
     for i in 0..80 {
         let t = i as f64 / 79.0;
-        let ang = t * 6.28 * 1.5;
+        let ang = t * std::f64::consts::TAU * 1.5;
         trans_pts.push(Point {
             x: 40.0 + 120.0 * ang.cos(),
             y: 40.0 + 25.0 * ang.sin(),
@@ -112,8 +140,22 @@ fn test_glcompare_all_16_cases_rasterize() {
     s_dash.is_shape = Some(true);
     s_dash.line_style = Some(LineStyle::Dashed);
     s_dash.points = vec![
-        Point { x: 20.0, y: 20.0, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-        Point { x: 180.0, y: 60.0, pressure: 0.5, t: Some(10.0), alt: None, az: None },
+        Point {
+            x: 20.0,
+            y: 20.0,
+            pressure: 0.5,
+            t: Some(0.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 180.0,
+            y: 60.0,
+            pressure: 0.5,
+            t: Some(10.0),
+            alt: None,
+            az: None,
+        },
     ];
     cases.push(("dashed", s_dash));
 
@@ -122,8 +164,22 @@ fn test_glcompare_all_16_cases_rasterize() {
     s_dot.is_shape = Some(true);
     s_dot.line_style = Some(LineStyle::Dotted);
     s_dot.points = vec![
-        Point { x: 20.0, y: 60.0, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-        Point { x: 180.0, y: 20.0, pressure: 0.5, t: Some(10.0), alt: None, az: None },
+        Point {
+            x: 20.0,
+            y: 60.0,
+            pressure: 0.5,
+            t: Some(0.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 180.0,
+            y: 20.0,
+            pressure: 0.5,
+            t: Some(10.0),
+            alt: None,
+            az: None,
+        },
     ];
     cases.push(("dotted", s_dot));
 
@@ -152,8 +208,22 @@ fn test_glcompare_all_16_cases_rasterize() {
     s_arr.arrow = Some(true);
     s_arr.width = 3.0;
     s_arr.points = vec![
-        Point { x: 20.0, y: 40.0, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-        Point { x: 170.0, y: 40.0, pressure: 0.5, t: Some(10.0), alt: None, az: None },
+        Point {
+            x: 20.0,
+            y: 40.0,
+            pressure: 0.5,
+            t: Some(0.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 170.0,
+            y: 40.0,
+            pressure: 0.5,
+            t: Some(10.0),
+            alt: None,
+            az: None,
+        },
     ];
     cases.push(("arrow", s_arr));
 
@@ -191,10 +261,38 @@ fn test_glcompare_all_16_cases_rasterize() {
     s_curve.fill = Some(FillType::Solid);
     s_curve.color = "#7c3aed".to_string();
     s_curve.points = vec![
-        Point { x: 30.0, y: 40.0, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-        Point { x: 100.0, y: 10.0, pressure: 0.5, t: Some(10.0), alt: None, az: None },
-        Point { x: 170.0, y: 40.0, pressure: 0.5, t: Some(20.0), alt: None, az: None },
-        Point { x: 100.0, y: 70.0, pressure: 0.5, t: Some(30.0), alt: None, az: None },
+        Point {
+            x: 30.0,
+            y: 40.0,
+            pressure: 0.5,
+            t: Some(0.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 100.0,
+            y: 10.0,
+            pressure: 0.5,
+            t: Some(10.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 170.0,
+            y: 40.0,
+            pressure: 0.5,
+            t: Some(20.0),
+            alt: None,
+            az: None,
+        },
+        Point {
+            x: 100.0,
+            y: 70.0,
+            pressure: 0.5,
+            t: Some(30.0),
+            alt: None,
+            az: None,
+        },
     ];
     cases.push(("curve", s_curve));
 
@@ -203,9 +301,14 @@ fn test_glcompare_all_16_cases_rasterize() {
     s_point.is_shape = Some(true);
     s_point.shape_kind = Some(ShapeKind::Point);
     s_point.width = 3.0;
-    s_point.points = vec![
-        Point { x: 100.0, y: 40.0, pressure: 0.5, t: Some(0.0), alt: None, az: None },
-    ];
+    s_point.points = vec![Point {
+        x: 100.0,
+        y: 40.0,
+        pressure: 0.5,
+        t: Some(0.0),
+        alt: None,
+        az: None,
+    }];
     cases.push(("point", s_point));
 
     for (name, stroke) in cases {
@@ -238,7 +341,10 @@ fn test_glcompare_all_16_cases_rasterize() {
                     k
                 );
             }
-            println!("[OK] case '{}' scale x{}: {} pixels inked", name, k, inked_count);
+            println!(
+                "[OK] case '{}' scale x{}: {} pixels inked",
+                name, k, inked_count
+            );
         }
     }
 }
@@ -336,5 +442,8 @@ fn test_thumbnail_and_selection_glow() {
             }
         }
     }
-    assert!(glow_inked > 0, "Glow pass should produce soft blurred pixels");
+    assert!(
+        glow_inked > 0,
+        "Glow pass should produce soft blurred pixels"
+    );
 }

@@ -11,7 +11,9 @@ struct ToolkitEvaluation {
 }
 
 fn main() {
-    println!("=== Spike F: UI Toolkit Evaluation (iOS, Android, Desktop + Embedded wgpu Canvas) ===");
+    println!(
+        "=== Spike F: UI Toolkit Evaluation (iOS, Android, Desktop + Embedded wgpu Canvas) ==="
+    );
 
     let toolkits = vec![
         ToolkitEvaluation {
@@ -56,10 +58,16 @@ fn main() {
         },
     ];
 
-    println!("{:<22} {:<10} {:<16} {:<18}", "Toolkit", "Score", "License", "Mobile Maturity");
+    println!(
+        "{:<22} {:<10} {:<16} {:<18}",
+        "Toolkit", "Score", "License", "Mobile Maturity"
+    );
     println!("{}", "-".repeat(70));
     for tk in &toolkits {
-        println!("{:<22} {:<10.1} {:<16} {:<18}", tk.name, tk.score, tk.license, tk.ios_android_maturity);
+        println!(
+            "{:<22} {:<10.1} {:<16} {:<18}",
+            tk.name, tk.score, tk.license, tk.ios_android_maturity
+        );
         println!("  Pros: {}", tk.pros);
         println!("  Cons: {}\n", tk.cons);
     }

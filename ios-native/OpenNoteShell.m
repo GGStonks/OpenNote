@@ -1453,6 +1453,7 @@ static void ONStartCanvasThread(void) {
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     metalLayer.framebufferOnly = YES;
     metalLayer.opaque = YES;
+    metalLayer.presentsWithTransaction = NO;
     uint32_t w = (uint32_t)(sz.width * scale);
     uint32_t h = (uint32_t)(sz.height * scale);
     if (!self.canvasAttached) self.canvasAttached = opennote_canvas_attach_layer((__bridge void *)metalLayer, w, h);

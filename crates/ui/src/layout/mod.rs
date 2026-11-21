@@ -4,6 +4,6 @@
 pub mod shell;
 
 pub use shell::{
-    BottomBarGeometry, FabGeometry, LayoutMode, LayoutShell, ReadingColumnGeometry,
-    ShellGeometry, SidebarState,
+    BottomBarGeometry, FabGeometry, LayoutMode, LayoutShell, ReadingColumnGeometry, ShellGeometry,
+    SidebarState,
 };

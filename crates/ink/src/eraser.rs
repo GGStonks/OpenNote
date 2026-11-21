@@ -1,7 +1,7 @@
-use nib::geometry::JsMath;
 use crate::geometry::stroke_geometry;
 use crate::spline::{catmull_rom_beziers, flatten_beziers};
 use model::{ModeledKind, Point, ShapeKind, Stroke};
+use nib::geometry::JsMath;
 use nib::geometry::XY;
 use std::collections::HashSet;
 
@@ -101,15 +101,27 @@ pub fn stroke_hit_test(s: &Stroke, x: f64, y: f64, radius: f64) -> bool {
         return (pts[0].x - x).js_hypot(pts[0].y - y) <= r + extra;
     }
     for i in 1..pts.len() {
-        let a = XY { x: pts[i - 1].x, y: pts[i - 1].y };
-        let b = XY { x: pts[i].x, y: pts[i].y };
+        let a = XY {
+            x: pts[i - 1].x,
+            y: pts[i - 1].y,
+        };
+        let b = XY {
+            x: pts[i].x,
+            y: pts[i].y,
+        };
         if dist_to_segment(x, y, a, b) <= r {
             return true;
         }
     }
     if s.closed.unwrap_or(false) && pts.len() > 2 {
-        let last = XY { x: pts.last().unwrap().x, y: pts.last().unwrap().y };
-        let first = XY { x: pts[0].x, y: pts[0].y };
+        let last = XY {
+            x: pts.last().unwrap().x,
+            y: pts.last().unwrap().y,
+        };
+        let first = XY {
+            x: pts[0].x,
+            y: pts[0].y,
+        };
         if dist_to_segment(x, y, last, first) <= r {
             return true;
         }
@@ -518,10 +530,10 @@ pub fn erase_strokes_partial(
         let mut along = 0.0;
 
         let flush = |cur_points: &mut Vec<Point>,
-                         cur_first: bool,
-                         cur_end: isize,
-                         cur_from: f64,
-                         runs: &mut Vec<HRun>| {
+                     cur_first: bool,
+                     cur_end: isize,
+                     cur_from: f64,
+                     runs: &mut Vec<HRun>| {
             if cur_points.len() >= 2 {
                 runs.push(HRun {
                     points: cur_points.clone(),

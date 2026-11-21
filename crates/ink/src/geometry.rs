@@ -1,7 +1,7 @@
-use nib::geometry::JsMath;
 use crate::ink_width::ink_widths;
 use crate::smoothing::settled_smooth;
 use model::{ModeledKind, PenStyle, Point, Stroke};
+use nib::geometry::JsMath;
 use nib::geometry::{thin_modeled_indices, InkPoint, ModeledPoint, XY};
 use nib::nib::nib_stroke;
 use std::f64::consts::PI;
@@ -16,7 +16,12 @@ pub struct InkGeometry {
 pub fn stroke_width(s: &Stroke) -> f64 {
     let pen_style = s.pen_style.unwrap_or(PenStyle::Fountain);
     let is_shape = s.is_shape.unwrap_or(false);
-    s.width * (if pen_style == PenStyle::Ballpoint && !is_shape { 1.5 } else { 1.4 })
+    s.width
+        * (if pen_style == PenStyle::Ballpoint && !is_shape {
+            1.5
+        } else {
+            1.4
+        })
 }
 
 pub fn is_variable_width(s: &Stroke) -> bool {

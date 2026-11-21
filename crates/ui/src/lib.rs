@@ -16,8 +16,8 @@ pub use formatting::{
 };
 pub use icons::{get_icon, VectorIcon};
 pub use layout::{
-    BottomBarGeometry, FabGeometry, LayoutMode, LayoutShell, ReadingColumnGeometry,
-    ShellGeometry, SidebarState,
+    BottomBarGeometry, FabGeometry, LayoutMode, LayoutShell, ReadingColumnGeometry, ShellGeometry,
+    SidebarState,
 };
 pub use theme::{
     hct_to_rgb, rgb_to_hct, Color, ColorTokens, CornerRadii, MaterialLayer, PlatformKind,
@@ -129,7 +129,9 @@ mod tests {
         let palette = TonalPalette::from_seed(seed);
 
         // Tone 100 should be near pure white
-        assert!(palette.tone_100.r > 0.95 && palette.tone_100.g > 0.95 && palette.tone_100.b > 0.95);
+        assert!(
+            palette.tone_100.r > 0.95 && palette.tone_100.g > 0.95 && palette.tone_100.b > 0.95
+        );
         // Tone 4 should be deep near-black surface_container_lowest
         assert!(palette.tone_4.r < 0.15 && palette.tone_4.g < 0.15 && palette.tone_4.b < 0.15);
         // Tone 40 should be richer than tone 90
@@ -141,7 +143,10 @@ mod tests {
         let tokens = ThemeTokens::apple_light();
         let shell = LayoutShell::new(1440.0, 900.0);
 
-        assert_eq!(shell.compute_geometry(&tokens).layout_mode, LayoutMode::Desktop);
+        assert_eq!(
+            shell.compute_geometry(&tokens).layout_mode,
+            LayoutMode::Desktop
+        );
 
         let geom = shell.compute_geometry(&tokens);
         // Reading column width must never exceed 680.0 lp
@@ -164,7 +169,9 @@ mod tests {
         assert!(geom.sidebar_bounds.is_none());
 
         // Floating Liquid Glass bottom action capsule pill
-        let bar = geom.bottom_bar.expect("Apple mobile should have bottom action pill");
+        let bar = geom
+            .bottom_bar
+            .expect("Apple mobile should have bottom action pill");
         assert!(bar.is_liquid_glass);
         assert_eq!(bar.height, 56.0);
         assert_eq!(bar.corner_radius, 999.0);
@@ -180,7 +187,9 @@ mod tests {
         assert_eq!(geom.layout_mode, LayoutMode::Mobile);
 
         // Tonal floating toolbar + Expressive FAB
-        let bar = geom.bottom_bar.expect("Android mobile should have tonal bottom bar");
+        let bar = geom
+            .bottom_bar
+            .expect("Android mobile should have tonal bottom bar");
         assert!(!bar.is_liquid_glass);
         assert_eq!(bar.height, 64.0);
 
@@ -215,7 +224,7 @@ mod tests {
         pill.update_selection(Some(&active_sel), 1200.0, 800.0, &tokens);
         assert!(pill.is_visible);
         assert_eq!(pill.bounds[3], 40.0); // height 40 lp
-        // Positioned above selection (300 - 40 - 8 = 252)
+                                          // Positioned above selection (300 - 40 - 8 = 252)
         assert_eq!(pill.bounds[1], 252.0);
 
         // 4. Clearing selection dismisses pill

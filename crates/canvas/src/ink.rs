@@ -17,7 +17,7 @@ use renderer::builder::FillMode;
 use renderer::color::Rgba;
 
 #[derive(Clone, Copy)]
-struct SeeItem {
+pub(crate) struct SeeItem {
     s0: usize,
     s1: usize,
     first: u32,
@@ -26,7 +26,7 @@ struct SeeItem {
 }
 
 #[derive(Clone, Copy)]
-struct FlatItem {
+pub(crate) struct FlatItem {
     s0: usize,
     first: u32,
     count: u32,
@@ -37,6 +37,7 @@ struct FlatItem {
 #[derive(Clone, Copy)]
 struct Views<'a> {
     target: &'a wgpu::TextureView,
+    #[allow(dead_code)]
     stencil: &'a wgpu::TextureView,
     cov_view: &'a wgpu::TextureView,
     cov_bg: &'a wgpu::BindGroup,
@@ -151,6 +152,7 @@ impl GpuCanvas {
         self.slots_scratch.clear();
         self.rects_scratch.clear();
         self.plan_scratch.clear();
+        self.slot_of_scratch.clear();
         self.bytes_scratch.clear();
 
         // Slots the uniform buffer can hold on this device.
@@ -191,7 +193,7 @@ impl GpuCanvas {
             if paper_slot.is_none() {
                 self.rects_scratch.extend([[0.0f32; 2]; 6]);
             }
-            let mut slot_of: Vec<(usize, usize)> = Vec::with_capacity(page.scene.ops.len());
+            let slot_offset = self.slot_of_scratch.len();
             for op in &page.scene.ops {
                 match op {
                     Op::See { col, .. } => {
@@ -200,7 +202,8 @@ impl GpuCanvas {
                             col: premul(*col),
                             ..base
                         });
-                        slot_of.push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
+                        self.slot_of_scratch
+                            .push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
                     }
                     Op::Fill { mode, col, .. } => {
                         self.slots_scratch.push(base);
@@ -212,14 +215,16 @@ impl GpuCanvas {
                             },
                             ..base
                         });
-                        slot_of.push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
+                        self.slot_of_scratch
+                            .push((self.slots_scratch.len() - 2, self.slots_scratch.len() - 1));
                     }
                     Op::Flat { col, .. } => {
                         self.slots_scratch.push(Uniforms {
                             col: premul(*col),
                             ..base
                         });
-                        slot_of.push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
+                        self.slot_of_scratch
+                            .push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
                     }
                     Op::Image {
                         quad,
@@ -235,11 +240,14 @@ impl GpuCanvas {
                             i_rot: [cs, sn, opacity.clamp(0.0, 1.0), 1.0 / base.px],
                             ..base
                         });
-                        slot_of.push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
+                        self.slot_of_scratch
+                            .push((self.slots_scratch.len() - 1, self.slots_scratch.len() - 1));
                     }
                 }
             }
-            self.plan_scratch.push((pi, paper_slot, slot_of));
+            let slot_count = self.slot_of_scratch.len() - slot_offset;
+            self.plan_scratch
+                .push((pi, paper_slot, slot_offset, slot_count));
         }
         if self.slots_scratch.is_empty() {
             self.slots_scratch.push(Uniforms::zeroed());
@@ -306,18 +314,11 @@ impl GpuCanvas {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: stencil,
-                    depth_ops: None,
-                    stencil_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                }),
+                depth_stencil_attachment: None,
                 ..Default::default()
             });
             let mut paper_bound = false;
-            for (pi, paper_slot, _) in &self.plan_scratch {
+            for (pi, paper_slot, _, _) in &self.plan_scratch {
                 let page = &frame.pages[*pi];
                 if let (Some(ps), Some(paper)) = (paper_slot, page.paper) {
                     let bx = PageBox {
@@ -329,7 +330,6 @@ impl GpuCanvas {
                     if let Some(sc) = self.scissor(&bx, &page.tf, 0.5) {
                         if !paper_bound {
                             p.set_bind_group(1, cov_bg, &[]);
-                            p.set_stencil_reference(0);
                             p.set_pipeline(&self.paper);
                             p.set_vertex_buffer(0, self.rects.slice(..));
                             paper_bound = true;
@@ -347,12 +347,15 @@ impl GpuCanvas {
             !(a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1)
         };
 
-        let mut see_batch: Vec<SeeItem> = Vec::new();
-        let mut flat_batch: Vec<FlatItem> = Vec::new();
+        let mut see_batch = std::mem::take(&mut self.see_batch_scratch);
+        see_batch.clear();
+        let mut flat_batch = std::mem::take(&mut self.flat_batch_scratch);
+        flat_batch.clear();
 
-        for (pi, _, slot_of) in &self.plan_scratch {
+        for (pi, _, slot_offset, slot_count) in &self.plan_scratch {
             let page = &frame.pages[*pi];
             let (tf, scene) = (&page.tf, page.scene);
+            let slot_of = &self.slot_of_scratch[*slot_offset..*slot_offset + *slot_count];
 
             for (i, op) in scene.ops.iter().enumerate() {
                 let (s0, s1) = slot_of[i];
@@ -409,7 +412,29 @@ impl GpuCanvas {
                         let Some(sc) = self.scissor(bx, tf, 1.5) else {
                             continue;
                         };
-                        let mut p = target_pass(&mut enc, target, stencil, "fill", true);
+                        let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("fill"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: stencil,
+                                    depth_ops: None,
+                                    stencil_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(0),
+                                        store: wgpu::StoreOp::Discard,
+                                    }),
+                                },
+                            ),
+                            ..Default::default()
+                        });
                         p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
                         p.set_bind_group(1, cov_bg, &[]);
                         p.set_stencil_reference(0);
@@ -472,13 +497,25 @@ impl GpuCanvas {
                         else {
                             continue;
                         };
-                        let mut p = target_pass(&mut enc, target, stencil, "picture", false);
+                        let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("picture"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: target,
+                                resolve_target: None,
+                                depth_slice: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            ..Default::default()
+                        });
                         p.set_scissor_rect(sc.0, sc.1, sc.2, sc.3);
                         p.set_pipeline(&self.picture);
                         p.set_bind_group(0, &self.uniform_bg, &[offset(s0)]);
                         p.set_bind_group(1, cov_bg, &[]);
                         p.set_bind_group(2, bg, &[]);
-                        p.set_stencil_reference(0);
                         p.draw(0..4, 0..1);
                     }
                 }
@@ -490,6 +527,8 @@ impl GpuCanvas {
                 self.flush_flat(&mut enc, &views, scene.flat.slice(..), &mut flat_batch);
             }
         }
+        self.see_batch_scratch = see_batch;
+        self.flat_batch_scratch = flat_batch;
         self.queue.submit([enc.finish()]);
         true
     }
@@ -504,16 +543,11 @@ impl GpuCanvas {
     ) {
         let Views {
             target,
-            stencil,
             cov_view,
             cov_bg,
+            ..
         } = *views;
-        let (uniform_bg, zero_cov, caps_cov, compose) = (
-            &self.uniform_bg,
-            &self.zero_cov,
-            &self.caps_cov,
-            &self.compose,
-        );
+        let (uniform_bg, caps_cov, compose) = (&self.uniform_bg, &self.caps_cov, &self.compose);
         if batch.is_empty() {
             return;
         }
@@ -526,7 +560,7 @@ impl GpuCanvas {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -537,17 +571,27 @@ impl GpuCanvas {
             for item in batch.iter() {
                 p.set_scissor_rect(item.sc.0, item.sc.1, item.sc.2, item.sc.3);
                 p.set_bind_group(0, uniform_bg, &[offset(item.s0)]);
-                p.set_pipeline(zero_cov);
-                p.draw(0..3, 0..1);
                 p.set_pipeline(caps_cov);
                 p.draw(0..4, item.first..item.first + item.count);
             }
         }
         {
-            let mut p = target_pass(enc, target, stencil, "compose-batch", false);
+            let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("compose-batch"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
             p.set_pipeline(compose);
             p.set_bind_group(1, cov_bg, &[]);
-            p.set_stencil_reference(0);
             for item in batch.iter() {
                 p.set_scissor_rect(item.sc.0, item.sc.1, item.sc.2, item.sc.3);
                 p.set_bind_group(0, uniform_bg, &[offset(item.s1)]);
@@ -565,20 +609,27 @@ impl GpuCanvas {
         scene_flat: wgpu::BufferSlice,
         batch: &mut Vec<FlatItem>,
     ) {
-        let Views {
-            target,
-            stencil,
-            cov_bg,
-            ..
-        } = *views;
+        let Views { target, cov_bg, .. } = *views;
         let (uniform_bg, flat_plain) = (&self.uniform_bg, &self.flat_plain);
         if batch.is_empty() {
             return;
         }
         let offset = |slot: usize| (slot as u64 * UNIFORM_STRIDE) as u32;
-        let mut p = target_pass(enc, target, stencil, "flat-batch", false);
+        let mut p = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("flat-batch"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            ..Default::default()
+        });
         p.set_bind_group(1, cov_bg, &[]);
-        p.set_stencil_reference(0);
         p.set_pipeline(flat_plain);
         p.set_vertex_buffer(0, scene_flat);
         for item in batch.drain(..) {
@@ -587,39 +638,4 @@ impl GpuCanvas {
             p.draw(item.first..item.first + item.count, 0..1);
         }
     }
-}
-
-/// A pass on the target that keeps what is drawn (and the stencil, unless `clear_stencil`).
-fn target_pass<'a>(
-    enc: &'a mut wgpu::CommandEncoder,
-    target: &'a wgpu::TextureView,
-    stencil: &'a wgpu::TextureView,
-    label: &'static str,
-    clear_stencil: bool,
-) -> wgpu::RenderPass<'a> {
-    enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some(label),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: target,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: stencil,
-            depth_ops: None,
-            stencil_ops: Some(wgpu::Operations {
-                load: if clear_stencil {
-                    wgpu::LoadOp::Clear(0)
-                } else {
-                    wgpu::LoadOp::Load
-                },
-                store: wgpu::StoreOp::Store,
-            }),
-        }),
-        ..Default::default()
-    })
 }

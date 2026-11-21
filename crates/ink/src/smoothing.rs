@@ -1,5 +1,5 @@
-use nib::geometry::JsMath;
 use crate::ink_width::WIDTH_AHEAD;
+use nib::geometry::JsMath;
 use nib::geometry::{ModeledPoint, XY};
 use std::f64::consts::PI;
 
@@ -155,4 +155,3 @@ pub fn settled_smooth(pts: &[ModeledPoint]) -> Vec<ModeledPoint> {
     let idx = settled_index(&xy);
     smooth_line(pts, idx, 0)
 }
-

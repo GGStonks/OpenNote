@@ -148,7 +148,11 @@ impl Renderer {
         let oy = self.origin_y;
 
         // Compute stroke bounding box
-        let pad = if is_glow { glow_radius * 2.5 } else { 2.0 / scale };
+        let pad = if is_glow {
+            glow_radius * 2.5
+        } else {
+            2.0 / scale
+        };
         let mut min_bx = f64::INFINITY;
         let mut min_by = f64::INFINITY;
         let mut max_bx = f64::NEG_INFINITY;
@@ -438,6 +442,11 @@ pub fn render_page_thumbnail(page: &NotePage, width: usize, height: usize) -> Pi
     }
 
     let default_color = PaperColor::Name("white".to_string());
-    renderer.render_scene(&mut buf, &ops, Some(PaperStyle::Ruled), Some(&default_color));
+    renderer.render_scene(
+        &mut buf,
+        &ops,
+        Some(PaperStyle::Ruled),
+        Some(&default_color),
+    );
     buf
 }

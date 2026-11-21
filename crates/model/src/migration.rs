@@ -48,7 +48,10 @@ pub fn migrate_note(mut n: NoteDocument) -> NoteDocument {
     };
 
     if n.schema_version == Some(3) || n.schema_version == Some(SCHEMA_VERSION) {
-        let mut surface = source.into_iter().next().unwrap_or_else(|| create_blank_page(1));
+        let mut surface = source
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| create_blank_page(1));
         surface.page_number = 1;
         let sheets = letter_sheets_for(&surface);
         NoteDocument {

@@ -63,4 +63,3 @@ pub fn render_document_page(
     let p = &pages[page_index];
     Some(render_page(&p.page, &p.box_.setup, scale))
 }
-

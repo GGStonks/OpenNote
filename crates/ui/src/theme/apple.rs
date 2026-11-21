@@ -11,15 +11,18 @@ impl ThemeTokens {
             variant: ThemeVariant::Light,
             colors: ColorTokens {
                 // Content Layer strictly opaque for maximum legibility: warm paper #FAF9F6
-                canvas_background: Color::from_hex("#FAF9F6").unwrap_or(Color::rgb(0.98, 0.976, 0.965)),
+                canvas_background: Color::from_hex("#FAF9F6")
+                    .unwrap_or(Color::rgb(0.98, 0.976, 0.965)),
                 // Subtle warm off-white for sidebars / lists
-                surface_background: Color::from_hex("#F3F2EE").unwrap_or(Color::rgb(0.953, 0.949, 0.933)),
+                surface_background: Color::from_hex("#F3F2EE")
+                    .unwrap_or(Color::rgb(0.953, 0.949, 0.933)),
                 // Elevated surface
                 surface_elevated: Color::from_hex("#FFFFFF").unwrap_or(Color::WHITE),
                 // Primary high-craft ink #1D1D1F
                 text_primary: Color::from_hex("#1D1D1F").unwrap_or(Color::rgb(0.114, 0.114, 0.122)),
                 // Secondary metadata #6E6E73
-                text_secondary: Color::from_hex("#6E6E73").unwrap_or(Color::rgb(0.431, 0.431, 0.451)),
+                text_secondary: Color::from_hex("#6E6E73")
+                    .unwrap_or(Color::rgb(0.431, 0.431, 0.451)),
                 // Muted caption
                 text_muted: Color::from_hex("#8E8E93").unwrap_or(Color::rgb(0.557, 0.557, 0.576)),
                 // Restrained Warm Amber accent #D97706 (optional Apple Blue #007AFF)
@@ -89,14 +92,18 @@ impl ThemeTokens {
             variant: ThemeVariant::Dark,
             colors: ColorTokens {
                 // Content Layer strictly opaque: deep warm charcoal #161618
-                canvas_background: Color::from_hex("#161618").unwrap_or(Color::rgb(0.086, 0.086, 0.094)),
+                canvas_background: Color::from_hex("#161618")
+                    .unwrap_or(Color::rgb(0.086, 0.086, 0.094)),
                 // Elevated charcoal
-                surface_background: Color::from_hex("#1C1C1E").unwrap_or(Color::rgb(0.11, 0.11, 0.118)),
-                surface_elevated: Color::from_hex("#2C2C2E").unwrap_or(Color::rgb(0.173, 0.173, 0.18)),
+                surface_background: Color::from_hex("#1C1C1E")
+                    .unwrap_or(Color::rgb(0.11, 0.11, 0.118)),
+                surface_elevated: Color::from_hex("#2C2C2E")
+                    .unwrap_or(Color::rgb(0.173, 0.173, 0.18)),
                 // Primary ink #F5F5F7
                 text_primary: Color::from_hex("#F5F5F7").unwrap_or(Color::rgb(0.96, 0.96, 0.969)),
                 // Secondary metadata #6E6E73 (or lightened for dark #8E8E93)
-                text_secondary: Color::from_hex("#8E8E93").unwrap_or(Color::rgb(0.557, 0.557, 0.576)),
+                text_secondary: Color::from_hex("#8E8E93")
+                    .unwrap_or(Color::rgb(0.557, 0.557, 0.576)),
                 text_muted: Color::from_hex("#636366").unwrap_or(Color::rgb(0.388, 0.388, 0.4)),
                 // Warm Amber accent #F59E0B in dark mode
                 accent: Color::from_hex("#F59E0B").unwrap_or(Color::rgb(0.961, 0.62, 0.043)),

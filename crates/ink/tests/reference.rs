@@ -19,13 +19,16 @@ const TOL: f64 = 1e-4;
 
 fn reference() -> Value {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/ink.json");
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("{path} is missing: run `npm run bench:rustref -- bench/rust-ref/ink.json`"));
+    let text = std::fs::read_to_string(path).unwrap_or_else(|_| {
+        panic!("{path} is missing: run `npm run bench:rustref -- bench/rust-ref/ink.json`")
+    });
     serde_json::from_str(&text).expect("ink.json is JSON")
 }
 
 fn nums(v: &Value) -> Vec<f64> {
-    v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()
+    v.as_array()
+        .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect())
+        .unwrap_or_default()
 }
 
 /// [x, y, t, pressure] rows.
@@ -73,18 +76,37 @@ fn geometry_diff(name: &str, g: &ink::InkGeometry, want: &Value) -> Vec<String> 
     let g4: Vec<[f64; 4]> = g.pts.iter().map(|p| [p.x, p.y, p.t, p.p]).collect();
     out.extend(diff_rows(&format!("{name}.pts"), &g4, &rows(&want["pts"])));
     match (&g.widths, want["widths"].is_null()) {
-        (Some(w), false) => out.extend(diff_nums(&format!("{name}.widths"), w, &nums(&want["widths"]))),
+        (Some(w), false) => out.extend(diff_nums(
+            &format!("{name}.widths"),
+            w,
+            &nums(&want["widths"]),
+        )),
         (None, true) => {}
-        (got, _) => out.push(format!("{name}.widths: present {}, want {}", got.is_some(), !want["widths"].is_null())),
+        (got, _) => out.push(format!(
+            "{name}.widths: present {}, want {}",
+            got.is_some(),
+            !want["widths"].is_null()
+        )),
     }
-    out.extend(diff_nums(&format!("{name}.width"), &[g.width], &[want["width"].as_f64().unwrap()]));
+    out.extend(diff_nums(
+        &format!("{name}.width"),
+        &[g.width],
+        &[want["width"].as_f64().unwrap()],
+    ));
     out
 }
 
 /// A reference stroke as another kind (`kinds.<name>.stroke`), its own points or the stroke's.
 fn kind_of(base: &Value, k: &Value) -> Stroke {
-    let src = if k["points"].is_null() { &base["points"] } else { &k["points"] };
-    let points: Vec<Value> = rows(src).iter().map(|p| json!({ "x": p[0], "y": p[1], "t": p[2], "pressure": p[3] })).collect();
+    let src = if k["points"].is_null() {
+        &base["points"]
+    } else {
+        &k["points"]
+    };
+    let points: Vec<Value> = rows(src)
+        .iter()
+        .map(|p| json!({ "x": p[0], "y": p[1], "t": p[2], "pressure": p[3] }))
+        .collect();
     let mut s = json!({ "id": "ref", "tool": k["tool"], "color": "#000", "width": base["width"], "opacity": 1, "lineStyle": "solid", "points": points });
     for (key, v) in [("penStyle", &k["penStyle"]), ("modeled", &k["modeled"])] {
         if !v.is_null() {
@@ -131,28 +153,52 @@ fn ink_pipeline_matches_typescript() {
         };
 
         let eng = engine_points(&s);
-        let eng4: Vec<[f64; 4]> = eng.iter().map(|p| [p.x, p.y, p.t.unwrap_or(0.0), p.pressure]).collect();
+        let eng4: Vec<[f64; 4]> = eng
+            .iter()
+            .map(|p| [p.x, p.y, p.t.unwrap_or(0.0), p.pressure])
+            .collect();
         fail(diff_rows("enginePoints", &eng4, &rows(&r["enginePoints"])));
 
-        let ink: Vec<InkPoint> = eng.iter().map(|p| InkPoint { x: p.x, y: p.y, pressure: p.pressure, t: p.t }).collect();
+        let ink: Vec<InkPoint> = eng
+            .iter()
+            .map(|p| InkPoint {
+                x: p.x,
+                y: p.y,
+                pressure: p.pressure,
+                t: p.t,
+            })
+            .collect();
         let modeled = nib_stroke(&ink);
         let m4: Vec<[f64; 4]> = modeled.iter().map(|p| [p.x, p.y, p.t, p.p]).collect();
         fail(diff_rows("modeled", &m4, &rows(&r["modeled"])));
 
         if !r["widths"].is_null() {
-            fail(diff_nums("widths", &ink_widths(&modeled, stroke_width(&s)), &nums(&r["widths"])));
+            fail(diff_nums(
+                "widths",
+                &ink_widths(&modeled, stroke_width(&s)),
+                &nums(&r["widths"]),
+            ));
         }
 
         for m in geometry_diff("geometry", &stroke_geometry(&s), &r["geometry"]) {
             fail(Some(m));
         }
         for (name, k) in r["kinds"].as_object().expect("kinds") {
-            for m in geometry_diff(&format!("kinds.{name}"), &stroke_geometry(&kind_of(r, &k["stroke"])), &k["geometry"]) {
+            for m in geometry_diff(
+                &format!("kinds.{name}"),
+                &stroke_geometry(&kind_of(r, &k["stroke"])),
+                &k["geometry"],
+            ) {
                 fail(Some(m));
             }
         }
     }
-    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 /// The densifier and the live line (SmoothLiveStroke, what the shells draw while the pen is down),
@@ -175,20 +221,65 @@ fn densify_and_live_line_match_typescript() {
         let mut points: Vec<[f64; 4]> = Vec::new();
         for (k, s) in r["samples"].as_array().unwrap().iter().enumerate() {
             let s = nums(s); // x, y, t, force
-            let pt = Point { x: s[0], y: s[1], pressure: if s[3] > 0.0 { s[3] } else { 0.0 }, t: Some(s[2]), ..Default::default() };
+            let pt = Point {
+                x: s[0],
+                y: s[1],
+                pressure: if s[3] > 0.0 { s[3] } else { 0.0 },
+                t: Some(s[2]),
+                ..Default::default()
+            };
             for q in dens.push(pt) {
                 points.push([q.x, q.y, q.t.unwrap_or(s[2]), q.pressure]);
-                live.add(q.x, q.y, q.t.unwrap_or(s[2]), if real { q.pressure } else { 0.5 });
+                live.add(
+                    q.x,
+                    q.y,
+                    q.t.unwrap_or(s[2]),
+                    if real { q.pressure } else { 0.5 },
+                );
             }
-            for l in lives.iter().filter(|l| l["sample"].as_u64() == Some(k as u64)) {
+            for l in lives
+                .iter()
+                .filter(|l| l["sample"].as_u64() == Some(k as u64))
+            {
                 let line = live.line(width, l["variable"].as_bool().unwrap());
-                let xy = |v: &[nib::geometry::ModeledPoint]| -> Vec<[f64; 4]> { v.iter().map(|p| [p.x, p.y, 0.0, 0.0]).collect() };
-                let want_xy = |v: &Value| -> Vec<[f64; 4]> { v.as_array().unwrap().iter().map(|p| { let p = nums(p); [p[0], p[1], 0.0, 0.0] }).collect() };
+                let xy = |v: &[nib::geometry::ModeledPoint]| -> Vec<[f64; 4]> {
+                    v.iter().map(|p| [p.x, p.y, 0.0, 0.0]).collect()
+                };
+                let want_xy = |v: &Value| -> Vec<[f64; 4]> {
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|p| {
+                            let p = nums(p);
+                            [p[0], p[1], 0.0, 0.0]
+                        })
+                        .collect()
+                };
                 let tag = format!("live@{k}");
-                failures.extend(diff_rows(&format!("{tag}.final"), &xy(&line.final_pts), &want_xy(&l["final"])).map(|m| format!("{id}: {m}")));
-                failures.extend(diff_nums(&format!("{tag}.finalW"), &line.final_w, &nums(&l["finalW"])).map(|m| format!("{id}: {m}")));
-                failures.extend(diff_rows(&format!("{tag}.rest"), &xy(&line.rest_pts), &want_xy(&l["rest"])).map(|m| format!("{id}: {m}")));
-                failures.extend(diff_nums(&format!("{tag}.restW"), &line.rest_w, &nums(&l["restW"])).map(|m| format!("{id}: {m}")));
+                failures.extend(
+                    diff_rows(
+                        &format!("{tag}.final"),
+                        &xy(&line.final_pts),
+                        &want_xy(&l["final"]),
+                    )
+                    .map(|m| format!("{id}: {m}")),
+                );
+                failures.extend(
+                    diff_nums(&format!("{tag}.finalW"), &line.final_w, &nums(&l["finalW"]))
+                        .map(|m| format!("{id}: {m}")),
+                );
+                failures.extend(
+                    diff_rows(
+                        &format!("{tag}.rest"),
+                        &xy(&line.rest_pts),
+                        &want_xy(&l["rest"]),
+                    )
+                    .map(|m| format!("{id}: {m}")),
+                );
+                failures.extend(
+                    diff_nums(&format!("{tag}.restW"), &line.rest_w, &nums(&l["restW"]))
+                        .map(|m| format!("{id}: {m}")),
+                );
                 compared += 1;
             }
         }
@@ -200,18 +291,30 @@ fn densify_and_live_line_match_typescript() {
         failures.extend(diff_rows("densified", &points, &want).map(|m| format!("{id}: {m}")));
     }
     assert!(compared >= 60, "only {compared} live lines compared");
-    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 fn diff_xy(name: &str, got: &[XY], want: &Value) -> Option<String> {
     let want_arr = want.as_array()?;
     if got.len() != want_arr.len() {
-        return Some(format!("{name}: {} points, want {}", got.len(), want_arr.len()));
+        return Some(format!(
+            "{name}: {} points, want {}",
+            got.len(),
+            want_arr.len()
+        ));
     }
     for (i, (g, w)) in got.iter().zip(want_arr).enumerate() {
         let p = nums(w);
         if (g.x - p[0]).abs() > TOL || (g.y - p[1]).abs() > TOL {
-            return Some(format!("{name}: pt {i} ({}, {}), want ({}, {})", g.x, g.y, p[0], p[1]));
+            return Some(format!(
+                "{name}: pt {i} ({}, {}), want ({}, {})",
+                g.x, g.y, p[0], p[1]
+            ));
         }
     }
     None
@@ -240,25 +343,44 @@ fn dash_runs_match_typescript() {
                 (Some(runs), false) => {
                     let want_runs = want.as_array().unwrap();
                     if runs.len() != want_runs.len() {
-                        failures.push(format!("{id}.{name}: {} runs, want {}", runs.len(), want_runs.len()));
+                        failures.push(format!(
+                            "{id}.{name}: {} runs, want {}",
+                            runs.len(),
+                            want_runs.len()
+                        ));
                         continue;
                     }
                     for (k, (run, wrun)) in runs.iter().zip(want_runs).enumerate() {
-                        if let Some(m) = diff_xy(&format!("{name}[{k}].pts"), &run.pts, &wrun["pts"]) {
+                        if let Some(m) =
+                            diff_xy(&format!("{name}[{k}].pts"), &run.pts, &wrun["pts"])
+                        {
                             failures.push(format!("{id}: {m}"));
                         }
-                        if let Some(m) = diff_nums(&format!("{name}[{k}].radii"), &run.radii, &nums(&wrun["radii"])) {
+                        if let Some(m) = diff_nums(
+                            &format!("{name}[{k}].radii"),
+                            &run.radii,
+                            &nums(&wrun["radii"]),
+                        ) {
                             failures.push(format!("{id}: {m}"));
                         }
                     }
                 }
                 (got, _) => {
-                    failures.push(format!("{id}.{name}: got is_some={}, want null={}", got.is_some(), want.is_null()));
+                    failures.push(format!(
+                        "{id}.{name}: got is_some={}, want null={}",
+                        got.is_some(),
+                        want.is_null()
+                    ));
                 }
             }
         }
     }
-    assert!(failures.is_empty(), "{} dash differences:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} dash differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
 
 #[test]
@@ -289,26 +411,50 @@ fn eraser_matches_typescript() {
 
         let want_solid = &r["eraser"];
         if changed_solid != want_solid["changed"].as_bool().unwrap() {
-            failures.push(format!("{id}.eraser: changed={}, want {}", changed_solid, want_solid["changed"]));
+            failures.push(format!(
+                "{id}.eraser: changed={}, want {}",
+                changed_solid, want_solid["changed"]
+            ));
         }
         let want_solid_pieces = want_solid["pieces"].as_array().unwrap();
         if pieces_solid.len() != want_solid_pieces.len() {
-            failures.push(format!("{id}.eraser: {} pieces, want {}", pieces_solid.len(), want_solid_pieces.len()));
+            failures.push(format!(
+                "{id}.eraser: {} pieces, want {}",
+                pieces_solid.len(),
+                want_solid_pieces.len()
+            ));
         } else {
             for (k, (p, wp)) in pieces_solid.iter().zip(want_solid_pieces).enumerate() {
-                let pts: Vec<[f64; 4]> = p.points.iter().map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure]).collect();
-                if let Some(m) = diff_rows(&format!("eraser[{k}].points"), &pts, &rows(&wp["points"])) {
+                let pts: Vec<[f64; 4]> = p
+                    .points
+                    .iter()
+                    .map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure])
+                    .collect();
+                if let Some(m) =
+                    diff_rows(&format!("eraser[{k}].points"), &pts, &rows(&wp["points"]))
+                {
                     failures.push(format!("{id}: {m}"));
                 }
-                let got_modeled = p.modeled.map(|m| serde_json::to_string(&m).unwrap().trim_matches('"').to_string());
+                let got_modeled = p.modeled.map(|m| {
+                    serde_json::to_string(&m)
+                        .unwrap()
+                        .trim_matches('"')
+                        .to_string()
+                });
                 let want_modeled = wp["modeled"].as_str().map(|s| s.to_string());
                 if got_modeled != want_modeled {
-                    failures.push(format!("{id}.eraser[{k}].modeled: got {:?}, want {:?}", got_modeled, want_modeled));
+                    failures.push(format!(
+                        "{id}.eraser[{k}].modeled: got {:?}, want {:?}",
+                        got_modeled, want_modeled
+                    ));
                 }
                 let got_offset = p.dash_offset;
                 let want_offset = wp["dashOffset"].as_f64();
                 if got_offset != want_offset {
-                    failures.push(format!("{id}.eraser[{k}].dashOffset: got {:?}, want {:?}", got_offset, want_offset));
+                    failures.push(format!(
+                        "{id}.eraser[{k}].dashOffset: got {:?}, want {:?}",
+                        got_offset, want_offset
+                    ));
                 }
             }
         }
@@ -331,37 +477,69 @@ fn eraser_matches_typescript() {
 
         let want_dashed = &r["eraserDashed"];
         if changed_dashed != want_dashed["changed"].as_bool().unwrap() {
-            failures.push(format!("{id}.eraserDashed: changed={}, want {}", changed_dashed, want_dashed["changed"]));
+            failures.push(format!(
+                "{id}.eraserDashed: changed={}, want {}",
+                changed_dashed, want_dashed["changed"]
+            ));
         }
         let want_dashed_pieces = want_dashed["pieces"].as_array().unwrap();
         if pieces_dashed.len() != want_dashed_pieces.len() {
-            failures.push(format!("{id}.eraserDashed: {} pieces, want {}", pieces_dashed.len(), want_dashed_pieces.len()));
+            failures.push(format!(
+                "{id}.eraserDashed: {} pieces, want {}",
+                pieces_dashed.len(),
+                want_dashed_pieces.len()
+            ));
         } else {
             for (k, (p, wp)) in pieces_dashed.iter().zip(want_dashed_pieces).enumerate() {
-                let pts: Vec<[f64; 4]> = p.points.iter().map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure]).collect();
-                if let Some(m) = diff_rows(&format!("eraserDashed[{k}].points"), &pts, &rows(&wp["points"])) {
+                let pts: Vec<[f64; 4]> = p
+                    .points
+                    .iter()
+                    .map(|pt| [pt.x, pt.y, pt.t.unwrap_or(0.0), pt.pressure])
+                    .collect();
+                if let Some(m) = diff_rows(
+                    &format!("eraserDashed[{k}].points"),
+                    &pts,
+                    &rows(&wp["points"]),
+                ) {
                     failures.push(format!("{id}: {m}"));
                 }
-                let got_modeled = p.modeled.map(|m| serde_json::to_string(&m).unwrap().trim_matches('"').to_string());
+                let got_modeled = p.modeled.map(|m| {
+                    serde_json::to_string(&m)
+                        .unwrap()
+                        .trim_matches('"')
+                        .to_string()
+                });
                 let want_modeled = wp["modeled"].as_str().map(|s| s.to_string());
                 if got_modeled != want_modeled {
-                    failures.push(format!("{id}.eraserDashed[{k}].modeled: got {:?}, want {:?}", got_modeled, want_modeled));
+                    failures.push(format!(
+                        "{id}.eraserDashed[{k}].modeled: got {:?}, want {:?}",
+                        got_modeled, want_modeled
+                    ));
                 }
                 let got_offset = p.dash_offset;
                 let want_offset = wp["dashOffset"].as_f64();
                 match (got_offset, want_offset) {
                     (Some(go), Some(wo)) if (go - wo).abs() > TOL => {
-                        failures.push(format!("{id}.eraserDashed[{k}].dashOffset: got {go}, want {wo}"));
+                        failures.push(format!(
+                            "{id}.eraserDashed[{k}].dashOffset: got {go}, want {wo}"
+                        ));
                     }
                     (None, None) => {}
                     (Some(_), None) | (None, Some(_)) => {
-                        failures.push(format!("{id}.eraserDashed[{k}].dashOffset: got {:?}, want {:?}", got_offset, want_offset));
+                        failures.push(format!(
+                            "{id}.eraserDashed[{k}].dashOffset: got {:?}, want {:?}",
+                            got_offset, want_offset
+                        ));
                     }
                     _ => {}
                 }
             }
         }
     }
-    assert!(failures.is_empty(), "{} eraser differences:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} eraser differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }
-

@@ -1,5 +1,5 @@
-use nib::geometry::JsMath;
 use model::Point;
+use nib::geometry::JsMath;
 use std::f64::consts::PI;
 
 const GAP: f64 = 3.0;
@@ -142,12 +142,8 @@ impl SampleDensifier {
         }
 
         let curved = arc && inked;
-        let n = if inked {
-            (l / STEP).ceil() as usize
-        } else {
-            1
-        }
-        .max(((tb - ta) / FILL_DT).ceil() as usize);
+        let n = if inked { (l / STEP).ceil() as usize } else { 1 }
+            .max(((tb - ta) / FILL_DT).ceil() as usize);
 
         let effective_tb = if tb <= ta && n > 1 {
             ta + (n as f64) * 0.5
@@ -199,4 +195,3 @@ impl SampleDensifier {
         out
     }
 }
-

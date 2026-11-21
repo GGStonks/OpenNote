@@ -100,7 +100,13 @@ fn test_store_files_and_thumbs() {
     let store = SqliteStore::open_in_memory().expect("open store");
 
     store
-        .put_file("file1", "document.pdf", "application/pdf", b"PDF_DATA", None)
+        .put_file(
+            "file1",
+            "document.pdf",
+            "application/pdf",
+            b"PDF_DATA",
+            None,
+        )
         .expect("put file");
     let f = store
         .get_file("file1")
@@ -181,4 +187,3 @@ fn test_store_backup_roundtrip() {
     let f2 = store2.get_file("f_bk").expect("get file").expect("exists");
     assert_eq!(f2.bytes, b"Hello Backup");
 }
-

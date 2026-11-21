@@ -2,8 +2,7 @@ use model::{FillType, ImageBlock, LatexBlock, NotePage, Point, ShapeKind, Stroke
 use nib::geometry::XY;
 use shapes::{
     detect_shape, lasso_select_strokes, rect_select_strokes, restamp, selection_bounds,
-    shape_handles, transform_page_items, transform_points, transform_stroke, z_layers,
-    HandleRole,
+    shape_handles, transform_page_items, transform_points, transform_stroke, z_layers, HandleRole,
 };
 
 fn make_pt(x: f64, y: f64) -> Point {
@@ -238,28 +237,14 @@ fn test_lasso_selection_and_transform() {
     let lasso = vec![
         XY { x: 0.0, y: 0.0 },
         XY { x: 100.0, y: 0.0 },
-        XY {
-            x: 100.0,
-            y: 100.0,
-        },
+        XY { x: 100.0, y: 100.0 },
         XY { x: 0.0, y: 100.0 },
     ];
     let selected = lasso_select_strokes(&lasso, &page);
     assert_eq!(selected, vec!["s_inside"]);
 
     let mut pts = stroke.points;
-    transform_points(
-        &mut pts,
-        10.0,
-        20.0,
-        1.0,
-        1.0,
-        0.0,
-        XY {
-            x: 50.0,
-            y: 50.0,
-        },
-    );
+    transform_points(&mut pts, 10.0, 20.0, 1.0, 1.0, 0.0, XY { x: 50.0, y: 50.0 });
     assert_eq!(pts[0].x, 60.0);
     assert_eq!(pts[0].y, 70.0);
 }
@@ -365,10 +350,31 @@ fn test_rect_select_strokes_and_circle_promotion() {
         opacity: 1.0,
         points: vec![
             make_pt(500.0, 50.0),
-            Point { x: 520.0, y: 55.0, pressure: 0.8, t: Some(10.0), alt: None, az: None },
-            Point { x: 540.0, y: 60.0, pressure: 0.6, t: Some(20.0), alt: None, az: None },
+            Point {
+                x: 520.0,
+                y: 55.0,
+                pressure: 0.8,
+                t: Some(10.0),
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 540.0,
+                y: 60.0,
+                pressure: 0.6,
+                t: Some(20.0),
+                alt: None,
+                az: None,
+            },
             // Lift point outside normal ink
-            Point { x: 999.0, y: 999.0, pressure: 0.0, t: Some(30.0), alt: None, az: None },
+            Point {
+                x: 999.0,
+                y: 999.0,
+                pressure: 0.0,
+                t: Some(30.0),
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -482,35 +488,60 @@ fn test_rect_select_strokes_and_circle_promotion() {
 
     // Selection 1: Box crossing line_1 (box [40..60, 40..60])
     let sel1 = rect_select_strokes(
-        RectBounds { min_x: 40.0, min_y: 40.0, max_x: 60.0, max_y: 60.0 },
+        RectBounds {
+            min_x: 40.0,
+            min_y: 40.0,
+            max_x: 60.0,
+            max_y: 60.0,
+        },
         &page,
     );
     assert_eq!(sel1, vec!["line_1"]);
 
     // Selection 2: Box entirely inside filled rect_1 (box [120..140, 120..140])
     let sel2 = rect_select_strokes(
-        RectBounds { min_x: 120.0, min_y: 120.0, max_x: 140.0, max_y: 140.0 },
+        RectBounds {
+            min_x: 120.0,
+            min_y: 120.0,
+            max_x: 140.0,
+            max_y: 140.0,
+        },
         &page,
     );
     assert_eq!(sel2, vec!["rect_1"]);
 
     // Selection 3: Box intersecting curve_1
     let sel3 = rect_select_strokes(
-        RectBounds { min_x: 340.0, min_y: 60.0, max_x: 360.0, max_y: 90.0 },
+        RectBounds {
+            min_x: 340.0,
+            min_y: 60.0,
+            max_x: 360.0,
+            max_y: 90.0,
+        },
         &page,
     );
     assert_eq!(sel3, vec!["curve_1"]);
 
     // Selection 4: Box intersecting handwriting stroke hw_1 (box [510..530, 45..65])
     let sel4 = rect_select_strokes(
-        RectBounds { min_x: 510.0, min_y: 45.0, max_x: 530.0, max_y: 65.0 },
+        RectBounds {
+            min_x: 510.0,
+            min_y: 45.0,
+            max_x: 530.0,
+            max_y: 65.0,
+        },
         &page,
     );
     assert_eq!(sel4, vec!["hw_1"]);
 
     // Selection 5: Box touching only the un-inked lift point (999, 999) must NOT select hw_1
     let sel5 = rect_select_strokes(
-        RectBounds { min_x: 990.0, min_y: 990.0, max_x: 1010.0, max_y: 1010.0 },
+        RectBounds {
+            min_x: 990.0,
+            min_y: 990.0,
+            max_x: 1010.0,
+            max_y: 1010.0,
+        },
         &page,
     );
     assert!(sel5.is_empty());
@@ -524,7 +555,11 @@ fn test_rect_select_strokes_and_circle_promotion() {
     let mut mut_page = page;
     transform_page_items(
         &mut mut_page,
-        &["lat_rect".to_string(), "txt_rect".to_string(), "img_rect".to_string()],
+        &[
+            "lat_rect".to_string(),
+            "txt_rect".to_string(),
+            "img_rect".to_string(),
+        ],
         10.0,
         20.0,
         1.0,
@@ -561,11 +596,46 @@ fn test_move_shape_handle_arrow() {
         width: 2.0,
         opacity: 1.0,
         points: vec![
-            Point { x: 10.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 80.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 10.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 80.0, y: 20.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 10.0,
+                y: 10.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 10.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 80.0,
+                y: 0.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 10.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 80.0,
+                y: 20.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -594,7 +664,13 @@ fn test_move_shape_handle_arrow() {
     };
 
     // Move tip to (10.0, 100.0) making a vertical downward arrow
-    let (moved, guide) = move_shape_handle(&stroke, &handle_tip, nib::geometry::XY { x: 10.0, y: 100.0 }, None, None);
+    let (moved, guide) = move_shape_handle(
+        &stroke,
+        &handle_tip,
+        nib::geometry::XY { x: 10.0, y: 100.0 },
+        None,
+        None,
+    );
     assert!((moved.points[1].x - 10.0).abs() < 1e-4);
     assert!((moved.points[1].y - 100.0).abs() < 1e-4);
     assert_eq!(moved.shape_kind, Some(ShapeKind::Arrow));
@@ -615,10 +691,38 @@ fn test_move_shape_handle_rectangle_orthogonality() {
         width: 2.0,
         opacity: 1.0,
         points: vec![
-            Point { x: 0.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 0.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 0.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 0.0,
+                y: 0.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 0.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 0.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -647,7 +751,13 @@ fn test_move_shape_handle_rectangle_orthogonality() {
     };
 
     // Drag corner 2 to (150.0, 80.0)
-    let (moved, _) = move_shape_handle(&stroke, &handle_corner, nib::geometry::XY { x: 150.0, y: 80.0 }, None, None);
+    let (moved, _) = move_shape_handle(
+        &stroke,
+        &handle_corner,
+        nib::geometry::XY { x: 150.0, y: 80.0 },
+        None,
+        None,
+    );
     assert_eq!(moved.points[0].x, 0.0);
     assert_eq!(moved.points[0].y, 0.0);
     assert_eq!(moved.points[1].x, 150.0);
@@ -660,7 +770,7 @@ fn test_move_shape_handle_rectangle_orthogonality() {
 
 #[test]
 fn test_snap_stroke_with_grid_and_objects() {
-    use shapes::recognition::{snap_stroke_with_context, SnapOptions, SnapKind};
+    use shapes::recognition::{snap_stroke_with_context, SnapKind, SnapOptions};
 
     let other_stroke = Stroke {
         id: "target1".to_string(),
@@ -669,8 +779,22 @@ fn test_snap_stroke_with_grid_and_objects() {
         width: 2.0,
         opacity: 1.0,
         points: vec![
-            Point { x: 200.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 300.0, y: 200.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 200.0,
+                y: 200.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 300.0,
+                y: 200.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -707,9 +831,30 @@ fn test_snap_stroke_with_grid_and_objects() {
         width: 2.0,
         opacity: 1.0,
         points: vec![
-            Point { x: 197.0, y: 203.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 220.0, y: 150.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 250.0, y: 100.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 197.0,
+                y: 203.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 220.0,
+                y: 150.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 250.0,
+                y: 100.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -777,74 +922,73 @@ fn test_snap_stroke_with_grid_and_objects() {
 
 #[test]
 fn test_rect_and_lasso_select_page_blocks() {
-    use shapes::selection::{lasso_select_page, rect_select_page};
     use ink::RectBounds;
+    use shapes::selection::{lasso_select_page, rect_select_page};
 
     let page = NotePage {
         id: "p_blocks".to_string(),
         page_number: 1,
         strokes: vec![],
-        latex_blocks: vec![
-            LatexBlock {
-                id: "latex1".to_string(),
-                x: 100.0,
-                y: 100.0,
-                width: 80.0,
-                height: 40.0,
-                scale: None,
-                stretch_x: None,
-                latex_code: "\\frac{a}{b}".to_string(),
-                is_tikz: None,
-                tikz_svg: None,
-                tikz_svg_source: None,
-                color: Some("#000".to_string()),
-                rotation: None,
-                created_at: 0.0,
-            }
-        ],
-        text_blocks: Some(vec![
-            TextBlock {
-                id: "text1".to_string(),
-                x: 300.0,
-                y: 300.0,
-                width: 120.0,
-                height: Some(30.0),
-                text: "Hello Rust".to_string(),
-                font_size: 14.0,
-                color: "#000".to_string(),
-                bold: None,
-                italic: None,
-                underline: None,
-                strike: None,
-                font_family: None,
-                align: None,
-                line_height: None,
-                padding: None,
-                spans: None,
-                paras: None,
-                background: None,
-                radius: None,
-                rotation: None,
-                created_at: 0.0,
-            }
-        ]),
-        image_blocks: Some(vec![
-            ImageBlock {
-                id: "img1".to_string(),
-                x: 500.0,
-                y: 500.0,
-                width: 100.0,
-                height: 100.0,
-                data_url: "data:image/png;base64,...".to_string(),
-                rotation: None,
-                created_at: 0.0,
-            }
-        ]),
+        latex_blocks: vec![LatexBlock {
+            id: "latex1".to_string(),
+            x: 100.0,
+            y: 100.0,
+            width: 80.0,
+            height: 40.0,
+            scale: None,
+            stretch_x: None,
+            latex_code: "\\frac{a}{b}".to_string(),
+            is_tikz: None,
+            tikz_svg: None,
+            tikz_svg_source: None,
+            color: Some("#000".to_string()),
+            rotation: None,
+            created_at: 0.0,
+        }],
+        text_blocks: Some(vec![TextBlock {
+            id: "text1".to_string(),
+            x: 300.0,
+            y: 300.0,
+            width: 120.0,
+            height: Some(30.0),
+            text: "Hello Rust".to_string(),
+            font_size: 14.0,
+            color: "#000".to_string(),
+            bold: None,
+            italic: None,
+            underline: None,
+            strike: None,
+            font_family: None,
+            align: None,
+            line_height: None,
+            padding: None,
+            spans: None,
+            paras: None,
+            background: None,
+            radius: None,
+            rotation: None,
+            created_at: 0.0,
+        }]),
+        image_blocks: Some(vec![ImageBlock {
+            id: "img1".to_string(),
+            x: 500.0,
+            y: 500.0,
+            width: 100.0,
+            height: 100.0,
+            data_url: "data:image/png;base64,...".to_string(),
+            rotation: None,
+            created_at: 0.0,
+        }]),
     };
 
     // 1. Rect select encompassing latex1 and text1
     let sel_rect = rect_select_page(
-        RectBounds { min_x: 50.0, min_y: 50.0, max_x: 450.0, max_y: 450.0 },
+        RectBounds {
+            min_x: 50.0,
+            min_y: 50.0,
+            max_x: 450.0,
+            max_y: 450.0,
+        },
         &page,
     );
     assert_eq!(sel_rect.latex_ids, vec!["latex1"]);

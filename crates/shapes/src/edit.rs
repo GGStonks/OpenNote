@@ -1,8 +1,8 @@
-use nib::geometry::JsMath;
+use crate::recognition::{find_snap_target, SnapGuide, SnapKind, SnapOptions};
 use ink::stroke_geometry;
 use model::{Point, ShapeKind, Stroke};
+use nib::geometry::JsMath;
 use nib::geometry::XY;
-use crate::recognition::{find_snap_target, SnapGuide, SnapKind, SnapOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,11 +73,7 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
     let is_shape = s.is_shape.unwrap_or(false);
     let closed = s.closed.unwrap_or(false);
 
-    if !is_shape
-        && (s.tool == "pen" || s.tool == "highlighter")
-        && !closed
-        && s.points.len() > 1
-    {
+    if !is_shape && (s.tool == "pen" || s.tool == "highlighter") && !closed && s.points.len() > 1 {
         let g = stroke_geometry(s);
         let line = &g.pts;
         if let (Some(a), Some(b)) = (line.first(), line.last()) {
@@ -124,14 +120,31 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
         | Some(ShapeKind::Polyline)
         | Some(ShapeKind::Triangle)
         | Some(ShapeKind::Polygon)
-        | Some(ShapeKind::Rectangle) => {
-            Some(pts.iter().enumerate().map(|(i, p)| h(XY { x: p.x, y: p.y }, HandleRole::Vertex, i as isize)).collect())
-        }
+        | Some(ShapeKind::Rectangle) => Some(
+            pts.iter()
+                .enumerate()
+                .map(|(i, p)| h(XY { x: p.x, y: p.y }, HandleRole::Vertex, i as isize))
+                .collect(),
+        ),
         Some(ShapeKind::Arrow) => {
             if pts.len() >= 2 {
                 Some(vec![
-                    h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::Vertex, 0),
-                    h(XY { x: pts[1].x, y: pts[1].y }, HandleRole::Vertex, 1),
+                    h(
+                        XY {
+                            x: pts[0].x,
+                            y: pts[0].y,
+                        },
+                        HandleRole::Vertex,
+                        0,
+                    ),
+                    h(
+                        XY {
+                            x: pts[1].x,
+                            y: pts[1].y,
+                        },
+                        HandleRole::Vertex,
+                        1,
+                    ),
                 ])
             } else {
                 None
@@ -139,21 +152,59 @@ pub fn shape_handles(s: &Stroke) -> Option<Vec<ShapeHandle>> {
         }
         Some(ShapeKind::Circle) => {
             let c = centroid_points(pts);
-            Some(vec![h(c, HandleRole::Center, -1), h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::AxisA, 0)])
+            Some(vec![
+                h(c, HandleRole::Center, -1),
+                h(
+                    XY {
+                        x: pts[0].x,
+                        y: pts[0].y,
+                    },
+                    HandleRole::AxisA,
+                    0,
+                ),
+            ])
         }
         Some(ShapeKind::Ellipse) => {
             let c = centroid_points(pts);
             let b_idx = (pts.len() as f64 / 4.0).round() as usize;
             Some(vec![
                 h(c, HandleRole::Center, -1),
-                h(XY { x: pts[0].x, y: pts[0].y }, HandleRole::AxisA, 0),
-                h(XY { x: pts[b_idx].x, y: pts[b_idx].y }, HandleRole::AxisB, b_idx as isize),
+                h(
+                    XY {
+                        x: pts[0].x,
+                        y: pts[0].y,
+                    },
+                    HandleRole::AxisA,
+                    0,
+                ),
+                h(
+                    XY {
+                        x: pts[b_idx].x,
+                        y: pts[b_idx].y,
+                    },
+                    HandleRole::AxisB,
+                    b_idx as isize,
+                ),
             ])
         }
         Some(ShapeKind::Curve) => {
             let is_closed = closed && pts.len() > 2;
             let indices = curve_handle_indices(pts.len(), is_closed);
-            Some(indices.into_iter().map(|i| h(XY { x: pts[i].x, y: pts[i].y }, HandleRole::Curve, i as isize)).collect())
+            Some(
+                indices
+                    .into_iter()
+                    .map(|i| {
+                        h(
+                            XY {
+                                x: pts[i].x,
+                                y: pts[i].y,
+                            },
+                            HandleRole::Curve,
+                            i as isize,
+                        )
+                    })
+                    .collect(),
+            )
         }
         _ => None,
     }
@@ -204,11 +255,20 @@ pub fn move_shape_handle(
     if guide.is_none() {
         let anchor_pt = if handle.role == HandleRole::End {
             handle.anchor
-        } else if (orig.shape_kind == Some(ShapeKind::Line) || orig.shape_kind == Some(ShapeKind::Arrow)) && orig.points.len() >= 2 {
+        } else if (orig.shape_kind == Some(ShapeKind::Line)
+            || orig.shape_kind == Some(ShapeKind::Arrow))
+            && orig.points.len() >= 2
+        {
             if handle.index == 0 {
-                Some(XY { x: orig.points[1].x, y: orig.points[1].y })
+                Some(XY {
+                    x: orig.points[1].x,
+                    y: orig.points[1].y,
+                })
             } else {
-                Some(XY { x: orig.points[0].x, y: orig.points[0].y })
+                Some(XY {
+                    x: orig.points[0].x,
+                    y: orig.points[0].y,
+                })
             }
         } else {
             None
@@ -244,7 +304,15 @@ pub fn move_shape_handle(
 
 pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
     if handle.role == HandleRole::End && handle.anchor.is_some() {
-        return swing_about(orig, handle.anchor.unwrap(), XY { x: handle.x, y: handle.y }, to);
+        return swing_about(
+            orig,
+            handle.anchor.unwrap(),
+            XY {
+                x: handle.x,
+                y: handle.y,
+            },
+            to,
+        );
     }
 
     let pts = &orig.points;
@@ -278,13 +346,41 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
                     new_pts[idx].y = to.y;
                 }
             } else {
-                let tail = if handle.index == 0 { to } else { XY { x: new_pts[0].x, y: new_pts[0].y } };
-                let tip = if handle.index == 1 { to } else { XY { x: new_pts[1].x, y: new_pts[1].y } };
-                let head_len = dist(XY { x: new_pts[2].x, y: new_pts[2].y }, XY { x: new_pts[1].x, y: new_pts[1].y });
+                let tail = if handle.index == 0 {
+                    to
+                } else {
+                    XY {
+                        x: new_pts[0].x,
+                        y: new_pts[0].y,
+                    }
+                };
+                let tip = if handle.index == 1 {
+                    to
+                } else {
+                    XY {
+                        x: new_pts[1].x,
+                        y: new_pts[1].y,
+                    }
+                };
+                let head_len = dist(
+                    XY {
+                        x: new_pts[2].x,
+                        y: new_pts[2].y,
+                    },
+                    XY {
+                        x: new_pts[1].x,
+                        y: new_pts[1].y,
+                    },
+                );
                 let dir0 = (pts[1].y - pts[0].y).atan2(pts[1].x - pts[0].x);
-                let rel = (pts[2].y - pts[1].y).atan2(pts[2].x - pts[1].x) - dir0 - std::f64::consts::PI;
+                let rel =
+                    (pts[2].y - pts[1].y).atan2(pts[2].x - pts[1].x) - dir0 - std::f64::consts::PI;
                 let spread_cand = rel.sin().atan2(rel.cos()).abs();
-                let spread = if spread_cand > 0.0 { spread_cand } else { (28.0 * std::f64::consts::PI) / 180.0 };
+                let spread = if spread_cand > 0.0 {
+                    spread_cand
+                } else {
+                    (28.0 * std::f64::consts::PI) / 180.0
+                };
                 let dir = (tip.y - tail.y).atan2(tip.x - tail.x);
                 let pi = std::f64::consts::PI;
 
@@ -316,10 +412,22 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
                 st.points = new_pts;
                 st
             } else {
-                let o = XY { x: pts[0].x, y: pts[0].y };
-                let d_01 = dist(XY { x: pts[1].x, y: pts[1].y }, o);
+                let o = XY {
+                    x: pts[0].x,
+                    y: pts[0].y,
+                };
+                let d_01 = dist(
+                    XY {
+                        x: pts[1].x,
+                        y: pts[1].y,
+                    },
+                    o,
+                );
                 let lu = if d_01 > 0.0 { d_01 } else { 1.0 };
-                let u = XY { x: (pts[1].x - o.x) / lu, y: (pts[1].y - o.y) / lu };
+                let u = XY {
+                    x: (pts[1].x - o.x) / lu,
+                    y: (pts[1].y - o.y) / lu,
+                };
                 let v = XY { x: -u.y, y: u.x };
                 let loc = |p: XY| -> XY {
                     XY {
@@ -329,21 +437,30 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
                 };
                 let l_pts: Vec<XY> = pts.iter().map(|p| loc(XY { x: p.x, y: p.y })).collect();
                 let h_idx = handle.index as usize;
-                let d = if h_idx < l_pts.len() { l_pts[h_idx] } else { XY { x: 0.0, y: 0.0 } };
+                let d = if h_idx < l_pts.len() {
+                    l_pts[h_idx]
+                } else {
+                    XY { x: 0.0, y: 0.0 }
+                };
                 let n = loc(to);
                 let eps = 1e-6 + 1e-6 * lu;
-                let moved: Vec<XY> = l_pts.iter().map(|q| {
-                    XY {
+                let moved: Vec<XY> = l_pts
+                    .iter()
+                    .map(|q| XY {
                         x: if (q.x - d.x).abs() < eps { n.x } else { q.x },
                         y: if (q.y - d.y).abs() < eps { n.y } else { q.y },
-                    }
-                }).collect();
-                let new_pts: Vec<Point> = moved.iter().enumerate().map(|(i, q)| {
-                    let mut p = pts[i].clone();
-                    p.x = o.x + q.x * u.x + q.y * v.x;
-                    p.y = o.y + q.x * u.y + q.y * v.y;
-                    p
-                }).collect();
+                    })
+                    .collect();
+                let new_pts: Vec<Point> = moved
+                    .iter()
+                    .enumerate()
+                    .map(|(i, q)| {
+                        let mut p = pts[i].clone();
+                        p.x = o.x + q.x * u.x + q.y * v.x;
+                        p.y = o.y + q.x * u.y + q.y * v.y;
+                        p
+                    })
+                    .collect();
                 let mut st = orig.clone();
                 st.points = new_pts;
                 st
@@ -353,20 +470,44 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
         Some(ShapeKind::Circle) | Some(ShapeKind::Ellipse) => {
             let c = centroid_points(pts);
             let n = pts.len();
-            let a = XY { x: pts[0].x - c.x, y: pts[0].y - c.y };
+            let a = XY {
+                x: pts[0].x - c.x,
+                y: pts[0].y - c.y,
+            };
             let qb_idx = ((n as f64 / 4.0).round() as usize) % n;
             let qb = pts[qb_idx];
             let rb = (qb.x - c.x).js_hypot(qb.y - c.y);
 
             let new_points = if handle.role == HandleRole::Center {
-                pts.iter().map(|p| Point { x: p.x + dx, y: p.y + dy, pressure: p.pressure, t: p.t, alt: p.alt, az: p.az }).collect()
+                pts.iter()
+                    .map(|p| Point {
+                        x: p.x + dx,
+                        y: p.y + dy,
+                        pressure: p.pressure,
+                        t: p.t,
+                        alt: p.alt,
+                        az: p.az,
+                    })
+                    .collect()
             } else if handle.role == HandleRole::AxisA {
-                let na = XY { x: to.x - c.x, y: to.y - c.y };
+                let na = XY {
+                    x: to.x - c.x,
+                    y: to.y - c.y,
+                };
                 let ra = na.x.js_hypot(na.y);
                 if ra < 2.0 {
                     pts.clone()
                 } else {
-                    ellipse_points(c, na, if kind == Some(ShapeKind::Circle) { ra } else { rb }, n)
+                    ellipse_points(
+                        c,
+                        na,
+                        if kind == Some(ShapeKind::Circle) {
+                            ra
+                        } else {
+                            rb
+                        },
+                        n,
+                    )
                 }
             } else {
                 let ra = a.x.js_hypot(a.y).max(1e-4);
@@ -386,7 +527,10 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
             let closed = orig.closed.unwrap_or(false) && pts.len() > 2;
             let n = pts.len();
             let handles = curve_handle_indices(n, closed);
-            let hi = handles.iter().position(|&x| x == handle.index as usize).unwrap_or(0);
+            let hi = handles
+                .iter()
+                .position(|&x| x == handle.index as usize)
+                .unwrap_or(0);
             let prev = if hi > 0 {
                 handles[hi - 1] as isize
             } else if closed {
@@ -410,8 +554,12 @@ pub fn drag_handle(orig: &Stroke, handle: &ShapeHandle, to: XY) -> Stroke {
             for (i, p) in new_pts.iter_mut().enumerate() {
                 let mut off = i as isize - handle.index;
                 if closed {
-                    if (off as f64) > n_half { off -= n as isize; }
-                    if (off as f64) < -n_half { off += n as isize; }
+                    if (off as f64) > n_half {
+                        off -= n as isize;
+                    }
+                    if (off as f64) < -n_half {
+                        off += n as isize;
+                    }
                 }
                 let span = if off < 0 { left } else { right };
                 let t = off.abs() as f64 / span;
@@ -441,18 +589,22 @@ fn swing_about(orig: &Stroke, anchor: XY, from: XY, to: XY) -> Stroke {
     let ty = to.y - anchor.y;
     let c = (tx * fx + ty * fy) / f2;
     let sn = (ty * fx - tx * fy) / f2;
-    let points = orig.points.iter().map(|p| {
-        let x = p.x - anchor.x;
-        let y = p.y - anchor.y;
-        Point {
-            x: anchor.x + c * x - sn * y,
-            y: anchor.y + sn * x + c * y,
-            pressure: p.pressure,
-            t: p.t,
-            alt: p.alt,
-            az: p.az,
-        }
-    }).collect();
+    let points = orig
+        .points
+        .iter()
+        .map(|p| {
+            let x = p.x - anchor.x;
+            let y = p.y - anchor.y;
+            Point {
+                x: anchor.x + c * x - sn * y,
+                y: anchor.y + sn * x + c * y,
+                pressure: p.pressure,
+                t: p.t,
+                alt: p.alt,
+                az: p.az,
+            }
+        })
+        .collect();
     let turned = (sn.atan2(c) * 180.0) / std::f64::consts::PI;
     let rotation = ((orig.rotation.unwrap_or(0.0) + turned) % 360.0 + 360.0) % 360.0;
     let mut out = orig.clone();
@@ -462,4 +614,3 @@ fn swing_about(orig: &Stroke, anchor: XY, from: XY, to: XY) -> Stroke {
     }
     out
 }
-

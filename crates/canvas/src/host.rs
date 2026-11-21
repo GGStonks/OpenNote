@@ -16,6 +16,7 @@ use crate::gpu::{device_descriptor, pc_device_backend};
 use crate::pages::{PageStats, PageStore};
 use crate::paper::Paper;
 use crate::scene::Transform;
+use crate::telemetry::{FrameSample, FrameStats, StatsSummary};
 use crate::{Frame, GpuCanvas, GpuScene, PageDraw, Scene};
 use model::Stroke;
 use std::sync::Arc;
@@ -44,6 +45,7 @@ pub struct Stats {
     pub pictures: usize,
     pub picture_bytes: u64,
     pub picture_budget: u64,
+    pub telemetry: StatsSummary,
 }
 
 enum Target {
@@ -73,15 +75,8 @@ pub struct CanvasHost {
     frame: FrameSpec,
     pub dirty: bool,
     stats: Stats,
-    stroke_cache: Option<IncrementalStrokeState>,
-}
-
-#[derive(Clone, Debug)]
-struct IncrementalStrokeState {
-    page_id: String,
-    stroke_id: String,
-    points_len: usize,
-    scene: Scene,
+    pub telemetry: FrameStats,
+    last_frame_instant: Option<Instant>,
 }
 
 impl CanvasHost {
@@ -162,10 +157,10 @@ impl CanvasHost {
                 .copied()
                 .unwrap_or(wgpu::CompositeAlphaMode::Auto)
         };
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
             wgpu::PresentMode::Fifo
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
         } else {
             caps.present_modes
                 .first()
@@ -184,8 +179,8 @@ impl CanvasHost {
             width: w.clamp(1, max),
             height: h.clamp(1, max),
             present_mode,
-            // 1 frame latency for lowest input-to-photon queue depth at 120-240 Hz
-            desired_maximum_frame_latency: 1,
+            // Pipelined frame latency (double-buffering) for smooth 120-240 Hz presentation
+            desired_maximum_frame_latency: 2,
             alpha_mode,
             view_formats: vec![],
         };
@@ -247,7 +242,8 @@ impl CanvasHost {
                 frame: FrameSpec::default(),
                 dirty: false,
                 stats,
-                stroke_cache: None,
+                telemetry: FrameStats::default(),
+                last_frame_instant: None,
             },
             name,
         ))
@@ -279,7 +275,8 @@ impl CanvasHost {
                     height: h,
                     ..Default::default()
                 },
-                stroke_cache: None,
+                telemetry: FrameStats::default(),
+                last_frame_instant: None,
             },
             name,
         ))
@@ -404,55 +401,7 @@ impl CanvasHost {
 
     /// The scene of page `id`: its strokes as the page stores them (one z-layer).
     pub fn set_scene(&mut self, id: &str, strokes: &[Stroke]) -> usize {
-        if strokes.len() == 1 {
-            let s = &strokes[0];
-            if s.tool == "pen" && s.points.len() > 1 {
-                let mut updated_scene = None;
-                if let Some(ref mut c) = self.stroke_cache {
-                    if c.page_id == id && c.stroke_id == s.id && s.points.len() >= c.points_len {
-                        if s.points.len() > c.points_len {
-                            let new_pts = &s.points[c.points_len - 1..];
-                            let color = renderer::color::Rgba::parse(&s.color, s.opacity as f32);
-                            let col = [color.r, color.g, color.b, color.a];
-                            let r = (s.width / 2.0) as f32;
-                            for w in new_pts.windows(2) {
-                                c.scene.caps.push(crate::scene::CapInst::new(
-                                    [w[0].x as f32, w[0].y as f32, r],
-                                    [w[1].x as f32, w[1].y as f32, r],
-                                    col,
-                                ));
-                            }
-                            if let Some(crate::scene::Op::See { count, bx, .. }) =
-                                c.scene.ops.first_mut()
-                            {
-                                *count = c.scene.caps.len() as u32;
-                                for p in new_pts {
-                                    bx.x0 = bx.x0.min(p.x as f32 - r);
-                                    bx.y0 = bx.y0.min(p.y as f32 - r);
-                                    bx.x1 = bx.x1.max(p.x as f32 + r);
-                                    bx.y1 = bx.y1.max(p.y as f32 + r);
-                                }
-                            }
-                            c.points_len = s.points.len();
-                        }
-                        updated_scene = Some(c.scene.clone());
-                    }
-                }
-                if let Some(sc) = updated_scene {
-                    return self.put_scene(id, &sc);
-                }
-            }
-        }
-        self.stroke_cache = None;
         let scene = Scene::build(&[strokes]);
-        if strokes.len() == 1 && strokes[0].tool == "pen" && strokes[0].points.len() > 1 {
-            self.stroke_cache = Some(IncrementalStrokeState {
-                page_id: id.to_string(),
-                stroke_id: strokes[0].id.clone(),
-                points_len: strokes[0].points.len(),
-                scene: scene.clone(),
-            });
-        }
         self.put_scene(id, &scene)
     }
 
@@ -522,6 +471,7 @@ impl CanvasHost {
             pictures,
             picture_bytes,
             picture_budget,
+            telemetry: self.telemetry.summarize(),
             ..self.stats.clone()
         }
     }
@@ -605,7 +555,13 @@ impl CanvasHost {
             return Ok(false);
         }
         let t0 = Instant::now();
+        let frame_dt_us = self
+            .last_frame_instant
+            .map(|t| t.elapsed().as_micros() as u64)
+            .unwrap_or(8333);
+        self.last_frame_instant = Some(t0);
         let errors_before = self.errors();
+        let bytes_before = self.pages.stats().gpu_bytes;
         // The placements meeting the view (all of them without a surface transform), their
         // scenes on the GPU (ADR-007).
         let order = self.pages.plan(&self.canvas, &self.frame, surface, size);
@@ -725,6 +681,15 @@ impl CanvasHost {
         self.stats.frames += 1;
         self.stats.last_draw_ms = ms;
         self.stats.worst_draw_ms = self.stats.worst_draw_ms.max(ms);
+        let cpu_prepare_us = (ms * 1000.0) as u64;
+        let bytes_uploaded = self.pages.stats().gpu_bytes.saturating_sub(bytes_before);
+        self.telemetry.record(FrameSample {
+            frame_dt_us,
+            cpu_prepare_us,
+            gpu_encode_us: 0,
+            bytes_uploaded,
+            draw_calls: self.pages.stats().drawn as u32,
+        });
         Ok(true)
     }
 

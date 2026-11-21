@@ -1,5 +1,5 @@
-use nib::geometry::JsMath;
 use model::{Point, ShapeKind, Stroke};
+use nib::geometry::JsMath;
 use std::f64::consts::PI;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -362,11 +362,7 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
         .map(|i| {
             let u = u0 + ((u1 - u0) * i as f64) / (parabola_points - 1) as f64;
             let v = f.a_coef * u * u + f.b_coef * u + f.c_coef;
-            pt(
-                u * f.c_ang - v * f.s_ang,
-                u * f.s_ang + v * f.c_ang,
-                0.5,
-            )
+            pt(u * f.c_ang - v * f.s_ang, u * f.s_ang + v * f.c_ang, 0.5)
         })
         .collect();
 
@@ -374,11 +370,7 @@ fn detect_parabola(pts: &[Point], diag: f64) -> Option<SnappedShape> {
         .map(|i| {
             let u = u0 + ((u1 - u0) * i as f64) / 48.0;
             let v = f.a_coef * u * u + f.b_coef * u + f.c_coef;
-            pt(
-                u * f.c_ang - v * f.s_ang,
-                u * f.s_ang + v * f.c_ang,
-                0.5,
-            )
+            pt(u * f.c_ang - v * f.s_ang, u * f.s_ang + v * f.c_ang, 0.5)
         })
         .collect();
     let err = polyline_error(pts, &dense, false) / diag;
@@ -441,7 +433,13 @@ fn detect_arrow(pts: &[Point], diag: f64) -> Option<SnappedShape> {
 
     Some(SnappedShape {
         kind: ShapeKind::Arrow,
-        points: vec![pt(v[0].x, v[0].y, 0.5), pt(tip.x, tip.y, 0.5), w1, pt(tip.x, tip.y, 0.5), w2],
+        points: vec![
+            pt(v[0].x, v[0].y, 0.5),
+            pt(tip.x, tip.y, 0.5),
+            w1,
+            pt(tip.x, tip.y, 0.5),
+            w2,
+        ],
         closed: false,
         confidence: 0.8,
         regular: None,
@@ -585,7 +583,11 @@ fn clean_vertices(v: &[Point], closed: bool) -> Vec<Point> {
             } else if !closed && j == n - 1 {
                 out.remove(idx);
             } else {
-                out[idx] = pt((out[idx].x + out[j].x) / 2.0, (out[idx].y + out[j].y) / 2.0, 0.5);
+                out[idx] = pt(
+                    (out[idx].x + out[j].x) / 2.0,
+                    (out[idx].y + out[j].y) / 2.0,
+                    0.5,
+                );
                 out.remove(j);
             }
             changed = true;
@@ -713,8 +715,7 @@ fn detect_polygon(pts: &[Point], diag: f64, closed: bool) -> Option<SnappedShape
 
     if closed && v.len() == 4 {
         let right = (0..4).all(|i| {
-            (angle_at(v[(i + 3) % 4], v[i], v[(i + 1) % 4]) - PI / 2.0).abs()
-                < (18.0 * PI) / 180.0
+            (angle_at(v[(i + 3) % 4], v[i], v[(i + 1) % 4]) - PI / 2.0).abs() < (18.0 * PI) / 180.0
         });
         if right {
             kind = ShapeKind::Rectangle;
@@ -921,10 +922,16 @@ pub fn find_snap_target(
                         }
                     }
                 } else {
-                    key_pts.push(nib::geometry::XY { x: pts[0].x, y: pts[0].y });
+                    key_pts.push(nib::geometry::XY {
+                        x: pts[0].x,
+                        y: pts[0].y,
+                    });
                     if pts.len() > 1 {
                         let last = pts.last().unwrap();
-                        key_pts.push(nib::geometry::XY { x: last.x, y: last.y });
+                        key_pts.push(nib::geometry::XY {
+                            x: last.x,
+                            y: last.y,
+                        });
                     }
                 }
 
@@ -940,7 +947,13 @@ pub fn find_snap_target(
 
             // Check block corners and centers
             for b in &pg.latex_blocks {
-                let cs = crate::selection::box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                let cs = crate::selection::box_corners(
+                    b.x,
+                    b.y,
+                    b.width,
+                    b.height,
+                    b.rotation.unwrap_or(0.0),
+                );
                 for c in cs {
                     let d = (c.x - p.x).js_hypot(c.y - p.y);
                     if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
@@ -951,7 +964,13 @@ pub fn find_snap_target(
             if let Some(text_blocks) = &pg.text_blocks {
                 for b in text_blocks {
                     let h = b.height.unwrap_or(b.font_size * 1.4);
-                    let cs = crate::selection::box_corners(b.x, b.y, b.width, h, b.rotation.unwrap_or(0.0));
+                    let cs = crate::selection::box_corners(
+                        b.x,
+                        b.y,
+                        b.width,
+                        h,
+                        b.rotation.unwrap_or(0.0),
+                    );
                     for c in cs {
                         let d = (c.x - p.x).js_hypot(c.y - p.y);
                         if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
@@ -962,7 +981,13 @@ pub fn find_snap_target(
             }
             if let Some(image_blocks) = &pg.image_blocks {
                 for b in image_blocks {
-                    let cs = crate::selection::box_corners(b.x, b.y, b.width, b.height, b.rotation.unwrap_or(0.0));
+                    let cs = crate::selection::box_corners(
+                        b.x,
+                        b.y,
+                        b.width,
+                        b.height,
+                        b.rotation.unwrap_or(0.0),
+                    );
                     for c in cs {
                         let d = (c.x - p.x).js_hypot(c.y - p.y);
                         if d < r_mag && best_pt.as_ref().map_or(true, |prev| d < prev.1) {
@@ -993,15 +1018,24 @@ pub fn find_snap_target(
                 let closed = s.closed.unwrap_or(false) && pts.len() > 2;
                 let segs = if closed { pts.len() } else { pts.len() - 1 };
                 for i in 0..segs {
-                    let a = nib::geometry::XY { x: pts[i].x, y: pts[i].y };
-                    let b = nib::geometry::XY { x: pts[(i + 1) % pts.len()].x, y: pts[(i + 1) % pts.len()].y };
+                    let a = nib::geometry::XY {
+                        x: pts[i].x,
+                        y: pts[i].y,
+                    };
+                    let b = nib::geometry::XY {
+                        x: pts[(i + 1) % pts.len()].x,
+                        y: pts[(i + 1) % pts.len()].y,
+                    };
                     let dx = b.x - a.x;
                     let dy = b.y - a.y;
                     let l2 = dx * dx + dy * dy;
                     if l2 > 1e-4 {
                         let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0);
                         if t > 0.05 && t < 0.95 {
-                            let proj = nib::geometry::XY { x: a.x + t * dx, y: a.y + t * dy };
+                            let proj = nib::geometry::XY {
+                                x: a.x + t * dx,
+                                y: a.y + t * dy,
+                            };
                             let d = (p.x - proj.x).js_hypot(p.y - proj.y);
                             if d < r_mag * 0.8 && best_edge.as_ref().map_or(true, |b| d < b.1) {
                                 best_edge = Some((proj, d, [a, b]));
@@ -1066,12 +1100,16 @@ pub fn find_snap_target(
                 let step = 32.0;
                 let gy = 80.0 + ((p.y - 80.0) / step).round() * step;
                 if (p.y - gy).abs() < r_mag {
-                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Ruled) && (p.x - 79.0).abs() < r_mag;
+                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Ruled)
+                        && (p.x - 79.0).abs() < r_mag;
                     let gx = if snap_margin { 79.0 } else { p.x };
                     return Some(SnapGuide {
                         at: nib::geometry::XY { x: gx, y: gy },
                         kind: SnapKind::RuledLine,
-                        line: Some([nib::geometry::XY { x: 0.0, y: gy }, nib::geometry::XY { x: 5000.0, y: gy }]),
+                        line: Some([
+                            nib::geometry::XY { x: 0.0, y: gy },
+                            nib::geometry::XY { x: 5000.0, y: gy },
+                        ]),
                     });
                 }
             }
@@ -1079,12 +1117,16 @@ pub fn find_snap_target(
                 let step = 24.0;
                 let gy = 80.0 + ((p.y - 80.0) / step).round() * step;
                 if (p.y - gy).abs() < r_mag {
-                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Narrow) && (p.x - 79.0).abs() < r_mag;
+                    let snap_margin = opts.paper_style == Some(model::PaperStyle::Narrow)
+                        && (p.x - 79.0).abs() < r_mag;
                     let gx = if snap_margin { 79.0 } else { p.x };
                     return Some(SnapGuide {
                         at: nib::geometry::XY { x: gx, y: gy },
                         kind: SnapKind::RuledLine,
-                        line: Some([nib::geometry::XY { x: 0.0, y: gy }, nib::geometry::XY { x: 5000.0, y: gy }]),
+                        line: Some([
+                            nib::geometry::XY { x: 0.0, y: gy },
+                            nib::geometry::XY { x: 5000.0, y: gy },
+                        ]),
                     });
                 }
             }
@@ -1112,14 +1154,20 @@ pub fn snap_stroke_with_context(
         if s.kind == ShapeKind::Line || s.kind == ShapeKind::Arrow {
             if points.len() >= 2 {
                 // Snap endpoint 0
-                let p0_xy = nib::geometry::XY { x: points[0].x, y: points[0].y };
+                let p0_xy = nib::geometry::XY {
+                    x: points[0].x,
+                    y: points[0].y,
+                };
                 if let Some(g0) = find_snap_target(p0_xy, page, Some(&stroke.id), &opts) {
                     points[0].x = g0.at.x;
                     points[0].y = g0.at.y;
                     guides.push(g0);
                 }
                 // Snap endpoint 1
-                let p1_xy = nib::geometry::XY { x: points[1].x, y: points[1].y };
+                let p1_xy = nib::geometry::XY {
+                    x: points[1].x,
+                    y: points[1].y,
+                };
                 if let Some(g1) = find_snap_target(p1_xy, page, Some(&stroke.id), &opts) {
                     points[1].x = g1.at.x;
                     points[1].y = g1.at.y;
@@ -1130,7 +1178,9 @@ pub fn snap_stroke_with_context(
                 if s.kind == ShapeKind::Arrow && points.len() >= 5 {
                     let tail = points[0];
                     let tip = points[1];
-                    let head_len = ((points[2].x - tip.x) * (points[2].x - tip.x) + (points[2].y - tip.y) * (points[2].y - tip.y)).sqrt();
+                    let head_len = ((points[2].x - tip.x) * (points[2].x - tip.x)
+                        + (points[2].y - tip.y) * (points[2].y - tip.y))
+                        .sqrt();
                     let dir = (tip.y - tail.y).atan2(tip.x - tail.x);
                     let spread = (28.0 * PI) / 180.0;
                     points[2].x = tip.x + head_len * (dir + PI - spread).cos();
@@ -1149,7 +1199,10 @@ pub fn snap_stroke_with_context(
                     guides.push(g);
                 }
             }
-        } else if s.kind == ShapeKind::Polyline || s.kind == ShapeKind::Triangle || s.kind == ShapeKind::Polygon {
+        } else if s.kind == ShapeKind::Polyline
+            || s.kind == ShapeKind::Triangle
+            || s.kind == ShapeKind::Polygon
+        {
             for pt in &mut points {
                 let xy = nib::geometry::XY { x: pt.x, y: pt.y };
                 if let Some(g) = find_snap_target(xy, page, Some(&stroke.id), &opts) {
@@ -1173,5 +1226,14 @@ pub fn snap_stroke_with_context(
 }
 
 pub fn snap_stroke(stroke: &Stroke) -> Stroke {
-    snap_stroke_with_context(stroke, None, SnapOptions { snap_to_objects: false, snap_to_grid: false, ..Default::default() }).0
+    snap_stroke_with_context(
+        stroke,
+        None,
+        SnapOptions {
+            snap_to_objects: false,
+            snap_to_grid: false,
+            ..Default::default()
+        },
+    )
+    .0
 }

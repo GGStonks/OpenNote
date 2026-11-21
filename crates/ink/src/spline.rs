@@ -136,35 +136,18 @@ pub fn catmull_rom_beziers(input: &[XY], closed: bool) -> Vec<Bezier> {
         // (starts/ends with natural curvature directly at terminal points with zero tangent overshoot,
         // without flattening into an artificial straight piece).
         let (c1x, c1y) = if !closed && i == 0 {
-            (
-                p1.x + (dx2 - t2 * m2x) / 3.0,
-                p1.y + (dy2 - t2 * m2y) / 3.0,
-            )
+            (p1.x + (dx2 - t2 * m2x) / 3.0, p1.y + (dy2 - t2 * m2y) / 3.0)
         } else {
-            (
-                p1.x + (dx2 + t2 * m1x) / 3.0,
-                p1.y + (dy2 + t2 * m1y) / 3.0,
-            )
+            (p1.x + (dx2 + t2 * m1x) / 3.0, p1.y + (dy2 + t2 * m1y) / 3.0)
         };
 
         let (c2x, c2y) = if !closed && i >= n - 2 {
-            (
-                p2.x - (dx2 - t2 * m1x) / 3.0,
-                p2.y - (dy2 - t2 * m1y) / 3.0,
-            )
+            (p2.x - (dx2 - t2 * m1x) / 3.0, p2.y - (dy2 - t2 * m1y) / 3.0)
         } else {
-            (
-                p2.x - (dx2 + t2 * m2x) / 3.0,
-                p2.y - (dy2 + t2 * m2y) / 3.0,
-            )
+            (p2.x - (dx2 + t2 * m2x) / 3.0, p2.y - (dy2 + t2 * m2y) / 3.0)
         };
 
-        out.push([
-            p1,
-            XY { x: c1x, y: c1y },
-            XY { x: c2x, y: c2y },
-            p2,
-        ]);
+        out.push([p1, XY { x: c1x, y: c1y }, XY { x: c2x, y: c2y }, p2]);
     }
     out
 }
@@ -197,7 +180,10 @@ pub fn flatten_beziers(segs: &[Bezier], step: f64) -> Vec<XY> {
 fn bezier_d1(b: Bezier, t: f64) -> XY {
     let mt = 1.0 - t;
     add(
-        add(mul(sub(b[1], b[0]), 3.0 * mt * mt), mul(sub(b[2], b[1]), 6.0 * mt * t)),
+        add(
+            mul(sub(b[1], b[0]), 3.0 * mt * mt),
+            mul(sub(b[2], b[1]), 6.0 * mt * t),
+        ),
         mul(sub(b[3], b[2]), 3.0 * t * t),
     )
 }
@@ -305,14 +291,7 @@ fn max_error(b: Bezier, pts: &[XY], u: &[f64]) -> (f64, usize) {
     (err, index)
 }
 
-fn fit_cubic(
-    pts: &[XY],
-    t_hat1: XY,
-    t_hat2: XY,
-    tol: f64,
-    out: &mut Vec<Bezier>,
-    depth: usize,
-) {
+fn fit_cubic(pts: &[XY], t_hat1: XY, t_hat2: XY, tol: f64, out: &mut Vec<Bezier>, depth: usize) {
     if pts.len() == 2 {
         let l = dist(pts[0], pts[1]) / 3.0;
         out.push([
@@ -352,7 +331,14 @@ fn fit_cubic(
     index = index.clamp(1, pts.len() - 2);
     let center = norm(sub(pts[index - 1], pts[index + 1]));
     fit_cubic(&pts[0..=index], t_hat1, center, tol, out, depth + 1);
-    fit_cubic(&pts[index..], mul(center, -1.0), t_hat2, tol, out, depth + 1);
+    fit_cubic(
+        &pts[index..],
+        mul(center, -1.0),
+        t_hat2,
+        tol,
+        out,
+        depth + 1,
+    );
 }
 
 pub fn fit_beziers(input: &[XY], tol: f64, closed: bool) -> Vec<Bezier> {
@@ -389,4 +375,3 @@ pub fn end_tangent(segs: &[Bezier]) -> Option<(XY, XY)> {
     }
     None
 }
-

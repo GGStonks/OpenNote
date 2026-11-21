@@ -476,4 +476,3 @@ pub struct LibraryBackup {
 pub const PAGE_WIDTH: f64 = 816.0;
 pub const PAGE_HEIGHT: f64 = 1056.0;
 pub const SCHEMA_VERSION: usize = 5;
-

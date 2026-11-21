@@ -285,6 +285,8 @@ pub struct Viewport {
     /// The fingers' places being fed are resampled ones (between real samples): a pinch engages
     /// and rebases only on a real sample, where the page's own gesture does.
     pub resampled: bool,
+    /// Timestamp (ms) of the most recent finger-count transition (e.g. 2->1).
+    transition_at: Option<f64>,
 }
 
 impl Default for Viewport {
@@ -330,6 +332,7 @@ impl Viewport {
             events: 0,
             last_pinch: None,
             resampled: false,
+            transition_at: None,
         };
         v.recompute();
         v
@@ -735,14 +738,17 @@ impl Viewport {
         }
         if !self.pointers.is_empty() {
             // A finger lifted: continue from the remaining ones without a jump.
+            self.transition_at = Some(now);
             self.reset_track(now);
             return;
         }
+        let in_transition_window = self.transition_at.is_some_and(|t| now - t < 50.0);
+        self.transition_at = None;
         self.flush_scroll();
         let pulled = self.pull_raw > 0.0;
         self.release_pull(now, true);
         let h: Vec<(f64, f64, f64)> = self.history.iter().map(|(p, t)| (p.x, p.y, *t)).collect();
-        let (vx, vy) = release_velocity(&h);
+        let (vx, vy) = release_velocity_weighted(&h);
         self.velocity = P { x: vx, y: vy };
         self.history.clear();
         let tap = self.tap.take();
@@ -757,7 +763,10 @@ impl Viewport {
                 return;
             }
         }
-        if was_navigating && recent && !pulled && self.js_scrolled && !cancelled {
+        let speed = self.velocity.x.hypot(self.velocity.y);
+        let suppress_fling = in_transition_window && (speed < 0.5 || h.len() < 3);
+        if was_navigating && recent && !pulled && self.js_scrolled && !cancelled && !suppress_fling
+        {
             self.start_momentum(now);
         }
     }
@@ -957,12 +966,12 @@ impl Viewport {
         if let Some(m) = self.momentum {
             if now > m.t0 {
                 self.by_page = false;
-                let (dx, dy, vx, vy) = momentum_step(m.vx, m.vy, now - m.t0);
+                let (dx, dy, vx, vy) = momentum_step_exact(m.vx, m.vy, now - m.t0);
                 let before = (self.sl, self.st);
                 self.st -= dy;
                 self.sl -= dx;
                 self.clamp_scroll();
-                let stuck = (self.sl, self.st) == before;
+                let stuck = (self.sl - before.0).abs() < 1e-4 && (self.st - before.1).abs() < 1e-4;
                 self.momentum = (vx.hypot(vy) > MOMENTUM_STOP_SPEED && !stuck)
                     .then_some(Momentum { vx, vy, t0: now });
             }

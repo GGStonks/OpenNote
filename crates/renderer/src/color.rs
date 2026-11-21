@@ -7,9 +7,24 @@ pub struct Rgba {
 }
 
 impl Rgba {
-    pub const WHITE: Self = Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
-    pub const BLACK: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    pub const WHITE: Self = Self {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
+    pub const BLACK: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const TRANSPARENT: Self = Self {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
 
     pub fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
@@ -53,7 +68,10 @@ impl Rgba {
             }
         } else if s.starts_with("rgb") {
             // parse rgb(r, g, b) or rgba(r, g, b, a)
-            let inside = s.trim_start_matches("rgba(").trim_start_matches("rgb(").trim_end_matches(')');
+            let inside = s
+                .trim_start_matches("rgba(")
+                .trim_start_matches("rgb(")
+                .trim_end_matches(')');
             let parts: Vec<&str> = inside.split(',').collect();
             if parts.len() >= 3 {
                 let r: f32 = parts[0].trim().parse().unwrap_or(0.0);
@@ -99,4 +117,3 @@ impl Rgba {
         ]
     }
 }
-

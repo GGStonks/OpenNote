@@ -171,9 +171,9 @@ impl SqliteStore {
     }
 
     pub fn get_all_folders(&self) -> Result<Vec<Folder>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, parent_id, color, created_at FROM folders ORDER BY created_at ASC")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, parent_id, color, created_at FROM folders ORDER BY created_at ASC",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok(Folder {
                 id: row.get(0)?,
@@ -248,9 +248,9 @@ impl SqliteStore {
     }
 
     pub fn get_file(&self, id: &str) -> Result<Option<StoredFile>, StoreError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT id, name, mime, bytes, password, created_at FROM files WHERE id = ?1")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, mime, bytes, password, created_at FROM files WHERE id = ?1",
+        )?;
         let res = stmt
             .query_row(params![id], |row| {
                 Ok(StoredFile {
@@ -289,7 +289,9 @@ impl SqliteStore {
         let mut stmt = self
             .conn
             .prepare("SELECT bytes FROM thumbs WHERE page_id = ?1")?;
-        let res: Option<Vec<u8>> = stmt.query_row(params![page_id], |row| row.get(0)).optional()?;
+        let res: Option<Vec<u8>> = stmt
+            .query_row(params![page_id], |row| row.get(0))
+            .optional()?;
         Ok(res)
     }
 

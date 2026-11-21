@@ -25,10 +25,22 @@ pub struct PageDim {
 
 pub fn page_size_dims(size: PageSize) -> PageDim {
     match size {
-        PageSize::Letter => PageDim { w: 816.0, h: 1056.0 },
-        PageSize::Legal => PageDim { w: 816.0, h: 1344.0 },
-        PageSize::A3 => PageDim { w: 1123.0, h: 1587.0 },
-        PageSize::A4 => PageDim { w: 794.0, h: 1123.0 },
+        PageSize::Letter => PageDim {
+            w: 816.0,
+            h: 1056.0,
+        },
+        PageSize::Legal => PageDim {
+            w: 816.0,
+            h: 1344.0,
+        },
+        PageSize::A3 => PageDim {
+            w: 1123.0,
+            h: 1587.0,
+        },
+        PageSize::A4 => PageDim {
+            w: 794.0,
+            h: 1123.0,
+        },
         PageSize::A5 => PageDim { w: 559.0, h: 794.0 },
         PageSize::B5 => PageDim { w: 665.0, h: 945.0 },
     }
@@ -58,7 +70,10 @@ pub struct SetupPatch {
 
 pub fn page_setup(doc: &NoteDocument, page: &PageSheet) -> PageSetup {
     let size = page.size.or(doc.page_size).unwrap_or(PageSize::Letter);
-    let orientation = page.orientation.or(doc.orientation).unwrap_or(PageOrientation::Portrait);
+    let orientation = page
+        .orientation
+        .or(doc.orientation)
+        .unwrap_or(PageOrientation::Portrait);
     let s = page_size_dims(size);
     let landscape = orientation == PageOrientation::Landscape;
     let custom = page.width.is_some()
@@ -69,8 +84,14 @@ pub fn page_setup(doc: &NoteDocument, page: &PageSheet) -> PageSetup {
         custom,
         pdf: page.pdf.clone(),
         paper_style: page.paper_style.unwrap_or(doc.paper_style),
-        paper_color: page.paper_color.clone().unwrap_or_else(|| doc.paper_color.clone()),
-        pattern_color: page.pattern_color.clone().or_else(|| doc.pattern_color.clone()),
+        paper_color: page
+            .paper_color
+            .clone()
+            .unwrap_or_else(|| doc.paper_color.clone()),
+        pattern_color: page
+            .pattern_color
+            .clone()
+            .or_else(|| doc.pattern_color.clone()),
         size,
         orientation,
         width: if custom {
@@ -342,10 +363,7 @@ pub fn letter_sheets_for(surface: &NotePage) -> Vec<PageSheet> {
         .collect()
 }
 
-pub fn surface_from_pages(
-    doc: &NoteDocument,
-    pages: &[NotePage],
-) -> (NotePage, Vec<PageSheet>) {
+pub fn surface_from_pages(doc: &NoteDocument, pages: &[NotePage]) -> (NotePage, Vec<PageSheet>) {
     let sheets: Vec<PageSheet> = pages
         .iter()
         .map(|_| PageSheet {
@@ -428,20 +446,8 @@ pub fn trailing_sheet_for(before: &NotePage, d: &NoteDocument) -> NoteDocument {
         .iter()
         .map(|s| s.id.clone())
         .chain(before.latex_blocks.iter().map(|b| b.id.clone()))
-        .chain(
-            before
-                .text_blocks
-                .iter()
-                .flatten()
-                .map(|b| b.id.clone()),
-        )
-        .chain(
-            before
-                .image_blocks
-                .iter()
-                .flatten()
-                .map(|b| b.id.clone()),
-        )
+        .chain(before.text_blocks.iter().flatten().map(|b| b.id.clone()))
+        .chain(before.image_blocks.iter().flatten().map(|b| b.id.clone()))
         .collect();
 
     let mut bottom = f64::NEG_INFINITY;
@@ -518,8 +524,16 @@ pub fn split_into_pages(doc: &NoteDocument) -> Vec<SplitPage> {
                 page_number: i + 1,
                 strokes: c.strokes,
                 latex_blocks: c.latex_blocks,
-                text_blocks: if c.text_blocks.is_empty() { None } else { Some(c.text_blocks) },
-                image_blocks: if c.image_blocks.is_empty() { None } else { Some(c.image_blocks) },
+                text_blocks: if c.text_blocks.is_empty() {
+                    None
+                } else {
+                    Some(c.text_blocks)
+                },
+                image_blocks: if c.image_blocks.is_empty() {
+                    None
+                } else {
+                    Some(c.image_blocks)
+                },
             };
             SplitPage {
                 page,
@@ -528,4 +542,3 @@ pub fn split_into_pages(doc: &NoteDocument) -> Vec<SplitPage> {
         })
         .collect()
 }
-

@@ -16,48 +16,129 @@ fn test_mechanism_1_purge_predicted_touches_on_up() {
     let mut predictor = StrokePredictor::new();
 
     // User draws an upward stroke (e.g. second leg of a "V")
-    predictor.push_committed(Point { x: 10.0, y: 10.0, pressure: 0.5, t: Some(0.0), ..Default::default() });
-    predictor.push_committed(Point { x: 15.0, y: 25.0, pressure: 0.5, t: Some(10.0), ..Default::default() });
-    predictor.push_committed(Point { x: 22.0, y: 50.0, pressure: 0.5, t: Some(20.0), ..Default::default() });
+    predictor.push_committed(Point {
+        x: 10.0,
+        y: 10.0,
+        pressure: 0.5,
+        t: Some(0.0),
+        ..Default::default()
+    });
+    predictor.push_committed(Point {
+        x: 15.0,
+        y: 25.0,
+        pressure: 0.5,
+        t: Some(10.0),
+        ..Default::default()
+    });
+    predictor.push_committed(Point {
+        x: 22.0,
+        y: 50.0,
+        pressure: 0.5,
+        t: Some(20.0),
+        ..Default::default()
+    });
 
     // While moving fast, hardware predictor projects 1 frame ahead into mid-air
-    let raw_prediction = Point { x: 30.0, y: 80.0, pressure: 0.5, t: Some(30.0), ..Default::default() };
+    let raw_prediction = Point {
+        x: 30.0,
+        y: 80.0,
+        pressure: 0.5,
+        t: Some(30.0),
+        ..Default::default()
+    };
     let pred = predictor.update_prediction(Some(raw_prediction));
-    assert_eq!(pred.len(), 1, "Predictor should generate 1 provisional point while moving");
-    assert!(predictor.live_display_points().len() == 4, "Live display includes prediction");
+    assert_eq!(
+        pred.len(),
+        1,
+        "Predictor should generate 1 provisional point while moving"
+    );
+    assert!(
+        predictor.live_display_points().len() == 4,
+        "Live display includes prediction"
+    );
 
     // The instant the stylus lifts (ACTION_UP / touchesEnded):
     let final_pts = predictor.on_touch_ended();
-    assert_eq!(final_pts.len(), 3, "Prediction buffer must be completely discarded on touch ended");
+    assert_eq!(
+        final_pts.len(),
+        3,
+        "Prediction buffer must be completely discarded on touch ended"
+    );
     assert_eq!(final_pts.last().unwrap().x, 22.0);
     assert_eq!(final_pts.last().unwrap().y, 50.0);
-    assert!(predictor.live_display_points().len() == 3, "No extrapolated tail left behind in mid-air");
+    assert!(
+        predictor.live_display_points().len() == 3,
+        "No extrapolated tail left behind in mid-air"
+    );
 }
 
 #[test]
 fn test_mechanism_2_liftoff_jitter_pressure_gate() {
     // Stylus lifting with contact patch shrinking and centroid jumping sideways:
     let pts = vec![
-        Point { x: 100.0, y: 100.0, pressure: 0.35, t: Some(10.0), ..Default::default() },
-        Point { x: 105.0, y: 110.0, pressure: 0.20, t: Some(20.0), ..Default::default() },
-        Point { x: 110.0, y: 120.0, pressure: 0.08, t: Some(30.0), ..Default::default() }, // Last stable sample (pressure >= 0.05)
-        Point { x: 118.0, y: 115.0, pressure: 0.03, t: Some(40.0), ..Default::default() }, // Noisy jump sideways as field collapses
-        Point { x: 125.0, y: 112.0, pressure: 0.00, t: Some(50.0), ..Default::default() }, // ACTION_UP sample
+        Point {
+            x: 100.0,
+            y: 100.0,
+            pressure: 0.35,
+            t: Some(10.0),
+            ..Default::default()
+        },
+        Point {
+            x: 105.0,
+            y: 110.0,
+            pressure: 0.20,
+            t: Some(20.0),
+            ..Default::default()
+        },
+        Point {
+            x: 110.0,
+            y: 120.0,
+            pressure: 0.08,
+            t: Some(30.0),
+            ..Default::default()
+        }, // Last stable sample (pressure >= 0.05)
+        Point {
+            x: 118.0,
+            y: 115.0,
+            pressure: 0.03,
+            t: Some(40.0),
+            ..Default::default()
+        }, // Noisy jump sideways as field collapses
+        Point {
+            x: 125.0,
+            y: 112.0,
+            pressure: 0.00,
+            t: Some(50.0),
+            ..Default::default()
+        }, // ACTION_UP sample
     ];
 
     let filtered = filter_liftoff_jitter(&pts);
-    assert_eq!(filtered.len(), pts.len(), "Point count preserved for tapering");
+    assert_eq!(
+        filtered.len(),
+        pts.len(),
+        "Point count preserved for tapering"
+    );
 
     // Stable points untouched:
     assert_eq!(filtered[2].x, 110.0);
     assert_eq!(filtered[2].y, 120.0);
 
     // Ultra-low pressure samples (< 0.05) clamped to last stable coordinate:
-    assert_eq!(filtered[3].x, 110.0, "Jitter coordinate replaced with last stable position");
+    assert_eq!(
+        filtered[3].x, 110.0,
+        "Jitter coordinate replaced with last stable position"
+    );
     assert_eq!(filtered[3].y, 120.0);
-    assert_eq!(filtered[3].pressure, 0.03, "Pressure drop preserved for width taper");
+    assert_eq!(
+        filtered[3].pressure, 0.03,
+        "Pressure drop preserved for width taper"
+    );
 
-    assert_eq!(filtered[4].x, 110.0, "ACTION_UP sample clamped to last stable position");
+    assert_eq!(
+        filtered[4].x, 110.0,
+        "ACTION_UP sample clamped to last stable position"
+    );
     assert_eq!(filtered[4].y, 120.0);
     assert_eq!(filtered[4].pressure, 0.00);
 }
@@ -122,12 +203,16 @@ fn test_mechanism_4_critically_damped_spring_filter() {
     assert_eq!(lerp_points.last().unwrap().x, 120.0);
     assert_eq!(lerp_points.last().unwrap().y, 60.0);
     assert_eq!(spring.pos, up_touch);
-    assert_eq!(spring.vel, XY { x: 0.0, y: 0.0 }, "Velocity halted immediately on UP");
+    assert_eq!(
+        spring.vel,
+        XY { x: 0.0, y: 0.0 },
+        "Velocity halted immediately on UP"
+    );
 }
 
 #[test]
 fn test_fast_stroke_live_vs_committed_endpoint() {
-    use ink::{SampleDensifier, SmoothLiveStroke, stroke_geometry};
+    use ink::{stroke_geometry, SampleDensifier, SmoothLiveStroke};
     use model::{LineStyle, PenStyle, Point, Stroke};
 
     // Fast upward flick simulating Apple Pencil at 240 Hz (~4.167 ms sample interval).
@@ -178,7 +263,11 @@ fn test_fast_stroke_live_vs_committed_endpoint() {
 
     // 1. Live line endpoint right before lift-off commit
     let line = live.line(2.0, true);
-    let live_end = line.rest_pts.last().or_else(|| line.final_pts.last()).expect("live points exist");
+    let live_end = line
+        .rest_pts
+        .last()
+        .or_else(|| line.final_pts.last())
+        .expect("live points exist");
 
     // 2. Committed stroke geometry
     let stroke = Stroke {
@@ -197,8 +286,13 @@ fn test_fast_stroke_live_vs_committed_endpoint() {
     let committed_end = geo.pts.last().expect("committed points exist");
 
     let dist = (live_end.x - committed_end.x).hypot(live_end.y - committed_end.y);
-    println!("Fast stroke live end: ({:.4}, {:.4}), committed end: ({:.4}, {:.4}), dist: {:.6} px",
-        live_end.x, live_end.y, committed_end.x, committed_end.y, dist);
+    println!(
+        "Fast stroke live end: ({:.4}, {:.4}), committed end: ({:.4}, {:.4}), dist: {:.6} px",
+        live_end.x, live_end.y, committed_end.x, committed_end.y, dist
+    );
 
-    assert!(dist < 0.05, "Live endpoint and committed endpoint must match without tail erasure: dist = {dist} px");
+    assert!(
+        dist < 0.05,
+        "Live endpoint and committed endpoint must match without tail erasure: dist = {dist} px"
+    );
 }

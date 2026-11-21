@@ -71,8 +71,7 @@ impl SlashCommandKind {
             return true;
         }
         let q = query.to_lowercase();
-        self.title().to_lowercase().contains(&q)
-            || self.description().to_lowercase().contains(&q)
+        self.title().to_lowercase().contains(&q) || self.description().to_lowercase().contains(&q)
     }
 }
 
@@ -108,7 +107,14 @@ impl Default for SlashCommandPopover {
 
 impl SlashCommandPopover {
     /// Open the slash popover at cursor coordinates [x, y].
-    pub fn open_at(&mut self, cursor_x: f32, cursor_y: f32, viewport_w: f32, viewport_h: f32, tokens: &ThemeTokens) {
+    pub fn open_at(
+        &mut self,
+        cursor_x: f32,
+        cursor_y: f32,
+        viewport_w: f32,
+        viewport_h: f32,
+        tokens: &ThemeTokens,
+    ) {
         self.is_open = true;
         self.query.clear();
         self.selected_index = 0;

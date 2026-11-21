@@ -17,7 +17,6 @@ use bytemuck::{Pod, Zeroable};
 use renderer::color::Rgba;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -49,7 +48,7 @@ pub(crate) struct Uniforms {
     pub(crate) i_rot: [f32; 4],
 }
 
-pub(crate) type PagePlan = (usize, Option<usize>, Vec<(usize, usize)>);
+pub(crate) type PagePlan = (usize, Option<usize>, usize, usize);
 
 pub(crate) const UNIFORM_STRIDE: u64 = 256;
 pub(crate) const COV_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
@@ -64,6 +63,13 @@ pub struct GpuScene {
     pub(crate) ops: Vec<Op>,
 }
 
+impl GpuScene {
+    pub fn allocated_bytes(&self) -> u64 {
+        (self.caps_capacity * std::mem::size_of::<CapInst>()
+            + self.flat_capacity * std::mem::size_of::<[f32; 2]>()) as u64
+    }
+}
+
 pub struct GpuCanvas {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
@@ -71,6 +77,7 @@ pub struct GpuCanvas {
     pub(crate) uniform_bgl: wgpu::BindGroupLayout,
     pub(crate) tex_bgl: wgpu::BindGroupLayout,
     pub(crate) caps_cov: wgpu::RenderPipeline,
+    #[allow(dead_code)]
     pub(crate) zero_cov: wgpu::RenderPipeline,
     pub(crate) compose: wgpu::RenderPipeline,
     pub(crate) fill_stencil: wgpu::RenderPipeline,
@@ -93,8 +100,11 @@ pub struct GpuCanvas {
     pub(crate) stencil: Option<wgpu::TextureView>,
     pub(crate) slots_scratch: Vec<Uniforms>,
     pub(crate) rects_scratch: Vec<[f32; 2]>,
-    /// Per page drawn: its index in the frame, its paper's uniform slot, each op's two slots.
+    /// Per page drawn: its index in the frame, its paper's uniform slot, and its range in slot_of_scratch.
     pub(crate) plan_scratch: Vec<PagePlan>,
+    pub(crate) slot_of_scratch: Vec<(usize, usize)>,
+    pub(crate) see_batch_scratch: Vec<crate::ink::SeeItem>,
+    pub(crate) flat_batch_scratch: Vec<crate::ink::FlatItem>,
     pub(crate) bytes_scratch: Vec<u8>,
     /// What wgpu reported (validation errors, a lost device), recorded instead of a panic.
     pub(crate) health: Arc<GpuHealth>,
@@ -324,7 +334,7 @@ impl GpuCanvas {
         use wgpu::{
             ColorWrites as W, CompareFunction as C, PrimitiveTopology as T, StencilOperation as S,
         };
-        let keep = || Some(stencil_state(C::Always, S::Keep));
+        let _keep = || Some(stencil_state(C::Always, S::Keep));
         let caps_cov = make(
             &layout_cov,
             "caps-cov",
@@ -359,7 +369,7 @@ impl GpuCanvas {
             format,
             Some(OVER),
             W::ALL,
-            keep(),
+            None,
         );
         let fill_stencil = make(
             &layout,
@@ -419,7 +429,7 @@ impl GpuCanvas {
             format,
             Some(OVER),
             W::ALL,
-            keep(),
+            None,
         );
         let paper = make(
             &layout,
@@ -431,7 +441,7 @@ impl GpuCanvas {
             format,
             Some(OVER),
             W::ALL,
-            keep(),
+            None,
         );
         let pic_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("picture"),
@@ -470,7 +480,7 @@ impl GpuCanvas {
             format,
             Some(OVER),
             W::ALL,
-            keep(),
+            None,
         );
         let pictures = Pictures::new(&device, pic_bgl, &limits, Library::new());
         let rects_capacity = 16;
@@ -512,6 +522,9 @@ impl GpuCanvas {
             slots_scratch: Vec::new(),
             rects_scratch: Vec::new(),
             plan_scratch: Vec::new(),
+            slot_of_scratch: Vec::new(),
+            see_batch_scratch: Vec::new(),
+            flat_batch_scratch: Vec::new(),
             bytes_scratch: Vec::new(),
             health,
             max_dim: limits.max_texture_dimension_2d.max(1),
@@ -559,30 +572,28 @@ impl GpuCanvas {
                 self.max_buffer
             ));
         }
-        let cap_capacity = scene.caps.len().max(16384).next_power_of_two();
-        let flat_capacity = scene.flat.len().max(1024).next_power_of_two();
-        let mut caps_data = vec![CapInst::zeroed(); cap_capacity];
+        let cap_capacity = scene.caps.len().max(1).next_power_of_two();
+        let flat_capacity = scene.flat.len().max(1).next_power_of_two();
+        let caps = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("caps"),
+            size: (cap_capacity * std::mem::size_of::<CapInst>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         if !scene.caps.is_empty() && fits {
-            caps_data[..scene.caps.len()].copy_from_slice(&scene.caps);
+            self.queue
+                .write_buffer(&caps, 0, bytemuck::cast_slice(&scene.caps));
         }
-        let mut flat_data = vec![[0.0f32; 2]; flat_capacity];
+        let flat = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flat"),
+            size: (flat_capacity * std::mem::size_of::<[f32; 2]>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         if !scene.flat.is_empty() && fits {
-            flat_data[..scene.flat.len()].copy_from_slice(&scene.flat);
+            self.queue
+                .write_buffer(&flat, 0, bytemuck::cast_slice(&scene.flat));
         }
-        let caps = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("caps"),
-                contents: bytemuck::cast_slice(&caps_data),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
-        let flat = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("flat"),
-                contents: bytemuck::cast_slice(&flat_data),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            });
         GpuScene {
             caps,
             caps_capacity: cap_capacity,

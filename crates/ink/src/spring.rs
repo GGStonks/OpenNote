@@ -66,7 +66,10 @@ impl CriticallyDampedSpring {
         let new_vy = (self.vel.y - self.omega * cy * dt) * exp_term;
 
         self.pos = XY { x: new_x, y: new_y };
-        self.vel = XY { x: new_vx, y: new_vy };
+        self.vel = XY {
+            x: new_vx,
+            y: new_vy,
+        };
         self.pos
     }
 
@@ -91,4 +94,3 @@ impl CriticallyDampedSpring {
         result
     }
 }
-

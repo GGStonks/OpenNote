@@ -217,15 +217,18 @@ fn fs_paper(i: PageOut) -> @location(0) vec4<f32> {
     c = over(c, u.p_major, lines(s.y, 0.0, 60.0, 1.0, h));
     c = over(c, u.p_major, lines(s.x, 0.0, 60.0, 1.0, h));
   } else if (st == 7u) {
-    // The CSS ramp sampled 4 x 4 over the pixel (it is narrower than a pixel at low zoom).
     let r = u.p_pad.x;
     let q = s - round(s / 24.0) * 24.0;
-    var a = 0.0;
-    for (var k = 0; k < 16; k++) {
-      let o = (vec2<f32>(f32(k % 4), f32(k / 4)) + 0.5) / 4.0 * 2.0 - 1.0;
-      a += clamp((r + 0.4 - length(q + o * h)) / 0.4, 0.0, 1.0);
+    let d2 = dot(q, q);
+    let bound = r + 0.4 + 2.0 * h;
+    if (d2 < bound * bound) {
+      var a = 0.0;
+      for (var k = 0u; k < 4u; k++) {
+        let o = vec2<f32>(select(-0.5, 0.5, (k & 1u) != 0u), select(-0.5, 0.5, k >= 2u));
+        a += clamp((r + 0.4 - length(q + o * h)) / 0.4, 0.0, 1.0);
+      }
+      c = over(c, u.p_dot, a * 0.25);
     }
-    c = over(c, u.p_dot, a / 16.0);
   }
   return vec4<f32>(c.rgb * c.a, c.a);
 }

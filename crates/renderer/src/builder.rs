@@ -155,4 +155,3 @@ pub fn build_glow_ops(strokes: &[Stroke], radius: f64, color: Rgba) -> Vec<Rende
     }
     ops
 }
-

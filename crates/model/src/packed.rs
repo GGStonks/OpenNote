@@ -1,4 +1,6 @@
-use crate::types::{FillType, LineStyle, ModeledKind, NoteDocument, NotePage, PenStyle, Point, ShapeKind, Stroke};
+use crate::types::{
+    FillType, LineStyle, ModeledKind, NoteDocument, NotePage, PenStyle, Point, ShapeKind, Stroke,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PACKED_STRIDE: usize = 6;
@@ -184,7 +186,11 @@ pub fn decode_points(pts: &[f64]) -> Vec<Point> {
         let az_val = pts[o + 5];
 
         let t = if t_val.is_nan() { None } else { Some(t_val) };
-        let alt = if alt_val.is_nan() { None } else { Some(alt_val) };
+        let alt = if alt_val.is_nan() {
+            None
+        } else {
+            Some(alt_val)
+        };
         let az = if az_val.is_nan() { None } else { Some(az_val) };
 
         points.push(Point {

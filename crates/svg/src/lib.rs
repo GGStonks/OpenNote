@@ -34,7 +34,9 @@ pub fn capsule_svg(a: XY, ra: f64, b: XY, rb: f64) -> String {
     }
     let th = dy.atan2(dx);
     let ph = ((ra - rb) / d).clamp(-1.0, 1.0).acos();
-    let p = |c: XY, r: f64, ang: f64| format!("{} {}", f2(c.x + r * ang.cos()), f2(c.y + r * ang.sin()));
+    let p = |c: XY, r: f64, ang: f64| {
+        format!("{} {}", f2(c.x + r * ang.cos()), f2(c.y + r * ang.sin()))
+    };
     use std::f64::consts::PI;
     let large1 = if 2.0 * ph > PI { 1 } else { 0 };
     let large2 = if 2.0 * PI - 2.0 * ph > PI { 1 } else { 0 };
@@ -181,7 +183,14 @@ pub fn stroke_to_svg_with_paper(s: &Stroke, dy: f64, paper: &str) -> String {
         return String::new();
     }
     let opacity = s.opacity;
-    let pts: Vec<XY> = s.points.iter().map(|p| XY { x: p.x, y: p.y + dy }).collect();
+    let pts: Vec<XY> = s
+        .points
+        .iter()
+        .map(|p| XY {
+            x: p.x,
+            y: p.y + dy,
+        })
+        .collect();
 
     if s.shape_kind == Some(ShapeKind::Point) {
         let r = 2.5f64.max(s.width * 1.7);
@@ -256,11 +265,18 @@ pub fn stroke_to_svg_with_paper(s: &Stroke, dy: f64, paper: &str) -> String {
         None
     };
 
-    let has_widths = geo_ink.as_ref().map(|g| g.widths.is_some()).unwrap_or(false);
+    let has_widths = geo_ink
+        .as_ref()
+        .map(|g| g.widths.is_some())
+        .unwrap_or(false);
     if (runs.is_some() || has_widths) && s.tool == "pen" {
         let g = geo_ink.as_ref().unwrap();
         let default_run = ink::dashes::DashRun {
-            pts: g.pts.iter().map(|p| nib::geometry::XY { x: p.x, y: p.y }).collect(),
+            pts: g
+                .pts
+                .iter()
+                .map(|p| nib::geometry::XY { x: p.x, y: p.y })
+                .collect(),
             radii: match &g.widths {
                 Some(w) => w.iter().map(|&x| x / 2.0).collect(),
                 None => vec![g.width / 2.0; g.pts.len()],
@@ -285,7 +301,12 @@ pub fn stroke_to_svg_with_paper(s: &Stroke, dy: f64, paper: &str) -> String {
                 if !keep[k] {
                     continue;
                 }
-                parts.push(capsule_svg(p_slice[prev], r_slice[prev], p_slice[k], r_slice[k]));
+                parts.push(capsule_svg(
+                    p_slice[prev],
+                    r_slice[prev],
+                    p_slice[k],
+                    r_slice[k],
+                ));
                 prev = k;
             }
         }
@@ -298,7 +319,10 @@ pub fn stroke_to_svg_with_paper(s: &Stroke, dy: f64, paper: &str) -> String {
         let dash = dash_pattern(s.line_style, s.width);
         let dash_attr = if let Some(d) = dash {
             let pat_str: Vec<String> = d.iter().map(|&x| f2(x)).collect();
-            let off = s.dash_offset.map(|o| format!(r#" stroke-dashoffset="{}""#, f2(o))).unwrap_or_default();
+            let off = s
+                .dash_offset
+                .map(|o| format!(r#" stroke-dashoffset="{}""#, f2(o)))
+                .unwrap_or_default();
             format!(r#" stroke-dasharray="{}"{}"#, pat_str.join(","), off)
         } else {
             String::new()
@@ -348,7 +372,13 @@ pub fn stroke_to_svg(s: &Stroke, dy: f64) -> String {
 fn turn(el: String, deg: Option<f64>, cx: f64, cy: f64) -> String {
     if let Some(deg) = deg {
         if deg != 0.0 {
-            return format!(r#"<g transform="rotate({} {} {})">{}</g>"#, deg, f2(cx), f2(cy), el);
+            return format!(
+                r#"<g transform="rotate({} {} {})">{}</g>"#,
+                deg,
+                f2(cx),
+                f2(cy),
+                el
+            );
         }
     }
     el
@@ -377,7 +407,12 @@ pub fn layer_svg(l: &ZLayer, dy: f64, paper: &str, _ink: &str) -> String {
                 tb.color,
                 quick_xml::escape::escape(&tb.text)
             );
-            turn(el, tb.rotation, tb.x + tb.width / 2.0, tb.y + dy + tb.height.unwrap_or(tb.font_size) / 2.0)
+            turn(
+                el,
+                tb.rotation,
+                tb.x + tb.width / 2.0,
+                tb.y + dy + tb.height.unwrap_or(tb.font_size) / 2.0,
+            )
         }
         ZLayer::Image { block: ib, .. } => {
             let el = format!(
@@ -388,7 +423,12 @@ pub fn layer_svg(l: &ZLayer, dy: f64, paper: &str, _ink: &str) -> String {
                 f2(ib.width),
                 f2(ib.height)
             );
-            turn(el, ib.rotation, ib.x + ib.width / 2.0, ib.y + dy + ib.height / 2.0)
+            turn(
+                el,
+                ib.rotation,
+                ib.x + ib.width / 2.0,
+                ib.y + dy + ib.height / 2.0,
+            )
         }
         _ => String::new(),
     }
@@ -422,7 +462,11 @@ pub fn document_to_svg(doc: &NoteDocument) -> Vec<String> {
     let pages = model::sheets::split_into_pages(doc);
     let mut out = Vec::new();
     for p in pages {
-        out.push(page_to_svg(&p.page, p.box_.setup.width, p.box_.setup.height));
+        out.push(page_to_svg(
+            &p.page,
+            p.box_.setup.width,
+            p.box_.setup.height,
+        ));
     }
     out
 }
@@ -431,7 +475,8 @@ pub fn build_svg_document(doc: &NoteDocument) -> String {
     let gap = 24.0;
     let pages = model::sheets::split_into_pages(doc);
     if pages.is_empty() {
-        return r#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"></svg>"#.to_string();
+        return r#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"></svg>"#
+            .to_string();
     }
     let max_w = pages.iter().map(|p| p.box_.setup.width).fold(0.0, f64::max);
     let total_h = pages.iter().map(|p| p.box_.setup.height + gap).sum::<f64>() - gap;
@@ -470,7 +515,7 @@ pub fn build_svg_document(doc: &NoteDocument) -> String {
 
         let layers = shapes::zorder::z_layers(&p.page);
         for l in &layers {
-            let s = layer_svg(l, dy, &paper, "#000000");
+            let s = layer_svg(l, dy, paper, "#000000");
             if !s.is_empty() {
                 out.push_str(&s);
                 out.push('\n');

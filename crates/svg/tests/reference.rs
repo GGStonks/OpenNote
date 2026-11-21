@@ -58,7 +58,9 @@ fn check_path_d(got_d: &str, want_d: &str) -> Result<(), String> {
         match (g, w) {
             (PathToken::Cmd(c1), PathToken::Cmd(c2)) => {
                 if c1 != c2 {
-                    return Err(format!("Path command mismatch at token {i}: '{c1}' vs '{c2}'"));
+                    return Err(format!(
+                        "Path command mismatch at token {i}: '{c1}' vs '{c2}'"
+                    ));
                 }
             }
             (PathToken::Num(n1), PathToken::Num(n2)) => {
@@ -69,7 +71,11 @@ fn check_path_d(got_d: &str, want_d: &str) -> Result<(), String> {
                     ));
                 }
             }
-            _ => return Err(format!("Path token type mismatch at {i}: got {g:?}, want {w:?}")),
+            _ => {
+                return Err(format!(
+                    "Path token type mismatch at {i}: got {g:?}, want {w:?}"
+                ))
+            }
         }
     }
     Ok(())
@@ -97,7 +103,11 @@ fn check_attr(key: &str, val_got: &str, val_want: &str) -> Result<(), String> {
             .map(|s| s.parse::<f64>().expect("valid float"))
             .collect();
         if nums_got.len() != nums_want.len() {
-            return Err(format!("Attribute '{key}' count mismatch: {} vs {}", nums_got.len(), nums_want.len()));
+            return Err(format!(
+                "Attribute '{key}' count mismatch: {} vs {}",
+                nums_got.len(),
+                nums_want.len()
+            ));
         }
         for (i, (g, w)) in nums_got.iter().zip(nums_want.iter()).enumerate() {
             if (g - w).abs() > 1e-4 {
@@ -109,14 +119,14 @@ fn check_attr(key: &str, val_got: &str, val_want: &str) -> Result<(), String> {
         Ok(())
     } else if let (Ok(g), Ok(w)) = (val_got.parse::<f64>(), val_want.parse::<f64>()) {
         if (g - w).abs() > 1e-4 {
-            return Err(format!(
-                "Attribute '{key}' numeric mismatch: {g} vs {w}"
-            ));
+            return Err(format!("Attribute '{key}' numeric mismatch: {g} vs {w}"));
         }
         Ok(())
     } else {
         if val_got != val_want {
-            return Err(format!("Attribute '{key}' text mismatch: '{val_got}' vs '{val_want}'"));
+            return Err(format!(
+                "Attribute '{key}' text mismatch: '{val_got}' vs '{val_want}'"
+            ));
         }
         Ok(())
     }
@@ -148,7 +158,10 @@ fn extract_elements(xml: &str) -> Vec<XmlElement> {
                 let mut attrs = Vec::new();
                 for a in e.attributes().flatten() {
                     let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
-                    let val = a.decode_and_unescape_value(reader.decoder()).unwrap().to_string();
+                    let val = a
+                        .decode_and_unescape_value(reader.decoder())
+                        .unwrap()
+                        .to_string();
                     attrs.push((key, val));
                 }
                 elements.push(XmlElement { tag, attrs });
@@ -187,7 +200,10 @@ fn check_xml_structurally(got_xml: &str, want_xml: &str) -> Result<(), String> {
         }
         for ((k_got, v_got), (k_want, v_want)) in g.attrs.iter().zip(w.attrs.iter()) {
             if k_got != k_want {
-                return Err(format!("Element {i} ({}) attribute key mismatch: '{}' vs '{}'", g.tag, k_got, k_want));
+                return Err(format!(
+                    "Element {i} ({}) attribute key mismatch: '{}' vs '{}'",
+                    g.tag, k_got, k_want
+                ));
             }
             check_attr(k_got, v_got, v_want)?;
         }
@@ -249,16 +265,25 @@ fn test_svg_reference() {
     for (i, s) in order.iter().enumerate() {
         let rust_s = svg::stroke_to_svg_with_paper(s, 0.0, paper);
         let want_s = want_lines.get(i).copied().unwrap_or("");
-        if let Err(e) = check_xml_structurally(&format!("<g>{rust_s}</g>"), &format!("<g>{want_s}</g>")) {
+        if let Err(e) =
+            check_xml_structurally(&format!("<g>{rust_s}</g>"), &format!("<g>{want_s}</g>"))
+        {
             eprintln!("Difference on stroke {}: {}", s.id, e);
             differing.push(s.id.clone());
         }
     }
 
     if !differing.is_empty() {
-        panic!("Differing stroke ids ({}): {:?}", differing.len(), differing);
+        panic!(
+            "Differing stroke ids ({}): {:?}",
+            differing.len(),
+            differing
+        );
     }
 
     let rust_layer = layer_svg(&layers[0], 0.0, paper, ink);
-    compare_xml_structurally(&format!("<g>{rust_layer}</g>"), &format!("<g>{want_layer}</g>"));
+    compare_xml_structurally(
+        &format!("<g>{rust_layer}</g>"),
+        &format!("<g>{want_layer}</g>"),
+    );
 }

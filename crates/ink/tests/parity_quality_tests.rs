@@ -23,7 +23,9 @@ fn test_smooth_live_stroke_width_continuity_across_boundary() {
             assert_eq!(res.rest_pts.len(), res.rest_w.len());
 
             // If both final and rest points exist, check width continuity across the seam
-            if let (Some(&last_final_w), Some(&first_rest_w)) = (res.final_w.last(), res.rest_w.first()) {
+            if let (Some(&last_final_w), Some(&first_rest_w)) =
+                (res.final_w.last(), res.rest_w.first())
+            {
                 let diff = (last_final_w - first_rest_w).abs();
                 assert!(
                     diff < 0.25,
@@ -87,7 +89,14 @@ fn test_erase_strokes_partial_closed_handwriting_across_seam() {
     };
 
     // 1. Erase away from the seam (seam is at angle 0: x=150, y=100; erase at angle PI: x=50, y=100)
-    let (pieces, changed) = erase_strokes_partial(&[stroke.clone()], 50.0, 100.0, 10.0, make_id, None);
+    let (pieces, changed) = erase_strokes_partial(
+        std::slice::from_ref(&stroke),
+        50.0,
+        100.0,
+        10.0,
+        make_id,
+        None,
+    );
     assert!(changed);
     // Because wrap-around is merged across the seam, this should yield exactly 1 open continuous piece
     assert_eq!(
@@ -103,7 +112,8 @@ fn test_erase_strokes_partial_closed_handwriting_across_seam() {
         id_counter2 += 1;
         format!("cut2_{id_counter2}")
     };
-    let (pieces_seam, changed_seam) = erase_strokes_partial(&[stroke], 150.0, 100.0, 10.0, make_id2, None);
+    let (pieces_seam, changed_seam) =
+        erase_strokes_partial(&[stroke], 150.0, 100.0, 10.0, make_id2, None);
     assert!(changed_seam);
     assert_eq!(
         pieces_seam.len(),
@@ -122,8 +132,22 @@ fn test_highlighter_cut_radius_matches_half_width() {
         width: 10.0,
         opacity: 0.5,
         points: vec![
-            Point { x: 0.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 200.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 0.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 200.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,
@@ -165,11 +189,46 @@ fn test_arrow_partial_erase_preserves_wings() {
         width: 2.0,
         opacity: 1.0,
         points: vec![
-            Point { x: 10.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 85.0, y: 40.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 100.0, y: 50.0, pressure: 0.5, t: None, alt: None, az: None },
-            Point { x: 85.0, y: 60.0, pressure: 0.5, t: None, alt: None, az: None },
+            Point {
+                x: 10.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 85.0,
+                y: 40.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 100.0,
+                y: 50.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
+            Point {
+                x: 85.0,
+                y: 60.0,
+                pressure: 0.5,
+                t: None,
+                alt: None,
+                az: None,
+            },
         ],
         line_style: None,
         pen_style: None,

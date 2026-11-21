@@ -48,4 +48,3 @@ pub fn import_file(name: &str, bytes: &[u8]) -> Result<NoteDocument, ImportError
         _ => Err(ImportError::Unsupported(ext)),
     }
 }
-

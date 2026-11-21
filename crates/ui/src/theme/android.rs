@@ -16,13 +16,16 @@ impl ThemeTokens {
                 // Tonal Surface Ladder: surface_container_lowest = #FFFFFF
                 canvas_background: Color::from_hex("#FFFFFF").unwrap_or(Color::WHITE),
                 // surface_container_low (Note List Background) = #F4F6FA
-                surface_background: Color::from_hex("#F4F6FA").unwrap_or(Color::rgb(0.957, 0.965, 0.98)),
+                surface_background: Color::from_hex("#F4F6FA")
+                    .unwrap_or(Color::rgb(0.957, 0.965, 0.98)),
                 // surface_container_high (Cards & Floating Toolbars) = #E8ECF4
-                surface_elevated: Color::from_hex("#E8ECF4").unwrap_or(Color::rgb(0.91, 0.925, 0.957)),
+                surface_elevated: Color::from_hex("#E8ECF4")
+                    .unwrap_or(Color::rgb(0.91, 0.925, 0.957)),
                 // Text primary
                 text_primary: Color::from_hex("#191C20").unwrap_or(Color::rgb(0.098, 0.11, 0.125)),
                 // Text secondary
-                text_secondary: Color::from_hex("#43474E").unwrap_or(Color::rgb(0.263, 0.278, 0.306)),
+                text_secondary: Color::from_hex("#43474E")
+                    .unwrap_or(Color::rgb(0.263, 0.278, 0.306)),
                 text_muted: Color::from_hex("#73777F").unwrap_or(Color::rgb(0.451, 0.467, 0.498)),
                 // Expressive Primary Accent: M3 Indigo #2563EB or Deep Blue #005AC1
                 accent: Color::from_hex("#005AC1").unwrap_or(Color::rgb(0.0, 0.353, 0.757)),
@@ -33,7 +36,8 @@ impl ThemeTokens {
                     specular_border_width: 0.0, // Strictly NO divider/border lines
                     specular_border_color: Color::TRANSPARENT,
                     // surface_container_high
-                    surface_fill: Color::from_hex("#E8ECF4").unwrap_or(Color::rgb(0.91, 0.925, 0.957)),
+                    surface_fill: Color::from_hex("#E8ECF4")
+                        .unwrap_or(Color::rgb(0.91, 0.925, 0.957)),
                     shadow_blur_px: 12.0,
                     shadow_color: Color::rgba(0.0, 0.0, 0.0, 0.10),
                 },
@@ -97,11 +101,14 @@ impl ThemeTokens {
             variant: ThemeVariant::Dark,
             colors: ColorTokens {
                 // Tonal Surface Ladder: surface_container_lowest = #0F1115
-                canvas_background: Color::from_hex("#0F1115").unwrap_or(Color::rgb(0.059, 0.067, 0.082)),
+                canvas_background: Color::from_hex("#0F1115")
+                    .unwrap_or(Color::rgb(0.059, 0.067, 0.082)),
                 // surface_container_low = #171A21
-                surface_background: Color::from_hex("#171A21").unwrap_or(Color::rgb(0.09, 0.102, 0.129)),
+                surface_background: Color::from_hex("#171A21")
+                    .unwrap_or(Color::rgb(0.09, 0.102, 0.129)),
                 // surface_container_high = #222630
-                surface_elevated: Color::from_hex("#222630").unwrap_or(Color::rgb(0.133, 0.149, 0.188)),
+                surface_elevated: Color::from_hex("#222630")
+                    .unwrap_or(Color::rgb(0.133, 0.149, 0.188)),
                 // Text primary
                 text_primary: Color::from_hex("#E2E2E9").unwrap_or(Color::rgb(0.886, 0.886, 0.914)),
                 // Text secondary
@@ -116,7 +123,8 @@ impl ThemeTokens {
                     specular_border_width: 0.0,
                     specular_border_color: Color::TRANSPARENT,
                     // surface_container_high
-                    surface_fill: Color::from_hex("#222630").unwrap_or(Color::rgb(0.133, 0.149, 0.188)),
+                    surface_fill: Color::from_hex("#222630")
+                        .unwrap_or(Color::rgb(0.133, 0.149, 0.188)),
                     shadow_blur_px: 16.0,
                     shadow_color: Color::rgba(0.0, 0.0, 0.0, 0.40),
                 },

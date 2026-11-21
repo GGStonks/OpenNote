@@ -7,7 +7,10 @@ use shapes::{detect_shape, snap_stroke};
 const TOL: f64 = 1e-4;
 
 fn ensure_reference_json() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/shapes.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/rust-ref/shapes.json"
+    );
     if !std::path::Path::new(path).exists() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let root = std::path::Path::new(manifest_dir).join("../..");
@@ -44,12 +47,19 @@ fn ensure_reference_json() {
 }
 
 fn reference() -> Value {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rust-ref/shapes.json");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../bench/rust-ref/shapes.json"
+    );
     let shapes_ts = concat!(env!("CARGO_MANIFEST_DIR"), "/../../bench/rustref/shapes.ts");
     let needs_regen = match (std::fs::metadata(path), std::fs::metadata(shapes_ts)) {
         (Ok(meta_json), Ok(meta_ts)) => {
-            meta_json.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                < meta_ts.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            meta_json
+                .modified()
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+                < meta_ts
+                    .modified()
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
         }
         _ => true,
     };
@@ -63,7 +73,9 @@ fn reference() -> Value {
 }
 
 fn nums(v: &Value) -> Vec<f64> {
-    v.as_array().map(|a| a.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect()).unwrap_or_default()
+    v.as_array()
+        .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(f64::NAN)).collect())
+        .unwrap_or_default()
 }
 
 fn rows(v: &Value) -> Vec<[f64; 4]> {
@@ -122,21 +134,30 @@ fn shapes_reference_matches_typescript() {
         let got_regular = detected.as_ref().and_then(|d| d.regular).unwrap_or(false);
         let want_regular = r["regularPolygon"].as_bool().unwrap_or(false);
         if got_regular != want_regular {
-            failures.push(format!("{id}: regularPolygon is {got_regular}, want {want_regular}"));
+            failures.push(format!(
+                "{id}: regularPolygon is {got_regular}, want {want_regular}"
+            ));
         }
 
         // Check detectParabola decision
-        let got_parabola = detected.as_ref().map_or(false, |d| d.kind == ShapeKind::Curve);
+        let got_parabola = detected
+            .as_ref()
+            .is_some_and(|d| d.kind == ShapeKind::Curve);
         let want_parabola = r["detectParabola"].as_bool().unwrap_or(false);
         if got_parabola != want_parabola {
-            failures.push(format!("{id}: detectParabola is {got_parabola}, want {want_parabola}"));
+            failures.push(format!(
+                "{id}: detectParabola is {got_parabola}, want {want_parabola}"
+            ));
         }
 
         // Check snapStroke result
         let want_snap = &r["snap"];
         if want_snap.is_null() {
             if snapped.is_shape == Some(true) {
-                failures.push(format!("{id}: snapped to {:?}, want null", snapped.shape_kind));
+                failures.push(format!(
+                    "{id}: snapped to {:?}, want null",
+                    snapped.shape_kind
+                ));
             }
         } else {
             if snapped.is_shape != Some(true) {
@@ -146,12 +167,17 @@ fn shapes_reference_matches_typescript() {
                 let want_kind: ShapeKind = serde_json::from_value(want_snap["kind"].clone())
                     .expect("valid ShapeKind in want_snap");
                 if got_kind != want_kind {
-                    failures.push(format!("{id}: snap kind is {got_kind:?}, want {want_kind:?}"));
+                    failures.push(format!(
+                        "{id}: snap kind is {got_kind:?}, want {want_kind:?}"
+                    ));
                 }
 
                 let want_width = want_snap["width"].as_f64().unwrap();
                 if (snapped.width - want_width).abs() > TOL {
-                    failures.push(format!("{id}: snap width is {}, want {}", snapped.width, want_width));
+                    failures.push(format!(
+                        "{id}: snap width is {}, want {}",
+                        snapped.width, want_width
+                    ));
                 }
 
                 let want_pts = want_snap["points"].as_array().unwrap();
@@ -177,5 +203,10 @@ fn shapes_reference_matches_typescript() {
         }
     }
 
-    assert!(failures.is_empty(), "{} differences:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} differences:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
 }

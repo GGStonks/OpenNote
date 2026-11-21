@@ -206,8 +206,14 @@ fn test_page_and_document_to_svg() {
 
     let svg = page_to_svg(&page, 800.0, 1000.0);
     // Numbers as JavaScript prints them (800, not 800.00), as svgHead writes them.
-    assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg""#), "{svg}");
-    assert!(svg.contains(r#"width="800""#) && svg.contains(r#"height="1000""#), "{svg}");
+    assert!(
+        svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg""#),
+        "{svg}"
+    );
+    assert!(
+        svg.contains(r#"width="800""#) && svg.contains(r#"height="1000""#),
+        "{svg}"
+    );
     assert!(svg.contains("Hello &lt;World&gt; &amp; Co."));
     assert!(svg.contains(r#"<image href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="#));
     assert!(svg.ends_with("</svg>"));

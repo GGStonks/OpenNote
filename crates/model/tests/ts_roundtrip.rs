@@ -215,7 +215,8 @@ fn build_expected_note_and_backup() -> (NoteDocument, LibraryBackup) {
         id: "pdf_file_1".to_string(),
         name: Some("test_document.pdf".to_string()),
         mime: Some("application/pdf".to_string()),
-        base64: "JVBERi0xLjQgbW9jayBwZGYgY29udGVudCBmb3Igc3RvcmFnZSByb3VuZHRyaXAgdGVzdA==".to_string(),
+        base64: "JVBERi0xLjQgbW9jayBwZGYgY29udGVudCBmb3Igc3RvcmFnZSByb3VuZHRyaXAgdGVzdA=="
+            .to_string(),
         password: None,
     };
 
@@ -327,9 +328,21 @@ fn test_ts_roundtrip_backup_and_opennote() {
         assert_eq!(actual.tool, expected.tool, "Stroke {} tool match", i);
         assert_eq!(actual.color, expected.color, "Stroke {} color match", i);
         assert_eq!(actual.width, expected.width, "Stroke {} width match", i);
-        assert_eq!(actual.opacity, expected.opacity, "Stroke {} opacity match", i);
-        assert_eq!(actual.modeled, expected.modeled, "Stroke {} modeled match", i);
-        assert_eq!(actual.rotation, expected.rotation, "Stroke {} rotation match", i);
+        assert_eq!(
+            actual.opacity, expected.opacity,
+            "Stroke {} opacity match",
+            i
+        );
+        assert_eq!(
+            actual.modeled, expected.modeled,
+            "Stroke {} modeled match",
+            i
+        );
+        assert_eq!(
+            actual.rotation, expected.rotation,
+            "Stroke {} rotation match",
+            i
+        );
         assert_eq!(
             actual.created_at, expected.created_at,
             "Stroke {} created_at match",
@@ -347,7 +360,10 @@ fn test_ts_roundtrip_backup_and_opennote() {
     // Sheets match
     assert_eq!(note_from_backup.sheets.len(), 2);
     assert_eq!(
-        note_from_backup.sheets[0].pdf.as_ref().map(|p| p.file.as_str()),
+        note_from_backup.sheets[0]
+            .pdf
+            .as_ref()
+            .map(|p| p.file.as_str()),
         Some("pdf_file_1")
     );
 
@@ -364,9 +380,8 @@ fn test_ts_roundtrip_backup_and_opennote() {
     fs::write(storage_dir.join("backup.rust.json"), rust_backup_json)
         .expect("write backup.rust.json");
 
-    let rust_note_json =
-        export_packed_note_json(note_from_backup, backup.files.as_deref())
-            .expect("export note json");
+    let rust_note_json = export_packed_note_json(note_from_backup, backup.files.as_deref())
+        .expect("export note json");
     fs::write(storage_dir.join("note.rust.opennote"), rust_note_json)
         .expect("write note.rust.opennote");
 }

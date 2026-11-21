@@ -1,6 +1,6 @@
-use nib::geometry::JsMath;
 use crate::ink_width::{ink_widths, width_behind};
 use crate::smoothing::{smooth_line, smooth_settle};
+use nib::geometry::JsMath;
 use nib::geometry::{ModeledPoint, XY};
 use nib::nib::NibModeler;
 

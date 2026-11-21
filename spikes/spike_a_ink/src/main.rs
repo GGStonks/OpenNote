@@ -65,8 +65,14 @@ fn main() {
     }
     let ingest_time = t0.elapsed();
 
-    println!("Ingested {} coalesced samples (240 Hz) in {:?}", sample_count, ingest_time);
-    println!("Throughput: {:.1} million samples/sec (zero-copy)", (sample_count as f64 / ingest_time.as_secs_f64()) / 1_000_000.0);
+    println!(
+        "Ingested {} coalesced samples (240 Hz) in {:?}",
+        sample_count, ingest_time
+    );
+    println!(
+        "Throughput: {:.1} million samples/sec (zero-copy)",
+        (sample_count as f64 / ingest_time.as_secs_f64()) / 1_000_000.0
+    );
 
     println!("\n=== Latency Analysis: OpenNote 2.9.3 (Web) vs Rust wgpu (Native) ===");
     println!("Metric                     OpenNote 2.9.3 (Web)    Rust wgpu (Native)");

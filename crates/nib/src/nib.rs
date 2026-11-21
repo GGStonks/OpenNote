@@ -1,5 +1,5 @@
 use crate::geometry::JsMath;
-use crate::geometry::{InkPoint, ModeledPoint, XY, has_real_pressure, sample_times};
+use crate::geometry::{has_real_pressure, sample_times, InkPoint, ModeledPoint, XY};
 
 #[derive(Clone, Copy, Debug)]
 pub struct NibParams {
@@ -205,11 +205,13 @@ impl NibModeler {
 
     fn half_window(&self, i: usize, limit: usize) -> f64 {
         let v = self.speed_at(i, limit);
-        self.params.min_half.max(self.params.max_half.min(if v > 0.0 {
-            self.params.arc / v
-        } else {
-            self.params.max_half
-        }))
+        self.params
+            .min_half
+            .max(self.params.max_half.min(if v > 0.0 {
+                self.params.arc / v
+            } else {
+                self.params.max_half
+            }))
     }
 
     fn settle(&mut self, final_flag: bool) {
@@ -217,7 +219,9 @@ impl NibModeler {
             return;
         }
         let latest = self.raw.last().unwrap().t;
-        if self.attack_force < 0.0 && (final_flag || latest > self.params.attack + self.params.press_half) {
+        if self.attack_force < 0.0
+            && (final_flag || latest > self.params.attack + self.params.press_half)
+        {
             self.attack_force = self.landing_force();
         }
         let end = if final_flag {
@@ -365,9 +369,18 @@ impl NibModeler {
         }
         let limit = self.raw.len();
         let mut new_points = Vec::new();
-        while self.emitted < self.anchors.len() && (final_flag || self.emitted + 1 < self.anchors.len()) {
+        while self.emitted < self.anchors.len()
+            && (final_flag || self.emitted + 1 < self.anchors.len())
+        {
             let last_seg = final_flag && self.emitted == self.anchors.len() - 1;
-            self.segment(&self.anchors, self.emitted, last_seg, &mut new_points, None, limit);
+            self.segment(
+                &self.anchors,
+                self.emitted,
+                last_seg,
+                &mut new_points,
+                None,
+                limit,
+            );
             self.emitted += 1;
         }
         self.points.extend(new_points);

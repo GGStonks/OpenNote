@@ -209,10 +209,8 @@ pub fn import_docx(bytes: &[u8], title: &str) -> Result<NoteDocument, DocxError>
             Ok(Event::End(ref e)) => match e.name().as_ref() {
                 b"w:t" => in_t = false,
                 b"w:rPr" => in_rpr = false,
-                b"w:p" => {
-                    if !current_p_text.is_empty() {
-                        paragraphs.push((current_p_text.clone(), current_spans.clone()));
-                    }
+                b"w:p" if !current_p_text.is_empty() => {
+                    paragraphs.push((current_p_text.clone(), current_spans.clone()));
                 }
                 _ => {}
             },

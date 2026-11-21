@@ -190,7 +190,12 @@ pub fn render_paper_background(
                             let dist2 = dx * dx + dy * dy;
                             if dist2 <= r2 {
                                 let alpha = (1.0 - (dist2.sqrt() - r + 0.5).clamp(0.0, 1.0)) as f32;
-                                blend_pixel(pixels, px, py, dot_color.with_alpha(dot_color.a * alpha));
+                                blend_pixel(
+                                    pixels,
+                                    px,
+                                    py,
+                                    dot_color.with_alpha(dot_color.a * alpha),
+                                );
                             }
                         }
                     }
@@ -202,4 +207,3 @@ pub fn render_paper_background(
         _ => {}
     }
 }
-

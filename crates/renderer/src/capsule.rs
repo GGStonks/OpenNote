@@ -1,7 +1,7 @@
-use nib::geometry::JsMath;
 use ink::spline::{catmull_rom_beziers, flatten_beziers};
 use ink::{dash_pattern, dash_runs, stroke_geometry, stroke_width, DOT};
 use model::{LineStyle, ShapeKind, Stroke};
+use nib::geometry::JsMath;
 use nib::geometry::XY;
 
 pub const GL_TOLERANCE: f64 = 0.015;
@@ -148,7 +148,12 @@ pub fn chain_caps(out: &mut Vec<Capsule>, pts: &[XY], radii: &[f64]) {
             continue;
         }
         out.push(Capsule::new(
-            pts[prev].x, pts[prev].y, radii[prev], pts[k].x, pts[k].y, radii[k],
+            pts[prev].x,
+            pts[prev].y,
+            radii[prev],
+            pts[k].x,
+            pts[k].y,
+            radii[k],
         ));
         prev = k;
     }
@@ -228,10 +233,17 @@ pub fn stroke_gl_geometry(s: &Stroke) -> (Vec<Capsule>, Option<Vec<XY>>, Option<
     } else if s.shape_kind == Some(ShapeKind::Curve) {
         let bez = catmull_rom_beziers(&pts_xy, closed);
         let mut line = flatten_beziers(&bez, 1.0);
-        if closed && line.len() > 1 && (line[0].x != line[line.len() - 1].x || line[0].y != line[line.len() - 1].y) {
+        if closed
+            && line.len() > 1
+            && (line[0].x != line[line.len() - 1].x || line[0].y != line[line.len() - 1].y)
+        {
             line.push(line[0]);
         }
-        let width = if is_highlighter { s.width * 5.5 } else { stroke_width(s) };
+        let width = if is_highlighter {
+            s.width * 5.5
+        } else {
+            stroke_width(s)
+        };
         stroke_caps(&mut caps, &line, width, s.line_style, is_highlighter, s);
         if fillable {
             area = Some(line);
@@ -245,7 +257,13 @@ pub fn stroke_gl_geometry(s: &Stroke) -> (Vec<Capsule>, Option<Vec<XY>>, Option<
         } else if let Some(widths) = &g.widths {
             let radii: Vec<f64> = widths.iter().map(|w| w / 2.0).collect();
             if let Some((pattern, dot_scale)) = ink::hand_dash(s.line_style, s.width) {
-                let runs = dash_runs(&g_pts_xy, &radii, &pattern, s.dash_offset.unwrap_or(0.0), dot_scale);
+                let runs = dash_runs(
+                    &g_pts_xy,
+                    &radii,
+                    &pattern,
+                    s.dash_offset.unwrap_or(0.0),
+                    dot_scale,
+                );
                 for r in runs {
                     chain_caps(&mut caps, &r.pts, &r.radii);
                 }
@@ -267,14 +285,22 @@ pub fn stroke_gl_geometry(s: &Stroke) -> (Vec<Capsule>, Option<Vec<XY>>, Option<
         } else {
             pts_xy.clone()
         };
-        let width = if is_highlighter { s.width * 5.5 } else { stroke_width(s) };
+        let width = if is_highlighter {
+            s.width * 5.5
+        } else {
+            stroke_width(s)
+        };
         stroke_caps(&mut caps, &line, width, s.line_style, is_highlighter, s);
         if fillable {
             area = Some(pts_xy.clone());
         }
     }
 
-    if s.arrow.unwrap_or(false) && !closed && s.shape_kind != Some(ShapeKind::Point) && pts_xy.len() > 1 {
+    if s.arrow.unwrap_or(false)
+        && !closed
+        && s.shape_kind != Some(ShapeKind::Point)
+        && pts_xy.len() > 1
+    {
         arrow = arrow_head(&pts_xy, s);
     }
 
@@ -298,7 +324,14 @@ fn stroke_caps(
     }
     let r = width / 2.0;
     if pts.len() == 1 {
-        out.push(Capsule::new(pts[0].x, pts[0].y, r, pts[0].x + 0.01, pts[0].y, r));
+        out.push(Capsule::new(
+            pts[0].x,
+            pts[0].y,
+            r,
+            pts[0].x + 0.01,
+            pts[0].y,
+            r,
+        ));
         return;
     }
     let style = ls.unwrap_or(LineStyle::Solid);

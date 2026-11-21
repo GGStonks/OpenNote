@@ -1,17 +1,19 @@
-use std::collections::BTreeMap;
-use std::fs;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use nib::{InkPoint, ModeledPoint, NibModeler, nib_stroke};
+use base64::Engine;
+use nib::{nib_stroke, InkPoint, ModeledPoint, NibModeler};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs;
 
 fn r4(v: f64) -> f64 {
     (v * 1e4).round() / 1e4
 }
 
 fn flat(pts: &[ModeledPoint]) -> Vec<[f64; 4]> {
-    pts.iter().map(|q| [r4(q.x), r4(q.y), r4(q.p), r4(q.t)]).collect()
+    pts.iter()
+        .map(|q| [r4(q.x), r4(q.y), r4(q.p), r4(q.t)])
+        .collect()
 }
 
 fn js_json_flat(pts: &[[f64; 4]]) -> String {
@@ -37,26 +39,32 @@ fn js_json_flat(pts: &[[f64; 4]]) -> String {
     out
 }
 
-
 #[test]
 fn test_golden_reference() {
     let cases_json = fs::read_to_string("../../bench/engine-cases.json")
         .or_else(|_| fs::read_to_string("bench/engine-cases.json"))
         .expect("read bench/engine-cases.json");
-    let cases: BTreeMap<String, Vec<[f64; 4]>> = serde_json::from_str(&cases_json).expect("parse cases");
+    let cases: BTreeMap<String, Vec<[f64; 4]>> =
+        serde_json::from_str(&cases_json).expect("parse cases");
 
     let golden_json = fs::read_to_string("../../bench/engine-golden.json")
         .or_else(|_| fs::read_to_string("bench/engine-golden.json"))
         .expect("read bench/engine-golden.json");
     let golden: Value = serde_json::from_str(&golden_json).expect("parse golden");
 
-    let golden_cases = golden.get("cases").expect("cases key").as_object().expect("cases object");
+    let golden_cases = golden
+        .get("cases")
+        .expect("cases key")
+        .as_object()
+        .expect("cases object");
 
     println!("Running Rust Nib on {} golden test cases...", cases.len());
 
     let mut all_ok = true;
     for (name, samples) in &cases {
-        let want = golden_cases.get(name).unwrap_or_else(|| panic!("case {} not found in golden", name));
+        let want = golden_cases
+            .get(name)
+            .unwrap_or_else(|| panic!("case {} not found in golden", name));
         let want_final = want.get("final").unwrap().as_array().unwrap();
         let want_nib_stroke = want.get("nibStroke").unwrap().as_array().unwrap();
         let want_live = want.get("live").unwrap().as_array().unwrap();
@@ -147,15 +155,24 @@ fn test_golden_reference() {
             if got_h != want_h {
                 live_mismatches += 1;
                 if live_mismatches <= 3 {
-                    println!("FAIL {}: live[{}] hash mismatch (got {}, want {})", name, i, got_h, want_h);
+                    println!(
+                        "FAIL {}: live[{}] hash mismatch (got {}, want {})",
+                        name, i, got_h, want_h
+                    );
                 }
                 all_ok = false;
             }
         }
         assert_eq!(live_mismatches, 0, "{}: live hash mismatches", name);
 
-        println!("[OK] case '{}': live hashes, final & nibStroke points match golden reference!", name);
+        println!(
+            "[OK] case '{}': live hashes, final & nibStroke points match golden reference!",
+            name
+        );
     }
 
-    assert!(all_ok, "Some points differed from golden reference beyond 1e-4 px!");
+    assert!(
+        all_ok,
+        "Some points differed from golden reference beyond 1e-4 px!"
+    );
 }

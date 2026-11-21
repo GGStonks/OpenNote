@@ -20,6 +20,7 @@ struct ActiveSession {
 }
 
 static SESSION: OnceLock<Mutex<Option<ActiveSession>>> = OnceLock::new();
+pub static MIRROR_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn session_lock() -> &'static Mutex<Option<ActiveSession>> {
     SESSION.get_or_init(|| Mutex::new(None))
@@ -120,6 +121,7 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         port: actual_port,
         shutdown_tx,
     });
+    MIRROR_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
 
     Ok((resp.to_string(), Vec::new()))
 }
@@ -129,6 +131,7 @@ pub fn mirror_stop(_meta: &str) -> Result<(String, Vec<u8>), String> {
     if let Some(session) = guard.take() {
         let _ = session.shutdown_tx.send(());
     }
+    MIRROR_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
     Ok((json!({ "active": false }).to_string(), Vec::new()))
 }
 
@@ -152,6 +155,9 @@ pub fn mirror_status(_meta: &str) -> Result<(String, Vec<u8>), String> {
 
 /// Global camera broadcast hook called on render tick. Zero-work if no receivers.
 pub fn broadcast_camera(x: f32, y: f32, zoom: f32, rotation: f32, in_motion: bool, glide: bool) {
+    if !MIRROR_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
     let guard = match session_lock().try_lock() {
         Ok(g) => g,
         Err(_) => return,

@@ -67,7 +67,10 @@ fn main() {
     println!("Total formulas: {}", formulas.len());
     println!("Success: {}", success);
     println!("Failures: {}", failures);
-    println!("Pass rate: {:.1}%", (success as f64 / formulas.len() as f64) * 100.0);
+    println!(
+        "Pass rate: {:.1}%",
+        (success as f64 / formulas.len() as f64) * 100.0
+    );
 }
 
 #[cfg(test)]

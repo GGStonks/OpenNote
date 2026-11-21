@@ -165,7 +165,10 @@ pub fn adjust_snapped_shape(a: &SnapAdjust, pen: XY) -> Vec<Point> {
                     };
                 }
             }
-            vec![pts[0], p_like(end, if pts.len() > 1 { &pts[1] } else { &pts[0] })]
+            vec![
+                pts[0],
+                p_like(end, if pts.len() > 1 { &pts[1] } else { &pts[0] }),
+            ]
         }
         ShapeKind::Arrow => {
             let as_stroke = Stroke {
@@ -189,16 +192,31 @@ pub fn adjust_snapped_shape(a: &SnapAdjust, pen: XY) -> Vec<Point> {
         ShapeKind::Circle | ShapeKind::Ellipse => {
             let c = centroid(pts);
             let n = pts.len();
-            let ua = XY { x: pts[0].x - c.x, y: pts[0].y - c.y };
+            let ua = XY {
+                x: pts[0].x - c.x,
+                y: pts[0].y - c.y,
+            };
             let ra = ua.x.js_hypot(ua.y).max(1.0);
             let qb = pts[((n as f64 / 4.0).round() as usize) % n];
             let rb = (qb.x - c.x).js_hypot(qb.y - c.y).max(1.0);
-            let u = XY { x: ua.x / ra, y: ua.y / ra };
+            let u = XY {
+                x: ua.x / ra,
+                y: ua.y / ra,
+            };
             let v = XY { x: -u.y, y: u.x };
 
             if a.kind == ShapeKind::Circle {
-                let k = (pen.x - c.x).js_hypot(pen.y - c.y) / (a.pen0.x - c.x).js_hypot(a.pen0.y - c.y).max(1.0);
-                return ellipse_points(c, XY { x: ua.x * k, y: ua.y * k }, ra * k, n);
+                let k = (pen.x - c.x).js_hypot(pen.y - c.y)
+                    / (a.pen0.x - c.x).js_hypot(a.pen0.y - c.y).max(1.0);
+                return ellipse_points(
+                    c,
+                    XY {
+                        x: ua.x * k,
+                        y: ua.y * k,
+                    },
+                    ra * k,
+                    n,
+                );
             }
 
             let along = |q: XY, d: XY| ((q.x - c.x) * d.x + (q.y - c.y) * d.y).abs();
@@ -206,19 +224,42 @@ pub fn adjust_snapped_shape(a: &SnapAdjust, pen: XY) -> Vec<Point> {
             let sv = along(pen, v) / along(a.pen0, v).max(0.35 * rb);
             let na = (ra * su).max(2.0);
             let nb = (rb * sv).max(2.0);
-            ellipse_points(c, XY { x: u.x * na, y: u.y * na }, nb, n)
+            ellipse_points(
+                c,
+                XY {
+                    x: u.x * na,
+                    y: u.y * na,
+                },
+                nb,
+                n,
+            )
         }
         ShapeKind::Rectangle => {
             let c = centroid(pts);
             if a.regular {
-                let k = (pen.x - c.x).js_hypot(pen.y - c.y) / (a.pen0.x - c.x).js_hypot(a.pen0.y - c.y).max(4.0);
-                return pts.iter().map(|q| p_like(XY { x: c.x + (q.x - c.x) * k, y: c.y + (q.y - c.y) * k }, q)).collect();
+                let k = (pen.x - c.x).js_hypot(pen.y - c.y)
+                    / (a.pen0.x - c.x).js_hypot(a.pen0.y - c.y).max(4.0);
+                return pts
+                    .iter()
+                    .map(|q| {
+                        p_like(
+                            XY {
+                                x: c.x + (q.x - c.x) * k,
+                                y: c.y + (q.y - c.y) * k,
+                            },
+                            q,
+                        )
+                    })
+                    .collect();
             }
             if pts.len() < 2 {
                 return pts.clone();
             }
             let l = (pts[1].x - pts[0].x).js_hypot(pts[1].y - pts[0].y).max(1.0);
-            let u = XY { x: (pts[1].x - pts[0].x) / l, y: (pts[1].y - pts[0].y) / l };
+            let u = XY {
+                x: (pts[1].x - pts[0].x) / l,
+                y: (pts[1].y - pts[0].y) / l,
+            };
             let v = XY { x: -u.y, y: u.x };
             let loc = |q: XY| XY {
                 x: (q.x - c.x) * u.x + (q.y - c.y) * u.y,
@@ -235,17 +276,38 @@ pub fn adjust_snapped_shape(a: &SnapAdjust, pen: XY) -> Vec<Point> {
             let p1 = loc(pen);
             let sx = p1.x.abs() / p0.x.abs().max(0.35 * hw);
             let sy = p1.y.abs() / p0.y.abs().max(0.35 * hh);
-            pts.iter().map(|q| {
-                let lq = loc(XY { x: q.x, y: q.y });
-                let x = lq.x * sx;
-                let y = lq.y * sy;
-                p_like(XY { x: c.x + x * u.x + y * v.x, y: c.y + x * u.y + y * v.y }, q)
-            }).collect()
+            pts.iter()
+                .map(|q| {
+                    let lq = loc(XY { x: q.x, y: q.y });
+                    let x = lq.x * sx;
+                    let y = lq.y * sy;
+                    p_like(
+                        XY {
+                            x: c.x + x * u.x + y * v.x,
+                            y: c.y + x * u.y + y * v.y,
+                        },
+                        q,
+                    )
+                })
+                .collect()
         }
         _ => {
-            let c = if a.closed { centroid(pts) } else { XY { x: pts[0].x, y: pts[0].y } };
-            let d0 = XY { x: a.pen0.x - c.x, y: a.pen0.y - c.y };
-            let d1 = XY { x: pen.x - c.x, y: pen.y - c.y };
+            let c = if a.closed {
+                centroid(pts)
+            } else {
+                XY {
+                    x: pts[0].x,
+                    y: pts[0].y,
+                }
+            };
+            let d0 = XY {
+                x: a.pen0.x - c.x,
+                y: a.pen0.y - c.y,
+            };
+            let d1 = XY {
+                x: pen.x - c.x,
+                y: pen.y - c.y,
+            };
             let l0 = d0.x.js_hypot(d0.y);
             if l0 < 4.0 {
                 return pts.clone();
@@ -254,12 +316,17 @@ pub fn adjust_snapped_shape(a: &SnapAdjust, pen: XY) -> Vec<Point> {
             let rot = d1.y.atan2(d1.x) - d0.y.atan2(d0.x);
             let cs = rot.cos() * k;
             let sn = rot.sin() * k;
-            pts.iter().map(|q| {
-                p_like(XY {
-                    x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn,
-                    y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs,
-                }, q)
-            }).collect()
+            pts.iter()
+                .map(|q| {
+                    p_like(
+                        XY {
+                            x: c.x + (q.x - c.x) * cs - (q.y - c.y) * sn,
+                            y: c.y + (q.x - c.x) * sn + (q.y - c.y) * cs,
+                        },
+                        q,
+                    )
+                })
+                .collect()
         }
     }
 }
@@ -366,7 +433,10 @@ pub fn build_snap_cache(strokes: &[Stroke], grid: Option<f64>) -> SnapCache {
         let kind = s.shape_kind.unwrap_or(ShapeKind::Polyline);
 
         if kind == ShapeKind::Point {
-            points.push(XY { x: pts[0].x, y: pts[0].y });
+            points.push(XY {
+                x: pts[0].x,
+                y: pts[0].y,
+            });
             continue;
         }
         if kind == ShapeKind::Ellipse || kind == ShapeKind::Circle {
@@ -374,13 +444,22 @@ pub fn build_snap_cache(strokes: &[Stroke], grid: Option<f64>) -> SnapCache {
             points.push(centroid(pts));
             for k in 0..8 {
                 let idx = ((k * n) as f64 / 8.0).round() as usize % n;
-                points.push(XY { x: pts[idx].x, y: pts[idx].y });
+                points.push(XY {
+                    x: pts[idx].x,
+                    y: pts[idx].y,
+                });
             }
             for i in 0..n {
                 let next = (i + 1) % n;
                 edges.push(Edge {
-                    a: XY { x: pts[i].x, y: pts[i].y },
-                    b: XY { x: pts[next].x, y: pts[next].y },
+                    a: XY {
+                        x: pts[i].x,
+                        y: pts[i].y,
+                    },
+                    b: XY {
+                        x: pts[next].x,
+                        y: pts[next].y,
+                    },
                     owner,
                 });
             }
@@ -395,15 +474,37 @@ pub fn build_snap_cache(strokes: &[Stroke], grid: Option<f64>) -> SnapCache {
 
         let mut segs = Vec::new();
         for i in 1..verts.len() {
-            segs.push((XY { x: verts[i - 1].x, y: verts[i - 1].y }, XY { x: verts[i].x, y: verts[i].y }));
+            segs.push((
+                XY {
+                    x: verts[i - 1].x,
+                    y: verts[i - 1].y,
+                },
+                XY {
+                    x: verts[i].x,
+                    y: verts[i].y,
+                },
+            ));
         }
         if closed && kind != ShapeKind::Arrow && !verts.is_empty() {
-            segs.push((XY { x: verts[verts.len() - 1].x, y: verts[verts.len() - 1].y }, XY { x: verts[0].x, y: verts[0].y }));
+            segs.push((
+                XY {
+                    x: verts[verts.len() - 1].x,
+                    y: verts[verts.len() - 1].y,
+                },
+                XY {
+                    x: verts[0].x,
+                    y: verts[0].y,
+                },
+            ));
         }
 
         for (a, b) in &segs {
             points.push(mid(*a, *b));
-            edges.push(Edge { a: *a, b: *b, owner });
+            edges.push(Edge {
+                a: *a,
+                b: *b,
+                owner,
+            });
         }
         for v in verts {
             points.push(XY { x: v.x, y: v.y });
@@ -451,7 +552,12 @@ pub struct SnapTarget {
     pub via_point: bool,
 }
 
-pub fn find_snap_kind(cache: &SnapCache, p: XY, zoom: f64, avoid: Option<XY>) -> Option<SnapTarget> {
+pub fn find_snap_kind(
+    cache: &SnapCache,
+    p: XY,
+    zoom: f64,
+    avoid: Option<XY>,
+) -> Option<SnapTarget> {
     let k = 1.0 / zoom.max(0.3);
     let point_thr = POINT_SNAP * k;
     let edge_thr = EDGE_SNAP * k;
@@ -674,8 +780,16 @@ impl SmartPen {
                         st.points = adjusted.clone();
                     }
                     if self.config.tool == SmartPenTool::Eraser {
-                        let closed = self.snapped_shape.as_ref().map(|s| s.closed).unwrap_or(false);
-                        self.erased_path = Some(erase_along_snapped_points(&adjusted, closed, self.config.eraser_size));
+                        let closed = self
+                            .snapped_shape
+                            .as_ref()
+                            .map(|s| s.closed)
+                            .unwrap_or(false);
+                        self.erased_path = Some(erase_along_snapped_points(
+                            &adjusted,
+                            closed,
+                            self.config.eraser_size,
+                        ));
                     }
                 }
             }
@@ -683,7 +797,10 @@ impl SmartPen {
         }
 
         // 4. Standstill check (hold to snap)
-        if !self.snapped && (t - self.last_move_t >= self.hold_threshold_ms) && self.points.len() >= 6 {
+        if !self.snapped
+            && (t - self.last_move_t >= self.hold_threshold_ms)
+            && self.points.len() >= 6
+        {
             if let Some(shape) = detect_shape(&self.points) {
                 self.snapped = true;
                 self.snapped_sample = Some(sample_idx);
@@ -734,7 +851,11 @@ impl SmartPen {
                 });
 
                 if self.config.tool == SmartPenTool::Eraser {
-                    self.erased_path = Some(erase_along_snapped_points(&shape.points, shape.closed, self.config.eraser_size));
+                    self.erased_path = Some(erase_along_snapped_points(
+                        &shape.points,
+                        shape.closed,
+                        self.config.eraser_size,
+                    ));
                 }
 
                 return true;
@@ -801,16 +922,17 @@ impl SmartPen {
         });
 
         for stroke in &page.strokes {
-            let hit_drawn = self.drawn_samples.iter().any(|s| {
-                stroke_hit_test(stroke, s.x, s.y, eraser_size)
-            });
+            let hit_drawn = self
+                .drawn_samples
+                .iter()
+                .any(|s| stroke_hit_test(stroke, s.x, s.y, eraser_size));
             if hit_drawn {
                 put_back.push(stroke.id.clone());
             }
 
-            let hit_snapped = path.iter().any(|p| {
-                stroke_hit_test(stroke, p.x, p.y, eraser_size)
-            });
+            let hit_snapped = path
+                .iter()
+                .any(|p| stroke_hit_test(stroke, p.x, p.y, eraser_size));
             if hit_snapped {
                 erased.push(stroke.id.clone());
             }

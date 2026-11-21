@@ -168,4 +168,3 @@ pub fn restamp(page: &mut NotePage, now_opt: Option<f64>) {
         }
     }
 }
-
