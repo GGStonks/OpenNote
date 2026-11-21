@@ -510,7 +510,7 @@ async function setCanvasScene(
   if (images.length) await sendImages(images);
 
   if (strokes.length === 0 && images.length === 0) {
-    if (!keep) canvasHolds.delete(pageId);
+    canvasHolds.delete(pageId);
     await rustCall('canvasSceneBin', { page: pageId, strokes: [], ...(keep ? { keep: true } : {}) }, new Uint8Array());
     return true;
   }

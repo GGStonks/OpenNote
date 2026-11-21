@@ -182,7 +182,7 @@ pub fn budgets() -> (u64, u64) {
 fn evict_for_memory(keep: &str) -> Vec<String> {
     let (_, budget) = budgets();
     let out = with_page(|p| {
-        if p.bytes <= budget {
+        if p.bytes <= budget || (p.near_now.is_empty() && !p.scenes.is_empty()) {
             return Vec::new();
         }
         let mut cands: Vec<(u64, String)> = p

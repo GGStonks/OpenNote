@@ -910,9 +910,12 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     };
 
     let lastCommittedZoom = zoomRef.current;
+    let wasGesture = false;
     const apply = (c: RustCamera, el: HTMLElement, outer: HTMLElement) => {
       if (c.seq === applied) return;
       applied = c.seq;
+      const gestureSettled = wasGesture && !c.gesture;
+      wasGesture = c.gesture;
       if (Math.abs(c.zoom - zoomRef.current) > 1e-9) {
         // During active gestures, defer React state reconciliation to avoid frame drops.
         zoomRef.current = c.zoom;
@@ -948,7 +951,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         pulls++;
         cb.current.onPullCommit?.();
       }
-      if (placed !== c.placed && !c.gesture && placed >= 0) window.dispatchEvent(new Event(CONTENT_PLACED));
+      if (((placed !== c.placed && placed >= 0) || gestureSettled) && !c.gesture) window.dispatchEvent(new Event(CONTENT_PLACED));
       placed = c.placed;
       for (const fn of tileWork.moved) fn();
       // The canvas draws the camera the DOM shows (ADR-008): text, formulas and the selection

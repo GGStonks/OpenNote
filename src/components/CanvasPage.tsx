@@ -1599,6 +1599,15 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }, [printMode]);
   useEffect(() => {
     rectCache.current = null;
+    const onInvalidate = () => {
+      rectCache.current = null;
+    };
+    tileWork.moved.add(onInvalidate);
+    window.addEventListener(CONTENT_PLACED, onInvalidate);
+    return () => {
+      tileWork.moved.delete(onInvalidate);
+      window.removeEventListener(CONTENT_PLACED, onInvalidate);
+    };
   }, [zoom]);
   // Scrolling a long note: every stroke's geometry (the ink engine's model of the line) is built
   // the first time its page is painted, which on a slower tablet stalled scrolling into pages not
@@ -2562,9 +2571,17 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       else if (isNative) {
         // The native canvas draws it once its scene is in (a long note's took 150 ms and more,
         // and the stroke vanished meanwhile): the shell's copy is cleared a frame after that.
-        requestAnimationFrame(() => requestAnimationFrame(() => {
-          void (sceneSent.current !== sent ? sceneIn.current : Promise.resolve()).then(() => requestAnimationFrame(end));
-        }));
+        const start = performance.now();
+        const waitForCommit = () => {
+          if (sceneSent.current !== sent) {
+            void sceneIn.current.then(() => requestAnimationFrame(end));
+          } else if (performance.now() - start < 600) {
+            requestAnimationFrame(waitForCommit);
+          } else {
+            end();
+          }
+        };
+        requestAnimationFrame(waitForCommit);
       } else requestAnimationFrame(() => requestAnimationFrame(end));
     }
 

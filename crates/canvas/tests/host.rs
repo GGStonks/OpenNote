@@ -211,3 +211,81 @@ fn sizes_stay_within_the_device() {
     assert!(host.draw().unwrap());
     assert_eq!(host.errors(), 0, "{:?}", host.last_error());
 }
+
+#[test]
+fn erase_shrinking_and_empty_scene_gpu_lifecycle() {
+    let (mut host, _) = CanvasHost::offscreen(300, 300).expect("GPU host");
+
+    // 1. Draw 10 strokes on page "p"
+    let strokes: Vec<Stroke> = (0..10)
+        .map(|i| line(&format!("s{i}"), 20.0, 25.0 + i as f64 * 25.0, 280.0, 4.0))
+        .collect();
+    host.set_scene("p", &strokes);
+    host.set_frame(FrameSpec {
+        surface: None,
+        placed: None,
+        clear: Some(Rgba::WHITE),
+        pages: vec![PagePlacement {
+            page: "p".into(),
+            tf: Transform::scale(1.0, 0.0, 0.0),
+            paper: None,
+            at: None,
+            bx: None,
+        }],
+    });
+    assert!(host.draw().unwrap());
+    let px1 = host.pixels();
+    let at = |px: &[u8], x: usize, y: usize| -> [u8; 3] {
+        let o = (y * 300 + x) * 4;
+        [px[o], px[o + 1], px[o + 2]]
+    };
+    // Verify non-blank pixels for stroke 0 (y=25) and stroke 9 (y=250)
+    assert!(at(&px1, 150, 25)[0] < 60, "stroke 0 present on GPU");
+    assert!(at(&px1, 150, 250)[0] < 60, "stroke 9 present on GPU");
+
+    // 2. Erase 5 strokes: keep only strokes 5..10 (y=150..250). Shrinking scene.
+    let remaining = &strokes[5..];
+    let scene5 = std::sync::Arc::new(canvas::Scene::build(&[remaining]));
+    host.put_scene_arc("p", scene5);
+    assert!(host.draw().unwrap());
+    let px2 = host.pixels();
+    // Stroke 0 (y=25) must now be clean white paper (255, 255, 255)
+    assert_eq!(at(&px2, 150, 25), [255, 255, 255], "erased stroke 0 is completely gone from GPU");
+    // Stroke 9 (y=250) must remain intact
+    assert!(at(&px2, 150, 250)[0] < 60, "remaining stroke 9 intact on GPU");
+
+    // 3. Erase all remaining strokes (empty scene)
+    host.put_scene_arc("p", std::sync::Arc::new(canvas::Scene::default()));
+    assert!(host.draw().unwrap());
+    let px3 = host.pixels();
+    // All ink pixels must be gone (clean white paper)
+    for i in 0..10 {
+        let y = 25 + i * 25;
+        assert_eq!(at(&px3, 150, y), [255, 255, 255], "stroke {i} cleared on empty scene");
+    }
+
+    // 4. Run 60 frames of pan/zoom with a tight GPU budget (verify visible page ink never disappears)
+    host.set_gpu_budget(50 * 1024); // 50 KB tight budget
+    host.put_scene_arc("p", std::sync::Arc::new(canvas::Scene::build(&[&strokes])));
+    for f in 0..60 {
+        let k = 1.0 + 0.01 * (f as f32).sin();
+        let ox = (f as f32) * 0.5;
+        let oy = (f as f32) * 0.3;
+        host.set_frame(FrameSpec {
+            surface: None,
+            placed: None,
+            clear: Some(Rgba::WHITE),
+            pages: vec![PagePlacement {
+                page: "p".into(),
+                tf: Transform::scale(k, ox, oy),
+                paper: None,
+                at: None,
+                bx: None,
+            }],
+        });
+        assert!(host.draw().unwrap());
+        let s = host.stats();
+        assert_eq!(s.pages.visible_missing, 0, "frame {f}: visible page missing");
+        assert!(s.pages.drawn_caps > 0, "frame {f}: no capsules drawn");
+    }
+}
