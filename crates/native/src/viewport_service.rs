@@ -235,7 +235,7 @@ pub fn touch(id: i64, phase: i32, x: f64, y: f64, t_ms: Option<f64>) -> bool {
             y: cy - vy,
             // A time from the future (another clock) or far past is not the event's.
             t: t_ms
-                .filter(|t| t.is_finite() && *t <= now + 1.0 && *t > now - 1000.0)
+                .filter(|t| t.is_finite() && *t <= now + 50.0 && *t > now - 1000.0)
                 .unwrap_or(now),
         };
         if legacy(v) {
@@ -300,7 +300,8 @@ fn feed(v: &mut View, s: Sample) {
 /// placed at `upto` itself: between its last sample and the next (queued) one, or a little past
 /// its last when the next is late.
 fn process(v: &mut View, upto: f64, resample: bool) {
-    while v.queue.front().is_some_and(|s| s.t <= upto) {
+    let target = if v.vp.layout().legacy { upto } else { upto.max(clock_ms()) };
+    while v.queue.front().is_some_and(|s| s.t <= target) {
         if let Some(s) = v.queue.pop_front() {
             feed(v, s);
         }
@@ -508,28 +509,34 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             Some(_) => {}
             None => v.trail = 0.0,
         }
-        let trail = if v.trail.is_finite() { v.trail } else { 0.0 };
-        let mut draw_t = t_ms - trail;
-        let dt = t_ms - v.tick_t;
-        if dt.is_finite() && dt > 0.0 && dt < 100.0 && v.drawn_t.is_finite() {
-            // Never back.
-            draw_t = draw_t.max(v.drawn_t).min(t_ms);
-        }
-        if !busy && shown_t.is_none_or(|st| st >= t_ms) {
-            draw_t = t_ms;
-        }
-        let d = hist_at(v, draw_t).unwrap_or(CamRec {
-            seq: c.seq,
-            t: t_ms,
-            x: c.x,
-            y: c.y,
-            ez: c.ez,
-        });
+        let (draw_cam_x, draw_cam_y, draw_cam_ez, draw_cam_t) = if v.vp.layout().legacy {
+            let trail = if v.trail.is_finite() { v.trail } else { 0.0 };
+            let mut draw_t = t_ms - trail;
+            let dt = t_ms - v.tick_t;
+            if dt.is_finite() && dt > 0.0 && dt < 100.0 && v.drawn_t.is_finite() {
+                // Never back.
+                draw_t = draw_t.max(v.drawn_t).min(t_ms);
+            }
+            if !busy && shown_t.is_none_or(|st| st >= t_ms) {
+                draw_t = t_ms;
+            }
+            let d = hist_at(v, draw_t).unwrap_or(CamRec {
+                seq: c.seq,
+                t: t_ms,
+                x: c.x,
+                y: c.y,
+                ez: c.ez,
+            });
+            (d.x, d.y, d.ez, draw_t)
+        } else {
+            // Live presentation at current frame: zero latency, maximum responsiveness, lean execution
+            (c.x, c.y, c.ez, t_ms)
+        };
         v.tick_t = t_ms;
-        v.drawn_t = draw_t;
+        v.drawn_t = draw_cam_t;
         if let Some(r) = v.rec.as_mut() {
             r.tick(t_ms, false);
-            r.placed(t_ms - draw_t, alone);
+            r.placed(t_ms - draw_cam_t, alone);
             if v.vp.gliding() {
                 r.glided();
             }
@@ -549,7 +556,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
                 f64::NAN
             }
         };
-        let placed = v.vp.layout().surface_at(d.x, d.y, d.ez);
+        let placed = v.vp.layout().surface_at(draw_cam_x, draw_cam_y, draw_cam_ez);
         if let Some(tr) = v.trace.as_mut() {
             if tr.len() < TRACE {
                 tr.push(TraceRec {
@@ -558,11 +565,11 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
                     x: c.x,
                     y: c.y,
                     ez: c.ez,
-                    drawn_t: draw_t,
+                    drawn_t: draw_cam_t,
                     shown: v.shown.map_or(0, |s| s.0),
-                    dx: d.x,
-                    dy: d.y,
-                    dez: d.ez,
+                    dx: draw_cam_x,
+                    dy: draw_cam_y,
+                    dez: draw_cam_ez,
                     k: placed.0,
                     sx: placed.1,
                     sy: placed.2,

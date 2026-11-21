@@ -143,3 +143,13 @@ sheet: a highlighter of the later sheet now lies over ink of the earlier one whe
 highlighters went under all ink (one scene). Pages far away cost a re-send (and their strokes'
 drawn lines rebuilt) when they come back after being dropped. The page's own path (canvas off) is
 unchanged and remains O(note) (a 2,000-page note: open 212 s, frames 0.3-1.4 s on the PC).
+
+## ADR-010: Lean zero-lag camera execution and native 120 Hz single-finger scrolling
+Status: accepted (2026-11-21, supersedes ADR-008 trailing delay)
+Context: ADR-008 introduced artificial trailing delay (`t_ms - trail`), causing 16-50ms of visual latency and sluggish gestures across iOS and Android. In addition, single-finger scrolling was bypassed in Rust (`layout.single`), causing single-finger scrolling to drop back to the WebView DOM at a 60 fps cap with IPC bridge lag. The owner requested full efficiency, maximum framerate (120 Hz), and lean executions.
+Decision:
+1. Rust directly owns single-finger scrolling at the display's maximum framerate (120 Hz) when `layout.single` is active (stylus-only mode and hand tool).
+2. The web view calls `ev.preventDefault()` in `useViewport.ts` for note content touches when `rustLive` and `fingersNavigate` are active, preventing 60 fps native DOM overflow scrolling from competing with Rust.
+3. The artificial trailing delay (`v.trail`) is eliminated during interactive canvas rendering: the canvas places the scene at the presentation camera `c` at timestamp `t_ms` directly (zero trailing lag).
+4. `busy()` and `gesture()` reflect single-finger navigation, keeping iOS CADisplayLink and Android Choreographer at the display's maximum 120 Hz rate throughout single-finger panning and momentum flings.
+Consequences: Both single-finger scrolling and two-finger pinch/zoom run at the screen's maximum refresh rate (120 Hz on ProMotion and high-refresh Android devices), pinned directly to finger movements with zero artificial latency.

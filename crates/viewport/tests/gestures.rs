@@ -522,7 +522,7 @@ fn one_finger_after_two_keeps_scrolling() {
         "{}",
         v.camera().st - st
     );
-    // Unless one finger scrolls natively (stylus only): the page's.
+    // When one finger scrolls (stylus only): it continues scrolling natively in Rust at 120 Hz.
     let mut l = layout(5);
     l.single = true;
     let mut v = Viewport::new();
@@ -541,7 +541,32 @@ fn one_finger_after_two_keeps_scrolling() {
     let st = v.camera().st;
     v.touch(0, Phase::Moved, 360.0, 300.0, t + 0.05);
     v.tick(t + 0.05);
-    assert_eq!(v.camera().st, st);
+    assert!(close(v.camera().st - st, 200.0, 1e-6));
+}
+
+#[test]
+fn one_finger_alone_scrolls_when_single_layout() {
+    let mut l = layout(5);
+    l.single = true;
+    let mut v = Viewport::new();
+    v.set_layout(l);
+    v.fit_width(None);
+    let c0 = v.camera().clone();
+    let t = fingers(
+        &mut v,
+        &[(360.0, 600.0)],
+        &[(360.0, 300.0)],
+        1.0,
+        100.0,
+        120.0,
+        false,
+    );
+    v.tick(t);
+    assert!(v.camera().st > c0.st);
+    assert!(v.busy());
+    v.touch(0, Phase::Ended, 360.0, 300.0, t);
+    v.tick(t + 0.016);
+    assert!(v.busy());
 }
 
 #[test]

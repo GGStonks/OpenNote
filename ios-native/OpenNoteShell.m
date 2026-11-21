@@ -241,11 +241,10 @@ static void ONAppendTouch(NSMutableString *js, UITouch *t, UIView *view) {
     [super sendEvent:event];
 }
 
-// Fingers to the Rust camera (ADR-006), before the web view and every gesture recognizer, without
-// changing the event: the page still gets them (taps, one finger, its own cancelling of a stroke
-// when a second finger lands) but no longer scrolls or zooms with them. Rust takes only touches
-// that start over the note (the page's layout: its scroll view less its controls) and moves the
-// camera only once two are down; a finger landing while the Pencil writes is the hand resting.
+// Fingers to the Rust camera (ADR-006 / ADR-010), before the web view and every gesture recognizer:
+// the web view delegates note touch scrolling to Rust at 120 Hz. Rust takes touches that start
+// over the note and moves the camera (one finger in stylus-only mode, or two fingers).
+// A finger landing while the Pencil writes is the hand resting.
 - (void)forwardFingers:(UIEvent *)event {
     WKWebView *view = self.webView;
     // Every finger of the event at once, each sample with its own time (UITouch.timestamp, the

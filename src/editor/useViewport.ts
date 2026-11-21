@@ -755,11 +755,18 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
       }
       if (gestures.inking && gestures.inkingWith === 'pen') ev.preventDefault();
       else if (ev.touches.length >= 2) ev.preventDefault();
+      else if (rustLive.current && fingersNavigate()) {
+        const target = ev.target as HTMLElement | null;
+        if (!target?.closest('textarea, input, button, [data-no-pan]')) {
+          ev.preventDefault();
+        }
+      }
       touchPullY = ev.touches.length === 1 ? ev.touches[0].clientY : null;
     };
     // One finger past the end of the note (native scrolling stops there): the pull that adds a page.
     const onTouchMove = (ev: TouchEvent) => {
       if (!cb.current.onPullCommit || ev.touches.length !== 1 || touchPullY === null || pointers.current.size > 1 || gestures.inking) return;
+      if (rustLive.current && fingersNavigate()) return;
       const y = ev.touches[0].clientY;
       const dy = touchPullY - y;
       touchPullY = y;

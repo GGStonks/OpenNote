@@ -249,6 +249,7 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         enterImmersive();
+        preferFastestMode();
     }
 
     @Override

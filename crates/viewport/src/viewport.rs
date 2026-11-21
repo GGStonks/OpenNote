@@ -673,11 +673,6 @@ impl Viewport {
         if !self.navigating {
             return;
         }
-        if self.pointers.len() == 1 && self.layout.single {
-            // One finger scrolls natively: the page's.
-            self.reset_track(now);
-            return;
-        }
         self.js_scrolled = true;
         let c = self.centroid();
         if self.pointers.len() == 2 && self.pinch.is_some() {
@@ -995,14 +990,14 @@ impl Viewport {
         &self.cam
     }
 
-    /// Two fingers move the camera, or it moves on its own.
+    /// Navigation active (fingers down moving camera or momentum glide).
     pub fn busy(&self) -> bool {
-        self.two || self.moving()
+        self.two || (self.layout.single && self.navigating) || self.moving()
     }
 
-    /// Two fingers came down and not all have lifted.
+    /// Fingers down moving the camera.
     pub fn gesture(&self) -> bool {
-        self.two
+        self.two || (self.layout.single && self.navigating)
     }
 
     /// Momentum, the pull's release or a glide.
@@ -1166,7 +1161,7 @@ impl Viewport {
             pull: self.reported_pull,
             pulls: self.pulls,
             placed: self.placed,
-            gesture: self.two,
+            gesture: self.two || (self.layout.single && self.navigating),
             moving: self.moving(),
             by_page: self.cam.by_page,
         };
