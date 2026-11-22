@@ -58,6 +58,10 @@ pub struct GestureSummary {
     pub link_max: f64,
     /// The longest wait for the canvas's lock (ms; held by the page's calls).
     pub lock_max: f64,
+    /// Ticks where the camera moved but the canvas's camera did not (it waits for the page's DOM,
+    /// ADR-008): a refresh shown twice while the fingers move. The other ticks not `drawn` had
+    /// nothing new (fingers down before a pinch engages, the end of a glide).
+    pub held: u64,
 }
 
 /// One gesture being recorded.
@@ -81,6 +85,7 @@ pub struct GestureRecorder {
     drained: u64,
     link_max: f64,
     lock_max: f64,
+    held: u64,
 }
 
 impl GestureRecorder {
@@ -107,7 +112,13 @@ impl GestureRecorder {
             drained: 0,
             link_max: 0.0,
             lock_max: 0.0,
+            held: 0,
         }
+    }
+
+    /// The camera moved this tick but the canvas's did not.
+    pub fn held(&mut self, held: bool) {
+        self.held += u64::from(held);
     }
 
     /// What the tick drew: `trail_ms` behind the newest camera, `alone` when the page's DOM was
@@ -243,6 +254,7 @@ impl GestureRecorder {
             drained: self.drained,
             link_max: r(self.link_max),
             lock_max: r(self.lock_max),
+            held: self.held,
         }
     }
 }
@@ -282,11 +294,13 @@ mod tests {
         r.pace(0.0, 0.0, true, false);
         r.link(8.33);
         r.link(16.67);
+        r.held(true);
+        r.held(false);
         r.tick(0.0, true);
         r.tick(8.3, false);
         let s = r.finish(1, 20.0, 1.0, 2, 0);
         assert_eq!((s.acquire_max, s.lock_max, s.link_max), (8.4, 0.3, 16.7));
-        assert_eq!((s.gpu_late, s.drained), (1, 1));
+        assert_eq!((s.gpu_late, s.drained, s.held), (1, 1, 1));
     }
 
     #[test]

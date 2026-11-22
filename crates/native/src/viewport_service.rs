@@ -592,7 +592,8 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             c.gesture,
             c.moving,
         );
-        if hist_get(v, 0).is_none_or(|h| h.seq != c.seq) {
+        let moved_now = hist_get(v, 0).is_none_or(|h| h.seq != c.seq);
+        if moved_now {
             v.moved_at = clock_ms();
         }
         if v.vp.gesture() && v.rec.is_none() && v.vp.fingers() >= 2 {
@@ -685,11 +686,15 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             });
             (d.x, d.y, d.ez, draw_t)
         };
+        // The camera moved but the canvas shows what it showed (waiting for the DOM): a refresh
+        // repeated while the fingers move.
+        let held = moved_now && v.drawn_cam == Some((draw_cam_x, draw_cam_y, draw_cam_ez));
         v.drawn_cam = Some((draw_cam_x, draw_cam_y, draw_cam_ez));
         v.tick_t = t_ms;
         v.drawn_t = draw_cam_t;
         if let Some(r) = v.rec.as_mut() {
             r.tick(t_ms, false);
+            r.held(held);
             r.placed(t_ms - draw_cam_t, alone);
             if v.vp.gliding() {
                 r.glided();

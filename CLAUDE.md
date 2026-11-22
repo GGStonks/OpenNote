@@ -165,8 +165,9 @@ Smoothness lives in the camera, which the DOM and the canvas share; never in one
   `workMax`: the whole tick; `cameraMax`: the camera's step and its lock; `uploadMax`: scene
   uploads; `lockMax`: the wait for the canvas's lock; `acquireMax`: the wait for a drawable, the
   display's, not the CPU's; `gpuLate` / `drained`: ticks skipped by the pacing below; `linkMax`:
-  the longest display-link interval): a tick over a frame misses a refresh. Read it before
-  guessing at dropped frames.
+  the longest display-link interval; `held`: ticks where the camera moved but the canvas kept its
+  picture, waiting for the DOM; other ticks not `drawn` had nothing new, as a two-finger undo tap):
+  a tick over a frame misses a refresh. Read it before guessing at dropped frames.
 - The canvas never queues frames behind the GPU or the display (canvas `host.rs` `Pace`): a tick
   whose previous frame the GPU has not finished draws nothing (`gpuLate`, the next tick draws the
   newest camera), and after a wait over `BACKLOG_MS` for a drawable the next tick is skipped

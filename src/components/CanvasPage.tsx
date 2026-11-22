@@ -1953,6 +1953,24 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     if (raf.current === null) raf.current = requestAnimationFrame(() => renderRef.current());
   }, []);
 
+  /**
+   * In the apps the live canvas serves one gesture at a time (lasso, highlighter, eraser): its
+   * memory goes back once the frame showing the result is drawn: the gesture finished, a second
+   * finger cancelled it, or the pen hovering with the eraser (its ring) went away.
+   */
+  const releaseLive = useCallback(() => {
+    if (!NativeInk.available && !isNative) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const c = activeCanvasRef.current;
+      if (c && !drawing.current && !handleDrag.current) {
+        c.width = 0;
+        c.height = 0;
+        live.current = null;
+        dirty.current = null;
+      }
+    }));
+  }, [isNative]);
+
   const clearActive = useCallback(() => {
     if (drawing.current) retireInk(drawing.current);
     drawing.current?.ink?.cancel();
@@ -1960,7 +1978,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     gestures.inking = false;
     eraserPos.current = null;
     requestRender();
-  }, [requestRender]);
+    releaseLive();
+  }, [requestRender, releaseLive]);
 
   // A second finger (pinch / two-finger scroll) cancels what the first finger started, leaving no
   // trace: the stroke in progress is dropped, what it erased comes back, a text box it was about to
@@ -2554,22 +2573,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     drawing.current = null;
     gestures.inking = false;
     retireInk(d);
-    // In the apps the live canvas served only this gesture (lasso, highlighter, eraser): its
-    // memory goes back once the frame showing the result is drawn.
-    if (NativeInk.available || isNative) requestAnimationFrame(() => requestAnimationFrame(() => {
-      const c = activeCanvasRef.current;
-      if (c && !drawing.current && !handleDrag.current) {
-        c.width = 0;
-        c.height = 0;
-        live.current = null;
-        dirty.current = null;
-      }
-    }));
+    releaseLive();
     if (d.ink) {
       const ink = d.ink;
       // The finished stroke is painted with React's commit below; the shell's layer is cleared
       // once a frame showing it has been drawn, so the ink never blinks.
-      const end = () => { ink.end(); logInkGrid(zoomRef.current); };
+      // Over the native canvas the page has no ink canvases or vectors to measure (3.0.4 logged
+      // empty ink-grid entries, after a layout read, in the middle of writing).
+      const end = () => { ink.end(); if (!isNative) logInkGrid(zoomRef.current); };
       const sent = sceneSent.current;
       if (cancelled) ink.cancel();
       else if (isNative) {
@@ -3324,6 +3335,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             if (!drawing.current && eraserPos.current) {
               eraserPos.current = null;
               requestRender();
+              // The eraser's hover ring was the live canvas's last use: 3.0.4 kept the canvas (a
+              // screen's worth, 22 MB on an iPad Pro) from an erase until the next pen stroke.
+              releaseLive();
             }
           }}
         />

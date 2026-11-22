@@ -351,11 +351,13 @@ export function useCanvasPageStream(o: {
     const changed = B.takeChanged();
     const near = new Set(s.near);
     const ids = latest.current.index;
-    const sends: number[] = [];
+    // A set: a changed sheet near the view is considered twice (changed, then near), and 3.0.4
+    // sent each stroke's sheet twice, the second call (2-3 ms) adding nothing.
+    const sends = new Set<number>();
     const forget: string[] = [];
     const consider = (k: number) => {
       if (!s.needs(k)) return;
-      if (near.has(k)) sends.push(k);
+      if (near.has(k)) sends.add(k);
       else {
         const sh = o.sheets[k];
         const id = sh && sheetSceneId(o.surfaceId, sh.id);
@@ -385,9 +387,9 @@ export function useCanvasPageStream(o: {
       }
     }
     if (forget.length) void rustForgetCanvasScenes({ ids: forget });
-    if (sends.length) {
+    if (sends.size) {
       sent.current++;
-      arrived.current = Promise.all(sends.map((k) => s.send(k)));
+      arrived.current = Promise.all([...sends].map((k) => s.send(k)));
     }
   }, [o.enabled, o.surfaceId, buckets, o.strokes, o.hidden, o.sheets]);
 

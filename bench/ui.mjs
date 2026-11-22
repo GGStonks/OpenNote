@@ -1628,6 +1628,7 @@ if (ONLY.has('nativecanvas')) {
   // A pen stroke written and lifted: the page hides its own copy, so it must show on the canvas.
   const box = [300, 560, 520, 640]; // css px, a zigzag inside
   const capsBefore = meta(await rust('canvasStats', framed({}))).capsules;
+  const scenesBefore = await page.evaluate(() => (JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []).filter((c) => c.kind === 'canvas-scene').length);
   await mouse('mousePressed', box[0], box[1] + 40);
   for (let i = 1; i <= 40; i++) {
     await mouse('mouseMoved', box[0] + ((box[2] - box[0]) * i) / 40, box[1] + (i % 2 ? 0 : 80));
@@ -1649,6 +1650,35 @@ if (ONLY.has('nativecanvas')) {
   const lift = scenes[scenes.length - 1];
   console.log(`nativecanvas scenes: open ${scenes[0]?.sent} strokes sent in ${scenes[0]?.ms} ms; the lift ${lift?.sent} of ${lift?.strokes} in ${lift?.ms} ms${scenes.length > 1 && lift.sent <= 2 ? '' : '  FAIL'}`);
   if (!(scenes.length > 1 && lift.sent <= 2)) process.exitCode = 1;
+  // One call for the stroke: 3.0.4 sent its sheet again right after, with nothing new.
+  const forStroke = scenes.slice(scenesBefore);
+  console.log(`nativecanvas scene calls for the stroke: ${forStroke.length} (${forStroke.map((c) => `sent ${c.sent} in ${c.ms} ms`).join(', ')})${forStroke.length === 1 ? '' : '  FAIL'}`);
+  if (forStroke.length !== 1) process.exitCode = 1;
+  // A finger starting an erase that a second finger turns into a gesture (a two-finger undo tap):
+  // the live canvas it claimed goes too (3.0.4 kept a screen-sized one until the next stroke).
+  await page.click('[title^="Eraser"]');
+  await touch('touchStart', [[400, 760]]);
+  await sleep(60);
+  await touch('touchMove', [[404, 764]]);
+  await sleep(30);
+  await touch('touchStart', [[400, 760], [520, 760]]);
+  await sleep(60);
+  await touch('touchEnd', []);
+  await sleep(400);
+  const liveCanvases = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).map((c) => `${c.width}x${c.height}`));
+  console.log(`nativecanvas canvases after an eraser touch cancelled by a second finger: ${liveCanvases.length ? liveCanvases.join(' ') : 'none'}${liveCanvases.length ? '  FAIL' : ''}`);
+  if (liveCanvases.length) process.exitCode = 1;
+  // The eraser's hover ring (Pencil hover, a mouse here) and the pen going away: the canvas goes.
+  for (let i = 0; i < 6; i++) {
+    await mouse('mouseMoved', 400 + i * 10, 760);
+    await sleep(30);
+  }
+  const hovering = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).length);
+  await mouse('mouseMoved', 400, 2);
+  await sleep(400);
+  const leftCanvases = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).map((c) => `${c.width}x${c.height}`));
+  console.log(`nativecanvas eraser hover: ${hovering} canvas while hovering, after the pen left ${leftCanvases.length ? leftCanvases.join(' ') : 'none'}${leftCanvases.length || !hovering ? '  FAIL' : ''}`);
+  if (leftCanvases.length || !hovering) process.exitCode = 1;
   if (arg('shots')) {
     await page.setContent('<canvas id=c></canvas>');
     await page.evaluate(([b64, w, h]) => {
@@ -4151,6 +4181,10 @@ if (process.argv.includes('--native') && ONLY.has('pen')) {
   const ended = new Set(msgs.filter((m) => m.startsWith('e:')).map((m) => m.slice(2)));
   const open = [...begun].filter((id) => !ended.has(id));
   console.log(`nativeink strokes begun ${begun.size}, ended by id ${ended.size}, never ended: ${open.length ? open.join(' ') : 'none'}`);
+  // Each stroke's sheet goes to the canvas once (3.0.4 sent it a second time with nothing new).
+  const crumbs = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []);
+  const scenes = crumbs.filter((c) => c.kind === 'canvas-scene');
+  console.log(`nativeink canvas-scene calls ${scenes.length}, ${scenes.filter((c) => c.sent === 0).length} sending nothing; ink-grid entries ${crumbs.filter((c) => c.kind === 'ink-grid').length}`);
 }
 await browser.close();
 cleanup();
