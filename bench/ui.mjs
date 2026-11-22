@@ -2163,7 +2163,6 @@ if (ONLY.has('rustcore')) {
     };
   });
   await reopen();
-  await page.waitForFunction(() => window.__opennoteRust);
   const events = async () => {
     const st = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}'));
     return (st.current?.crumbs ?? []).filter((c) => /^rust-|^gl-ready/.test(c.kind));
@@ -2180,10 +2179,7 @@ if (ONLY.has('rustcore')) {
     console.log('rustcore FAIL: Rust did not prepare the lines before the GPU ink');
     process.exitCode = 1;
   }
-  const r = await page.evaluate(() => window.__opennoteRust.check());
-  console.log(`rustcore check "${r.title}": ${r.strokes} strokes, ${r.points} points; TypeScript ${r.tsMs.toFixed(0)} ms, Rust ${r.rustTotalMs.toFixed(0)} ms (page ${r.pageMs.toFixed(0)}, its own ${r.rustMs.toFixed(0)}, ${r.via}); ${r.differing} lines differ, largest ${r.maxDiff.toExponential(1)} px (${CPU}x slower CPU)`);
-  if (r.worst) console.log(`rustcore worst ${JSON.stringify(r.worst)}`);
-  if (r.differing) process.exitCode = 1;
+  // The lines' equality with TypeScript's is crates/ink's (tests/reference.rs, bench:rustref).
 }
 
 // Not in the default run: --only probe, the frame-rate test of Settings > Diagnostics on the open note.
@@ -2204,7 +2200,7 @@ if (ONLY.has('probe')) {
 // text box and the formula against where the page's DOM showed them at that moment (device px),
 // (c) the page point first under the fingers against where the camera puts it, (d) the second
 // difference of the drawn camera (jumps and judder: a constant-speed pan has none) and the ticks'
-// pacing. "before" is 2.9.6's camera (localStorage opennote_camera_v1), "after" this one.
+// pacing. (2.9.6's camera, once run as "before", is gone from the app since 3.0.3.)
 // --big N: the same on a note of N pages (recorded handwriting repeated, a text box and a formula
 // every 50 pages) against the small note: open time, ticks, the canvas's draw time (ADR-007).
 if (ONLY.has('cameracoherence')) {
@@ -2315,14 +2311,13 @@ if (ONLY.has('cameracoherence')) {
     }, { ...note, pages: [{ ...note.pages[0], strokes: [] }] });
     const cdp2 = await pctx.newCDPSession(p);
     let lastOpenInkMs = NaN;
-    const open = async (legacy) => {
-      await p.evaluate((l) => {
+    const open = async () => {
+      await p.evaluate(() => {
         localStorage.removeItem('opennote_note_views_v1');
-        if (l) localStorage.setItem('opennote_camera_v1', '1'); else localStorage.removeItem('opennote_camera_v1');
         const st = JSON.parse(localStorage.getItem('opennote_settings_v2') || '{}');
         st.stylusOnly = false;
         localStorage.setItem('opennote_settings_v2', JSON.stringify(st));
-      }, legacy);
+      });
       await p.reload();
       const t0 = performance.now(), m0 = monoMs();
       await p.getByText(note.title).first().click({ timeout: 600000 });
@@ -2459,8 +2454,8 @@ if (ONLY.has('cameracoherence')) {
   // BENCH_CC_LONG_ONLY=1: the long note's part alone (with --big).
   for (const [W, H] of CANVAS_OFF || process.env.BENCH_CC_LONG_ONLY ? [] : arg('orient') === 'portrait' ? [[1024, 1366]] : [[1024, 1366], [1366, 1024]]) {
     const s = await session(W, H, small);
-    for (const mode of ['before', 'after']) {
-      await s.open(mode === 'before');
+    for (const mode of ['after']) {
+      await s.open();
       // The text box's and the formula's corners in content px at zoom 1 (from the DOM at rest).
       const pts = await s.p.evaluate(() => {
         const outer = document.querySelector('[data-note-content]');
@@ -2494,7 +2489,7 @@ if (ONLY.has('cameracoherence')) {
     const gpuWait = process.env.BENCH_NO_GPU_WAIT ? [] : ['--gpu-wait'];
     for (const nt of [small, noteOf(bigPages, 1, true)]) {
       const s = await session(1024, 1366, nt, gpuWait);
-      const openMs = await s.open(false);
+      const openMs = await s.open();
       const name0 = `${String(nt.sheets.length).padStart(5)} pages`;
       console.log(`cameracoherence long note ${name0} open ${openMs.toFixed(0)} ms (formula shown), open to ink ${f2(s.openInk())} ms`);
       for (const [name, samples, end] of pathsFor(1024, 1366).filter(([n]) => n !== 'long pinch')) {

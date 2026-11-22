@@ -267,10 +267,6 @@ fn owned(v: &View) -> bool {
     v.vp.has_layout() && v.vp.layout().owned
 }
 
-fn legacy(v: &View) -> bool {
-    v.vp.layout().legacy
-}
-
 // ------------------------------------------------------------------------------------------------
 // The fingers.
 
@@ -319,17 +315,12 @@ pub fn touch(id: i64, phase: i32, x: f64, y: f64, t_ms: Option<f64>) -> bool {
                 .filter(|t| t.is_finite() && *t <= now + 50.0 && *t > now - 1000.0)
                 .unwrap_or(now),
         };
-        if legacy(v) {
-            // 2.9.6: each finger as it arrives, stamped then.
-            feed(v, Sample { t: now, ..s });
-        } else {
-            if v.queue.len() >= QUEUE {
-                if let Some(old) = v.queue.pop_front() {
-                    feed(v, old);
-                }
+        if v.queue.len() >= QUEUE {
+            if let Some(old) = v.queue.pop_front() {
+                feed(v, old);
             }
-            v.queue.push_back(s);
         }
+        v.queue.push_back(s);
         true
     })
 }
@@ -576,22 +567,16 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             v.tick_t = t_ms;
             return None;
         }
-        let old = legacy(v);
         let resample_lead = if v.hz > 0.0 {
             (1000.0 / v.hz * 0.65).clamp(3.0, 8.0)
         } else {
             RESAMPLE_MS
         };
-        if old {
-            // 2.9.6: the camera advanced to the moment of the tick.
-            v.vp.tick(clock_ms() / 1000.0);
-        } else {
-            // Fingers, momentum and animations all at one time, the resampling's: a fling goes
-            // on from where the fingers left the camera, with no extra step at the release. Slow
-            // fingers are placed on their fitted line at that time (no delay: `FIT_SAMPLES`).
-            process(v, t_ms - resample_lead, true);
-            v.vp.tick((t_ms - resample_lead) / 1000.0);
-        }
+        // Fingers, momentum and animations all at one time, the resampling's: a fling goes
+        // on from where the fingers left the camera, with no extra step at the release. Slow
+        // fingers are placed on their fitted line at that time (no delay: `FIT_SAMPLES`).
+        process(v, t_ms - resample_lead, true);
+        v.vp.tick((t_ms - resample_lead) / 1000.0);
         let c = v.vp.camera().clone();
         let (view_w, view_h) = {
             let [_, _, vw, vh] = v.vp.layout().view;
@@ -635,7 +620,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         let busy = v.vp.busy();
         let lag = lag_max(v);
         let shown_t = match v.shown {
-            Some((seq, at)) if !old && clock_ms() - at < 1000.0 => {
+            Some((seq, at)) if clock_ms() - at < 1000.0 => {
                 if seq == c.seq {
                     Some(t_ms)
                 } else {
@@ -681,7 +666,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
                 };
             }
         }
-        let (draw_cam_x, draw_cam_y, draw_cam_ez, draw_cam_t) = if !v.vp.layout().legacy {
+        let (draw_cam_x, draw_cam_y, draw_cam_ez, draw_cam_t) = {
             let trail = if v.trail.is_finite() { v.trail } else { 0.0 };
             let mut draw_t = t_ms - trail;
             if dt.is_finite() && dt > 0.0 && dt < 100.0 && v.drawn_t.is_finite() {
@@ -699,9 +684,6 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
                 ez: c.ez,
             });
             (d.x, d.y, d.ez, draw_t)
-        } else {
-            // Live presentation at current frame: zero latency, maximum responsiveness, lean execution
-            (c.x, c.y, c.ez, t_ms)
         };
         v.drawn_cam = Some((draw_cam_x, draw_cam_y, draw_cam_ez));
         v.tick_t = t_ms;
@@ -844,7 +826,7 @@ pub fn poll(now_ms: f64) -> Option<String> {
         }
         let seq = v.vp.camera().seq;
         let f = v.vp.layout().frame_ms.clamp(4.0, 100.0);
-        let gap = if legacy(v) { f * 0.8 } else { f * 0.95 };
+        let gap = f * 0.95;
         let missing_new = crate::canvas_service::missing().1 != v.pushed_missing;
         if (seq == v.pushed_seq && v.unread.is_empty() && !missing_new)
             || now_ms - v.pushed_at < gap

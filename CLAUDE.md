@@ -48,9 +48,9 @@ drawn line (`strokeGeometry`'s cache, `prepareGeometry`) before the GPU ink is p
 while writing stays TypeScript. That line must be TypeScript's point for point:
 `crates/ink/tests/reference.rs` against `npm run bench:rustref -- bench/rust-ref/ink.json` (every
 kind of stroke), and Rust ports `Math.hypot` as `js_hypot` (libm's last bit flipped a smoothing
-window). Settings > Diagnostics: "Rust ink preparation" (off: TypeScript, localStorage
-`opennote_rust`) and "Rust check" (the largest note both ways: same lines, times; `rust-check` in
-the crash report, each preparation `rust-geometry`). `npm run bench:ui -- --only rustcore` (alone:
+window). In the apps Rust always prepares the lines (3.0.3 removed the "Rust ink preparation"
+switch and the "Rust check" that compared both); TypeScript computes them only where the library
+is missing (the browser) or a call fails. Each preparation is `rust-geometry` in the crash report. `npm run bench:ui -- --only rustcore` (alone:
 a stand-in iOS shell answering with the real library, binary; `BENCH_RUST_VIA=base64` the fallback), `crates/native/tests/jni/run.sh` (the JNI
 entry point from a JVM). On 2026-11-12 the headless emulator (`on20x9`, swiftshader or guest GPU)
 crashed as this build started (qemu itself, exit 139): the Android side is checked from the JVM.
@@ -122,7 +122,9 @@ edges). The page keeps the gesture logic, draws the new zoom when the fingers li
 shell where the content really landed (the snapshot glides there and goes). `npm run bench:ui -- --only nativepinch` (alone) checks the
 messages and that the snapshot's last position matches the drawn page.
 
-Over the native canvas (opennote-rs, Settings > Diagnostics > Native canvas) none of this applies:
+Over the native canvas (on in the apps since 3.0.3: iOS skips it for the one run after a native
+crash, Android uses GLES after an abnormal end; the page draws notes with PDF pages, the browser,
+and whenever the canvas fails, `canvas-fallback`) none of this applies:
 two fingers move the Rust camera (`crates/viewport`, a port of useViewport.ts's gestures and
 viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (iOS `ONWindow
 sendEvent:`, Android `MainActivity.dispatchTouchEvent`: every sample with its own timestamp,

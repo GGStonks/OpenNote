@@ -895,9 +895,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         frameMs: frameRate.frameMs,
         owned: true,
         vv: [window.visualViewport?.offsetLeft ?? 0, window.visualViewport?.offsetTop ?? 0, window.visualViewport?.scale ?? 1],
-        legacy: localStorage.getItem('opennote_camera_v1') === '1',
       };
-      const key = JSON.stringify([layout.view, layout.content, layout.surface, layout.pull, layout.single, holes, layout.dpr, Math.round(layout.frameMs), layout.vv, layout.legacy]);
+      const key = JSON.stringify([layout.view, layout.content, layout.surface, layout.pull, layout.single, holes, layout.dpr, Math.round(layout.frameMs), layout.vv]);
       if (key === layoutKey && info.sheets === lastSheets) return;
       layoutKey = key;
       lastSheets = info.sheets;

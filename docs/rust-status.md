@@ -1,8 +1,10 @@
 # Rust port: where it stands
 
 The plan is docs/rust-rewrite-roadmap.md. The port is developed on the `opennote-rs` branch
-(origin `GGStonks/OpenNote`, branch `opennote-rs`). The app does not use any of it yet: what ships
-is the TypeScript app in `src/`.
+(origin `GGStonks/OpenNote`, branch `opennote-rs`, the official app since 2026-11-22). In the apps
+Rust draws the page (the native canvas, `canvas`), moves the camera (`viewport`), prepares the
+ink's lines and casts to a PC (`native`); the rest of `src/` is still TypeScript, and the browser
+build runs TypeScript only (no WebAssembly).
 
 `npm run test:rust` (`cargo test --workspace`) runs every crate's tests. The ones that read
 `bench/recordings` (nib's golden test does not) need the recordings, which are not in git.

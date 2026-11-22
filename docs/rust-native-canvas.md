@@ -55,8 +55,9 @@ no hand-off and no re-rasterisation. The existing pieces it builds on:
 
 ### N2. The shells host the canvas under a transparent web view
 
-State (2.9.4-rs.19): an opt-in test, Settings > Diagnostics > "Native canvas" (next start; iOS
-`OpenNoteNativeCanvas`, Android SharedPreferences `opennote_native_canvas`). The shells host the
+State (3.0.3): on in the apps (the Settings switch, iOS `OpenNoteNativeCanvas` and Android
+`opennote_native_canvas` "on", are gone; iOS skips it for the one run after a native crash).
+Until 3.0.2 it was an opt-in test (2.9.4-rs.19). The shells host the
 canvas (iOS CAMetalLayer, Android SurfaceView through ANativeWindow) under a see-through web
 view; the page keeps every touch and all logic, sends its strokes (`canvasScene`) and, every
 animation frame it changed, where they are (`canvasFrame`: from the page's own box, so scroll,

@@ -52,9 +52,6 @@ pub struct Layout {
     /// points are the web view's own; the page's are its client px: client = web / scale + offset
     /// (iOS scrolls the web view under the keyboard: the two then part).
     pub vv: [f64; 3],
-    /// The bench's "before" (`--only cameracoherence`): 2.9.6's camera, fingers stamped as they
-    /// arrive and the newest camera drawn whatever the page's DOM shows.
-    pub legacy: bool,
 }
 
 impl Default for Layout {
@@ -71,7 +68,6 @@ impl Default for Layout {
             frame_ms: 1000.0 / 60.0,
             owned: false,
             vv: [0.0, 0.0, 1.0],
-            legacy: false,
         }
     }
 }

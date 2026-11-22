@@ -132,10 +132,9 @@ static NSString *const kPageUnlockFailedKey = @"OpenNotePageUnlockFailed";
 static NSString *const kPage120Key = @"OpenNotePage120Hz";
 /** NSUserDefaults: the UI theme's background ("#RRGGBB", setLaunchTheme), shown until the page paints. */
 static NSString *const kLaunchColorKey = @"OpenNoteLaunchColor";
-// The native canvas (Rust, under a see-through web view): off unless chosen in Settings >
-// Diagnostics ("setNativeCanvas", next start). It is a test of N2 (docs/rust-native-canvas.md):
-// the page keeps all input and drawing logic, the shell only draws the page's ink and paper.
-static NSString *const kNativeCanvasKey = @"OpenNoteNativeCanvas";
+// The native canvas (Rust, under a see-through web view) draws the page's ink and paper on every
+// run (docs/rust-native-canvas.md N2), except the one after a native crash: that run the page draws
+// them itself, so a canvas that crashed at start can never keep the app from opening.
 
 /** The app's theme background (the system's before the app has sent one): window and web view at start. */
 static UIColor *ONLaunchColor(void) {
@@ -1500,8 +1499,8 @@ static void ONStartCanvasThread(void) {
     config.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
 
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-    BOOL nativeCanvas = [defaults boolForKey:kNativeCanvasKey];
     NSString *nativeCrash = ONTakeNativeCrash();
+    BOOL nativeCanvas = nativeCrash == nil;
     ONInstallCrashCapture(kVersion);
     NSString *nativeCrashJs = @"null";
     if (nativeCrash) {
@@ -1761,10 +1760,6 @@ static void ONStartCanvasThread(void) {
             UIImpactFeedbackGenerator *g = [[UIImpactFeedbackGenerator alloc] initWithStyle:[style isEqualToString:@"light"] ? UIImpactFeedbackStyleLight : UIImpactFeedbackStyleMedium];
             [g impactOccurred];
         }
-        replyHandler(@{}, nil);
-    } else if ([cmd isEqualToString:@"setNativeCanvas"]) {
-        // Settings > Diagnostics: the native canvas from the next start.
-        [[NSUserDefaults standardUserDefaults] setBool:[msg[@"on"] boolValue] forKey:kNativeCanvasKey];
         replyHandler(@{}, nil);
     } else if ([cmd isEqualToString:@"rust"]) {
         [self handleRust:msg reply:replyHandler];

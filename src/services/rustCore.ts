@@ -2,8 +2,8 @@
  * The app's Rust library on the devices (crates/native): the iOS shell links it (`rust` command of
  * the `opennote` message handler), Android loads it (OpenNoteRustPlugin). Requests and replies are
  * framed as crates/native/src/lib.rs says (u32 meta length, meta JSON, binary data), base64 over the
- * bridge. Everything here falls back to TypeScript: without the library (the browser, a build
- * without Rust), with Rust switched off (Settings > Diagnostics), or when a call fails.
+ * bridge. Everything here falls back to TypeScript only without the library (the browser, a build
+ * without Rust) or when a call fails: in the apps Rust always does it.
  *
  * What Rust does now: the drawn line of every stroke of a note before the GPU ink is prepared, and
  * of a library card's strokes before its thumbnail is drawn (`prepareGeometry`), the very line
@@ -15,7 +15,7 @@ import { Capacitor, registerPlugin } from '@capacitor/core';
 import { ImageBlock, NoteDocument, Stroke } from '../types';
 import type { ZLayer } from '../editor/zorder';
 import { bytesToBase64, fromBase64, hasNativeCanvas, hasNativeViewport, platformKind } from '../platform';
-import { computeStrokeGeometry, hasStrokeGeometry, setStrokeGeometry, type InkGeometry } from '../ink/strokeRenderer';
+import { hasStrokeGeometry, setStrokeGeometry, type InkGeometry } from '../ink/strokeRenderer';
 import { packedPoints, PACKED_STRIDE } from '../storage/packedPoints';
 import { crashLog } from './crashLog';
 
@@ -24,26 +24,8 @@ interface RustPlugin {
   call(o: { method: string; data: string }): Promise<{ data: string }>;
 }
 
-const KEY = 'opennote_rust';
 /** Fewer points than this go faster in TypeScript than through the bridge. */
 const MIN_POINTS = 2000;
-
-export function rustEnabled(): boolean {
-  try {
-    return localStorage.getItem(KEY) !== 'off';
-  } catch {
-    return true;
-  }
-}
-
-export function setRustEnabled(on: boolean): void {
-  try {
-    if (on) localStorage.removeItem(KEY);
-    else localStorage.setItem(KEY, 'off');
-  } catch {
-    /* the setting stays as it was */
-  }
-}
 
 let plugin: RustPlugin | null = null;
 let availability: Promise<string | null> | null = null;
@@ -259,11 +241,10 @@ const inFlight = new WeakMap<Stroke[], Promise<void>>();
 
 /**
  * Has Rust compute the drawn line of every stroke of `strokes` strokeGeometry does not know yet,
- * and gives it the result. Resolves (never rejects) once done, or at once when Rust is off,
- * missing, or there is too little to gain; strokeGeometry computes whatever is left.
+ * and gives it the result. Resolves (never rejects) once done, or at once when Rust is missing
+ * or there is too little to gain; strokeGeometry computes whatever is left.
  */
 export function prepareGeometry(strokes: Stroke[]): Promise<void> {
-  if (!rustEnabled()) return Promise.resolve();
   let p = inFlight.get(strokes);
   if (p) return p;
   p = (async () => {
@@ -282,80 +263,6 @@ export function prepareGeometry(strokes: Stroke[]): Promise<void> {
   })();
   inFlight.set(strokes, p);
   return p;
-}
-
-export interface RustCheck {
-  strokes: number;
-  points: number;
-  /** TypeScript computing the same lines, on the main thread. */
-  tsMs: number;
-  /** Rust as the page sees it (encoding, bridge, decoding), the page's main-thread share of it, and Rust's own time (off the main thread). */
-  rustTotalMs: number;
-  pageMs: number;
-  rustMs: number;
-  via: RustReply['via'];
-  /** Largest difference between the two, in page px (positions and widths). */
-  maxDiff: number;
-  /** Lines differing by more than 1e-4 px. */
-  differing: number;
-  /** The stroke whose line differs most, when one differs. */
-  worst?: { tool: string; penStyle?: string; isShape?: boolean; modeled?: string; penEnd?: boolean; points: number; diff: number | 'length'; width: number; pts?: number[][] };
-}
-
-/** Rust against TypeScript on `strokes`: the same lines (to 1e-4 px), and how long each takes. */
-export async function rustCheck(strokes: Stroke[]): Promise<RustCheck> {
-  const why = await rustUnavailable();
-  if (why) throw new Error(`Rust library unavailable: ${why}`);
-  const ink = strokes.filter((s) => (s.tool === 'pen' || s.tool === 'highlighter') && s.points.length);
-  const t0 = performance.now();
-  const ts = ink.map(computeStrokeGeometry);
-  const tsMs = performance.now() - t0;
-  const run = await rustGeometry(ink);
-  let maxDiff = 0, differing = 0, worstAt = -1;
-  ts.forEach((a, i) => {
-    const b = run.lines[i];
-    let d = a.pts.length === b.pts.length ? Math.abs(a.width - b.width) : Infinity;
-    for (let k = 0; k < a.pts.length && d < Infinity; k++) {
-      d = Math.max(d, Math.abs(a.pts[k].x - b.pts[k].x), Math.abs(a.pts[k].y - b.pts[k].y));
-      if (a.widths || b.widths) d = !a.widths || !b.widths ? Infinity : Math.max(d, Math.abs(a.widths[k] - b.widths[k]));
-    }
-    if (d > 1e-4) differing++;
-    if (d > 1e-4 && d >= maxDiff) worstAt = i;
-    maxDiff = Math.max(maxDiff, d);
-  });
-  const w = ink[worstAt];
-  const worst = w && {
-    tool: w.tool, penStyle: w.penStyle, isShape: w.isShape, modeled: w.modeled, penEnd: w.penEnd, points: w.points.length,
-    diff: Number.isFinite(maxDiff) ? Number(maxDiff.toExponential(2)) : ('length' as const), width: w.width,
-    // Short enough to reproduce on the PC from the report.
-    pts: w.points.length <= 200 ? w.points.map((p) => [p.x, p.y, p.pressure, p.t ?? NaN]) : undefined,
-  };
-  const result: RustCheck = { strokes: ink.length, points: run.points, tsMs, rustTotalMs: run.ms, pageMs: run.pageMs, rustMs: run.rustMs, via: run.via, maxDiff, differing, worst };
-  crashLog.event('rust-check', {
-    strokes: result.strokes, points: result.points, tsMs: Math.round(tsMs), rustTotalMs: Math.round(run.ms), pageMs: Math.round(run.pageMs), rustMs: Math.round(run.rustMs), via: run.via,
-    maxDiff: Number.isFinite(maxDiff) ? Number(maxDiff.toExponential(2)) : 'length', differing, worst,
-  });
-  return result;
-}
-
-// For npm run bench:ui -- --only rustcore (as frameProbe's window.__opennoteFrameProbe).
-(window as unknown as { __opennoteRust?: unknown }).__opennoteRust = { check: () => rustCheckLargestNote() };
-
-/** rustCheck on the library's largest note (the most points), for Settings > Diagnostics. */
-export async function rustCheckLargestNote(): Promise<RustCheck & { title: string }> {
-  const { getAllNotes } = await import('../storage/db');
-  const size = (s: Stroke) => {
-    const packed = Object.getOwnPropertyDescriptor(s, 'points')?.get ? packedPoints.get(s) : undefined;
-    return packed ? packed.length / PACKED_STRIDE : s.points.length;
-  };
-  let best: { title: string; strokes: Stroke[]; n: number } | null = null;
-  for (const note of await getAllNotes()) {
-    const strokes = (note.pages ?? []).flatMap((p) => p.strokes ?? []);
-    const n = strokes.reduce((a, s) => a + size(s), 0);
-    if (!best || n > best.n) best = { title: note.title, strokes, n };
-  }
-  if (!best || !best.n) throw new Error('No note with ink to check');
-  return { ...(await rustCheck(best.strokes)), title: best.title };
 }
 
 export interface CanvasPlacement {
@@ -678,18 +585,6 @@ export function deskRgba(): [number, number, number, number] {
   return v.length === 3 && v.every((x) => Number.isFinite(x)) ? [v[0] / 255, v[1] / 255, v[2] / 255, 1] : [0.9, 0.9, 0.92, 1];
 }
 
-/**
- * Settings > Diagnostics: the native canvas (docs/rust-native-canvas.md N2) from the next start.
- * The shells keep the choice (iOS NSUserDefaults, Android SharedPreferences).
- */
-export async function setNativeCanvas(on: boolean): Promise<void> {
-  if (platformKind() === 'ios') {
-    await window.webkit!.messageHandlers!.opennote!.postMessage({ cmd: 'setNativeCanvas', on });
-  } else if (platformKind() === 'capacitor' && Capacitor.getPlatform() === 'android') {
-    await registerPlugin<{ setNativeCanvas(o: { on: boolean }): Promise<void> }>('OpenNoteRust').setNativeCanvas({ on });
-  }
-}
-
 // ------------------------------------------------------------------------------------------------
 // The Rust camera (rust/DECISIONS.md ADR-006, docs/rust-native-canvas.md N5): while the native canvas
 // draws a note, two fingers move crates/viewport (a port of useViewport.ts's gestures) at the
@@ -762,8 +657,6 @@ export interface RustViewportLayout {
   owned: boolean;
   /** window.visualViewport: offsetLeft, offsetTop, scale (the shells' points are the web view's). */
   vv: [number, number, number];
-  /** The bench's "before" (`--only cameracoherence`): 2.9.6's camera. */
-  legacy?: boolean;
 }
 
 export type RustViewportOp =

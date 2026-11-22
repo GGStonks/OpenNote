@@ -254,13 +254,13 @@ public class OpenNoteRustPlugin extends Plugin {
     private static Boolean nativeCanvasThisRun;
 
     /**
-     * The native canvas was chosen in Settings > Diagnostics. Read once per run: it applies from the
-     * next start, and everything that depends on it (the SurfaceView, the see-through WebView, the
-     * page's flag, the gestures) must agree for the whole run.
+     * The native canvas draws whenever the Rust library loaded. Read once per run: everything that
+     * depends on it (the SurfaceView, the see-through WebView, the page's flag, the gestures) must
+     * agree for the whole run.
      */
     static synchronized boolean nativeCanvasEnabled(android.content.Context ctx) {
         if (nativeCanvasThisRun == null) {
-            nativeCanvasThisRun = LOADED && ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).getBoolean("on", false);
+            nativeCanvasThisRun = LOADED;
         }
         return nativeCanvasThisRun;
     }
@@ -347,8 +347,7 @@ public class OpenNoteRustPlugin extends Plugin {
         if (!LOADED) return;
         // A run with the canvas on that ended abnormally (the system's exit record: a GPU driver's
         // segfault ends the process past anything Rust catches) makes the canvas use GLES from then
-        // on, else Vulkan on a fragile driver (Mali) would end every run the same way. Reset when
-        // the canvas is switched in Diagnostics.
+        // on, else Vulkan on a fragile driver (Mali) would end every run the same way.
         if (nativeCanvasEnabled(getContext())) {
             android.content.SharedPreferences prefs = getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE);
             if (lastEnd.contains("android exit:")) prefs.edit().putBoolean("gl", true).apply();
@@ -388,14 +387,6 @@ public class OpenNoteRustPlugin extends Plugin {
             System.arraycopy(r, 0, out, 4, r.length);
             main.post(() -> reply.postMessage(out));
         });
-    }
-
-    /** Settings > Diagnostics: the native canvas from the next start. */
-    @PluginMethod
-    public void setNativeCanvas(PluginCall call) {
-        getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
-                .putBoolean("on", Boolean.TRUE.equals(call.getBoolean("on", false))).putBoolean("gl", false).apply();
-        call.resolve();
     }
 
     @PluginMethod

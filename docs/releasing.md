@@ -4,8 +4,8 @@ For any agent (Claude, Gemini) or person who makes a release. A release publishe
 who installs OpenNote: make one only when the owner asks for it. Since 2026-11-19 releases are
 made from the `opennote-rs` branch (the owner's decision, rust/DECISIONS.md ADR-003), in its
 worktree `/home/ds/AI/OpenNote-worktrees/rs` (GitHub `GGStonks/OpenNote`), as ordinary releases;
-`main` is no longer released. The native canvas stays an opt-in until the owner has confirmed it
-on a device.
+`main` follows it (fast-forwarded, 2026-11-22). Since 3.0.3 the native canvas is on in the apps
+(the owner made the Rust line official): its switch in Settings is gone.
 
 ## Steps
 

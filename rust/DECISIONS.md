@@ -34,8 +34,9 @@ allowed only prereleases from it.
 Decision: releases are made from `opennote-rs` (the worktree `/home/ds/AI/OpenNote-worktrees/rs`)
 as ordinary `X.Y.Z` releases following docs/releasing.md; `main` is not touched. Versions go on
 from 2.9.4 (`Z` raised, `Y` only when the owner says).
-Consequences: every release reaches everyone through the updater, so the native canvas stays an
-opt-in (Settings > Diagnostics) until it is complete and the owner has confirmed it on a device.
+Consequences: every release reaches everyone through the updater, so the native canvas was an
+opt-in (Settings > Diagnostics) until the owner confirmed it on a device: on by default from 3.0.3
+(2026-11-22, the owner: the Rust canvas is better, make it the official version).
 
 ## ADR-004: Who writes the code
 Status: accepted (2026-11-19)
