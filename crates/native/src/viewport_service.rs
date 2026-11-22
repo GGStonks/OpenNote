@@ -24,7 +24,6 @@
 //! tick allocates nothing: the queue, the fingers and the camera's history are made once.
 
 use crate::clock_ms;
-use crate::one_euro::OneEuroFilter;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::VecDeque;
@@ -43,6 +42,23 @@ pub const RESAMPLE_MS: f64 = 8.0;
 pub const PREDICT_MAX_MS: f64 = 17.0;
 /// The least time between a finger's two samples to extrapolate from them.
 const MIN_SAMPLE_MS: f64 = 2.0;
+/// Slow fingers are resampled up to one of their sampling intervals in the past (at most this):
+/// between two real samples, never extrapolated, so a slow pan moves a little every frame instead
+/// of standing still and jumping when the next sample lands (0.5 px steps at 18 px/s).
+const SLOW_DELAY_MAX_MS: f64 = 34.0;
+
+/// How much a finger moving at `v_ms` (px/ms) is extrapolated past its last sample: none when
+/// slow (its samples' noise and quantization would show), fully from 0.25 px/ms.
+fn extrapolation_weight(v_ms: f64) -> f64 {
+    if v_ms < 0.06 {
+        0.0
+    } else if v_ms < 0.25 {
+        let t = (v_ms - 0.06) / (0.25 - 0.06);
+        t * t * (3.0 - 2.0 * t)
+    } else {
+        1.0
+    }
+}
 /// Cameras kept to place the one the page's DOM shows (0.5 s at 120 Hz).
 const HISTORY: usize = 64;
 const QUEUE: usize = 512;
@@ -144,23 +160,22 @@ struct View {
     moved_at: f64,
     /// The DOM's trail behind the newest camera (ms, smoothed) and the seq last seen shown.
     trail: f64,
+    /// How far in the past the fingers are resampled beyond the lead (ms, `SLOW_DELAY_MAX_MS`),
+    /// and the input time last reached (it never goes back).
+    slow_delay: f64,
+    input_t: f64,
     last_shown: Option<u64>,
-    filter_x: OneEuroFilter,
-    filter_y: OneEuroFilter,
-    filter_ln_ez: OneEuroFilter,
-    filter_converging: bool,
-    filter_last_t: Option<f64>,
-    pub filtered_cam: Option<(f64, f64, f64)>,
+    /// The camera the canvas drew last (x, y, ez): the one the page's DOM shows (ADR-008). Not
+    /// filtered: 2.9.13 smoothed it here (One Euro), after choosing it, so while the camera moved
+    /// the ink lagged the text, formulas and selection the DOM placed (up to 47 device px through
+    /// a long pinch, `--native --only cameracoherence`). Smoothness belongs to the camera itself,
+    /// which the DOM and the canvas share.
+    pub drawn_cam: Option<(f64, f64, f64)>,
 }
 
 impl View {
-    fn reset_filters(&mut self) {
-        self.filter_x.reset();
-        self.filter_y.reset();
-        self.filter_ln_ez.reset();
-        self.filter_converging = false;
-        self.filter_last_t = None;
-        self.filtered_cam = None;
+    fn reset_drawn(&mut self) {
+        self.drawn_cam = None;
     }
 }
 
@@ -195,13 +210,10 @@ fn with_view<R>(f: impl FnOnce(&mut View) -> R) -> R {
         link: (0.0, 0.0),
         moved_at: f64::NEG_INFINITY,
         trail: f64::NAN,
+        slow_delay: 0.0,
+        input_t: f64::NEG_INFINITY,
         last_shown: None,
-        filter_x: OneEuroFilter::new(8.0, 0.18, 15.0),
-        filter_y: OneEuroFilter::new(8.0, 0.18, 15.0),
-        filter_ln_ez: OneEuroFilter::new(7.0, 0.25, 15.0),
-        filter_converging: false,
-        filter_last_t: None,
-        filtered_cam: None,
+        drawn_cam: None,
     }))
 }
 
@@ -347,15 +359,7 @@ fn process(v: &mut View, upto: f64, resample: bool) {
                 // the speed), recent enough.
                 if dt >= MIN_SAMPLE_MS && gap > 0.0 && gap <= 3.0 * dt {
                     let dist = (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1);
-                    let v_ms = dist / dt; // px/ms
-                    let extrap_weight = if v_ms < 0.06 {
-                        0.0
-                    } else if v_ms < 0.25 {
-                        let t = (v_ms - 0.06) / (0.25 - 0.06);
-                        t * t * (3.0 - 2.0 * t)
-                    } else {
-                        1.0
-                    };
+                    let extrap_weight = extrapolation_weight(dist / dt);
                     if extrap_weight > 0.0 {
                         let tp = upto.min(f.last.2 + PREDICT_MAX_MS.min(2.0 * dt));
                         (tp > f.fed.2).then(|| {
@@ -381,6 +385,32 @@ fn process(v: &mut View, upto: f64, resample: bool) {
             v.fingers[i].fed = (x, y, t);
         }
     }
+}
+
+/// The time the fingers are resampled at for the frame presented at `t_ms`: `lead` before it, and
+/// for slow fingers up to one of their sampling intervals more (eased in and out at half a ms per
+/// ms, so the input's clock never jumps or stops; never back).
+fn input_time(v: &mut View, t_ms: f64, lead: f64) -> f64 {
+    let mut speed: f64 = 0.0;
+    let mut interval: f64 = 0.0;
+    for f in &v.fingers {
+        let dt = f.last.2 - f.prev.2;
+        if dt >= MIN_SAMPLE_MS && t_ms - f.last.2 < 4.0 * dt.max(12.0) {
+            let dist = (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1);
+            speed = speed.max(dist / dt);
+            interval = interval.max(dt);
+        }
+    }
+    let target = if v.fingers.is_empty() {
+        0.0
+    } else {
+        interval.min(SLOW_DELAY_MAX_MS) * (1.0 - extrapolation_weight(speed))
+    };
+    let step = if v.tick_t.is_finite() { (t_ms - v.tick_t).clamp(0.0, 50.0) * 0.5 } else { 0.0 };
+    v.slow_delay += (target - v.slow_delay).clamp(-step, step);
+    let at = (t_ms - lead - v.slow_delay).max(v.input_t);
+    v.input_t = at;
+    at
 }
 
 /// Every finger waiting, now (a read of the camera outside the ticks).
@@ -480,9 +510,11 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             v.vp.tick(clock_ms() / 1000.0);
         } else {
             // Fingers, momentum and animations all at one time, the resampling's: a fling goes
-            // on from where the fingers left the camera, with no extra step at the release.
-            process(v, t_ms - resample_lead, true);
-            v.vp.tick((t_ms - resample_lead) / 1000.0);
+            // on from where the fingers left the camera, with no extra step at the release. Slow
+            // fingers are taken a sampling interval further back, between real samples.
+            let at = input_time(v, t_ms, resample_lead);
+            process(v, at, true);
+            v.vp.tick(at / 1000.0);
         }
         let c = v.vp.camera().clone();
         let (view_w, view_h) = {
@@ -593,33 +625,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             // Live presentation at current frame: zero latency, maximum responsiveness, lean execution
             (c.x, c.y, c.ez, t_ms)
         };
-        let t_s = t_ms / 1000.0;
-        if let Some(prev) = v.filter_last_t {
-            if t_s - prev > 0.1 || t_s < prev {
-                v.reset_filters();
-            }
-        }
-        v.filter_last_t = Some(t_s);
-
-        let (draw_cam_x, draw_cam_y, draw_cam_ez) = {
-            let fx = v.filter_x.filter(draw_cam_x, t_s);
-            let fy = v.filter_y.filter(draw_cam_y, t_s);
-            let ln_ez = v.filter_ln_ez.filter(draw_cam_ez.ln(), t_s);
-            let fez = ln_ez.exp();
-
-            let dx = (fx - draw_cam_x).abs();
-            let dy = (fy - draw_cam_y).abs();
-            let dln = (ln_ez - draw_cam_ez.ln()).abs();
-
-            if !busy && dx < 0.02 && dy < 0.02 && dln < 1e-4 {
-                v.filter_converging = false;
-                (draw_cam_x, draw_cam_y, draw_cam_ez)
-            } else {
-                v.filter_converging = dx >= 0.02 || dy >= 0.02 || dln >= 1e-4;
-                (fx, fy, fez)
-            }
-        };
-        v.filtered_cam = Some((draw_cam_x, draw_cam_y, draw_cam_ez));
+        v.drawn_cam = Some((draw_cam_x, draw_cam_y, draw_cam_ez));
         v.tick_t = t_ms;
         v.drawn_t = draw_cam_t;
         if let Some(r) = v.rec.as_mut() {
@@ -812,12 +818,12 @@ pub fn viewport_layout(meta: &str) -> Result<(String, Vec<u8>), String> {
             v.shown = None;
         }
         if !was {
-            v.reset_filters();
+            v.reset_drawn();
         }
         if let Some(a) = req.adopt {
             if !was || !v.vp.busy() {
                 v.vp.adopt(a.zoom, a.sl, a.st, (a.sub[0], a.sub[1]), a.fit);
-                v.reset_filters();
+                v.reset_drawn();
             }
         }
         camera_value(v)
@@ -881,7 +887,7 @@ pub fn viewport_set(meta: &str) -> Result<(String, Vec<u8>), String> {
         flush(v);
         let vp = &mut v.vp;
         let pair = |a: Option<[f64; 2]>| a.map(|[l, w]| (l, w));
-        let reset_filter = match req {
+        let reset_drawn = match req {
             SetReq::ScrollTo { smooth, .. } => !smooth,
             SetReq::Pull { animate, .. } => !animate,
             _ => true,
@@ -902,8 +908,8 @@ pub fn viewport_set(meta: &str) -> Result<(String, Vec<u8>), String> {
             SetReq::Pull { d, animate } => vp.page_pull(d, animate, t),
             SetReq::Stop => vp.stop(),
         }
-        if reset_filter {
-            v.reset_filters();
+        if reset_drawn {
+            v.reset_drawn();
         }
         camera_value(v)
     });
@@ -1020,7 +1026,7 @@ pub fn viewport_trace(meta: &str) -> Result<(String, Vec<u8>), String> {
 
 /// Tests: back to a new camera.
 pub fn reset() {
-    with_view(|v| v.reset_filters());
+    with_view(|v| v.reset_drawn());
     *view() = None;
 }
 
@@ -1085,13 +1091,8 @@ pub fn busy() -> bool {
             && (v.vp.busy()
                 || !v.held.is_empty()
                 || !v.queue.is_empty()
-                || v.filter_converging
                 || clock_ms() - v.moved_at < 500.0)
     })
-}
-
-pub fn filtered_camera() -> Option<(f64, f64, f64)> {
-    with_view(|v| v.filtered_cam)
 }
 
 /// The display link's interval and how far ahead of its frame's presentation the tick ran
@@ -1235,7 +1236,7 @@ mod tests {
                 sample_idx += 1;
             }
             draw_tick(present);
-            let cam_y = with_view(|v| v.filtered_cam.map(|c| c.1).unwrap_or(v.vp.camera().y));
+            let cam_y = with_view(|v| v.drawn_cam.map(|c| c.1).unwrap_or(v.vp.camera().y));
             ys.push(cam_y);
         }
 

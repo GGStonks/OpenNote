@@ -200,7 +200,10 @@ struct Pinch {
     c0: P,
     c: P,
     engaged: bool,
+    /// The zoom's factor, within the limits (what the release commits).
     k: f64,
+    /// The fingers' own factor (spread / d0), past the limits too: shown rubber-banded.
+    kr: f64,
     #[allow(dead_code)]
     rebased_at: Option<f64>,
 }
@@ -225,6 +228,22 @@ struct Momentum {
 #[derive(Clone, Copy, Debug)]
 struct Release {
     from: f64,
+    t0: f64,
+}
+
+/// A stretch past an edge going back (shown scroll px past it, as `spring` from x0 moving at v0).
+#[derive(Clone, Copy, Debug)]
+struct Spring {
+    x0: f64,
+    v0: f64,
+    t0: f64,
+}
+
+/// A released pinch settling into place: the content's corner and scale as shown at the release.
+#[derive(Clone, Copy, Debug)]
+struct Settle {
+    from: P,
+    ez: f64,
     t0: f64,
 }
 
@@ -265,6 +284,13 @@ pub struct Viewport {
     page_pull: f64,
     page_pull_release: Option<Release>,
     glide: Option<Glide>,
+    /// Fingers panning past an edge: how far (scroll px, signed as sl / st) beyond it they asked;
+    /// shown through `rubber`. The committed scroll stays within its range.
+    over: P,
+    /// Stretches going back (x, y): after the fingers lift, or a fling's overshoot at an edge.
+    bounce: [Option<Spring>; 2],
+    /// A released pinch going to where its zoom was committed (limits, edges, the width snap).
+    settle: Option<Settle>,
     /// `gestures.navigating`.
     navigating: bool,
     /// Two fingers came down in this touch sequence (the camera's gesture).
@@ -320,6 +346,9 @@ impl Viewport {
             page_pull: 0.0,
             page_pull_release: None,
             glide: None,
+            over: P::default(),
+            bounce: [None, None],
+            settle: None,
             navigating: false,
             two: false,
             js_scrolled: false,
@@ -560,6 +589,8 @@ impl Viewport {
     pub fn stop(&mut self) {
         self.momentum = None;
         self.glide = None;
+        self.bounce = [None, None];
+        self.settle = None;
         self.recompute();
     }
 
@@ -624,6 +655,8 @@ impl Viewport {
         // stopMomentum (a touch also ends the browser's smooth scroll).
         self.momentum = None;
         self.glide = None;
+        // A stretch going back is caught where it is shown (the fingers take it on from there).
+        self.catch_stretch(now);
         if self.pointers.is_empty() {
             self.tap = Some(Tap {
                 start: now,
@@ -648,7 +681,7 @@ impl Viewport {
             if self.pointers.len() == 2 {
                 self.begin_pinch();
             } else {
-                self.end_pinch();
+                self.end_pinch(now);
             }
         } else if self.layout.single {
             self.navigating = true;
@@ -698,6 +731,8 @@ impl Viewport {
                 };
                 self.pinch = Some(pz);
                 self.release_pull(now, false);
+                self.over = P::default();
+                self.bounce = [None, None];
             }
             if pz.engaged {
                 // trackPinch
@@ -709,6 +744,7 @@ impl Viewport {
                     self.layout.scroll_box().content_w,
                 );
                 pz.k = z / pz.z0;
+                pz.kr = spread / pz.d0;
                 pz.c = c;
                 self.pinch = Some(pz);
                 // Hard rule: NEVER rebase layout/zoom mid-gesture.
@@ -734,7 +770,7 @@ impl Viewport {
         self.pointers.remove(i);
         if self.pointers.len() < 2 {
             self.two = false;
-            self.end_pinch();
+            self.end_pinch(now);
         }
         if !self.pointers.is_empty() {
             // A finger lifted: continue from the remaining ones without a jump.
@@ -747,9 +783,18 @@ impl Viewport {
         self.flush_scroll();
         let pulled = self.pull_raw > 0.0;
         self.release_pull(now, true);
+        let stretched = (self.over.x != 0.0, self.over.y != 0.0);
+        self.release_stretch(now);
         let h: Vec<(f64, f64, f64)> = self.history.iter().map(|(p, t)| (p.x, p.y, *t)).collect();
         let (vx, vy) = release_velocity_weighted(&h);
         self.velocity = P { x: vx, y: vy };
+        // Along a stretched axis the content springs back instead of flinging.
+        if stretched.0 {
+            self.velocity.x = 0.0;
+        }
+        if stretched.1 {
+            self.velocity.y = 0.0;
+        }
         self.history.clear();
         let tap = self.tap.take();
         let was_navigating = self.navigating;
@@ -804,6 +849,7 @@ impl Viewport {
             c: P::default(),
             engaged: false,
             k: 1.0,
+            kr: 1.0,
             rebased_at: None,
         });
     }
@@ -828,6 +874,7 @@ impl Viewport {
             z0: self.zoom,
             d0: spread,
             k: 1.0,
+            kr: 1.0,
             c0: pz.c,
             o: P {
                 x: pz.c.x - corner.x,
@@ -839,14 +886,19 @@ impl Viewport {
         self.rebases += 1;
     }
 
-    /// useViewport `endPinch`: the pinch's zoom applied (snapped to the page's width when close).
-    fn end_pinch(&mut self) {
-        let Some(p) = self.pinch.take() else {
+    /// useViewport `endPinch`: the pinch's zoom applied (snapped to the page's width when close),
+    /// reached on a spring from where the fingers left it (past the limits or the edges, rubber
+    /// banded, or short of the snap).
+    fn end_pinch(&mut self, now: f64) {
+        let Some(p) = self.pinch else {
             return;
         };
         if !p.engaged {
+            self.pinch = None;
             return;
         }
+        let (from, from_ez) = self.visual(self.release_clock());
+        self.pinch = None;
         // No momentum after a pinch (the fingers' last movement was zooming, not a fling).
         self.js_scrolled = false;
         let z = p.z0 * p.k;
@@ -876,6 +928,14 @@ impl Viewport {
             self.set_view_inner(z, Some(a), f64::INFINITY);
         }
         self.last_pinch = Some((p.z0, self.zoom));
+        let to = self.placed_corner();
+        let far = (from.x - to.x).abs().max((from.y - to.y).abs()) > 0.25
+            || (from_ez / self.zoom - 1.0).abs() > 1e-4;
+        self.settle = far.then_some(Settle {
+            from,
+            ez: from_ez,
+            t0: now,
+        });
     }
 
     fn flush_scroll(&mut self) {
@@ -886,29 +946,85 @@ impl Viewport {
         }
         let engaged = self.pinch.is_some_and(|p| p.engaged);
         let b = self.layout.scroll_box();
+        // A stretch is taken back first, then the scroll moves; past an edge the rest stretches.
+        let max_left = b.max_scroll_left(self.zoom).max(0.0);
+        let max_top = b.max_scroll_top(self.zoom).max(0.0);
+        let mut ty = self.st + self.over.y + dy;
         if self.layout.pull && !self.pointers.is_empty() && !engaged {
             // Past the end: the movement becomes pull; moving back takes the pull back first.
             if self.pull_raw > 0.0 && dy < 0.0 {
                 let back = self.pull_raw.min(-dy);
                 self.pull_raw -= back;
                 dy += back;
+                ty += back;
                 self.report_pull();
             }
-            let max_top = b.max_scroll_top(self.zoom);
-            if dy > 0.0 && self.st + dy > max_top - PULL_EDGE {
-                let extra = self.st + dy - self.st.max(max_top);
-                dy -= extra;
+            if dy > 0.0 && ty > max_top - PULL_EDGE {
+                let extra = ty - (self.st + self.over.y).max(max_top);
+                ty -= extra;
                 self.pull_raw += extra;
                 self.report_pull();
             }
         }
-        if dy != 0.0 {
-            self.st += dy;
+        let tx = self.sl + self.over.x + dx;
+        self.sl = tx.clamp(0.0, max_left);
+        self.st = ty.clamp(0.0, max_top);
+        self.over = P {
+            x: tx - self.sl,
+            y: ty - self.st,
+        };
+        if self.over.x != 0.0 {
+            self.bounce[0] = None;
         }
-        if dx != 0.0 {
-            self.sl += dx;
+        if self.over.y != 0.0 {
+            self.bounce[1] = None;
         }
-        self.clamp_scroll();
+    }
+
+    /// The view's size (view px), for the rubber band.
+    fn dims(&self) -> (f64, f64) {
+        (self.layout.view[2].max(1.0), self.layout.view[3].max(1.0))
+    }
+
+    /// The stretch past the edges shown now (scroll px, signed as sl / st).
+    fn stretch_now(&self, now: f64) -> P {
+        let (w, h) = self.dims();
+        let axis = |i: usize, raw: f64, d: f64| {
+            if raw != 0.0 {
+                rubber(raw, d)
+            } else {
+                self.bounce[i].map_or(0.0, |s| spring(s.x0, s.v0, now - s.t0).0)
+            }
+        };
+        P {
+            x: axis(0, self.over.x, w),
+            y: axis(1, self.over.y, h),
+        }
+    }
+
+    /// The fingers lifted with the content stretched: it springs back from where it shows.
+    fn release_stretch(&mut self, now: f64) {
+        let shown = self.stretch_now(now);
+        for (i, (raw, x)) in [(self.over.x, shown.x), (self.over.y, shown.y)].into_iter().enumerate() {
+            if raw != 0.0 {
+                self.bounce[i] = Some(Spring { x0: x, v0: 0.0, t0: now });
+            }
+        }
+        self.over = P::default();
+    }
+
+    /// A finger came down on a stretch going back: held where it shows. A settling pinch ends.
+    fn catch_stretch(&mut self, now: f64) {
+        let shown = self.stretch_now(now);
+        let (w, h) = self.dims();
+        if self.bounce[0].is_some() {
+            self.over.x = rubber_inverse(shown.x, w);
+        }
+        if self.bounce[1].is_some() {
+            self.over.y = rubber_inverse(shown.y, h);
+        }
+        self.bounce = [None, None];
+        self.settle = None;
     }
 
     fn report_pull(&mut self) {
@@ -967,13 +1083,27 @@ impl Viewport {
         if let Some(m) = self.momentum {
             if now > m.t0 {
                 self.by_page = false;
-                let (dx, dy, vx, vy) = momentum_step_exact(m.vx, m.vy, now - m.t0);
-                let before = (self.sl, self.st);
-                self.st -= dy;
-                self.sl -= dx;
-                self.clamp_scroll();
-                let stuck = (self.sl - before.0).abs() < 1e-4 && (self.st - before.1).abs() < 1e-4;
-                self.momentum = (vx.hypot(vy) > MOMENTUM_STOP_SPEED && !stuck)
+                let (dx, dy, mut vx, mut vy) = momentum_step_exact(m.vx, m.vy, now - m.t0);
+                let b = self.layout.scroll_box();
+                let (w, h) = self.dims();
+                let max_left = b.max_scroll_left(self.zoom).max(0.0);
+                let max_top = b.max_scroll_top(self.zoom).max(0.0);
+                // Reaching an edge, the glide runs on past it on a spring and comes back.
+                let mut edge = |i: usize, s: &mut f64, d: f64, max: f64, v: &mut f64, len: f64| {
+                    let next = *s - d;
+                    *s = next.clamp(0.0, max);
+                    if next != *s {
+                        let cap = BOUNCE_MAX * len * SPRING_W * std::f64::consts::E;
+                        self.bounce[i] = Some(Spring { x0: 0.0, v0: (-*v).clamp(-cap, cap), t0: now });
+                        *v = 0.0;
+                    }
+                };
+                let (mut sl, mut st) = (self.sl, self.st);
+                edge(0, &mut sl, dx, max_left, &mut vx, w);
+                edge(1, &mut st, dy, max_top, &mut vy, h);
+                self.sl = sl;
+                self.st = st;
+                self.momentum = (vx.hypot(vy) > MOMENTUM_STOP_SPEED)
                     .then_some(Momentum { vx, vy, t0: now });
             }
         }
@@ -985,6 +1115,19 @@ impl Viewport {
         if let Some(r) = self.page_pull_release {
             if now - r.t0 >= PULL_RELEASE_MS {
                 self.page_pull_release = None;
+            }
+        }
+        for i in 0..2 {
+            if let Some(s) = self.bounce[i] {
+                let (x, v) = spring(s.x0, s.v0, now - s.t0);
+                if now > s.t0 && x.abs() < 0.05 && v.abs() < 0.002 {
+                    self.bounce[i] = None;
+                }
+            }
+        }
+        if let Some(s) = self.settle {
+            if spring(1.0, 0.0, now - s.t0).0 < 0.002 {
+                self.settle = None;
             }
         }
         if let Some(g) = self.glide {
@@ -1016,6 +1159,8 @@ impl Viewport {
             || self.pull_release.is_some()
             || self.page_pull_release.is_some()
             || self.glide.is_some()
+            || self.bounce.iter().any(Option::is_some)
+            || self.settle.is_some()
     }
 
     /// Momentum after the fingers lifted.
@@ -1086,23 +1231,75 @@ impl Viewport {
 
     /// The content's corner on screen and its scale, every transform included.
     fn visual(&self, now: f64) -> (P, f64) {
+        if let Some(p) = self.pinch.filter(|p| p.engaged) {
+            return self.pinch_visual(&p);
+        }
         let c = self.placed_corner();
-        match self.pinch {
-            Some(p) if p.engaged => (
+        let s = self.stretch_now(now);
+        let to = P {
+            x: c.x - s.x,
+            y: c.y - s.y - self.pull_now(now) - self.page_pull_now(now),
+        };
+        let Some(st) = self.settle else {
+            return (to, self.zoom);
+        };
+        // From the release's picture to the committed one: a scaling about the point both share
+        // (or a translation), its share left going down on the spring.
+        let left = spring(1.0, 0.0, now - st.t0).0;
+        let r0 = st.ez / self.zoom;
+        if (r0 - 1.0).abs() < 1e-9 {
+            return (
                 P {
-                    x: c.x + p.o.x * (1.0 - p.k) + p.c.x - p.c0.x,
-                    y: c.y + p.o.y * (1.0 - p.k) + p.c.y - p.c0.y,
-                },
-                self.zoom * p.k,
-            ),
-            _ => (
-                P {
-                    x: c.x,
-                    y: c.y - self.pull_now(now) - self.page_pull_now(now),
+                    x: to.x + (st.from.x - to.x) * left,
+                    y: to.y + (st.from.y - to.y) * left,
                 },
                 self.zoom,
-            ),
+            );
         }
+        let f = P {
+            x: (st.from.x - r0 * to.x) / (1.0 - r0),
+            y: (st.from.y - r0 * to.y) / (1.0 - r0),
+        };
+        let r = 1.0 + (r0 - 1.0) * left;
+        (
+            P {
+                x: f.x + (to.x - f.x) * r,
+                y: f.y + (to.y - f.y) * r,
+            },
+            self.zoom * r,
+        )
+    }
+
+    /// A pinch as shown: the content point first between the fingers stays under them, the zoom
+    /// past its limits and the content past its edges rubber-banded (what the release would clamp).
+    fn pinch_visual(&self, p: &Pinch) -> (P, f64) {
+        let b = self.layout.scroll_box();
+        let (w, h) = self.dims();
+        let zc = p.z0 * p.k;
+        let zr = p.z0 * p.kr;
+        let zs = if zr.is_finite() && zr > 0.0 && (zr / zc - 1.0).abs() > 1e-12 {
+            zc * rubber((zr / zc).ln(), ZOOM_RUBBER).exp()
+        } else {
+            zc
+        };
+        let a = Anchor {
+            cx: p.o.x / p.z0,
+            cy: p.o.y / p.z0,
+            sx: p.c.x,
+            sy: p.c.y,
+        };
+        // Past the edges at the committed zoom: where the fingers put the corner, less where the
+        // release would place it.
+        let pl = place_anchor(&b, zc, a);
+        let ex = (a.sx - a.cx * zc) - (b.margin_left(zc) - pl.scroll_left + pl.dx);
+        let ey = (a.sy - a.cy * zc) - (-pl.scroll_top + pl.dy);
+        (
+            P {
+                x: a.sx - a.cx * zs - ex + rubber(ex, w),
+                y: a.sy - a.cy * zs - ey + rubber(ey, h),
+            },
+            zs,
+        )
     }
 
     /// useViewport `contentCorner` (the content's box on screen, transforms included).

@@ -60,6 +60,8 @@ fn is_lan(ip: std::net::Ipv4Addr) -> bool {
 /// This device's IPv4 address on the local network, Wi-Fi first: the interfaces' private addresses
 /// (Wi-Fi `en0` / `wlan*` before others; cellular `pdp_ip*` / `rmnet*` / `ccmni*` never), else the
 /// address the system routes outward from (no packet is sent).
+// libc's IFF_* constants are i32 here but unsigned on other targets: the casts are needed there.
+#[allow(clippy::unnecessary_cast)]
 pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
     #[cfg(all(unix, not(target_arch = "wasm32")))]
     {

@@ -25,7 +25,6 @@ pub use canvas_service::{
     opennote_canvas_detach, opennote_canvas_draw_active, opennote_canvas_resize,
 };
 pub mod live;
-pub mod one_euro;
 pub mod remote_service;
 pub mod viewport_service;
 

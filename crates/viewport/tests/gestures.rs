@@ -204,7 +204,8 @@ fn a_pinch_zooms_about_the_fingers() {
 #[test]
 fn zoom_limits_hold() {
     let mut v = fitted(5);
-    // Spread x10: stops at MAX_ZOOM.
+    // Spread x10: past MAX_ZOOM the zoom shown is rubber-banded (never past ZOOM_RUBBER in log
+    // zoom); the release commits MAX_ZOOM without a jump and the picture settles on it.
     fingers(
         &mut v,
         &[(400.0, 600.0), (420.0, 600.0)],
@@ -214,12 +215,18 @@ fn zoom_limits_hold() {
         120.0,
         false,
     );
-    assert!(close(v.camera().ez, MAX_ZOOM, 1e-9), "{}", v.camera().ez);
+    let shown = v.camera().ez;
+    assert!(shown > MAX_ZOOM && shown < MAX_ZOOM * ZOOM_RUBBER.exp(), "{shown}");
     let t = fingers(&mut v, &[], &[], 2.0, 8.0, 120.0, false);
     for i in 0..2 {
         v.touch(i, Phase::Ended, 0.0, 0.0, t);
     }
     assert!(close(v.camera().zoom, MAX_ZOOM, 1e-9));
+    assert!(close(v.camera().ez, shown, 1e-9), "jumped at the release: {} vs {shown}", v.camera().ez);
+    assert!(v.moving());
+    run(&mut v, t, 600.0, 120.0);
+    assert!(close(v.camera().ez, MAX_ZOOM, 1e-9), "{}", v.camera().ez);
+    assert!(!v.moving());
     // Pinching far in: never above, out: never below min(MIN_ZOOM, fitting the width).
     let mut v = fitted(5);
     fingers(
@@ -233,14 +240,17 @@ fn zoom_limits_hold() {
     );
     let floor = MIN_ZOOM.min(820.0 / (PAGE_W + 2.0 * PAD));
     assert!(close(v.camera().zoom, floor, 1e-9), "{}", v.camera().zoom);
+    assert!(v.camera().ez < floor, "shown past the floor while released: {}", v.camera().ez);
+    run(&mut v, 2.0, 600.0, 120.0);
+    assert!(close(v.camera().ez, floor, 1e-9), "{}", v.camera().ez);
 }
 
 #[test]
 fn a_pinch_ending_near_the_page_width_snaps_to_it() {
     let mut v = fitted(5);
     let zf = v.camera().zoom;
-    // Out to ~1.06x the fit: snaps back, fitted.
-    fingers(
+    // Out to ~1.06x the fit: snaps back (on a spring from where it was), fitted.
+    let t = fingers(
         &mut v,
         &[(300.0, 600.0), (520.0, 600.0)],
         &[(290.0, 600.0), (530.0, 600.0)],
@@ -249,6 +259,8 @@ fn a_pinch_ending_near_the_page_width_snaps_to_it() {
         120.0,
         true,
     );
+    assert!(v.camera().ez > zf * 1.03, "the snap jumped: {}", v.camera().ez);
+    run(&mut v, t, 600.0, 120.0);
     let c = v.camera();
     assert!(close(c.zoom, zf, 1e-12), "{} vs {zf}", c.zoom);
     assert_eq!(c.fit, Some(FitMode::Width));
@@ -754,4 +766,90 @@ fn set_view_keeps_an_anchor() {
     );
     let p = content_at(v.camera(), 100.0, 200.0);
     assert!(close(p.0, 400.0, 1e-9) && close(p.1, 2000.0, 1e-9));
+}
+
+/// The camera's corner shown now and at rest (both view px): the stretch is their difference.
+fn shown_y(v: &Viewport) -> f64 {
+    v.camera().y
+}
+
+#[test]
+fn panning_past_the_top_stretches_and_springs_back() {
+    let mut v = fitted(5);
+    let y0 = shown_y(&v);
+    // Two fingers pull the top of the note 300 px down: the content follows less and less.
+    let t = fingers(&mut v, &[(360.0, 400.0), (460.0, 400.0)], &[(360.0, 700.0), (460.0, 700.0)], 1.0, 300.0, 120.0, false);
+    let stretch = shown_y(&v) - y0;
+    assert_eq!(v.camera().st, 0.0);
+    assert!(close(stretch, rubber(300.0, 1110.0), 1e-6), "{stretch}");
+    assert!(stretch > 50.0 && stretch < 300.0);
+    // Back 100 px: less stretch, still past the top.
+    let t = fingers(&mut v, &[(360.0, 700.0), (460.0, 700.0)], &[(360.0, 600.0), (460.0, 600.0)], t, 100.0, 120.0, false);
+    assert!(close(shown_y(&v) - y0, rubber(200.0, 1110.0), 1e-6), "{}", shown_y(&v) - y0);
+    // Lifted: no fling, the stretch goes back on its own without crossing the top.
+    for (i, x) in [360.0, 460.0].into_iter().enumerate() {
+        v.touch(i as i64, Phase::Ended, x, 600.0, t + 0.016);
+    }
+    assert!(!v.gliding());
+    assert!(v.moving());
+    let mut tt = t + 0.016;
+    for _ in 0..96 {
+        tt += 1.0 / 120.0;
+        v.tick(tt);
+        assert!(shown_y(&v) >= y0 - 1e-9, "crossed the top");
+    }
+    assert!(close(shown_y(&v), y0, 1e-6), "{}", shown_y(&v) - y0);
+    assert!(!v.moving());
+    assert_eq!(v.camera().st, 0.0);
+}
+
+#[test]
+fn a_fling_into_the_top_overshoots_and_comes_back() {
+    let mut v = fitted(8);
+    v.page_scroll(0.0, 300.0, 0.0, 0.0);
+    let y_top = {
+        let mut w = fitted(8);
+        w.tick(0.0);
+        shown_y(&w)
+    };
+    let t = fling(&mut v, 300.0, -400.0, 100.0, 120.0);
+    let mut tt = t;
+    let mut most: f64 = 0.0;
+    for _ in 0..360 {
+        tt += 1.0 / 120.0;
+        v.tick(tt);
+        most = most.max(shown_y(&v) - y_top);
+    }
+    assert!(most > 1.0, "no overshoot: {most}");
+    assert!(most <= BOUNCE_MAX * 1110.0 + 1e-6, "{most}");
+    assert_eq!(v.camera().st, 0.0);
+    assert!(close(shown_y(&v), y_top, 1e-6));
+    assert!(!v.moving());
+}
+
+#[test]
+fn sideways_past_the_page_stretches_too() {
+    // Fitted, the content is a few px wider than the view: dragged right, it scrolls to its left
+    // edge, then stretches; released, it rests at that edge.
+    let mut v = fitted(5);
+    let x0 = v.camera().x;
+    let at_edge = x0 + v.camera().sl;
+    let t = fingers(&mut v, &[(300.0, 500.0), (400.0, 500.0)], &[(500.0, 500.0), (600.0, 500.0)], 1.0, 200.0, 120.0, true);
+    assert!(v.camera().x > at_edge + 20.0, "{}", v.camera().x - at_edge);
+    run(&mut v, t, 600.0, 120.0);
+    assert_eq!(v.camera().sl, 0.0);
+    assert!(close(v.camera().x, at_edge, 1.0), "{} vs {at_edge}", v.camera().x);
+    assert!(!v.moving());
+}
+
+#[test]
+fn a_finger_catches_a_stretch_where_it_shows() {
+    let mut v = fitted(5);
+    let t = fingers(&mut v, &[(360.0, 400.0), (460.0, 400.0)], &[(360.0, 700.0), (460.0, 700.0)], 1.0, 300.0, 120.0, true);
+    let t = run(&mut v, t, 80.0, 120.0);
+    let before = shown_y(&v);
+    v.touch(0, Phase::Began, 360.0, 500.0, t);
+    v.touch(1, Phase::Began, 460.0, 500.0, t);
+    v.tick(t);
+    assert!(close(shown_y(&v), before, 1e-6), "{} vs {before}", shown_y(&v));
 }

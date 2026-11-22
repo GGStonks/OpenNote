@@ -913,9 +913,35 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
 
     let lastCommittedZoom = zoomRef.current;
     let wasActive = false;
+    /**
+     * The content's corner as laid out (scroll and margin only): getBoundingClientRect includes the
+     * transform and translation the last camera put on it, which must not count again (3.0.1
+     * measured with them on: each frame's offset was taken off the next, and the content shook
+     * between two places while the canvas, drawing the camera itself, did not). Read back from the
+     * inline style written here: no style recalculation. The transform's origin is the corner, so
+     * its scale does not move it.
+     */
+    const laidOutCorner = (el: HTMLElement, outer: HTMLElement) => {
+      const o = contentCorner(el, outer);
+      const m = outer.style.transform ? new DOMMatrixReadOnly(outer.style.transform) : null;
+      const [tx, ty] = (outer.style.translate || '0px 0px').split(' ').map((v) => parseFloat(v) || 0);
+      return { x: o.x - (m?.m41 ?? 0) - (tx ?? 0), y: o.y - (m?.m42 ?? 0) - (ty ?? 0) };
+    };
+    /**
+     * The zoom the content is laid out at now (outer's width is content width x the zoom React
+     * rendered): it trails zoomRef by a render after a commit, and the transform scales from it.
+     */
+    const laidOutZoom = (outer: HTMLElement) => {
+      const z = parseFloat(outer.style.width) / contentWidthRef.current;
+      return Number.isFinite(z) && z > 0 ? z : zoomRef.current;
+    };
+    let appliedLaid = NaN;
     const apply = (c: RustCamera, el: HTMLElement, outer: HTMLElement) => {
-      if (c.seq === applied) return;
+      // Again when React lays the content out at a newly committed zoom, the camera unchanged.
+      const laid = laidOutZoom(outer);
+      if (c.seq === applied && laid === appliedLaid) return;
       applied = c.seq;
+      appliedLaid = laid;
       const isActive = c.gesture || c.moving;
       const settled = wasActive && !isActive;
       wasActive = isActive;
@@ -936,8 +962,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         }
       }
 
-      const o = contentCorner(el, outer);
-      const dx = c.x - o.x, dy = c.y - o.y, k = c.ez / zoomRef.current;
+      const o = laidOutCorner(el, outer);
+      const dx = c.x - o.x, dy = c.y - o.y, k = c.ez / laid;
       if (Math.abs(k - 1) > 1e-7 || Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
         outer.style.transformOrigin = '0 0';
         outer.style.transform = `translate3d(${dx.toFixed(3)}px, ${dy.toFixed(3)}px, 0) scale(${k})`;

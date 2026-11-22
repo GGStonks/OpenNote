@@ -39,6 +39,16 @@ pub const VELOCITY_WINDOW_MS: f64 = 80.0;
 pub const VELOCITY_MIN_DT: f64 = 8.0;
 pub const RELEASE_RECENT_MS: f64 = 80.0;
 
+/// Rubber band past an edge (UIScrollView's curve): the content follows the fingers less and less
+/// the further they go, never more than the view's size.
+pub const RUBBER_C: f64 = 0.55;
+/// Past the zoom limits: the same curve in log zoom, at most this far (x1.42 above, x0.70 below).
+pub const ZOOM_RUBBER: f64 = 0.35;
+/// The spring bringing a stretched camera back: critically damped, per ms (settled in ~400 ms).
+pub const SPRING_W: f64 = 0.016;
+/// A fling's overshoot past an edge: at most this share of the view.
+pub const BOUNCE_MAX: f64 = 0.12;
+
 /// JavaScript's `Math.round` (halves toward +infinity; `f64::round` takes them away from zero).
 pub fn js_round(x: f64) -> f64 {
     (x + 0.5).floor()
@@ -198,6 +208,32 @@ pub fn release_velocity_weighted(h: &[(f64, f64, f64)]) -> (f64, f64) {
     } else {
         release_velocity(h)
     }
+}
+
+/// How far `x` px asked past an edge shows (signed), for a view `d` px long.
+pub fn rubber(x: f64, d: f64) -> f64 {
+    if d <= 0.0 || x == 0.0 || !x.is_finite() {
+        return 0.0;
+    }
+    x.signum() * (1.0 - 1.0 / (x.abs() * RUBBER_C / d + 1.0)) * d
+}
+
+/// The `x` that `rubber(x, d)` shows as `y` (a stretch caught by a finger).
+pub fn rubber_inverse(y: f64, d: f64) -> f64 {
+    if d <= 0.0 || y == 0.0 || !y.is_finite() {
+        return 0.0;
+    }
+    let a = y.abs().min(d * 0.999);
+    y.signum() * d / RUBBER_C * (1.0 / (1.0 - a / d) - 1.0)
+}
+
+/// A critically damped spring towards 0 from `x0` moving at `v0` (per ms), `t_ms` later:
+/// (position, velocity). It never crosses 0 coming back, so a stretch never overshoots inwards.
+pub fn spring(x0: f64, v0: f64, t_ms: f64) -> (f64, f64) {
+    let t = t_ms.max(0.0);
+    let e = (-SPRING_W * t).exp();
+    let b = v0 + SPRING_W * x0;
+    ((x0 + b * t) * e, (v0 - SPRING_W * b * t) * e)
 }
 
 /// `cubicBezier`: CSS cubic-bezier(x1, y1, x2, y2) at progress `u`.
@@ -409,6 +445,35 @@ mod tests {
             },
         );
         assert_eq!((p.scroll_top, p.dy), (0.0, 0.4));
+    }
+
+    #[test]
+    fn rubber_band_resists_and_inverts() {
+        assert_eq!(rubber(0.0, 800.0), 0.0);
+        // Gentle at first (slope RUBBER_C), never past the view's size, symmetric.
+        assert!((rubber(1.0, 800.0) - RUBBER_C).abs() < 1e-3);
+        assert!(rubber(1e9, 800.0) < 800.0);
+        assert_eq!(rubber(-50.0, 800.0), -rubber(50.0, 800.0));
+        for x in [-300.0, -3.0, 0.5, 40.0, 900.0] {
+            assert!((rubber_inverse(rubber(x, 800.0), 800.0) - x).abs() < 1e-6 * x.abs().max(1.0));
+        }
+    }
+
+    #[test]
+    fn the_spring_settles_without_crossing() {
+        let (x, _) = spring(100.0, 0.0, 0.0);
+        assert_eq!(x, 100.0);
+        let mut last = 100.0;
+        for ms in (10..=600).step_by(10) {
+            let (x, _) = spring(100.0, 0.0, ms as f64);
+            assert!(x >= 0.0 && x <= last, "{ms} ms: {x}");
+            last = x;
+        }
+        assert!(spring(100.0, 0.0, 450.0).0 < 1.0);
+        // A fling into an edge: out, then back, peaking at 1/w.
+        let peak = spring(0.0, 2.0, 1.0 / SPRING_W).0;
+        assert!((peak - 2.0 / (SPRING_W * std::f64::consts::E)).abs() < 1e-9);
+        assert!(spring(0.0, 2.0, 600.0).0 < 1.0);
     }
 
     #[test]

@@ -138,6 +138,27 @@ than six page frames behind. A change to the page's gestures is made in both. `n
 the link's interval (`linkMs`), how far the canvas trailed the newest camera (`trailP50`,
 `trailMax`) and the ticks it went on without the DOM (`alone`). A canvas that does not draw (no
 host, nothing presented, frames failing) hands the note back to the page (`canvas-fallback`).
+
+Smoothness lives in the camera, which the DOM and the canvas share; never in one of them only.
+- No filter after the camera: 2.9.13 put One Euro filters on the canvas's drawn camera, so while
+  it moved the ink lagged the DOM (up to 47 device px through a long pinch; the lasso hit-tests the
+  DOM). `cameracoherence` must show DOM vs canvas p50 under 1 device px for every gesture.
+- The page places its DOM from the laid-out corner (useViewport `laidOutCorner`: the transform it
+  wrote last taken off getBoundingClientRect) and scales from the laid-out zoom (`laidOutZoom`,
+  re-applied when React lays out a committed zoom): 3.0.1 measured with its own transform on, and
+  the content shook between two places every frame (DOM vs canvas p50 588 px on a pan).
+- Slow fingers are resampled up to a sampling interval in the past (viewport_service
+  `input_time`, `SLOW_DELAY_MAX_MS`), between real samples, easing in and out at half a ms per ms:
+  a slow pan moves a little every frame instead of standing and jumping (0.5 px steps at 18 px/s,
+  `micro_movement_pan_is_subpixel_smooth`); fast ones are extrapolated as before.
+- Rubber banding (crates/viewport): pans past any edge stretch on UIScrollView's curve
+  (`rubber`, `RUBBER_C`), the committed scroll staying in range; a fling reaching an edge runs on
+  past it on a critically damped spring (`spring`, `SPRING_W`, at most `BOUNCE_MAX` of the view)
+  and comes back; a pinch past the zoom limits (log zoom, `ZOOM_RUBBER`) or the content's edges is
+  resisted, and its release (the width snap too) settles on the spring from where it was shown
+  (`Settle`) instead of jumping. A finger catches a stretch where it shows. The bottom's pull to
+  add a page keeps its own resistance. `cargo test -p viewport` (gestures.rs: stretch, bounce,
+  catch, limits, snap).
 Every cost per frame and on open is bounded by what is on screen, never by the note's length
 (ADR-007, docs/rust-native-canvas.md "Scale"): each sheet's ink is a scene of its own
 (`note:sheet`), streamed by the page as it comes near the view (services/canvasPages.ts) and asked
