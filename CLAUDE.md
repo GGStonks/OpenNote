@@ -147,10 +147,23 @@ Smoothness lives in the camera, which the DOM and the canvas share; never in one
   wrote last taken off getBoundingClientRect) and scales from the laid-out zoom (`laidOutZoom`,
   re-applied when React lays out a committed zoom): 3.0.1 measured with its own transform on, and
   the content shook between two places every frame (DOM vs canvas p50 588 px on a pan).
-- Slow fingers are resampled up to a sampling interval in the past (viewport_service
-  `input_time`, `SLOW_DELAY_MAX_MS`), between real samples, easing in and out at half a ms per ms:
-  a slow pan moves a little every frame instead of standing and jumping (0.5 px steps at 18 px/s,
-  `micro_movement_pan_is_subpixel_smooth`); fast ones are extrapolated as before.
+- No delay on the fingers: each tick places a slow finger on the least-squares line through its
+  last `FIT_SAMPLES` (4) samples at the frame's time (viewport_service `process`, `line_at`): no
+  lag at a steady speed, a position every frame though touches and frames beat (0, 1 or 2 samples
+  in a frame), never a step back while the finger moves (direction and stillness from the last
+  `STILL_SAMPLES` (12): over 33 ms a 10 px/s finger's samples can repeat); fast fingers blend into
+  the two-sample extrapolation by their fitted speed. When a pinch's finger lifts, every finger
+  takes its real last place first (the zoom ends where the fingers did; the release spring starts
+  from the frame shown, `Viewport.shown`). 3.0.2 resampled slow fingers an interval in the past
+  instead: +4.8 ms on the owner's iPad (trail p50 11.4 -> 16.2 ms). Tests:
+  `a_slow_pan_on_120hz_touches_steps_evenly_without_lag` (step spread per speed, 2.9.13's figures
+  beside), `micro_movement_pan_is_subpixel_smooth`; `--native --only rustcamera` (zoom in and back
+  in land exactly on the page's own gestures).
+- Each gesture's crash-log `pinch` entry says where the render thread's ticks went (`workP95`,
+  `workMax`: the whole tick; `cameraMax`: the camera's step and its lock; `uploadMax`: scene
+  uploads): a tick over a frame misses a refresh. Read it before guessing at dropped frames.
+- `--native --only cameracoherence` is bimodal on this PC (since at least 3.0.2): some runs lock the
+  canvas a page frame off the DOM (pan p50 exactly 20 px, the frame's motion). Run it twice.
 - Rubber banding (crates/viewport): pans past any edge stretch on UIScrollView's curve
   (`rubber`, `RUBBER_C`), the committed scroll staying in range; a fling reaching an edge runs on
   past it on a critically damped spring (`spring`, `SPRING_W`, at most `BOUNCE_MAX` of the view)

@@ -78,7 +78,7 @@ export const FpsOverlay: React.FC = React.memo(() => {
       data-no-pan
       data-viewport-hole
       onClick={cycleCorner}
-      className={`fixed z-50 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/80 text-white backdrop-blur shadow-lg border border-white/20 font-mono text-[11px] font-semibold tabular-nums cursor-pointer select-none active:scale-95 transition-transform ${cornerClasses[corner]}`}
+      className={`fixed z-50 flex items-center justify-center gap-1.5 w-[9.5rem] px-2.5 py-1 rounded-full bg-black/80 text-white backdrop-blur shadow-lg border border-white/20 font-mono text-[11px] font-semibold tabular-nums cursor-pointer select-none active:scale-95 transition-transform ${cornerClasses[corner]}`}
       title="Frame rate (tap to move corner)"
     >
       <span className={`w-2 h-2 rounded-full ${statusDot} animate-pulse`} />

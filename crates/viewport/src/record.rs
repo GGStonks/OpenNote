@@ -41,6 +41,13 @@ pub struct GestureSummary {
     /// presentation the tick ran (ms; 0 when the shell does not say).
     pub link_ms: f64,
     pub lead_ms: f64,
+    /// Where the render thread's ticks went (ms): the whole tick (camera, uploads, the draw and
+    /// its wait for a drawable), p95 and longest; the camera's own step (its lock included) and
+    /// the scene uploads, longest. A tick over a frame misses the display's next refresh.
+    pub work_p95: f64,
+    pub work_max: f64,
+    pub camera_max: f64,
+    pub upload_max: f64,
 }
 
 /// One gesture being recorded.
@@ -56,6 +63,9 @@ pub struct GestureRecorder {
     hz: f64,
     trail: Vec<f64>,
     alone: usize,
+    work: Vec<f64>,
+    camera_max: f64,
+    upload_max: f64,
 }
 
 impl GestureRecorder {
@@ -74,6 +84,9 @@ impl GestureRecorder {
             hz,
             trail: Vec::with_capacity(4096),
             alone: 0,
+            work: Vec::with_capacity(4096),
+            camera_max: 0.0,
+            upload_max: 0.0,
         }
     }
 
@@ -92,6 +105,15 @@ impl GestureRecorder {
         if drawn {
             self.drawn += 1;
         }
+    }
+
+    /// The last tick's time on the render thread (ms): all of it, the camera's step, the uploads.
+    pub fn work(&mut self, total: f64, camera: f64, upload: f64) {
+        if total.is_finite() {
+            self.work.push(total.max(0.0));
+        }
+        self.camera_max = self.camera_max.max(camera);
+        self.upload_max = self.upload_max.max(upload);
     }
 
     /// The canvas drew a frame in the last tick.
@@ -134,6 +156,13 @@ impl GestureRecorder {
                 .copied()
                 .unwrap_or(0.0)
         };
+        let mut work = self.work.clone();
+        work.sort_by(|a, b| a.total_cmp(b));
+        let work_at = |q: f64| {
+            work.get((((work.len() as f64) * q) as usize).min(work.len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0.0)
+        };
         let frame = if self.hz > 0.0 {
             1000.0 / self.hz
         } else {
@@ -164,6 +193,10 @@ impl GestureRecorder {
             alone: self.alone,
             link_ms: 0.0,
             lead_ms: 0.0,
+            work_p95: r(work_at(0.95)),
+            work_max: r(work_at(1.0)),
+            camera_max: r(self.camera_max),
+            upload_max: r(self.upload_max),
         }
     }
 }

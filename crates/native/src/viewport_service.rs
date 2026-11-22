@@ -42,10 +42,18 @@ pub const RESAMPLE_MS: f64 = 8.0;
 pub const PREDICT_MAX_MS: f64 = 17.0;
 /// The least time between a finger's two samples to extrapolate from them.
 const MIN_SAMPLE_MS: f64 = 2.0;
-/// Slow fingers are resampled up to one of their sampling intervals in the past (at most this):
-/// between two real samples, never extrapolated, so a slow pan moves a little every frame instead
-/// of standing still and jumping when the next sample lands (0.5 px steps at 18 px/s).
-const SLOW_DELAY_MAX_MS: f64 = 34.0;
+/// A slow finger is placed at the frame's time on the least-squares line through its last
+/// `FIT_SAMPLES` samples (33 ms at 120 Hz: longer windows lag a decelerating finger, and a pinch
+/// overshot its zoom): no lag at a steady speed, the samples' quantization averaged out, and a
+/// position every frame (touch samples and frames beat: some frames get none, some two). It is
+/// never moved back along its motion. 2.9.13 hid the beat with a filter on the canvas only (the ink
+/// lagged the DOM); 3.0.2 resampled slow fingers a sampling interval in the past (+4.8 ms).
+const FIT_SAMPLES: usize = 4;
+/// Whether a finger stands still is read from a longer stretch (100 ms at 120 Hz): at 10 px/s its
+/// quarter-pixel samples can repeat for 33 ms, and the short line took that for a stop and went
+/// back. Below `STILL_PX_MS` (5 px/s) over this many samples it is still.
+const STILL_SAMPLES: usize = 12;
+const STILL_PX_MS: f64 = 0.005;
 
 /// How much a finger moving at `v_ms` (px/ms) is extrapolated past its last sample: none when
 /// slow (its samples' noise and quantization would show), fully from 0.25 px/ms.
@@ -84,6 +92,49 @@ struct Finger {
     /// The last two real samples.
     prev: (f64, f64, f64),
     last: (f64, f64, f64),
+    /// The last `STILL_SAMPLES` real samples, oldest first (`ring_n` of them).
+    ring: [(f64, f64, f64); STILL_SAMPLES],
+    ring_n: usize,
+    /// Where the fitted line last placed it (the camera follows that path, never the raw samples
+    /// between: their quantization would show).
+    out: Option<(f64, f64)>,
+}
+
+impl Finger {
+    fn remember(&mut self, s: (f64, f64, f64)) {
+        if self.ring_n == STILL_SAMPLES {
+            self.ring.rotate_left(1);
+            self.ring_n -= 1;
+        }
+        self.ring[self.ring_n] = s;
+        self.ring_n += 1;
+    }
+
+    /// The least-squares line through the newest `k` remembered samples and `extra` (a queued
+    /// next one): its place at `t` and its velocity (px/ms). None with fewer than two samples.
+    fn line_at(&self, k: usize, extra: Option<(f64, f64, f64)>, t: f64) -> Option<(f64, f64, f64, f64)> {
+        let mut pts = [(0.0, 0.0, 0.0); STILL_SAMPLES + 1];
+        let mut n = 0;
+        let from = self.ring_n.saturating_sub(k);
+        for p in self.ring[from..self.ring_n].iter().chain(extra.iter()) {
+            pts[n] = *p;
+            n += 1;
+        }
+        let pts = &pts[..n];
+        if n < 2 {
+            return None;
+        }
+        let tm = pts.iter().map(|p| p.2).sum::<f64>() / n as f64;
+        let xm = pts.iter().map(|p| p.0).sum::<f64>() / n as f64;
+        let ym = pts.iter().map(|p| p.1).sum::<f64>() / n as f64;
+        let stt: f64 = pts.iter().map(|p| (p.2 - tm) * (p.2 - tm)).sum();
+        if stt < 1e-9 {
+            return None;
+        }
+        let vx = pts.iter().map(|p| (p.2 - tm) * (p.0 - xm)).sum::<f64>() / stt;
+        let vy = pts.iter().map(|p| (p.2 - tm) * (p.1 - ym)).sum::<f64>() / stt;
+        Some((xm + vx * (t - tm), ym + vy * (t - tm), vx, vy))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -160,10 +211,6 @@ struct View {
     moved_at: f64,
     /// The DOM's trail behind the newest camera (ms, smoothed) and the seq last seen shown.
     trail: f64,
-    /// How far in the past the fingers are resampled beyond the lead (ms, `SLOW_DELAY_MAX_MS`),
-    /// and the input time last reached (it never goes back).
-    slow_delay: f64,
-    input_t: f64,
     last_shown: Option<u64>,
     /// The camera the canvas drew last (x, y, ez): the one the page's DOM shows (ADR-008). Not
     /// filtered: 2.9.13 smoothed it here (One Euro), after choosing it, so while the camera moved
@@ -210,8 +257,6 @@ fn with_view<R>(f: impl FnOnce(&mut View) -> R) -> R {
         link: (0.0, 0.0),
         moved_at: f64::NEG_INFINITY,
         trail: f64::NAN,
-        slow_delay: 0.0,
-        input_t: f64::NEG_INFINITY,
         last_shown: None,
         drawn_cam: None,
     }))
@@ -294,6 +339,20 @@ fn feed(v: &mut View, s: Sample) {
     let i = v.fingers.iter().position(|f| f.id == s.id);
     // Never back in time (a sample delivered after a resampled one past it).
     let t = i.map_or(s.t, |i| s.t.max(v.fingers[i].fed.2));
+    // A pinch's finger lifting ends the pinch: every finger first takes its real last place (the
+    // frames before were placed on their predicted lines, a little ahead), so the zoom ends where
+    // the fingers did; the release's spring starts from the frame shown.
+    if matches!(s.phase, Phase::Ended | Phase::Cancelled) && v.vp.fingers() >= 2 {
+        for k in 0..v.fingers.len() {
+            let f = v.fingers[k];
+            let (x, y) = if f.id == s.id { (s.x, s.y) } else { (f.last.0, f.last.1) };
+            if (f.fed.0 - x).abs() > 1e-9 || (f.fed.1 - y).abs() > 1e-9 {
+                v.vp.touch(f.id, Phase::Moved, x, y, t / 1000.0);
+                v.fingers[k].fed = (x, y, t);
+                v.fingers[k].out = None;
+            }
+        }
+    }
     v.vp.touch(s.id, s.phase, s.x, s.y, t / 1000.0);
     let p = (s.x, s.y, t);
     // The real samples keep their own times (the finger's velocity).
@@ -301,12 +360,17 @@ fn feed(v: &mut View, s: Sample) {
     match (s.phase, i) {
         (Phase::Began, None) => {
             if v.fingers.len() < FINGERS {
-                v.fingers.push(Finger {
+                let mut f = Finger {
                     id: s.id,
                     fed: p,
                     prev: real,
                     last: real,
-                });
+                    ring: [(0.0, 0.0, 0.0); STILL_SAMPLES],
+                    ring_n: 0,
+                    out: None,
+                };
+                f.remember(real);
+                v.fingers.push(f);
             }
         }
         (Phase::Began | Phase::Moved, Some(i)) => {
@@ -314,6 +378,7 @@ fn feed(v: &mut View, s: Sample) {
             if real.2 > f.last.2 {
                 f.prev = f.last;
                 f.last = real;
+                f.remember(real);
             }
             f.fed = p;
         }
@@ -342,75 +407,87 @@ fn process(v: &mut View, upto: f64, resample: bool) {
             continue;
         }
         let next = v.queue.iter().find(|s| s.id == f.id).copied();
-        let at = match next {
+        let dt = f.last.2 - f.prev.2;
+        // A finger with no sample for long has stopped (iOS sends none for a finger standing
+        // still): held where it was.
+        let recent = dt >= MIN_SAMPLE_MS && upto - f.last.2 > 0.0 && upto - f.last.2 <= 3.0 * dt;
+        let queued = next
+            .filter(|n| n.phase == Phase::Moved && n.t > f.last.2)
+            .map(|n| (n.x, n.y, n.t));
+        let newest = queued.map_or(f.last.2, |q| q.2);
+        // Two samples ahead at most (samples reach the tick up to a frame late).
+        let tp_fit = upto.min(newest + 2.0 * dt);
+        let line = (dt >= MIN_SAMPLE_MS).then(|| f.line_at(FIT_SAMPLES, queued, tp_fit)).flatten();
+        // How fast it moves, from the line (two quantized samples alone are noisy: one jump made
+        // a slow finger "fast", unguarded).
+        let speed = match line {
+            Some((_, _, vx, vy)) => vx.hypot(vy),
+            None if dt >= MIN_SAMPLE_MS => (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1) / dt,
+            None => 0.0,
+        };
+        let w = extrapolation_weight(speed);
+        // Fast: between the last sample and the next (queued) one, or a little past the last
+        // (two coalesced samples closer than MIN_SAMPLE_MS say little of the speed).
+        let fast = match next {
             Some(n) if n.phase == Phase::Moved && n.t > f.fed.2 => {
                 let u = ((upto - f.fed.2) / (n.t - f.fed.2)).clamp(0.0, 1.0);
-                Some((
-                    f.fed.0 + (n.x - f.fed.0) * u,
-                    f.fed.1 + (n.y - f.fed.1) * u,
-                    upto,
-                ))
+                Some((f.fed.0 + (n.x - f.fed.0) * u, f.fed.1 + (n.y - f.fed.1) * u, upto))
             }
             Some(_) => None,
-            None => {
-                let dt = f.last.2 - f.prev.2;
-                let gap = upto - f.last.2;
-                // Two samples a sampling interval apart (coalesced ones closer say little of
-                // the speed), recent enough.
-                if dt >= MIN_SAMPLE_MS && gap > 0.0 && gap <= 3.0 * dt {
-                    let dist = (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1);
-                    let extrap_weight = extrapolation_weight(dist / dt);
-                    if extrap_weight > 0.0 {
-                        let tp = upto.min(f.last.2 + PREDICT_MAX_MS.min(2.0 * dt));
-                        (tp > f.fed.2).then(|| {
-                            let u = ((tp - f.last.2) / dt) * extrap_weight;
-                            (
-                                f.last.0 + (f.last.0 - f.prev.0) * u,
-                                f.last.1 + (f.last.1 - f.prev.1) * u,
-                                tp,
-                            )
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
+            None if recent && w > 0.0 => {
+                let tp = upto.min(f.last.2 + PREDICT_MAX_MS.min(2.0 * dt));
+                (tp > f.fed.2).then(|| {
+                    let u = (tp - f.last.2) / dt;
+                    (
+                        f.last.0 + (f.last.0 - f.prev.0) * u,
+                        f.last.1 + (f.last.1 - f.prev.1) * u,
+                        tp,
+                    )
+                })
             }
+            None => None,
+        };
+        // Slow: the fitted line at the frame's time, at most two sampling intervals past the
+        // newest sample known (a stop overshoots by no more than a slow finger moves in two
+        // intervals, and the line comes back to it as the stopped finger's samples arrive).
+        let slow = if w < 1.0 && (recent || queued.is_some()) {
+            let from = f.out.unwrap_or((f.fed.0, f.fed.1));
+            // Its direction over the longer stretch (the short line can read a slow finger as
+            // still), and whether it moves at all.
+            let (sx, sy) = f
+                .line_at(STILL_SAMPLES, queued, tp_fit)
+                .map_or((0.0, 0.0), |(_, _, sx, sy)| (sx, sy));
+            let moving = sx.hypot(sy) > STILL_PX_MS;
+            line.map(|(x, y, _, _)| {
+                // Never back while it moves (a new sample bending the line): held instead. A
+                // finger slowing to a stop is followed back to where it stopped.
+                if moving && (x - from.0) * sx + (y - from.1) * sy < 0.0 {
+                    (from.0, from.1, tp_fit)
+                } else {
+                    (x, y, tp_fit)
+                }
+            })
+        } else {
+            None
+        };
+        let fitted = slow.is_some();
+        let at = match (slow, fast) {
+            (Some(s), Some(q)) => Some((
+                s.0 + (q.0 - s.0) * w,
+                s.1 + (q.1 - s.1) * w,
+                s.2.max(q.2),
+            )),
+            (Some(s), None) => Some(s),
+            (None, q) => q,
         };
         if let Some((x, y, t)) = at {
             v.vp.resampled = true;
             v.vp.touch(f.id, Phase::Moved, x, y, t / 1000.0);
             v.vp.resampled = false;
             v.fingers[i].fed = (x, y, t);
+            v.fingers[i].out = fitted.then_some((x, y));
         }
     }
-}
-
-/// The time the fingers are resampled at for the frame presented at `t_ms`: `lead` before it, and
-/// for slow fingers up to one of their sampling intervals more (eased in and out at half a ms per
-/// ms, so the input's clock never jumps or stops; never back).
-fn input_time(v: &mut View, t_ms: f64, lead: f64) -> f64 {
-    let mut speed: f64 = 0.0;
-    let mut interval: f64 = 0.0;
-    for f in &v.fingers {
-        let dt = f.last.2 - f.prev.2;
-        if dt >= MIN_SAMPLE_MS && t_ms - f.last.2 < 4.0 * dt.max(12.0) {
-            let dist = (f.last.0 - f.prev.0).hypot(f.last.1 - f.prev.1);
-            speed = speed.max(dist / dt);
-            interval = interval.max(dt);
-        }
-    }
-    let target = if v.fingers.is_empty() {
-        0.0
-    } else {
-        interval.min(SLOW_DELAY_MAX_MS) * (1.0 - extrapolation_weight(speed))
-    };
-    let step = if v.tick_t.is_finite() { (t_ms - v.tick_t).clamp(0.0, 50.0) * 0.5 } else { 0.0 };
-    v.slow_delay += (target - v.slow_delay).clamp(-step, step);
-    let at = (t_ms - lead - v.slow_delay).max(v.input_t);
-    v.input_t = at;
-    at
 }
 
 /// Every finger waiting, now (a read of the camera outside the ticks).
@@ -511,10 +588,9 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         } else {
             // Fingers, momentum and animations all at one time, the resampling's: a fling goes
             // on from where the fingers left the camera, with no extra step at the release. Slow
-            // fingers are taken a sampling interval further back, between real samples.
-            let at = input_time(v, t_ms, resample_lead);
-            process(v, at, true);
-            v.vp.tick(at / 1000.0);
+            // fingers are placed on their fitted line at that time (no delay: `FIT_SAMPLES`).
+            process(v, t_ms - resample_lead, true);
+            v.vp.tick((t_ms - resample_lead) / 1000.0);
         }
         let c = v.vp.camera().clone();
         let (view_w, view_h) = {
@@ -535,9 +611,11 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             v.moved_at = clock_ms();
         }
         if v.vp.gesture() && v.rec.is_none() && v.vp.fingers() >= 2 {
+            // The zoom committed when the gesture began (a pinch commits only at its release): the
+            // shown one at the first recorded tick had already moved when that tick came late.
             v.rec = Some(GestureRecorder::new(
                 t_ms,
-                c.ez,
+                c.zoom,
                 v.vp.events,
                 v.vp.rebases,
                 v.hz,
@@ -685,6 +763,15 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
 
 /// The tick's frame was drawn; `ink_paper` the largest gap between the papers and the ink as
 /// drawn (device px).
+/// The tick just done on the render thread (ms): all of it, the camera's step, the uploads.
+pub(crate) fn tick_work(total: f64, camera: f64, upload: f64) {
+    with_view(|v| {
+        if let Some(r) = v.rec.as_mut() {
+            r.work(total, camera, upload);
+        }
+    });
+}
+
 pub(crate) fn drew(ink_paper: f64) {
     with_view(|v| {
         if let Some(r) = v.rec.as_mut() {
@@ -1199,6 +1286,71 @@ mod tests {
         let ys = pan();
         let new = worst_second_difference(&ys);
         assert!(new < 0.05, "resampled: worst second difference {new}");
+    }
+
+    /// A slow two-finger pan as an iPad gives it: 120 Hz touches (hardware times jittered by
+    /// +-1.5 ms, positions with +-`noise` px of their own) delivered 0-8 ms late, ticks at 120 Hz.
+    /// Per tick: the camera's y and where the finger really was at the camera's time.
+    fn slow_pan_120hz(speed: f64, noise: f64) -> Vec<(f64, f64)> {
+        reset();
+        viewport_layout(&layout()).unwrap();
+        let t0 = clock_ms() - 900.0;
+        let period = 1000.0 / 120.0;
+        let mut seed = 11u64;
+        let mut rnd = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let finger = |t: f64| 700.0 - speed * (t - t0);
+        let samples: Vec<(f64, f64, f64)> = (0..100)
+            .map(|i| {
+                let t = t0 + 3.1 + i as f64 * period + (rnd() - 0.5) * 3.0;
+                let n = (rnd() - 0.5) * 2.0 * noise;
+                (t, finger(t) + n, t + rnd() * 8.0)
+            })
+            .collect();
+        let lead = RESAMPLE_MS;
+        let mut out = Vec::new();
+        let mut next = 0;
+        for k in 0..90 {
+            let present = t0 + 20.0 + k as f64 * period;
+            while next < samples.len() && samples[next].2 <= present - period {
+                let (t, y, _) = samples[next];
+                let phase = if next == 0 { 0 } else { 1 };
+                touch(1, phase, 300.0, y + 50.0, Some(t));
+                touch(2, phase, 400.0, y + 50.0, Some(t));
+                next += 1;
+            }
+            draw_tick(present);
+            let y = with_view(|v| v.vp.camera().y);
+            out.push((y, finger(present - lead)));
+        }
+        out
+    }
+
+    #[test]
+    fn a_slow_pan_on_120hz_touches_steps_evenly_without_lag() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        // Per speed (px/ms): the most the per-frame steps may spread (standard deviation, px).
+        // 2.9.13's resampling (slow fingers held between samples, two-sample extrapolation) on
+        // the same input: 0.052 (and a step backwards), 0.124, 0.111, 0.156.
+        for (speed, spread) in [(0.01, 0.045), (0.03, 0.06), (0.08, 0.095), (0.15, 0.15)] {
+            let run = slow_pan_120hz(speed, 0.05);
+            let (y0, f0) = run[20];
+            let steps: Vec<f64> = (21..80).map(|i| run[i].0 - run[i - 1].0).collect();
+            let mean = steps.iter().sum::<f64>() / steps.len() as f64;
+            // Moving up the screen: never a step back.
+            for (i, d) in steps.iter().enumerate() {
+                assert!(*d <= 1e-6, "{speed} px/ms: step back at {}: {d}", i + 21);
+            }
+            let sd = (steps.iter().map(|d| (d - mean).powi(2)).sum::<f64>() / steps.len() as f64).sqrt();
+            assert!(sd <= spread, "{speed} px/ms: steps spread {sd} px (mean {mean})");
+            // No lag: the camera moved as far as the finger had by the camera's time.
+            let lag = (21..80).map(|i| (run[i].0 - y0) - (run[i].1 - f0)).sum::<f64>() / 59.0;
+            assert!(lag.abs() < 0.1, "{speed} px/ms: lag {lag} px");
+        }
     }
 
     #[test]

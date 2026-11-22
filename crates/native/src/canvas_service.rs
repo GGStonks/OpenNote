@@ -767,7 +767,9 @@ pub fn draw_at(present_ms: f64) -> bool {
     } else {
         clock_ms()
     };
-    catch_unwind(AssertUnwindSafe(|| draw_locked(t))).unwrap_or_else(|_| {
+    let start = clock_ms();
+    TICK_PARTS.with(|p| p.set((0.0, 0.0)));
+    let drawn = catch_unwind(AssertUnwindSafe(|| draw_locked(t))).unwrap_or_else(|_| {
         // Nothing drawn by a host that panicked is trusted: made again at a later tick.
         let mut slot = lock(&HOST);
         drop_host(&mut slot);
@@ -776,12 +778,23 @@ pub fn draw_at(present_ms: f64) -> bool {
         with_status(|s| s.attached = false);
         note_error("draw panicked".into());
         false
-    })
+    });
+    let (camera, upload) = TICK_PARTS.with(|p| p.get());
+    crate::viewport_service::tick_work(clock_ms() - start, camera, upload);
+    drawn
+}
+
+thread_local! {
+    /// This render tick's camera step and scene uploads (ms), for the gesture's record.
+    static TICK_PARTS: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
 }
 
 fn draw_locked(present_ms: f64) -> bool {
     // The camera first (its own lock): advanced to the frame's time whether or not a host draws.
+    let t_cam = clock_ms();
     let placed = crate::viewport_service::draw_tick(present_ms);
+    let camera_ms = clock_ms() - t_cam;
+    TICK_PARTS.with(|p| p.set((camera_ms, 0.0)));
     let mut guard = lock(&HOST);
     let slot: &mut Slot = &mut guard;
     if slot.host.is_none() {
@@ -821,6 +834,7 @@ fn draw_locked(present_ms: f64) -> bool {
         return false;
     }
     let (updates, frame, moved) = take_changes(fresh);
+    let t_up = clock_ms();
     for (id, scene) in updates {
         match scene {
             Some(s) => {
@@ -833,6 +847,8 @@ fn draw_locked(present_ms: f64) -> bool {
         host.set_frame(f);
         slot.complete = false;
     }
+    let upload_ms = clock_ms() - t_up;
+    TICK_PARTS.with(|p| p.set((camera_ms, upload_ms)));
     if let Some(sf) = moved {
         host.set_surface(sf);
     }

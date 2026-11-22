@@ -291,6 +291,9 @@ pub struct Viewport {
     bounce: [Option<Spring>; 2],
     /// A released pinch going to where its zoom was committed (limits, edges, the width snap).
     settle: Option<Settle>,
+    /// The camera the last frame showed (corner, scale, time ms): a release settles from it, so
+    /// whatever the release changes (the fingers' final places, a snap) never jumps.
+    shown: Option<(P, f64, f64)>,
     /// `gestures.navigating`.
     navigating: bool,
     /// Two fingers came down in this touch sequence (the camera's gesture).
@@ -349,6 +352,7 @@ impl Viewport {
             over: P::default(),
             bounce: [None, None],
             settle: None,
+            shown: None,
             navigating: false,
             two: false,
             js_scrolled: false,
@@ -897,7 +901,10 @@ impl Viewport {
             self.pinch = None;
             return;
         }
-        let (from, from_ez) = self.visual(self.release_clock());
+        let (from, from_ez) = match self.shown {
+            Some((c, ez, t)) if now - t < 50.0 && now >= t => (c, ez),
+            _ => self.visual(self.release_clock()),
+        };
         self.pinch = None;
         // No momentum after a pinch (the fingers' last movement was zooming, not a fling).
         self.js_scrolled = false;
@@ -1140,6 +1147,7 @@ impl Viewport {
             }
         }
         self.recompute_at(now);
+        self.shown = Some((P { x: self.cam.x, y: self.cam.y }, self.cam.ez, now));
         &self.cam
     }
 

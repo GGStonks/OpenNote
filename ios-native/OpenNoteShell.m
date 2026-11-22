@@ -1451,7 +1451,7 @@ static void ONStartCanvasThread(void) {
     CAMetalLayer *metalLayer = (CAMetalLayer *)self.layer;
     metalLayer.contentsScale = scale;
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    metalLayer.framebufferOnly = NO;
+    metalLayer.framebufferOnly = YES;  // the surface is only rendered to (wgpu RENDER_ATTACHMENT); 3.0.1 set NO for nothing
     metalLayer.opaque = YES;
     metalLayer.presentsWithTransaction = NO;
     metalLayer.maximumDrawableCount = 3;
