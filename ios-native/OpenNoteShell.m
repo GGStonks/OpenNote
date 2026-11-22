@@ -1451,7 +1451,7 @@ static void ONStartCanvasThread(void) {
     CAMetalLayer *metalLayer = (CAMetalLayer *)self.layer;
     metalLayer.contentsScale = scale;
     metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    metalLayer.framebufferOnly = YES;
+    metalLayer.framebufferOnly = NO;
     metalLayer.opaque = YES;
     metalLayer.presentsWithTransaction = NO;
     metalLayer.maximumDrawableCount = 3;

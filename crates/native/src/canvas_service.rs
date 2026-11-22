@@ -555,6 +555,7 @@ struct Slot {
     near_gen: u64,
     ink_samples: usize,
     complete: bool,
+    created_at: f64,
 }
 
 static HOST: Mutex<Slot> = Mutex::new(Slot {
@@ -570,6 +571,7 @@ static HOST: Mutex<Slot> = Mutex::new(Slot {
     near_gen: u64::MAX,
     ink_samples: usize::MAX,
     complete: false,
+    created_at: 0.0,
 });
 
 /// The PC's stand-in shell waits for the GPU after each frame (as a surface's next image would).
@@ -658,6 +660,7 @@ fn install(slot: &mut Slot, w: u32, h: u32) -> bool {
             slot.remake = false;
             slot.attempts = 0;
             slot.host_frames = 0;
+            slot.created_at = clock_ms();
             slot.host_errors = 0;
             slot.near_gen = u64::MAX;
             slot.ink_samples = usize::MAX;
@@ -895,7 +898,7 @@ fn draw_locked(present_ms: f64) -> bool {
             st.skipped_pages = s.skipped_pages;
             st.pages = s.pages.clone();
             if became_complete {
-                st.ink_complete_ms = clock_ms();
+                st.ink_complete_ms = ((clock_ms() - slot.created_at).max(0.0) * 100.0).round() / 100.0;
             }
             if let Some(g) = gpu_ms {
                 st.gpu_ms = (g, st.gpu_ms.1.max(g));

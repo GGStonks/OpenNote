@@ -118,7 +118,7 @@ export function buildLatex(doc: NoteDocument, includeInk: boolean): string {
   return preamble.join('\n') + body.join('\n\\newpage\n') + '\n\\end{document}\n';
 }
 
-function buildMarkdown(doc: NoteDocument): string {
+export function buildMarkdown(doc: NoteDocument): string {
   let md = `# ${doc.title}\n\n`;
   splitIntoPages(doc).forEach(({ page: p }, i) => {
     const items: Item[] = [];

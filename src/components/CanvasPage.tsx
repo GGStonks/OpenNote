@@ -1520,8 +1520,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const visH = Math.max(1, v1 - v0);
     const visW = Math.max(1, u1 - u0);
     const r = Math.max(1, zoomRef.current * Math.min(window.devicePixelRatio || 1, 3));
-    const maxArea = MAX_CANVAS_PIXELS / (r * r);
-    const margin = Math.min(1.5, Math.sqrt(Math.max(1, maxArea / (visW * visH))));
+    const screenPx = Math.max(1, (window.innerWidth || 800) * (window.innerHeight || 600) * (window.devicePixelRatio || 1));
+    const maxArea = Math.min(MAX_CANVAS_PIXELS, screenPx * 2) / (r * r);
+    const margin = Math.min(1.2, Math.sqrt(Math.max(1, maxArea / (visW * visH))));
     const height = Math.min(H, Math.ceil(visH * margin));
     const width = Math.min(W, Math.ceil(visW * margin));
     const cur = live.current;
@@ -1573,8 +1574,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     let idle: ReturnType<typeof setTimeout> | null = null;
     const place = () => {
       idle = null;
-      // In the apps pen strokes are drawn by the shell: no live canvas is held for them.
-      if (!drawing.current && !handleDrag.current && !NativeInk.available) claimLive();
+      // In the apps pen strokes are drawn by the shell or native Rust wgpu: no live canvas is held for them.
+      if (!drawing.current && !handleDrag.current && !NativeInk.available && !isNative) claimLive();
     };
     const onMove = () => {
       rectCache.current = null;
@@ -2553,10 +2554,11 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     retireInk(d);
     // In the apps the live canvas served only this gesture (lasso, highlighter, eraser): its
     // memory goes back once the frame showing the result is drawn.
-    if (NativeInk.available) requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (NativeInk.available || isNative) requestAnimationFrame(() => requestAnimationFrame(() => {
       const c = activeCanvasRef.current;
       if (c && !drawing.current && !handleDrag.current) {
-        c.width = c.height = 0;
+        c.width = 0;
+        c.height = 0;
         live.current = null;
         dirty.current = null;
       }

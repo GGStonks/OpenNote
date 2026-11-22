@@ -16,6 +16,8 @@ import { Toolbar } from './Toolbar';
 const MemoizedToolbar = React.memo(Toolbar);
 import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
+import { MirrorPopover } from './MirrorPopover';
+import { mirrorStatus } from '../services/rustCore';
 import { selectionSvg } from '../services/svgExport';
 import { TextFormatBar } from './TextFormatBar';
 import { CommandPalette } from './CommandPalette';
@@ -266,6 +268,27 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const toolsRef = useRef(tools);
   toolsRef.current = tools;
   const lastNonEraser = useRef<ToolSettings['tool']>('pen');
+
+  const [isMirrorActive, setIsMirrorActive] = useState(false);
+  const [mirrorOpen, setMirrorOpen] = useState(false);
+
+  useEffect(() => {
+    let unmounted = false;
+    const checkMirror = async () => {
+      try {
+        const s = await mirrorStatus();
+        if (!unmounted) setIsMirrorActive(!!s.active);
+      } catch {
+        // ignore
+      }
+    };
+    checkMirror();
+    const interval = setInterval(checkMirror, 2000);
+    return () => {
+      unmounted = true;
+      clearInterval(interval);
+    };
+  }, []);
 
   const setTools = useCallback(
     (patch: Partial<ToolSettings>) => {
@@ -1412,6 +1435,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           onToggleZen={() => setZenMode((z) => !z)}
           dockPosition={dockPosition}
           onSetDockPosition={setDockPosition}
+          onOpenMirror={() => setMirrorOpen(true)}
+          isMirrorActive={isMirrorActive}
           cleanPresentation={cleanPresentation}
           onToggleCleanPresentation={setCleanPresentation}
           adaptDarkPaper={settings.adaptDarkPaper}
@@ -1719,7 +1744,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           setSettings({ ...settings, theme: next });
         }}
         isDarkTheme={settings.theme === 'dark' || settings.theme === 'midnight' || settings.theme === 'oled'}
-        onOpenMirror={() => {}}
+        onOpenMirror={() => setMirrorOpen(true)}
         onExportPdf={() => setExportOpen(true)}
         onConvertAi={convertPage}
         onInsertLatex={insertLatexManually}
@@ -1736,6 +1761,18 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         onToggleZen={() => setZenMode((z) => !z)}
         onOpenPaper={() => {}}
       />
+
+      {mirrorOpen && (
+        <div className="fixed inset-0 z-50 flex items-start justify-end p-4 pt-16 pointer-events-none">
+          <div className="pointer-events-auto shadow-2xl rounded-2xl">
+            <MirrorPopover
+              onClose={() => setMirrorOpen(false)}
+              cleanPresentation={cleanPresentation}
+              onToggleCleanPresentation={setCleanPresentation}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

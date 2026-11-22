@@ -104,6 +104,14 @@ impl GestureRecorder {
         self.glide = true;
     }
 
+    pub fn events0(&self) -> u64 {
+        self.events0
+    }
+
+    pub fn ticks_len(&self) -> usize {
+        self.ticks.len()
+    }
+
     /// The summary at rest (`t_ms`), zoom `z`, the viewport's counters then.
     pub fn finish(&self, id: u64, t_ms: f64, z: f64, events: u64, rebases: u64) -> GestureSummary {
         let mut gaps: Vec<f64> = self.ticks.windows(2).map(|w| w[1] - w[0]).collect();

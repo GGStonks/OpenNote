@@ -4,12 +4,13 @@ import { run as runShapes } from './rustref/shapes';
 import { run as runSelection } from './rustref/selection';
 import { run as runSmartpen } from './rustref/smartpen';
 import { run as runSvg } from './rustref/svg';
+import { run as runImport } from './rustref/import';
 import { run as runViewport } from './rustref/viewport';
 
 const args = process.argv.slice(2);
 const out = args[0];
 if (!out || out.startsWith('--')) {
-  console.error('usage: npm run bench:rustref -- <out.json> [--per N] [--module ink|shapes|selection|smartpen|svg|viewport] [files…]');
+  console.error('usage: npm run bench:rustref -- <out.json> [--per N] [--module ink|shapes|selection|smartpen|svg|import|viewport] [files…]');
   process.exit(1);
 }
 
@@ -36,6 +37,7 @@ const runners: Record<string, (opts: { per: number; files: string[]; out: string
   selection: runSelection,
   smartpen: runSmartpen,
   svg: runSvg,
+  import: runImport,
   viewport: runViewport,
 };
 

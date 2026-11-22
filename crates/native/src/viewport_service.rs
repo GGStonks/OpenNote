@@ -485,9 +485,15 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
             v.vp.tick((t_ms - resample_lead) / 1000.0);
         }
         let c = v.vp.camera().clone();
+        let (view_w, view_h) = {
+            let [_, _, vw, vh] = v.vp.layout().view;
+            (vw, vh)
+        };
+        let world_cx = if c.ez > 1e-6 { ((view_w / 2.0) - c.x) / c.ez } else { 0.0 };
+        let world_cy = if c.ez > 1e-6 { ((view_h / 2.0) - c.y) / c.ez } else { 0.0 };
         crate::remote_service::broadcast_camera(
-            c.x as f32,
-            c.y as f32,
+            world_cx as f32,
+            world_cy as f32,
             c.ez as f32,
             0.0,
             c.gesture,
@@ -496,7 +502,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         if hist_get(v, 0).is_none_or(|h| h.seq != c.seq) {
             v.moved_at = clock_ms();
         }
-        if v.vp.gesture() && v.rec.is_none() {
+        if v.vp.gesture() && v.rec.is_none() && v.vp.fingers() >= 2 {
             v.rec = Some(GestureRecorder::new(
                 t_ms,
                 c.ez,
@@ -686,6 +692,11 @@ pub(crate) fn drew(ink_paper: f64) {
 
 fn finish(v: &mut View, now_ms: f64) {
     if let Some(r) = v.rec.take() {
+        let events = v.vp.events.saturating_sub(r.events0());
+        // Filter phantom 1-event pinches: genuine pinches have >= 2 events and >= 2 ticks
+        if events < 2 || r.ticks_len() < 2 {
+            return;
+        }
         v.gestures += 1;
         let mut s = r.finish(
             v.gestures,

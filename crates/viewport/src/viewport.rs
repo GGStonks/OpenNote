@@ -201,6 +201,7 @@ struct Pinch {
     c: P,
     engaged: bool,
     k: f64,
+    #[allow(dead_code)]
     rebased_at: Option<f64>,
 }
 
@@ -710,11 +711,9 @@ impl Viewport {
                 pz.k = z / pz.z0;
                 pz.c = c;
                 self.pinch = Some(pz);
-                if !self.resampled
-                    && should_rebase(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r))
-                {
-                    self.rebase(now);
-                }
+                // Hard rule: NEVER rebase layout/zoom mid-gesture.
+                // 100% of camera motion is driven via GPU uniforms and CSS transform.
+                // Single atomic rebase on settle only in end_pinch.
                 self.last = Some((c, now));
                 return;
             }
@@ -734,6 +733,7 @@ impl Viewport {
         };
         self.pointers.remove(i);
         if self.pointers.len() < 2 {
+            self.two = false;
             self.end_pinch();
         }
         if !self.pointers.is_empty() {
@@ -809,6 +809,7 @@ impl Viewport {
     }
 
     /// useViewport `rebase`: the pinch's zoom committed while the fingers are down.
+    #[allow(dead_code)]
     fn rebase(&mut self, now: f64) {
         let Some(pz) = self.pinch else {
             return;
@@ -1006,7 +1007,7 @@ impl Viewport {
 
     /// Fingers down moving the camera.
     pub fn gesture(&self) -> bool {
-        self.two || (self.layout.single && self.navigating)
+        !self.pointers.is_empty() && (self.two || (self.layout.single && self.navigating))
     }
 
     /// Momentum, the pull's release or a glide.
@@ -1170,7 +1171,7 @@ impl Viewport {
             pull: self.reported_pull,
             pulls: self.pulls,
             placed: self.placed,
-            gesture: self.two || (self.layout.single && self.navigating),
+            gesture: self.gesture(),
             moving: self.moving(),
             by_page: self.cam.by_page,
         };

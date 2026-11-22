@@ -12,8 +12,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", exact: "8.5.3"),
-        .package(name: "CapacitorFilesystem", path: "../../../node_modules/@capacitor/filesystem"),
-        .package(name: "CapacitorShare", path: "../../../node_modules/@capacitor/share")
+        .package(name: "CapacitorFilesystem", path: "../../../../../OpenNote/node_modules/@capacitor/filesystem"),
+        .package(name: "CapacitorShare", path: "../../../../../OpenNote/node_modules/@capacitor/share")
     ],
     targets: [
         .target(

@@ -1,4 +1,5 @@
 # Dependencies
+node_modules
 node_modules/
 .pnp
 .pnp.js
@@ -60,3 +61,9 @@ bench/out/
 bench/rust-ref/
 # The Rust library built by scripts/build-rust.sh
 android/app/src/main/jniLibs/
+
+# Real import files for the importer reference (T7): never committed
+bench/corpus/
+.cgl/
+bench/recordings
+bench/rustref/import.ts

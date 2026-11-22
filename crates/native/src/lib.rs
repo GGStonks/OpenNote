@@ -760,6 +760,7 @@ pub unsafe extern "C" fn opennote_live_update(
 #[no_mangle]
 pub unsafe extern "C" fn opennote_live_free(h: *mut LiveHandle) {
     if !h.is_null() {
+        remote_service::broadcast_stroke_commit(1, "page", 0, [0.0, 0.0, 0.0, 0.0]);
         drop(Box::from_raw(h));
     }
 }

@@ -673,7 +673,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         if (pz.engaged) {
           if (pinchTimes) pinchTimes.events++;
           trackPinch(pz);
-          if (pz.native === null && shouldRebase(pz.k, now - pz.rebasedAt)) rebase(pz, now);
+          // Hard rule: NEVER rebase layout/zoom mid-gesture. Driven purely via CSS transform.
           if (pinchFrame === null) pinchFrame = requestAnimationFrame(applyPinch);
           last.current = { x: c.x, y: c.y, t: now };
           return;
@@ -865,6 +865,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     const onScroll = () => {
       const el = scrollRef.current;
       if (!el || !rustLive.current) return;
+      const latestCam = cameraFeed.latest?.camera;
+      if (latestCam && (latestCam.gesture || latestCam.moving)) return;
       const l = el.scrollLeft, t = el.scrollTop;
       if (Math.abs(l - written.l) < 0.5 && Math.abs(t - written.t) < 0.5) return;
       const dsl = Number.isNaN(written.l) ? 0 : l - written.l, dst = Number.isNaN(written.t) ? 0 : t - written.t;
@@ -910,37 +912,41 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     };
 
     let lastCommittedZoom = zoomRef.current;
-    let wasGesture = false;
+    let wasActive = false;
     const apply = (c: RustCamera, el: HTMLElement, outer: HTMLElement) => {
       if (c.seq === applied) return;
       applied = c.seq;
-      const gestureSettled = wasGesture && !c.gesture;
-      wasGesture = c.gesture;
-      if (Math.abs(c.zoom - zoomRef.current) > 1e-9) {
-        // During active gestures, defer React state reconciliation to avoid frame drops.
-        zoomRef.current = c.zoom;
-        if (!c.gesture) {
+      const isActive = c.gesture || c.moving;
+      const settled = wasActive && !isActive;
+      wasActive = isActive;
+
+      if (!isActive) {
+        if (Math.abs(c.zoom - zoomRef.current) > 1e-9) {
+          zoomRef.current = c.zoom;
+          lastCommittedZoom = c.zoom;
+          setZoomState(c.zoom);
+        } else if (Math.abs(c.zoom - lastCommittedZoom) > 1e-9) {
           lastCommittedZoom = c.zoom;
           setZoomState(c.zoom);
         }
-      } else if (!c.gesture && Math.abs(c.zoom - lastCommittedZoom) > 1e-9) {
-        lastCommittedZoom = c.zoom;
-        setZoomState(c.zoom);
+        if (!c.byPage) {
+          el.scrollLeft = c.sl;
+          el.scrollTop = c.st;
+          written = { l: el.scrollLeft, t: el.scrollTop };
+        }
       }
-      outer.style.transform = '';
-      outer.style.translate = '';
-      if (!c.byPage) {
-        el.scrollLeft = c.sl;
-        el.scrollTop = c.st;
-        written = { l: el.scrollLeft, t: el.scrollTop };
-      }
+
       const o = contentCorner(el, outer);
       const dx = c.x - o.x, dy = c.y - o.y, k = c.ez / zoomRef.current;
       if (Math.abs(k - 1) > 1e-7 || Math.abs(dx) > 0.002 || Math.abs(dy) > 0.002) {
         outer.style.transformOrigin = '0 0';
         outer.style.transform = `translate3d(${dx.toFixed(3)}px, ${dy.toFixed(3)}px, 0) scale(${k})`;
-      } else outer.style.transformOrigin = '';
-      outer.style.willChange = c.gesture ? 'transform' : '';
+      } else {
+        outer.style.transformOrigin = '';
+        outer.style.transform = '';
+      }
+      outer.style.translate = '';
+      outer.style.willChange = isActive ? 'transform' : '';
       if (c.fit !== fitModeRef.current) setFitMode(c.fit);
       if (c.pull !== pullSeen) {
         pullSeen = c.pull;
@@ -951,7 +957,7 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         pulls++;
         cb.current.onPullCommit?.();
       }
-      if (((placed !== c.placed && placed >= 0) || gestureSettled) && !c.gesture) window.dispatchEvent(new Event(CONTENT_PLACED));
+      if (((placed !== c.placed && placed >= 0) || settled) && !isActive) window.dispatchEvent(new Event(CONTENT_PLACED));
       placed = c.placed;
       for (const fn of tileWork.moved) fn();
       // The canvas draws the camera the DOM shows (ADR-008): text, formulas and the selection

@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
-import { LibraryView } from './components/LibraryView';
+import { LibraryStudio as LibraryView } from './components/studio/LibraryStudio';
 import { Editor } from './components/Editor';
-import { SettingsModal } from './components/SettingsModal';
+import { SettingsStudioModal as SettingsModal } from './components/studio/SettingsStudioModal';
 import { Folder, NoteDocument, NotePage, PAGE_HEIGHT, PAGE_WIDTH, SCHEMA_VERSION, Tag, newId } from './types';
 import {
   collectUnusedFiles, createBlankPage, deleteNote, exportLibrary, saveRecording, getAllFolders, getAllNotes, getAllTags, importBackup,
