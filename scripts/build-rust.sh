@@ -17,8 +17,11 @@ for t in "${TARGETS[@]}"; do
     android)
       # cargo-ndk reads the NDK from the environment, not from .cargo/config.toml's [env].
       export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$HOME/android-tools/sdk/ndk/27.2.12479018}"
-      echo "--> Rust for Android (arm64-v8a, armeabi-v7a, x86_64)"
-      cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -o android/app/src/main/jniLibs build --release -p opennote_native --features jni
+      # Linked against the app's own minimum API level (android/variables.gradle minSdkVersion),
+      # not cargo-ndk's default 21: getifaddrs (the cast's LAN address) exists from 24.
+      MIN_SDK="$(sed -n 's/.*minSdkVersion *= *\([0-9]*\).*/\1/p' android/variables.gradle)"
+      echo "--> Rust for Android (arm64-v8a, armeabi-v7a, x86_64; API ${MIN_SDK:?minSdkVersion not found})"
+      cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -P "$MIN_SDK" -o android/app/src/main/jniLibs build --release -p opennote_native --features jni
       for abi in arm64-v8a armeabi-v7a x86_64; do
         [ -s "android/app/src/main/jniLibs/$abi/libopennote_native.so" ] || { echo "missing $abi/libopennote_native.so"; exit 1; }
       done
