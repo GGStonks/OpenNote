@@ -165,12 +165,16 @@
   let dpr = window.devicePixelRatio || 1;
   let width = 0, height = 0;
 
+  // Drawn again only when something changed (the note at rest costs nothing).
+  let dirty = true;
+
   function resize() {
     dpr = window.devicePixelRatio || 1;
     width = window.innerWidth;
     height = window.innerHeight;
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
+    dirty = true;
   }
   window.addEventListener('resize', resize);
   resize();
@@ -192,22 +196,92 @@
     hudTimeout = setTimeout(() => hud.classList.add('autohide'), 3000);
   });
 
-  // State
-  const camera = { x: 0, y: 0, zoom: 1.0, rotation: 0 };
-  const committedStrokes = [];
-  const activeStrokes = new Map();
-  const laser = { x: 0, y: 0, intensity: 0, color: '#ef4444', trail: [] };
-
+  // State. `doc`: the note near the device's view (crates/canvas cast.rs), `camera`: the canvas's
+  // surface transform this frame (device px), as the device draws them; `live`: pen points of the
+  // stroke being written (device view units), until the next snapshot carries it.
+  const camera = { k: 0, x: 0, y: 0 };
+  let doc = null;
+  const live = new Map();
   let packetsCount = 0;
   let framesCount = 0;
   let lastStatsTime = performance.now();
 
-  function rgbaToString(rgba) {
-    const r = (rgba >> 24) & 0xff;
-    const g = (rgba >> 16) & 0xff;
-    const b = (rgba >> 8) & 0xff;
-    const a = (rgba & 0xff) / 255;
-    return `rgba(${r},${g},${b},${a})`;
+  const css = (c, a = c[3]) => `rgba(${Math.round(c[0] * 255)},${Math.round(c[1] * 255)},${Math.round(c[2] * 255)},${a})`;
+
+  // A capsule from a to b (x, y, radius) as one closed contour, always turning the same way, so
+  // a run of them filled together is their union.
+  function capsule(path, ax, ay, ar, bx, by, br) {
+    const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+    if (L <= Math.abs(ar - br) || L < 1e-6) {
+      const [x, y, r] = ar >= br ? [ax, ay, ar] : [bx, by, br];
+      path.moveTo(x + r, y);
+      path.arc(x, y, r, 0, Math.PI * 2);
+      return;
+    }
+    const th = Math.atan2(dy, dx), ph = Math.asin((ar - br) / L);
+    path.moveTo(ax + ar * Math.cos(th + Math.PI / 2 + ph), ay + ar * Math.sin(th + Math.PI / 2 + ph));
+    path.arc(ax, ay, ar, th + Math.PI / 2 + ph, th + 1.5 * Math.PI - ph);
+    path.arc(bx, by, br, th - Math.PI / 2 - ph, th + Math.PI / 2 + ph);
+    path.closePath();
+  }
+
+  // The snapshot (cast.rs's layout), each page's ink made into paths once.
+  function readDoc(bytes) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let o = 0;
+    const u8 = () => v.getUint8(o++);
+    const u32 = () => { const x = v.getUint32(o, true); o += 4; return x; };
+    const f32 = () => { const x = v.getFloat32(o, true); o += 4; return x; };
+    const f64 = () => { const x = v.getFloat64(o, true); o += 8; return x; };
+    const rgba = () => [f32(), f32(), f32(), f32()];
+    if (u32() !== 0x44434E4F || u32() !== 1) return null;
+    const d = { w: f32(), h: f32(), viewPx: f32(), clear: rgba(), pages: [] };
+    const n = u32();
+    for (let i = 0; i < n; i++) {
+      const pg = { at: [f64(), f64()], paper: null, ops: [] };
+      if (u8()) {
+        pg.paper = { w: f32(), h: f32(), style: u32(), origin: [f32(), f32()], base: rgba() };
+        const [line, margin, grid, major, minor, dot] = [rgba(), rgba(), rgba(), rgba(), rgba(), rgba()];
+        Object.assign(pg.paper, { line, margin, grid, major, minor, dot });
+      }
+      const nc = u32();
+      const caps = new Float32Array(nc * 6);
+      for (let j = 0; j < nc * 6; j++) caps[j] = f32();
+      const nf = u32();
+      const flat = new Float32Array(nf * 2);
+      for (let j = 0; j < nf * 2; j++) flat[j] = f32();
+      const runOf = (first, count) => {
+        const p = new Path2D();
+        for (let c = first; c < first + count && c < nc; c++) {
+          const q = c * 6;
+          capsule(p, caps[q], caps[q + 1], caps[q + 2], caps[q + 3], caps[q + 4], caps[q + 5]);
+        }
+        return p;
+      };
+      const trisOf = (first, count) => {
+        const p = new Path2D();
+        for (let t = first; t + 2 < first + count && t + 2 < nf; t += 3) {
+          p.moveTo(flat[t * 2], flat[t * 2 + 1]);
+          p.lineTo(flat[t * 2 + 2], flat[t * 2 + 3]);
+          p.lineTo(flat[t * 2 + 4], flat[t * 2 + 5]);
+          p.closePath();
+        }
+        return p;
+      };
+      const no = u32();
+      for (let j = 0; j < no; j++) {
+        const kind = u8(), col = rgba(), first = u32(), count = u32();
+        if (kind === 1) {
+          const mode = u8(), boxFirst = u32(), hatchFirst = u32(), hatchCount = u32();
+          void boxFirst;
+          pg.ops.push({ kind, col, mode, path: trisOf(first, count), hatch: mode === 2 ? runOf(hatchFirst, hatchCount) : null });
+        } else {
+          pg.ops.push({ kind, col, path: kind === 0 ? runOf(first, count) : trisOf(first, count) });
+        }
+      }
+      d.pages.push(pg);
+    }
+    return d;
   }
 
   // Pure JS LZ4 block decompressor for 0x06 DocumentSync
@@ -294,63 +368,42 @@
       if (view.byteLength < 8 + payloadLen) return;
 
       switch (msgType) {
-        case 0x02: { // Camera
-          camera.timestamp = Number(view.getBigUint64(8, true));
+        case 0x02: { // Camera: the canvas's surface transform (scale, left, top; device px)
           camera.x = view.getFloat32(16, true);
           camera.y = view.getFloat32(20, true);
-          camera.zoom = view.getFloat32(24, true);
-          camera.rotation = view.getFloat32(28, true);
-          camera.flags = view.getUint32(32, true);
+          camera.k = view.getFloat32(24, true);
+          dirty = true;
           break;
         }
-        case 0x03: { // StrokeLiveAdd
+        case 0x03: { // StrokeLiveAdd: the pen's samples (device view units)
           const strokeId = view.getUint32(8, true);
-          const toolType = view.getUint8(12);
-          const colorRgba = view.getUint32(13, true);
           const baseWidth = view.getFloat32(17, true);
           const count = view.getUint16(21, true);
-          let stroke = activeStrokes.get(strokeId);
-          if (!stroke) {
-            stroke = { id: strokeId, tool: toolType, color: rgbaToString(colorRgba), width: baseWidth, points: [] };
-            activeStrokes.set(strokeId, stroke);
+          let stroke = live.get(strokeId);
+          if (!stroke || stroke.done) {
+            stroke = { width: baseWidth, points: [], done: false };
+            live.set(strokeId, stroke);
           }
           let off = 23;
           for (let i = 0; i < count; i++) {
-            const x = view.getFloat32(off, true);
-            const y = view.getFloat32(off + 4, true);
-            const pressure = view.getFloat32(off + 8, true);
-            const t_ms = view.getFloat32(off + 12, true);
-            stroke.points.push({ x, y, pressure, t_ms });
+            stroke.points.push(view.getFloat32(off, true), view.getFloat32(off + 4, true));
             off += 16;
           }
+          dirty = true;
           break;
         }
-        case 0x04: { // StrokeCommit
-          const strokeId = view.getUint32(8, true);
-          const pageIdLen = view.getUint16(12, true);
-          const strokeKey = view.getBigUint64(14 + pageIdLen, true);
-          const stroke = activeStrokes.get(strokeId);
-          if (stroke) {
-            activeStrokes.delete(strokeId);
-            committedStrokes.push(stroke);
+        case 0x04: { // StrokeCommit: shown until the snapshot with the stroke comes
+          const stroke = live.get(view.getUint32(8, true));
+          if (stroke) stroke.done = true;
+          break;
+        }
+        case 0x06: { // DocumentSync: the note near the view
+          const next = readDoc(decompressLz4(new Uint8Array(ev.data, 8, payloadLen)));
+          if (next) {
+            doc = next;
+            dirty = true;
+            for (const [id, st] of live) if (st.done) live.delete(id);
           }
-          break;
-        }
-        case 0x05: { // LaserPointer
-          laser.x = view.getFloat32(8, true);
-          laser.y = view.getFloat32(12, true);
-          laser.intensity = view.getFloat32(16, true);
-          laser.color = rgbaToString(view.getUint32(20, true));
-          if (laser.intensity > 0.05) {
-            laser.trail.push({ x: laser.x, y: laser.y, t: performance.now() });
-          }
-          break;
-        }
-        case 0x06: { // DocumentSync
-          const compressed = new Uint8Array(ev.data, 8, payloadLen);
-          const decompressed = decompressLz4(compressed);
-          committedStrokes.length = 0;
-          activeStrokes.clear();
           break;
         }
       }
@@ -387,55 +440,89 @@
     };
   }
 
-  // Stroke rendering helper
-  function drawStroke(ctx, stroke) {
-    const pts = stroke.points;
-    if (pts.length === 0) return;
-
-    ctx.save();
-    if (stroke.tool === 2) { // Highlighter
-      ctx.globalAlpha = 0.35;
-      ctx.globalCompositeOperation = 'multiply';
-      ctx.strokeStyle = stroke.color;
-      ctx.lineCap = 'square';
-      ctx.lineJoin = 'miter';
-    } else if (stroke.tool === 3) { // Eraser
-      ctx.globalCompositeOperation = 'destination-out';
-      ctx.strokeStyle = '#000000';
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-    } else { // Pen or Pencil
-      ctx.strokeStyle = stroke.color;
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
+  // The paper's pattern (crates/canvas shaders.wgsl fs_paper), in page px.
+  function drawPaper(c, p) {
+    c.fillStyle = css(p.base);
+    c.fillRect(0, 0, p.w, p.h);
+    const st = p.style;
+    if (st >= 1 && st <= 4) {
+      const gap = st === 2 || st === 4 ? 24 : 32;
+      c.fillStyle = css(p.line);
+      for (let y = 79; y < p.h; y += gap) c.fillRect(0, y, p.w, 1);
+      if (st <= 2) {
+        c.fillStyle = css(p.margin);
+        c.fillRect(79, 0, 1, p.h);
+      }
+    } else if (st === 5 || st === 6) {
+      const lattice = (step, col) => {
+        c.fillStyle = css(col);
+        const x0 = ((-p.origin[0] % step) + step) % step, y0 = ((-p.origin[1] % step) + step) % step;
+        for (let x = x0; x < p.w; x += step) c.fillRect(x, 0, 1, p.h);
+        for (let y = y0; y < p.h; y += step) c.fillRect(0, y, p.w, 1);
+      };
+      if (st === 5) lattice(24, p.grid);
+      else {
+        lattice(12, p.minor);
+        lattice(60, p.major);
+      }
+    } else if (st === 7) {
+      const dots = new Path2D();
+      const x0 = ((-p.origin[0] % 24) + 24) % 24, y0 = ((-p.origin[1] % 24) + 24) % 24;
+      for (let y = y0; y < p.h; y += 24) for (let x = x0; x < p.w; x += 24) {
+        dots.moveTo(x + 1.3, y);
+        dots.arc(x, y, 1.3, 0, Math.PI * 2);
+      }
+      c.fillStyle = css(p.dot);
+      c.fill(dots);
     }
-
-    if (pts.length === 1) {
-      const p = pts[0];
-      const rad = Math.max(1, (stroke.width * (0.3 + 0.7 * (p.pressure || 0.5))) / 2);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, rad, 0, Math.PI * 2);
-      ctx.fillStyle = ctx.strokeStyle;
-      ctx.fill();
-      ctx.restore();
-      return;
-    }
-
-    for (let i = 1; i < pts.length; i++) {
-      const p0 = pts[i - 1];
-      const p1 = pts[i];
-      const pressure = (p0.pressure + p1.pressure) / 2 || 0.5;
-      const w = Math.max(0.75, stroke.width * (0.3 + 0.7 * pressure));
-      ctx.lineWidth = w;
-      ctx.beginPath();
-      ctx.moveTo(p0.x, p0.y);
-      ctx.lineTo(p1.x, p1.y);
-      ctx.stroke();
-    }
-    ctx.restore();
   }
 
-  // Render loop
+  // A translucent run is drawn opaque on a layer of its own and laid on at its alpha, as the
+  // canvas composites a coverage run once (overlaps do not darken).
+  const layer = document.createElement('canvas');
+  const lctx = layer.getContext('2d');
+
+  function drawInk(c, pg, tf) {
+    for (const op of pg.ops) {
+      if (op.kind === 0) {
+        if (op.col[3] >= 0.999) {
+          c.fillStyle = css(op.col, 1);
+          c.fill(op.path);
+        } else {
+          if (layer.width !== canvas.width || layer.height !== canvas.height) {
+            layer.width = canvas.width;
+            layer.height = canvas.height;
+          }
+          lctx.setTransform(1, 0, 0, 1, 0, 0);
+          lctx.clearRect(0, 0, layer.width, layer.height);
+          lctx.setTransform(...tf);
+          lctx.fillStyle = css(op.col, 1);
+          lctx.fill(op.path);
+          c.save();
+          c.setTransform(1, 0, 0, 1, 0, 0);
+          c.globalAlpha = op.col[3];
+          c.drawImage(layer, 0, 0);
+          c.restore();
+        }
+      } else if (op.kind === 1) {
+        if (op.mode === 2) {
+          c.save();
+          c.clip(op.path, 'evenodd');
+          c.fillStyle = css(op.col);
+          c.fill(op.hatch);
+          c.restore();
+        } else {
+          c.fillStyle = op.mode === 1 ? css(pg.paper ? pg.paper.base : [1, 1, 1, 1]) : css(op.col);
+          c.fill(op.path, 'evenodd');
+        }
+      } else {
+        c.fillStyle = css(op.col);
+        c.fill(op.path);
+      }
+    }
+  }
+
+  // Render loop: the device's screen, letterboxed into the window.
   function render(now) {
     framesCount++;
     if (now - lastStatsTime >= 1000) {
@@ -445,62 +532,54 @@
       packetsCount = 0;
       lastStatsTime = now;
     }
-
-    ctx.save();
+    if (!dirty) {
+      requestAnimationFrame(render);
+      return;
+    }
+    dirty = false;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#1e1e24';
+    ctx.fillStyle = '#111114';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    // Apply viewport camera
-    const scale = dpr * camera.zoom;
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    if (camera.rotation) ctx.rotate(camera.rotation);
-    ctx.scale(scale, scale);
-    ctx.translate(-camera.x, -camera.y);
-
-    // Draw document background paper
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 816, 1056); // standard page
-    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-    ctx.lineWidth = 1 / scale;
-    ctx.strokeRect(0, 0, 816, 1056);
-
-    // Draw committed strokes
-    for (let i = 0; i < committedStrokes.length; i++) {
-      drawStroke(ctx, committedStrokes[i]);
-    }
-
-    // Draw active live strokes
-    for (const stroke of activeStrokes.values()) {
-      drawStroke(ctx, stroke);
-    }
-
-    // Draw laser pointer
-    if (laser.intensity > 0.05 || laser.trail.length > 0) {
-      // Trail
-      const cutoff = now - 350;
-      laser.trail = laser.trail.filter(pt => pt.t > cutoff);
-      for (let i = 0; i < laser.trail.length; i++) {
-        const pt = laser.trail[i];
-        const age = (now - pt.t) / 350;
-        const alpha = (1 - age) * 0.6;
-        ctx.beginPath();
-        ctx.arc(pt.x, pt.y, (8 * (1 - age * 0.5)) / camera.zoom, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`;
-        ctx.fill();
+    if (doc && doc.w > 0 && doc.h > 0 && camera.k > 0) {
+      const s = Math.min(canvas.width / doc.w, canvas.height / doc.h);
+      const ox = (canvas.width - doc.w * s) / 2, oy = (canvas.height - doc.h * s) / 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(ox, oy, doc.w * s, doc.h * s);
+      ctx.clip();
+      ctx.fillStyle = doc.clear[3] > 0 ? css(doc.clear) : '#e7e5e4';
+      ctx.fillRect(ox, oy, doc.w * s, doc.h * s);
+      const tfOf = (pg) => {
+        const k = s * camera.k;
+        return [k, 0, 0, k, ox + s * (camera.x + pg.at[0] * camera.k), oy + s * (camera.y + pg.at[1] * camera.k)];
+      };
+      for (const pg of doc.pages) {
+        if (!pg.paper) continue;
+        ctx.setTransform(...tfOf(pg));
+        drawPaper(ctx, pg.paper);
       }
-      if (laser.intensity > 0.05) {
-        ctx.beginPath();
-        ctx.arc(laser.x, laser.y, 6 / camera.zoom, 0, Math.PI * 2);
-        ctx.fillStyle = '#ef4444';
-        ctx.shadowColor = '#ef4444';
-        ctx.shadowBlur = 12;
-        ctx.fill();
-        ctx.shadowBlur = 0;
+      for (const pg of doc.pages) {
+        const tf = tfOf(pg);
+        ctx.setTransform(...tf);
+        drawInk(ctx, pg, tf);
       }
+      // The stroke being written, in the device's view units.
+      const vp = doc.viewPx || 2;
+      ctx.setTransform(s * vp, 0, 0, s * vp, ox, oy);
+      ctx.strokeStyle = '#111827';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      for (const st of live.values()) {
+        const p = st.points;
+        if (p.length < 4) continue;
+        ctx.lineWidth = Math.max(1, st.width * camera.k / vp / 2);
+        ctx.beginPath();
+        ctx.moveTo(p[0], p[1]);
+        for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
+        ctx.stroke();
+      }
+      ctx.restore();
     }
-
-    ctx.restore();
     requestAnimationFrame(render);
   }
 

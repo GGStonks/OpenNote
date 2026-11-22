@@ -86,6 +86,27 @@ impl Paper {
     pub const MAX_SIZE: f32 = 1e6;
 
     pub(crate) fn uniforms(&self, base: &Uniforms) -> Uniforms {
+        let [line, margin, grid, major, minor, dot] = self.pattern_colors();
+        Uniforms {
+            p_style: self.style,
+            p_lw: 1.0,
+            p_origin: self.origin,
+            p_size: [self.width, self.height],
+            p_pad: [1.3, 0.0],
+            p_base: self.base,
+            p_line: line,
+            p_margin: margin,
+            p_grid: grid,
+            p_major: major,
+            p_minor: minor,
+            p_dot: dot,
+            ..*base
+        }
+    }
+
+    /// The pattern's colours (straight rgba): ruled lines, the margin, grid lines, graph majors and
+    /// minors, dots. The shader's (`fs_paper`) and the cast viewer's.
+    pub fn pattern_colors(&self) -> [[f32; 4]; 6] {
         let c = |r: f32, g: f32, b: f32, a: f32| [r / 255.0, g / 255.0, b / 255.0, a];
         let dark = self.dark;
         // paperBackground's `ink`: a chosen colour at three times the alpha (capped), else the defaults.
@@ -144,20 +165,6 @@ impl Paper {
                 }
             }
         };
-        Uniforms {
-            p_style: self.style,
-            p_lw: 1.0,
-            p_origin: self.origin,
-            p_size: [self.width, self.height],
-            p_pad: [1.3, 0.0],
-            p_base: self.base,
-            p_line: line,
-            p_margin: margin,
-            p_grid: grid,
-            p_major: major,
-            p_minor: minor,
-            p_dot: dot,
-            ..*base
-        }
+        [line, margin, grid, major, minor, dot]
     }
 }

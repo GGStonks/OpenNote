@@ -578,20 +578,6 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         process(v, t_ms - resample_lead, true);
         v.vp.tick((t_ms - resample_lead) / 1000.0);
         let c = v.vp.camera().clone();
-        let (view_w, view_h) = {
-            let [_, _, vw, vh] = v.vp.layout().view;
-            (vw, vh)
-        };
-        let world_cx = if c.ez > 1e-6 { ((view_w / 2.0) - c.x) / c.ez } else { 0.0 };
-        let world_cy = if c.ez > 1e-6 { ((view_h / 2.0) - c.y) / c.ez } else { 0.0 };
-        crate::remote_service::broadcast_camera(
-            world_cx as f32,
-            world_cy as f32,
-            c.ez as f32,
-            0.0,
-            c.gesture,
-            c.moving,
-        );
         let moved_now = hist_get(v, 0).is_none_or(|h| h.seq != c.seq);
         if moved_now {
             v.moved_at = clock_ms();
@@ -759,6 +745,11 @@ pub(crate) fn tick_work(total: f64, camera: f64, upload: f64, lock: f64, pace: c
             r.pace(lock, pace.acquire_ms, pace.gpu_late, pace.drained);
         }
     });
+}
+
+/// The zoom of the camera the canvas drew last (the cast's view unit), while Rust owns it.
+pub(crate) fn drawn_zoom() -> Option<f64> {
+    with_view(|v| if owned(v) { v.drawn_cam.map(|c| c.2).filter(|z| *z > 0.0) } else { None })
 }
 
 pub(crate) fn drew(ink_paper: f64) {

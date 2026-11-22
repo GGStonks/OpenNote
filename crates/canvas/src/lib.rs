@@ -20,6 +20,7 @@
 //! `render_offscreen` is the PC path (tests, the CLI).
 
 #![allow(clippy::type_complexity, clippy::chunks_exact_to_as_chunks)]
+pub mod cast;
 pub mod cull;
 pub mod frame;
 pub mod gpu;

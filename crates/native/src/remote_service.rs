@@ -1,13 +1,16 @@
 //! Mirroring service for OpenNote (`crates/remote` integration in `crates/native`).
 
 use std::net::SocketAddr;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use opennote_remote::{
     CameraPayload, LaserPointerPayload, MirrorBroadcaster, PointData, StrokeCommitPayload,
-    StrokeLiveAddPayload, ToolType, CAMERA_FLAG_IN_MOTION, CAMERA_FLAG_MOMENTUM_GLIDE,
-    DEFAULT_PORT,
+    StrokeLiveAddPayload, ToolType, DEFAULT_PORT,
 };
+
+/// How often a cast's viewers are sent what changed in the note near the view.
+const CAST_SYNC: Duration = Duration::from_millis(200);
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -175,7 +178,11 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
 
     let broadcaster = MirrorBroadcaster::new(&pin);
+    // A viewer that connects gets the note near the view at once; then, while any is connected,
+    // what changed (a stroke, other pages in view, a rotation) every `CAST_SYNC`.
+    broadcaster.set_snapshot_provider(Arc::new(|| crate::canvas_service::cast_document(None)));
     let b_clone = broadcaster.clone();
+    let b_sync = broadcaster.clone();
 
     // Bind listener with automatic port fallback if busy
     let bind_addr: SocketAddr = format!("0.0.0.0:{initial_port}")
@@ -198,8 +205,23 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         .name("opennote-mirror".into())
         .spawn(move || {
             rt.block_on(async move {
+                let sync = async move {
+                    let mut last = 0u64;
+                    let mut tick = tokio::time::interval(CAST_SYNC);
+                    loop {
+                        tick.tick().await;
+                        if b_sync.client_count() == 0 {
+                            last = 0;
+                            continue;
+                        }
+                        if let Some(doc) = crate::canvas_service::cast_document(Some(&mut last)) {
+                            b_sync.broadcast_document_sync(doc);
+                        }
+                    }
+                };
                 tokio::select! {
                     _ = b_clone.serve_listener(listener) => {}
+                    _ = sync => {}
                     _ = &mut shutdown_rx => {}
                 }
             });
@@ -257,9 +279,15 @@ pub fn mirror_status(_meta: &str) -> Result<(String, Vec<u8>), String> {
     Ok((resp.to_string(), Vec::new()))
 }
 
-/// Global camera broadcast hook called on render tick. Zero-work if no receivers.
-pub fn broadcast_camera(x: f32, y: f32, zoom: f32, rotation: f32, in_motion: bool, glide: bool) {
-    if !MIRROR_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+/// Whether a cast is on (the render thread then sends its camera each frame).
+pub fn active() -> bool {
+    MIRROR_ACTIVE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The canvas's surface transform this frame (device px: scale, left, top), for the viewers to
+/// place the note as the device's screen shows it. Nothing to do without a viewer.
+pub fn broadcast_camera(k: f64, x: f64, y: f64) {
+    if !active() {
         return;
     }
     let guard = match session_lock().try_lock() {
@@ -270,22 +298,23 @@ pub fn broadcast_camera(x: f32, y: f32, zoom: f32, rotation: f32, in_motion: boo
     if s.broadcaster.receiver_count() == 0 {
         return;
     }
-
-    let mut flags = 0u32;
-    if in_motion {
-        flags |= CAMERA_FLAG_IN_MOTION;
+    // Only a camera that moved (the canvas draws more often than it moves; at rest nothing goes).
+    // A viewer connecting later is sent the last one (the broadcaster keeps it).
+    static LAST: Mutex<[f64; 3]> = Mutex::new([f64::NAN; 3]);
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if *last == [k, x, y] {
+            return;
+        }
+        *last = [k, x, y];
     }
-    if glide {
-        flags |= CAMERA_FLAG_MOMENTUM_GLIDE;
-    }
-
     s.broadcaster.broadcast_camera(CameraPayload {
         timestamp_us: (crate::clock_ms() * 1000.0) as u64,
-        x,
-        y,
-        zoom,
-        rotation,
-        flags,
+        x: x as f32,
+        y: y as f32,
+        zoom: k as f32,
+        rotation: 0.0,
+        flags: 0,
     });
 }
 

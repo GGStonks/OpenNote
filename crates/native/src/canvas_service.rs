@@ -85,6 +85,90 @@ struct Page {
 
 static PAGE: Mutex<Option<Page>> = Mutex::new(None);
 
+/// The canvas's screen while casting (device px), its device px per view unit (0: unknown) and
+/// the surface's transform there (scale, left, top).
+static CAST_SCREEN: Mutex<([f32; 2], f32, [f64; 3])> = Mutex::new(([0.0, 0.0], 0.0, [0.0; 3]));
+
+/// Placements a cast snapshot carries at most (those meeting the device's screen and half a
+/// screen around it): bounded by the screen, never by the note's length.
+const CAST_PAGES: usize = 24;
+
+/// A placement a cast snapshot carries: where it sits on the surface, its paper, its scene, its id.
+type CastPick = ([f64; 2], Option<canvas::Paper>, Option<Arc<Scene>>, String);
+
+/// The cast viewers' snapshot (canvas::cast): the pages near the view, their paper and ink. With
+/// `last`, None when nothing changed since the snapshot `last` names (the pages, their scenes,
+/// the screen), and `last` set to this one.
+pub fn cast_document(last: Option<&mut u64>) -> Option<Vec<u8>> {
+    use std::hash::{Hash, Hasher};
+    let (device, view_px, [k, x, y]) = *lock(&CAST_SCREEN);
+    if k.is_nan() || k <= 0.0 {
+        return None;
+    }
+    // The screen on the surface (surface px), half a screen more each way.
+    let (w, h) = (device[0] as f64 / k, device[1] as f64 / k);
+    let (sx0, sy0) = (-x / k - w / 2.0, -y / k - h / 2.0);
+    let (sx1, sy1) = (sx0 + 2.0 * w, sy0 + 2.0 * h);
+    let (clear, picked) = with_page(|p| {
+        let frame = p.frame.as_ref()?;
+        let picked: Vec<CastPick> = frame
+            .pages
+            .iter()
+            .filter_map(|pl| {
+                // A placement of the page's own transform (a note with pictures): where that puts
+                // it on the surface.
+                let at = pl.at.or_else(|| {
+                    let [fk, fx, fy] = frame.surface?;
+                    ((pl.tf.a as f64 - fk).abs() < 1e-3 * fk)
+                        .then(|| [(pl.tf.ox as f64 - fx) / fk, (pl.tf.oy as f64 - fy) / fk])
+                })?;
+                // Its box on the surface: the paper's, else the part of the surface it belongs
+                // to; one with neither is kept.
+                let bx = match (pl.paper, pl.bx) {
+                    (Some(pp), _) => Some([0.0, 0.0, pp.width as f64, pp.height as f64]),
+                    (None, b) => b,
+                };
+                if let Some([x0, y0, x1, y1]) = bx {
+                    let (px0, py0, px1, py1) = (at[0] + x0, at[1] + y0, at[0] + x1, at[1] + y1);
+                    if px1 < sx0 || px0 > sx1 || py1 < sy0 || py0 > sy1 {
+                        return None;
+                    }
+                }
+                Some((at, pl.paper, p.scenes.get(&pl.page).map(|h| h.scene.clone()), pl.page.clone()))
+            })
+            .take(CAST_PAGES)
+            .collect();
+        Some((frame.clear, picked))
+    })?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for v in [device[0], device[1], view_px] {
+        v.to_bits().hash(&mut h);
+    }
+    clear.map(|c| [c.r, c.g, c.b, c.a].map(f32::to_bits)).hash(&mut h);
+    for (at, paper, scene, id) in &picked {
+        id.hash(&mut h);
+        at.map(f64::to_bits).hash(&mut h);
+        format!("{paper:?}").hash(&mut h);
+        scene.as_ref().map(|s| Arc::as_ptr(s) as usize).hash(&mut h);
+    }
+    let key = h.finish();
+    if let Some(l) = last {
+        if *l == key {
+            return None;
+        }
+        *l = key;
+    }
+    let pages: Vec<canvas::cast::CastPage> = picked
+        .iter()
+        .map(|(at, paper, scene, _)| canvas::cast::CastPage {
+            at: *at,
+            paper: paper.as_ref(),
+            scene: scene.as_deref(),
+        })
+        .collect();
+    Some(canvas::cast::encode(device, view_px, clear, &pages))
+}
+
 /// The pictures' files the page sent (`canvasImage`), shared by every host made: a host made
 /// again (lost device, Android's surface back) decodes them again as they come into view.
 static LIBRARY: OnceLock<Library> = OnceLock::new();
@@ -879,6 +963,12 @@ fn draw_locked(present_ms: f64) -> bool {
     let surface = placed.or(host.frame().surface.map(|[k, x, y]| (k, x, y)));
     if let Some((k, x, y)) = surface {
         host.place(k, x, y);
+        // Casting: the viewers place the note as this frame does, on a screen of this size.
+        if crate::remote_service::active() {
+            crate::remote_service::broadcast_camera(k, x, y);
+            let view_px = crate::viewport_service::drawn_zoom().map_or(0.0, |ez| k / ez);
+            *lock(&CAST_SCREEN) = ([slot.size.0 as f32, slot.size.1 as f32], view_px as f32, [k, x, y]);
+        }
     }
     let result = host.draw();
     let pace = host.pace;

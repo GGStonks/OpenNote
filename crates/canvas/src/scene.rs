@@ -69,6 +69,11 @@ impl CapInst {
     pub fn new(a: [f32; 3], b: [f32; 3], col: [f32; 4]) -> Self {
         CapInst { a, b, col }
     }
+
+    /// Its ends ([x, y, radius], page px).
+    pub fn ends(&self) -> ([f32; 3], [f32; 3]) {
+        (self.a, self.b)
+    }
 }
 
 #[derive(Clone, Debug)]

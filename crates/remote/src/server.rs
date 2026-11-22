@@ -217,10 +217,26 @@ impl MirrorBroadcaster {
                 html.len(),
                 html
             );
-            use tokio::io::AsyncWriteExt;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let mut stream = stream;
+            // The request is read before the answer (it was only peeked): a socket closed with
+            // bytes unread sends a reset, which browsers show as "The connection was reset"
+            // instead of the page (3.0.1-3.0.5: casting never opened).
+            let mut seen: Vec<u8> = Vec::with_capacity(1024);
+            let mut buf = [0u8; 1024];
+            let _ = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
+                while !seen.windows(4).any(|w| w == b"\r\n\r\n") && seen.len() < 64 * 1024 {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => seen.extend_from_slice(&buf[..n]),
+                    }
+                }
+            })
+            .await;
             let _ = stream.write_all(response.as_bytes()).await;
             let _ = stream.flush().await;
+            // A clean end of the answer (FIN), not a drop.
+            let _ = stream.shutdown().await;
             return Ok(());
         }
 
@@ -324,6 +340,39 @@ mod tests {
     use super::*;
     use crate::protocol::*;
     use std::net::Ipv4Addr;
+
+    /// A browser opening the cast's URL gets the whole viewer page and a clean close. 3.0.5 only
+    /// peeked at the request: closing with it unread sent a TCP reset, and Firefox showed "The
+    /// connection was reset" instead of the page.
+    #[tokio::test]
+    async fn a_browser_gets_the_viewer_page() {
+        let broadcaster = MirrorBroadcaster::new("9000");
+        let (listener, addr) =
+            MirrorBroadcaster::bind_listener(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .await
+                .expect("bind ephemeral");
+        tokio::spawn(async move {
+            let _ = broadcaster.serve_listener(listener).await;
+        });
+        let page = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut tcp = std::net::TcpStream::connect(addr).expect("connect");
+            tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let req = format!(
+                "GET /?pin=9000 HTTP/1.1\r\nHost: {addr}\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0\r\nAccept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8\r\nAccept-Language: en-US,en;q=0.5\r\nAccept-Encoding: gzip, deflate\r\nConnection: keep-alive\r\nUpgrade-Insecure-Requests: 1\r\nPriority: u=0, i\r\n\r\n"
+            );
+            tcp.write_all(req.as_bytes()).unwrap();
+            let mut out = Vec::new();
+            tcp.read_to_end(&mut out).map(|_| out)
+        })
+        .await
+        .unwrap()
+        .expect("the page, then a clean close (no reset)");
+        let text = String::from_utf8_lossy(&page);
+        assert!(text.starts_with("HTTP/1.1 200 OK"), "{}", &text[..text.len().min(200)]);
+        let body = text.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        assert_eq!(body.len(), include_str!("viewer.html").len(), "the whole viewer page");
+    }
 
     #[tokio::test]
     async fn server_handshake_and_broadcast() {

@@ -1679,6 +1679,77 @@ if (ONLY.has('nativecanvas')) {
   const leftCanvases = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).map((c) => `${c.width}x${c.height}`));
   console.log(`nativecanvas eraser hover: ${hovering} canvas while hovering, after the pen left ${leftCanvases.length ? leftCanvases.join(' ') : 'none'}${leftCanvases.length || !hovering ? '  FAIL' : ''}`);
   if (leftCanvases.length || !hovering) process.exitCode = 1;
+  // Cast to PC: a browser opening the cast's address gets the viewer, which shows the note as
+  // the canvas holds it (paper and ink near the view), placed as the device's screen shows it.
+  // 3.0.1-3.0.5 reset the connection, and the viewer had no note to show (a made-up blank page).
+  {
+    const ms = meta(await rust('mirrorStart', framed({ port: 38471 })));
+    const viewer = await browser.newPage({ viewport: { width: 960, height: 680 } });
+    let error = null;
+    try {
+      await viewer.goto(`http://127.0.0.1:${ms.port}/?pin=${ms.pin}`, { timeout: 5000 });
+    } catch (e) {
+      error = String(e.message ?? e).split('\n')[0];
+    }
+    await sleep(1500);
+    const seen = error ? null : await viewer.evaluate(() => {
+      const c = document.getElementById('view');
+      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+      let ink = 0, paper = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+        if (l > 235) paper++;
+        else if (l < 110 && !(d[i] === 17 && d[i + 1] === 17 && d[i + 2] === 20)) ink++;
+      }
+      return { ink, paper, status: document.getElementById('status-label')?.textContent, hud: `${document.getElementById('stat-fps')?.textContent} ${document.getElementById('stat-pkt')?.textContent}` };
+    });
+    if (arg('shots')) await viewer.screenshot({ path: join(arg('shots'), 'cast-viewer.png') });
+    // A whole redraw (a pinch redraws each frame it moves): the window resized 20 times.
+    await viewer.bringToFront();
+    const drawMs = error ? NaN : await viewer.evaluate(async () => {
+      const frame = () => new Promise((r) => requestAnimationFrame(r));
+      await frame();
+      const t0 = performance.now();
+      for (let i = 0; i < 20; i++) {
+        window.dispatchEvent(new Event('resize'));
+        await frame();
+      }
+      return (performance.now() - t0) / 20;
+    });
+    console.log(`nativecanvas cast: a frame with a whole redraw ${drawMs.toFixed(1)} ms`);
+    // A stroke written while the viewer watches reaches it (the snapshot sent again).
+    let gainedOnPc = 0;
+    if (!error) {
+      await page.bringToFront();
+      await page.click('[title^="Pen"]').catch(() => {});
+      await mouse('mousePressed', 300, 1000);
+      for (let i = 1; i <= 30; i++) {
+        await mouse('mouseMoved', 300 + i * 8, 1000 + (i % 2 ? 0 : 60));
+        await sleep(8);
+      }
+      await mouse('mouseReleased', 540, 1060);
+      await sleep(1200);
+      await viewer.bringToFront();
+      await sleep(300);
+      const after = await viewer.evaluate(() => {
+        const c = document.getElementById('view');
+        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+        let ink = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+          if (l < 110 && !(d[i] === 17 && d[i + 1] === 17 && d[i + 2] === 20)) ink++;
+        }
+        return ink;
+      });
+      gainedOnPc = after - seen.ink;
+      console.log(`nativecanvas cast: a stroke written while casting adds ${gainedOnPc} ink pixels on the PC${gainedOnPc > 200 ? '' : '  FAIL'}`);
+    }
+    const ok = !error && seen && seen.ink > 1000 && seen.paper > 50000 && gainedOnPc > 200;
+    console.log(`nativecanvas cast: ${error ? `the page did not open: ${error}` : `viewer "${seen.status}" (${seen.hud}), ${seen.paper} paper and ${seen.ink} ink pixels`}${ok ? '' : '  FAIL'}`);
+    if (!ok) process.exitCode = 1;
+    await viewer.close();
+    await rust('mirrorStop', framed({}));
+  }
   if (arg('shots')) {
     await page.setContent('<canvas id=c></canvas>');
     await page.evaluate(([b64, w, h]) => {

@@ -415,6 +415,15 @@ show the iPad's compositing cost).
   0.0.0.0 and the URL carries this device's LAN IPv4 (`lan_ipv4`: Wi-Fi `en0` / `wlan*` first,
   never loopback or cellular); its QR code is encoded in Rust (`qr_svg_path`, qrcode crate) and
   drawn as one SVG path. 3.0.1 sent `127.0.0.1` with a decorative pattern that was no QR code.
+  The browser's request is read before the viewer page is sent (crates/remote `server.rs`): it
+  was only peeked, and a socket closed with bytes unread sends a reset ("The connection was
+  reset" in Firefox, 3.0.1-3.0.5). The viewer (`viewer.html`) draws what the canvas holds: on
+  connect and then every `CAST_SYNC` when it changed, a snapshot of the placements meeting the
+  device's screen and half a screen around it (paper with its pattern, ink capsules, fills;
+  pictures left out; `canvas::cast`, `canvas_service::cast_document`), placed with the canvas's
+  own surface transform (camera packets, sent when it moves) on the device's screen letterboxed.
+  `--native --only nativecanvas` opens the cast in a browser: paper and ink shown, a stroke
+  written while casting reaching it.
 - Launch screens follow the UI theme: the app sends it at start and on change (`setLaunchTheme`,
   platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
   the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView
