@@ -58,6 +58,9 @@ pub struct GestureSummary {
     pub link_max: f64,
     /// The longest wait for the canvas's lock (ms; held by the page's calls).
     pub lock_max: f64,
+    /// Frames the canvas drew per second (`drawn` over the gesture's time): `fps` is the display
+    /// link's ticks, drawn or not.
+    pub drawn_fps: f64,
     /// Ticks where the camera moved but the canvas's camera did not (it waits for the page's DOM,
     /// ADR-008): a refresh shown twice while the fingers move. The other ticks not `drawn` had
     /// nothing new (fingers down before a pinch engages, the end of a glide).
@@ -255,6 +258,11 @@ impl GestureRecorder {
             link_max: r(self.link_max),
             lock_max: r(self.lock_max),
             held: self.held,
+            drawn_fps: if t_ms > self.start {
+                ((self.drawn as f64 / ((t_ms - self.start) / 1000.0)) * 10.0).round() / 10.0
+            } else {
+                0.0
+            },
         }
     }
 }

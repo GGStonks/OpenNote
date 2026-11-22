@@ -970,6 +970,7 @@ fn draw_locked(present_ms: f64) -> bool {
             *lock(&CAST_SCREEN) = ([slot.size.0 as f32, slot.size.1 as f32], view_px as f32, [k, x, y]);
         }
     }
+    host.frame_ms = crate::viewport_service::frame_ms();
     let result = host.draw();
     let pace = host.pace;
     TICK_PARTS.with(|p| p.set((camera_ms, upload_ms, pace)));

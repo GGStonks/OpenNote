@@ -865,3 +865,23 @@ fn a_finger_catches_a_stretch_where_it_shows() {
     v.tick(t);
     assert!(close(shown_y(&v), before, 1e-6), "{} vs {before}", shown_y(&v));
 }
+
+#[test]
+fn a_pinch_going_in_and_out_does_not_rebase_at_every_swing() {
+    // Fingers spreading to 1.8x and back, five times in 2.5 s: under the page's own rule (1.5x,
+    // every 250 ms) each swing committed the zoom (7 in one pinch on the owner's iPad, each a few
+    // late frames on the canvas); the Rust camera commits at 2x, at most every 500 ms.
+    let mut v = fitted(5);
+    v.touch(0, Phase::Began, 380.0, 600.0, 1.0);
+    v.touch(1, Phase::Began, 440.0, 600.0, 1.0);
+    let mut t = 1.0;
+    for s in 0..300 {
+        t += 0.008333;
+        let swing = (s as f64 / 60.0 * std::f64::consts::PI).sin().abs();
+        let d = 30.0 * (1.0 + 0.8 * swing);
+        v.touch(0, Phase::Moved, 410.0 - d, 600.0, t);
+        v.touch(1, Phase::Moved, 410.0 + d, 600.0, t);
+        v.tick(t);
+    }
+    assert_eq!(v.rebases, 0, "rebases {}", v.rebases);
+}

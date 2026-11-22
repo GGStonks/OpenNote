@@ -9,6 +9,7 @@
   html, body { width: 100%; height: 100%; overflow: hidden; background: #121214; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #fff; }
   #canvas-container { position: absolute; inset: 0; width: 100%; height: 100%; overflow: hidden; }
   canvas { display: block; width: 100%; height: 100%; }
+  #live { position: absolute; inset: 0; pointer-events: none; }
   
   /* HUD overlay */
   #hud {
@@ -37,6 +38,16 @@
   .dot.live { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
   .status-text { color: #f3f4f6; }
   .stat-pill { color: #9ca3af; font-variant-numeric: tabular-nums; }
+  button.stat-pill {
+    background: rgba(255, 255, 255, 0.08);
+    border: none;
+    border-radius: 6px;
+    color: #e5e7eb;
+    cursor: pointer;
+    font: inherit;
+    padding: 4px 8px;
+  }
+  button.stat-pill:hover { background: rgba(255, 255, 255, 0.16); }
   .btn-fullscreen {
     background: transparent;
     border: none;
@@ -106,6 +117,7 @@
 
 <div id="canvas-container">
   <canvas id="view"></canvas>
+  <canvas id="live"></canvas>
 </div>
 
 <div id="hud">
@@ -113,6 +125,8 @@
   <span id="status-label" class="status-text">Connecting...</span>
   <span class="stat-pill" id="stat-fps">0 fps</span>
   <span class="stat-pill" id="stat-pkt">0 pkt/s</span>
+  <span class="stat-pill" id="stat-draw">0 ms</span>
+  <button class="stat-pill" id="btn-fit" title="Fill the window's width, or show the device's whole screen">Fill width</button>
   <button class="btn-fullscreen" id="btn-fs" title="Toggle Fullscreen (F11)">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
   </button>
@@ -151,12 +165,71 @@
   }
 
   const canvas = document.getElementById('view');
-  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+  // The window is composed by the GPU (WebGL): each page's bitmap is a texture uploaded once, and a
+  // frame is a few textured rectangles, at any size and the display's rate (144 Hz too). Drawn
+  // with a 2D canvas, a 2560 px window cost 6 ms a frame where browsers draw it on the CPU
+  // (Firefox on Linux, headless Chromium), and a `desynchronized` one was shown at 60 fps.
+  // The stroke being written goes on a 2D canvas over it.
+  const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, premultipliedAlpha: true });
+  const liveCanvas = document.getElementById('live');
+  const ctx = liveCanvas.getContext('2d');
+  const prog = (() => {
+    const sh = (type, src) => {
+      const x = gl.createShader(type);
+      gl.shaderSource(x, src);
+      gl.compileShader(x);
+      return x;
+    };
+    const pr = gl.createProgram();
+    gl.attachShader(pr, sh(gl.VERTEX_SHADER, `#version 300 es
+      in vec2 p; uniform vec4 r; out vec2 uv;
+      void main() { uv = p; vec2 q = r.xy + p * r.zw; gl_Position = vec4(q.x * 2.0 - 1.0, 1.0 - q.y * 2.0, 0.0, 1.0); }`));
+    gl.attachShader(pr, sh(gl.FRAGMENT_SHADER, `#version 300 es
+      precision mediump float; in vec2 uv; uniform sampler2D t; uniform vec4 col; uniform vec2 src; out vec4 o;
+      void main() { o = col.a >= 0.0 ? col : texture(t, uv * src); }`));
+    gl.linkProgram(pr);
+    return pr;
+  })();
+  gl.useProgram(prog);
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+  const aP = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(aP);
+  gl.vertexAttribPointer(aP, 2, gl.FLOAT, false, 0, 0);
+  const uR = gl.getUniformLocation(prog, 'r'), uCol = gl.getUniformLocation(prog, 'col'), uSrc = gl.getUniformLocation(prog, 'src');
+  gl.enable(gl.BLEND);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  // A rectangle (window px) in a colour (premultiplied rgba 0..1) or a texture's part `src`.
+  function rect(x, y, w, h, col, tex, src) {
+    gl.uniform4f(uR, x / canvas.width, y / canvas.height, w / canvas.width, h / canvas.height);
+    if (tex) {
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.uniform4f(uCol, 0, 0, 0, -1);
+      gl.uniform2f(uSrc, src[0], src[1]);
+    } else gl.uniform4f(uCol, ...col);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+  function upload(c) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+    gl.generateMipmap(gl.TEXTURE_2D);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+  const premul = (c) => [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
   const hud = document.getElementById('hud');
   const statusDot = document.getElementById('status-dot');
   const statusLabel = document.getElementById('status-label');
   const statFps = document.getElementById('stat-fps');
   const statPkt = document.getElementById('stat-pkt');
+  const statDraw = document.getElementById('stat-draw');
+  const btnFit = document.getElementById('btn-fit');
   const btnFs = document.getElementById('btn-fs');
   const pinModal = document.getElementById('pin-modal');
   const pinInput = document.getElementById('pin-input');
@@ -172,8 +245,8 @@
     dpr = window.devicePixelRatio || 1;
     width = window.innerWidth;
     height = window.innerHeight;
-    canvas.width = Math.round(width * dpr);
-    canvas.height = Math.round(height * dpr);
+    canvas.width = liveCanvas.width = Math.round(width * dpr);
+    canvas.height = liveCanvas.height = Math.round(height * dpr);
     dirty = true;
   }
   window.addEventListener('resize', resize);
@@ -199,7 +272,29 @@
   // State. `doc`: the note near the device's view (crates/canvas cast.rs), `camera`: the canvas's
   // surface transform this frame (device px), as the device draws them; `live`: pen points of the
   // stroke being written (device view units), until the next snapshot carries it.
+  // The camera as the device sent it (device ms, surface transform), played back a little late
+  // and interpolated: Wi-Fi delivers packets in bursts, shown as they come the note jerks.
   const camera = { k: 0, x: 0, y: 0 };
+  const cams = [];
+  let clockOffset = Infinity;
+  const PLAYOUT_MS = 30;
+  function cameraAt(now) {
+    if (!cams.length) return null;
+    const t = now - clockOffset - PLAYOUT_MS;
+    let i = cams.length - 1;
+    if (t >= cams[i].t) return cams[i];
+    while (i > 0 && cams[i - 1].t > t) i--;
+    if (i === 0) return cams[0];
+    const a = cams[i - 1], b = cams[i], u = (t - a.t) / (b.t - a.t || 1);
+    return { t, k: a.k + (b.k - a.k) * u, x: a.x + (b.x - a.x) * u, y: a.y + (b.y - a.y) * u };
+  }
+  // Fill the window's width (larger), or show the device's whole screen.
+  let fill = true;
+  btnFit.addEventListener('click', () => {
+    fill = !fill;
+    btnFit.textContent = fill ? 'Fill width' : 'Whole screen';
+    dirty = true;
+  });
   let doc = null;
   const live = new Map();
   let packetsCount = 0;
@@ -225,8 +320,10 @@
     path.closePath();
   }
 
-  // The snapshot (cast.rs's layout), each page's ink made into paths once.
-  function readDoc(bytes) {
+  // The snapshot (cast.rs's layout): where the pages are, their ink as numbers (traced onto the
+  // canvas when drawn: Path2D objects made in a worker took seconds), and for the page a hash of
+  // each one's bytes, which tells a page that did not change (its bitmap is kept).
+  function readDoc(bytes, hashes) {
     const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let o = 0;
     const u8 = () => v.getUint8(o++);
@@ -238,6 +335,7 @@
     const d = { w: f32(), h: f32(), viewPx: f32(), clear: rgba(), pages: [] };
     const n = u32();
     for (let i = 0; i < n; i++) {
+      const start = o;
       const pg = { at: [f64(), f64()], paper: null, ops: [] };
       if (u8()) {
         pg.paper = { w: f32(), h: f32(), style: u32(), origin: [f32(), f32()], base: rgba() };
@@ -250,34 +348,38 @@
       const nf = u32();
       const flat = new Float32Array(nf * 2);
       for (let j = 0; j < nf * 2; j++) flat[j] = f32();
-      const runOf = (first, count) => {
-        const p = new Path2D();
-        for (let c = first; c < first + count && c < nc; c++) {
-          const q = c * 6;
-          capsule(p, caps[q], caps[q + 1], caps[q + 2], caps[q + 3], caps[q + 4], caps[q + 5]);
-        }
-        return p;
-      };
-      const trisOf = (first, count) => {
-        const p = new Path2D();
-        for (let t = first; t + 2 < first + count && t + 2 < nf; t += 3) {
-          p.moveTo(flat[t * 2], flat[t * 2 + 1]);
-          p.lineTo(flat[t * 2 + 2], flat[t * 2 + 3]);
-          p.lineTo(flat[t * 2 + 4], flat[t * 2 + 5]);
-          p.closePath();
-        }
-        return p;
-      };
+      pg.caps = caps;
+      pg.flat = flat;
       const no = u32();
       for (let j = 0; j < no; j++) {
         const kind = u8(), col = rgba(), first = u32(), count = u32();
         if (kind === 1) {
           const mode = u8(), boxFirst = u32(), hatchFirst = u32(), hatchCount = u32();
           void boxFirst;
-          pg.ops.push({ kind, col, mode, path: trisOf(first, count), hatch: mode === 2 ? runOf(hatchFirst, hatchCount) : null });
+          pg.ops.push({ kind, col, first, count, mode, hatchFirst, hatchCount });
         } else {
-          pg.ops.push({ kind, col, path: kind === 0 ? runOf(first, count) : trisOf(first, count) });
+          pg.ops.push({ kind, col, first, count });
         }
+      }
+      // Its extent (page px): the paper, else its ink.
+      if (pg.paper) pg.box = [0, 0, pg.paper.w, pg.paper.h];
+      else {
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (let c = 0; c < nc; c++) {
+          const q = c * 6;
+          for (const [x, y, r] of [[caps[q], caps[q + 1], caps[q + 2]], [caps[q + 3], caps[q + 4], caps[q + 5]]]) {
+            x0 = Math.min(x0, x - r); y0 = Math.min(y0, y - r); x1 = Math.max(x1, x + r); y1 = Math.max(y1, y + r);
+          }
+        }
+        for (let j = 0; j < nf; j++) {
+          x0 = Math.min(x0, flat[j * 2]); y0 = Math.min(y0, flat[j * 2 + 1]); x1 = Math.max(x1, flat[j * 2]); y1 = Math.max(y1, flat[j * 2 + 1]);
+        }
+        pg.box = x1 > x0 ? [x0 - 2, y0 - 2, x1 + 2, y1 + 2] : null;
+      }
+      if (hashes) {
+        let h = 0x811c9dc5;
+        for (let j = start; j < o; j++) h = Math.imul(h ^ v.getUint8(j), 0x01000193);
+        pg.hash = h >>> 0;
       }
       d.pages.push(pg);
     }
@@ -369,10 +471,13 @@
 
       switch (msgType) {
         case 0x02: { // Camera: the canvas's surface transform (scale, left, top; device px)
-          camera.x = view.getFloat32(16, true);
-          camera.y = view.getFloat32(20, true);
-          camera.k = view.getFloat32(24, true);
-          dirty = true;
+          const t = Number(view.getBigUint64(8, true)) / 1000;
+          const now = performance.now();
+          // The clocks' offset from the quickest delivery, following a lasting change slowly.
+          clockOffset = Math.min(now - t, clockOffset + 0.05);
+          if (cams.length && t <= cams[cams.length - 1].t) cams.length = 0;
+          cams.push({ t, k: view.getFloat32(24, true), x: view.getFloat32(16, true), y: view.getFloat32(20, true) });
+          while (cams.length > 2 && cams[1].t < t - 1000) cams.shift();
           break;
         }
         case 0x03: { // StrokeLiveAdd: the pen's samples (device view units)
@@ -398,9 +503,10 @@
           break;
         }
         case 0x06: { // DocumentSync: the note near the view
-          const next = readDoc(decompressLz4(new Uint8Array(ev.data, 8, payloadLen)));
+          const bytes = decompressLz4(new Uint8Array(ev.data, 8, payloadLen));
+          const next = readDoc(bytes, true);
           if (next) {
-            doc = next;
+            adopt(next);
             dirty = true;
             for (const [id, st] of live) if (st.done) live.delete(id);
           }
@@ -477,54 +583,166 @@
     }
   }
 
-  // A translucent run is drawn opaque on a layer of its own and laid on at its alpha, as the
-  // canvas composites a coverage run once (overlaps do not darken).
-  const layer = document.createElement('canvas');
-  const lctx = layer.getContext('2d');
-
-  function drawInk(c, pg, tf) {
-    for (const op of pg.ops) {
-      if (op.kind === 0) {
-        if (op.col[3] >= 0.999) {
-          c.fillStyle = css(op.col, 1);
-          c.fill(op.path);
-        } else {
-          if (layer.width !== canvas.width || layer.height !== canvas.height) {
-            layer.width = canvas.width;
-            layer.height = canvas.height;
-          }
-          lctx.setTransform(1, 0, 0, 1, 0, 0);
-          lctx.clearRect(0, 0, layer.width, layer.height);
-          lctx.setTransform(...tf);
-          lctx.fillStyle = css(op.col, 1);
-          lctx.fill(op.path);
-          c.save();
-          c.setTransform(1, 0, 0, 1, 0, 0);
-          c.globalAlpha = op.col[3];
-          c.drawImage(layer, 0, 0);
-          c.restore();
-        }
-      } else if (op.kind === 1) {
-        if (op.mode === 2) {
-          c.save();
-          c.clip(op.path, 'evenodd');
-          c.fillStyle = css(op.col);
-          c.fill(op.hatch);
-          c.restore();
-        } else {
-          c.fillStyle = op.mode === 1 ? css(pg.paper ? pg.paper.base : [1, 1, 1, 1]) : css(op.col);
-          c.fill(op.path, 'evenodd');
-        }
-      } else {
-        c.fillStyle = css(op.col);
-        c.fill(op.path);
-      }
+  // A run of capsules, or triangles, traced onto a context's path.
+  function traceRun(c, pg, first, count) {
+    const q = pg.caps, n = q.length / 6;
+    c.beginPath();
+    for (let i = first; i < first + count && i < n; i++) {
+      const j = i * 6;
+      capsule(c, q[j], q[j + 1], q[j + 2], q[j + 3], q[j + 4], q[j + 5]);
     }
   }
+  function traceTris(c, pg, first, count) {
+    const f = pg.flat, n = f.length / 2;
+    c.beginPath();
+    for (let t = first; t + 2 < first + count && t + 2 < n; t += 3) {
+      c.moveTo(f[t * 2], f[t * 2 + 1]);
+      c.lineTo(f[t * 2 + 2], f[t * 2 + 3]);
+      c.lineTo(f[t * 2 + 4], f[t * 2 + 5]);
+      c.closePath();
+    }
+  }
+  // A page's bitmap is drawn a slice at a time (a few ms of each frame) on the page's own canvas
+  // (GPU-drawn; in a worker a page took seconds), the bitmap shown until then staying up: a whole
+  // page at once took 30-60 ms, a hitch whenever the zoom changed (3.0.6 drew every capsule as a
+  // vector for each camera packet). A translucent run is drawn opaque on a layer of its own and
+  // laid on at its alpha, as the canvas composites a coverage run once (overlaps do not darken).
+  const SLICE = 200;
+  // The display's frame interval (ms, the shortest seen lately): bitmaps get a third of a frame
+  // (a 144 Hz screen 2.3 ms, a 60 Hz one 5.6), never at the cost of the frame.
+  let frameMs = 16.7, lastRaf = 0, raf = [];
+  function startJob(pg, want) {
+    const [x0, y0, x1, y1] = want.rect;
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.ceil((x1 - x0) * want.scale));
+    c.height = Math.max(1, Math.ceil((y1 - y0) * want.scale));
+    const g = c.getContext('2d');
+    const tf = [want.scale, 0, 0, want.scale, -x0 * want.scale, -y0 * want.scale];
+    g.setTransform(...tf);
+    pg.job = { scale: want.scale, rect: want.rect, c, g, tf, op: -1, at: 0, layer: null, lg: null };
+  }
+  // Goes on with a page's bitmap until `until` (ms); true when it is done.
+  function stepJob(pg, until) {
+    const j = pg.job, g = j.g;
+    while (performance.now() < until) {
+      if (j.op === -1) {
+        if (pg.paper) drawPaper(g, pg.paper);
+        j.op = 0;
+        continue;
+      }
+      const op = pg.ops[j.op];
+      if (!op) return true;
+      if (op.kind === 0) {
+        const see = op.col[3] < 0.999;
+        if (see && !j.layer) {
+          j.layer = document.createElement('canvas');
+          j.layer.width = j.c.width;
+          j.layer.height = j.c.height;
+          j.lg = j.layer.getContext('2d');
+        }
+        const t = see ? j.lg : g;
+        if (j.at === 0 && see) {
+          t.setTransform(1, 0, 0, 1, 0, 0);
+          t.clearRect(0, 0, j.layer.width, j.layer.height);
+        }
+        t.setTransform(...j.tf);
+        t.fillStyle = css(op.col, 1);
+        const n = Math.min(SLICE, op.count - j.at);
+        traceRun(t, pg, op.first + j.at, n);
+        t.fill();
+        j.at += n;
+        if (j.at < op.count) continue;
+        if (see) {
+          g.save();
+          g.setTransform(1, 0, 0, 1, 0, 0);
+          g.globalAlpha = op.col[3];
+          g.drawImage(j.layer, 0, 0);
+          g.restore();
+        }
+      } else if (op.kind === 1) {
+        traceTris(g, pg, op.first, op.count);
+        if (op.mode === 2) {
+          g.save();
+          g.clip('evenodd');
+          g.fillStyle = css(op.col);
+          traceRun(g, pg, op.hatchFirst, op.hatchCount);
+          g.fill();
+          g.restore();
+        } else {
+          g.fillStyle = op.mode === 1 ? css(pg.paper ? pg.paper.base : [1, 1, 1, 1]) : css(op.col);
+          g.fill('evenodd');
+        }
+      } else {
+        traceTris(g, pg, op.first, op.count);
+        g.fillStyle = css(op.col);
+        g.fill();
+      }
+      j.op++;
+      j.at = 0;
+    }
+    return false;
+  }
 
-  // Render loop: the device's screen, letterboxed into the window.
+  // A new snapshot: unchanged pages keep their bitmaps; a changed one shows its old bitmap until
+  // the new one comes.
+  function adopt(next) {
+    const slots = new Map();
+    const slotOf = (pg, seen) => {
+      const base = `${pg.at[0]},${pg.at[1]},${pg.paper ? `p${pg.paper.w}x${pg.paper.h}` : 'i'}`;
+      const n = seen.get(base) ?? 0;
+      seen.set(base, n + 1);
+      return `${base}#${n}`;
+    };
+    if (doc) {
+      const seen = new Map();
+      for (const pg of doc.pages) slots.set(slotOf(pg, seen), pg);
+    }
+    const seen = new Map();
+    for (const pg of next.pages) {
+      const key = slotOf(pg, seen);
+      const old = slots.get(key);
+      slots.delete(key);
+      if (old?.bitmap) {
+        pg.bitmap = old.bitmap;
+        if (old.hash !== pg.hash) pg.keep = old.bitmap;
+      }
+    }
+    // The pages that went: their textures too.
+    for (const old of slots.values()) if (old.bitmap) gl.deleteTexture(old.bitmap.tex);
+    doc = next;
+  }
+
+  // The scale a page is drawn at (viewer px per page px) and the part of it (page px): all of it,
+  // or, larger than a bitmap may be, the part in the window and a margin.
+  // A page's bitmap holds at most this (48 MB, uploaded to the GPU once); larger, it covers the
+  // window's part of the page and half the window around it.
+  const MAX_SIDE = 4096, MAX_PX = 12e6;
+  function wanted(pg, S, view) {
+    const [x0, y0, x1, y1] = pg.box;
+    const w = x1 - x0, h = y1 - y0;
+    if (w * S <= MAX_SIDE && h * S <= MAX_SIDE && w * h * S * S <= MAX_PX) return { scale: S, rect: pg.box };
+    const mx = (view[2] - view[0]) / 2, my = (view[3] - view[1]) / 2;
+    const r = [Math.max(x0, view[0] - mx), Math.max(y0, view[1] - my), Math.min(x1, view[2] + mx), Math.min(y1, view[3] + my)];
+    const sc = Math.min(S, MAX_SIDE / (r[2] - r[0]), MAX_SIDE / (r[3] - r[1]), Math.sqrt(MAX_PX / ((r[2] - r[0]) * (r[3] - r[1]))));
+    return { scale: sc, rect: r };
+  }
+  const covers = (a, b) => a[0] <= b[0] + 0.5 && a[1] <= b[1] + 0.5 && a[2] >= b[2] - 0.5 && a[3] >= b[3] - 0.5;
+  function request(pg, want) {
+    pg.pending = want;
+    startJob(pg, want);
+  }
+
+  let shown = null, restSince = 0, sharp = false, liveShown = false;
+
+  // Render loop: the device's screen, filling the window's width or whole.
   function render(now) {
-    framesCount++;
+    requestAnimationFrame(render);
+    if (lastRaf) {
+      raf.push(now - lastRaf);
+      if (raf.length > 30) raf.shift();
+      frameMs = Math.max(4, Math.min(...raf));
+    }
+    lastRaf = now;
     if (now - lastStatsTime >= 1000) {
       statFps.textContent = `${framesCount} fps`;
       statPkt.textContent = `${packetsCount} pkt/s`;
@@ -532,55 +750,100 @@
       packetsCount = 0;
       lastStatsTime = now;
     }
-    if (!dirty) {
-      requestAnimationFrame(render);
-      return;
+    const cam = cameraAt(now);
+    if (!doc || !(doc.w > 0 && doc.h > 0) || !cam || !(cam.k > 0)) return;
+    // Bitmaps being drawn go on for a few ms of the frame; a finished one is shown.
+    const until = performance.now() + frameMs / 3;
+    for (const pg of doc.pages) {
+      if (!pg.job || performance.now() >= until || !stepJob(pg, until)) continue;
+      if (pg.bitmap) gl.deleteTexture(pg.bitmap.tex);
+      const j = pg.job;
+      pg.bitmap = { tex: upload(j.c), tw: j.c.width, th: j.c.height, scale: j.scale, rect: j.rect };
+      j.c.width = 0;
+      if (j.layer) j.layer.width = 0;
+      pg.job = null;
+      pg.pending = null;
+      pg.keep = null;
+      dirty = true;
     }
+    const moved = !shown || cam.k !== shown.k || cam.x !== shown.x || cam.y !== shown.y;
+    if (moved) {
+      restSince = now;
+      sharp = false;
+    }
+    // At rest for a moment: drawn once more, exactly.
+    const rest = now - restSince > 120;
+    if (!moved && !dirty && (sharp || !rest)) return;
+    const t0 = performance.now();
     dirty = false;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.fillStyle = '#111114';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    if (doc && doc.w > 0 && doc.h > 0 && camera.k > 0) {
-      const s = Math.min(canvas.width / doc.w, canvas.height / doc.h);
-      const ox = (canvas.width - doc.w * s) / 2, oy = (canvas.height - doc.h * s) / 2;
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(ox, oy, doc.w * s, doc.h * s);
-      ctx.clip();
-      ctx.fillStyle = doc.clear[3] > 0 ? css(doc.clear) : '#e7e5e4';
-      ctx.fillRect(ox, oy, doc.w * s, doc.h * s);
-      const tfOf = (pg) => {
-        const k = s * camera.k;
-        return [k, 0, 0, k, ox + s * (camera.x + pg.at[0] * camera.k), oy + s * (camera.y + pg.at[1] * camera.k)];
-      };
-      for (const pg of doc.pages) {
-        if (!pg.paper) continue;
-        ctx.setTransform(...tfOf(pg));
-        drawPaper(ctx, pg.paper);
-      }
-      for (const pg of doc.pages) {
-        const tf = tfOf(pg);
-        ctx.setTransform(...tf);
-        drawInk(ctx, pg, tf);
-      }
-      // The stroke being written, in the device's view units.
-      const vp = doc.viewPx || 2;
-      ctx.setTransform(s * vp, 0, 0, s * vp, ox, oy);
-      ctx.strokeStyle = '#111827';
-      ctx.lineCap = 'round';
-      ctx.lineJoin = 'round';
-      for (const st of live.values()) {
-        const p = st.points;
-        if (p.length < 4) continue;
-        ctx.lineWidth = Math.max(1, st.width * camera.k / vp / 2);
-        ctx.beginPath();
-        ctx.moveTo(p[0], p[1]);
-        for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
-        ctx.stroke();
-      }
-      ctx.restore();
+    shown = cam;
+    Object.assign(camera, cam);
+    framesCount++;
+
+    const s = fill ? canvas.width / doc.w : Math.min(canvas.width / doc.w, canvas.height / doc.h);
+    const ox = (canvas.width - doc.w * s) / 2, oy = (canvas.height - doc.h * s) / 2;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clearColor(0.067, 0.067, 0.078, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    // The device's screen: its desk, and what is drawn clipped to it.
+    const sx0 = Math.max(0, Math.round(ox)), sy0 = Math.max(0, Math.round(oy));
+    const sx1 = Math.min(canvas.width, Math.round(ox + doc.w * s)), sy1 = Math.min(canvas.height, Math.round(oy + doc.h * s));
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(sx0, canvas.height - sy1, Math.max(0, sx1 - sx0), Math.max(0, sy1 - sy0));
+    rect(ox, oy, doc.w * s, doc.h * s, doc.clear[3] > 0 ? premul(doc.clear) : [0.906, 0.898, 0.894, 1]);
+    const S = s * cam.k;
+    const view = [0, 0, canvas.width, canvas.height].map((v, j) => v - (j % 2 ? oy : ox));
+    const show = (pg) => {
+      if (!pg.box) return;
+      const tx = s * (cam.x + pg.at[0] * cam.k), ty = s * (cam.y + pg.at[1] * cam.k);
+      const [x0, y0, x1, y1] = pg.box;
+      if (tx + x1 * S < view[0] || tx + x0 * S > view[2] || ty + y1 * S < view[1] || ty + y0 * S > view[3]) return;
+      // The window in this page's px.
+      const pv = [(view[0] - tx) / S, (view[1] - ty) / S, (view[2] - tx) / S, (view[3] - ty) / S];
+      const want = wanted(pg, S, pv);
+      const b = pg.bitmap;
+      const shownPart = [Math.max(x0, pv[0]), Math.max(y0, pv[1]), Math.min(x1, pv[2]), Math.min(y1, pv[3])];
+      const fits = (x) => x && covers(x.rect, shownPart) && (rest ? x.scale === want.scale : x.scale > want.scale / 2 && x.scale < want.scale * 2);
+      if (!(fits(b) && !pg.keep) && !fits(pg.pending)) request(pg, want);
+      if (!b) return;
+      const [r0, r1, r2, r3] = b.rect;
+      rect(ox + tx + r0 * S, oy + ty + r1 * S, (r2 - r0) * S, (r3 - r1) * S, null, b.tex, [((r2 - r0) * b.scale) / b.tw, ((r3 - r1) * b.scale) / b.th]);
+    };
+    for (const pg of doc.pages) if (pg.paper) show(pg);
+    for (const pg of doc.pages) if (!pg.paper) show(pg);
+    // The stroke being written, in the device's view units (cleared when there is none).
+    const vp = doc.viewPx || 2;
+    if (live.size || liveShown) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
+      liveShown = live.size > 0;
+      // Hidden when empty: one window-sized layer less for the browser to blend each frame.
+      liveCanvas.style.visibility = liveShown ? 'visible' : 'hidden';
     }
-    requestAnimationFrame(render);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, doc.w * s, doc.h * s);
+    ctx.clip();
+    ctx.setTransform(s * vp, 0, 0, s * vp, ox, oy);
+    ctx.strokeStyle = '#111827';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const st of live.values()) {
+      const p = st.points;
+      if (p.length < 4) continue;
+      ctx.lineWidth = Math.max(1, st.width * cam.k / vp / 2);
+      ctx.beginPath();
+      ctx.moveTo(p[0], p[1]);
+      for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
+      ctx.stroke();
+    }
+    ctx.restore();
+    sharp = rest;
+    const ms = performance.now() - t0;
+    statDraw.textContent = `${ms.toFixed(1)} ms`;
+    // The bench's record (window.__castRecord = []): each drawn frame's time and cost.
+    if (window.__castRecord) window.__castRecord.push([now, ms]);
   }
 
   requestAnimationFrame(render);

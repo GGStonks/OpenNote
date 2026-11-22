@@ -103,6 +103,18 @@ pub fn should_rebase(k: f64, since_ms: f64) -> bool {
     k.ln().abs() > REBASE_RATIO.ln() && since_ms > REBASE_MIN_MS
 }
 
+/// The Rust camera's mid-pinch commit: scaled `NATIVE_REBASE_RATIO` since the last, at most every
+/// `NATIVE_REBASE_MIN_MS`. Wider than the page's own (`should_rebase`): each commit lays the
+/// page's DOM out again at the new zoom while the native canvas draws, and the page's drawing
+/// shares the GPU; at 1.5x / 250 ms a pinch going in and out made 7 in 2.5 s on the owner's iPad,
+/// each one a few frames late on the canvas.
+pub const NATIVE_REBASE_RATIO: f64 = 2.0;
+pub const NATIVE_REBASE_MIN_MS: f64 = 500.0;
+
+pub fn rebases_now(k: f64, since_ms: f64) -> bool {
+    k.ln().abs() > NATIVE_REBASE_RATIO.ln() && since_ms > NATIVE_REBASE_MIN_MS
+}
+
 /// `subPixel`: what a placement's clamp or rounding left, as a translation only under 1 px.
 pub fn sub_pixel(d: f64) -> f64 {
     if d.abs() < 1.0 {

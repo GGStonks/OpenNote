@@ -747,6 +747,19 @@ pub(crate) fn tick_work(total: f64, camera: f64, upload: f64, lock: f64, pace: c
     });
 }
 
+/// The display's frame interval (ms): the display link's, else the display's best rate's.
+pub(crate) fn frame_ms() -> f64 {
+    with_view(|v| {
+        if v.link.0 > 0.0 {
+            v.link.0
+        } else if v.hz > 0.0 {
+            1000.0 / v.hz
+        } else {
+            1000.0 / 60.0
+        }
+    })
+}
+
 /// The zoom of the camera the canvas drew last (the cast's view unit), while Rust owns it.
 pub(crate) fn drawn_zoom() -> Option<f64> {
     with_view(|v| if owned(v) { v.drawn_cam.map(|c| c.2).filter(|z| *z > 0.0) } else { None })

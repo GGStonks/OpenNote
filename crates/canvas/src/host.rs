@@ -23,11 +23,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// A drawable that took longer than this to come (ms) means frames were queued ahead of the
-/// display (3.0.3's waits were whole refreshes, 8.4 and 16.9 ms): the next tick is skipped, so
-/// the queue drains to the frame being drawn. Where a wait stays long though a tick was skipped
-/// (a driver whose images come late anyway), nothing is skipped for `DRAIN_PAUSE`.
-const BACKLOG_MS: f64 = 4.0;
+/// A drawable that took longer than this many display frames to come means two frames were queued
+/// ahead of the display (3.0.3 after a rest: 16.9 ms waits at 120 Hz): the next tick is skipped,
+/// so the queue drains to the frame being drawn. A wait of one frame is the swapchain's ordinary
+/// pipelining: 3.0.4-3.0.6 skipped a tick after any wait over 4 ms (`drained` 44 in one pinch on
+/// the owner's iPad, each a refresh shown twice). Where a wait stays long though a tick was
+/// skipped (a driver whose images come late anyway), nothing is skipped for `DRAIN_PAUSE`.
+const BACKLOG_FRAMES: f64 = 1.5;
 const DRAIN_PAUSE: Duration = Duration::from_secs(1);
 /// A frame whose GPU work has not been seen done for this long is drawn over anyway (a completion
 /// that never came must not stop the canvas).
@@ -118,6 +120,8 @@ pub struct CanvasHost {
     paced: bool,
     /// How the last `draw` was paced.
     pub pace: Pace,
+    /// The display's frame interval (ms; the shells' display link), for `BACKLOG_FRAMES`.
+    pub frame_ms: f64,
 }
 
 impl CanvasHost {
@@ -293,6 +297,7 @@ impl CanvasHost {
                 no_drain_until: None,
                 paced: true,
                 pace: Pace::default(),
+                frame_ms: 1000.0 / 60.0,
             },
             name,
         ))
@@ -334,6 +339,7 @@ impl CanvasHost {
                 no_drain_until: None,
                 paced: false,
                 pace: Pace::default(),
+                frame_ms: 1000.0 / 60.0,
             },
             name,
         ))
@@ -625,7 +631,10 @@ impl CanvasHost {
         // skipped, which the frames queued ahead cover, so the queue drains without a gap.
         if self.paced {
             let _ = self.canvas.device.poll(wgpu::PollType::Poll);
-            let busy = self.submitted > self.done.load(Ordering::Acquire)
+            // Two frames still on the GPU: one in flight is the ordinary pipeline (the GPU is shared
+            // with WebKit's own drawing, which delays ours by part of a frame when the page lays
+            // out: 3.0.4-3.0.6 skipped then, `gpuLate` 49 in one pinch).
+            let busy = self.submitted > self.done.load(Ordering::Acquire) + 1
                 && self.submitted_at.is_some_and(|t| t.elapsed() < GPU_STALE);
             if busy {
                 self.pace.gpu_late = true;
@@ -719,7 +728,7 @@ impl CanvasHost {
                 let ta = Instant::now();
                 let acquired = surface.get_current_texture();
                 self.pace.acquire_ms = ta.elapsed().as_secs_f64() * 1000.0;
-                let long = self.pace.acquire_ms > BACKLOG_MS;
+                let long = self.pace.acquire_ms > BACKLOG_FRAMES * self.frame_ms;
                 let now = Instant::now();
                 if long && self.drained_last {
                     self.no_drain_until = Some(now + DRAIN_PAUSE);

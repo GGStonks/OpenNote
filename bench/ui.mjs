@@ -1685,24 +1685,44 @@ if (ONLY.has('nativecanvas')) {
   {
     const ms = meta(await rust('mirrorStart', framed({ port: 38471 })));
     const viewer = await browser.newPage({ viewport: { width: 960, height: 680 } });
+    const viewerErrors = [];
+    viewer.on('pageerror', (e) => viewerErrors.push(String(e.message ?? e)));
+    viewer.on('console', (m) => m.type() === 'error' && viewerErrors.push(m.text()));
     let error = null;
     try {
       await viewer.goto(`http://127.0.0.1:${ms.port}/?pin=${ms.pin}`, { timeout: 5000 });
     } catch (e) {
       error = String(e.message ?? e).split('\n')[0];
     }
+    // The pixel checks on the device's whole screen; the motion below fills the window's width.
+    if (!error) await viewer.click('#btn-fit');
     await sleep(1500);
-    const seen = error ? null : await viewer.evaluate(() => {
-      const c = document.getElementById('view');
-      const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-      let ink = 0, paper = 0;
-      for (let i = 0; i < d.length; i += 4) {
-        const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
-        if (l > 235) paper++;
-        else if (l < 110 && !(d[i] === 17 && d[i + 1] === 17 && d[i + 2] === 20)) ink++;
-      }
-      return { ink, paper, status: document.getElementById('status-label')?.textContent, hud: `${document.getElementById('stat-fps')?.textContent} ${document.getElementById('stat-pkt')?.textContent}` };
-    });
+    // The viewer's picture (a WebGL canvas: read from a screenshot, the HUD hidden): paper and
+    // ink pixels (dark, not the window's own #111114 around the device's screen).
+    const pixels = async () => {
+      await viewer.evaluate(() => { document.getElementById('hud').style.visibility = 'hidden'; });
+      const png = (await viewer.screenshot()).toString('base64');
+      return viewer.evaluate(async (b64) => {
+        document.getElementById('hud').style.visibility = '';
+        const img = new Image();
+        img.src = `data:image/png;base64,${b64}`;
+        await img.decode();
+        const c = document.createElement('canvas');
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext('2d');
+        g.drawImage(img, 0, 0);
+        const d = g.getImageData(0, 0, c.width, c.height).data;
+        let ink = 0, paper = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
+          if (l > 235) paper++;
+          else if (l < 110 && !(Math.abs(d[i] - 17) <= 1 && Math.abs(d[i + 1] - 17) <= 1 && Math.abs(d[i + 2] - 20) <= 1)) ink++;
+        }
+        return { ink, paper };
+      }, png);
+    };
+    const seen = error ? null : { ...(await pixels()), ...(await viewer.evaluate(() => ({ status: document.getElementById('status-label')?.textContent, hud: `${document.getElementById('stat-fps')?.textContent} ${document.getElementById('stat-pkt')?.textContent}` }))) };
     if (arg('shots')) await viewer.screenshot({ path: join(arg('shots'), 'cast-viewer.png') });
     // A whole redraw (a pinch redraws each frame it moves): the window resized 20 times.
     await viewer.bringToFront();
@@ -1731,23 +1751,74 @@ if (ONLY.has('nativecanvas')) {
       await sleep(1200);
       await viewer.bringToFront();
       await sleep(300);
-      const after = await viewer.evaluate(() => {
-        const c = document.getElementById('view');
-        const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-        let ink = 0;
-        for (let i = 0; i < d.length; i += 4) {
-          const l = 0.3 * d[i] + 0.59 * d[i + 1] + 0.11 * d[i + 2];
-          if (l < 110 && !(d[i] === 17 && d[i + 1] === 17 && d[i + 2] === 20)) ink++;
-        }
-        return ink;
-      });
+      const after = (await pixels()).ink;
       gainedOnPc = after - seen.ink;
       console.log(`nativecanvas cast: a stroke written while casting adds ${gainedOnPc} ink pixels on the PC${gainedOnPc > 200 ? '' : '  FAIL'}`);
     }
-    const ok = !error && seen && seen.ink > 1000 && seen.paper > 50000 && gainedOnPc > 200;
+    // Motion on a large window: the camera moved at 120 Hz (a pan with a zoom), the viewer's
+    // drawn frames and their cost (3.0.6 drew every capsule as a vector for each packet).
+    if (!error) {
+      await viewer.setViewportSize({ width: 1920, height: 1080 });
+      await viewer.click('#btn-fit');
+      await viewer.bringToFront();
+      await viewer.evaluate(() => { window.__castRecord = []; });
+      const t0 = Date.now();
+      for (let i = 0; Date.now() - t0 < 2500; i++) {
+        const u = (Date.now() - t0) / 2500;
+        const k = 2 * (1 + 0.5 * Math.sin(u * Math.PI));
+        await rust('canvasFrame', framed({ surface: [k, -200 * u, -1800 * u], keep: true }));
+        await sleep(8);
+      }
+      await sleep(400);
+      const rec = await viewer.evaluate(() => window.__castRecord);
+      const moving = rec.filter(([t]) => t <= rec[rec.length - 1][0] - 300);
+      const gaps = moving.slice(1).map(([t], i) => t - moving[i][0]).sort((a, b) => a - b);
+      const costs = moving.map(([, c]) => c).sort((a, b) => a - b);
+      const q = (a, p) => (a.length ? a[Math.min(a.length - 1, Math.floor(a.length * p))] : NaN);
+      const fps = moving.length / ((moving[moving.length - 1]?.[0] - moving[0]?.[0]) / 1000);
+      console.log(`nativecanvas cast motion 1920x1080: ${fps.toFixed(0)} fps drawn, gaps p50 ${q(gaps, 0.5)?.toFixed(1)} p95 ${q(gaps, 0.95)?.toFixed(1)} max ${gaps[gaps.length - 1]?.toFixed(1)} ms, draw p50 ${q(costs, 0.5)?.toFixed(1)} p95 ${q(costs, 0.95)?.toFixed(1)} max ${costs[costs.length - 1]?.toFixed(1)} ms`);
+      if (arg('shots')) await viewer.screenshot({ path: join(arg('shots'), 'cast-viewer-wide.png') });
+    }
+    if (viewerErrors.length) console.log(`nativecanvas cast: viewer errors: ${viewerErrors.slice(0, 3).join(' | ')}  FAIL`);
+    const ok = !error && !viewerErrors.length && seen && seen.ink > 1000 && seen.paper > 50000 && gainedOnPc > 200;
     console.log(`nativecanvas cast: ${error ? `the page did not open: ${error}` : `viewer "${seen.status}" (${seen.hud}), ${seen.paper} paper and ${seen.ink} ink pixels`}${ok ? '' : '  FAIL'}`);
     if (!ok) process.exitCode = 1;
     await viewer.close();
+    // The rate it can reach: a browser without vsync or a frame-rate limit (headless Chromium's
+    // is 60), the same motion, the other viewer closed. A 144 Hz screen needs every frame within
+    // 6.9 ms. Run with the GPU (BENCH_GPU, CLAUDE.md): headless WebGL is software otherwise.
+    if (!error) {
+      const fast = await chromium.launch({ executablePath, headless: !HEADED, args: ['--enable-gpu-rasterization', '--ignore-gpu-blocklist', '--disable-gpu-vsync', '--disable-frame-rate-limit', ...gpuArgs] });
+      const v2 = await fast.newPage({ viewport: { width: 2560, height: 1440 } });
+      await v2.goto(`http://127.0.0.1:${ms.port}/?pin=${ms.pin}`, { timeout: 5000 });
+      await sleep(1500);
+      await v2.evaluate(() => {
+        window.__castRecord = [];
+        window.__rafs = 0;
+        const tick = () => { window.__rafs++; requestAnimationFrame(tick); };
+        requestAnimationFrame(tick);
+      });
+      const t1 = Date.now();
+      while (Date.now() - t1 < 2500) {
+        const u = (Date.now() - t1) / 2500;
+        const k = 2 * (1 + 0.5 * Math.sin(u * Math.PI));
+        await rust('canvasFrame', framed({ surface: [k, -200 * u, -1800 * u], keep: true }));
+        await sleep(4);
+      }
+      const r2 = await v2.evaluate(() => window.__castRecord);
+      const rafs = await v2.evaluate(() => window.__rafs);
+      console.log(`nativecanvas cast unlimited: ${(rafs / ((Date.now() - t1) / 1000)).toFixed(0)} frames/s offered by the browser`);
+      const mv = r2.filter(([t]) => t <= r2[r2.length - 1][0] - 300);
+      const g2 = mv.slice(1).map(([t], i) => t - mv[i][0]).sort((a, b) => a - b);
+      const c2 = mv.map(([, c]) => c).sort((a, b) => a - b);
+      const q2 = (a, p) => a[Math.min(a.length - 1, Math.floor(a.length * p))];
+      const fps2 = mv.length / ((mv[mv.length - 1][0] - mv[0][0]) / 1000);
+      // Only with the GPU: headless WebGL draws in software (a few dozen fps).
+      const ok2 = !gpuArgs.length || (fps2 >= 144 && q2(g2, 0.95) <= 6.9);
+      console.log(`nativecanvas cast unlimited 2560x1440: ${fps2.toFixed(0)} fps drawn, gaps p95 ${q2(g2, 0.95).toFixed(1)} max ${g2[g2.length - 1].toFixed(1)} ms, draw p50 ${q2(c2, 0.5).toFixed(2)} p95 ${q2(c2, 0.95).toFixed(2)} max ${c2[c2.length - 1].toFixed(2)} ms${ok2 ? '' : '  FAIL'}`);
+      if (!ok2) process.exitCode = 1;
+      await fast.close();
+    }
     await rust('mirrorStop', framed({}));
   }
   if (arg('shots')) {

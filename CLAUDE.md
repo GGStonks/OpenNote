@@ -168,12 +168,14 @@ Smoothness lives in the camera, which the DOM and the canvas share; never in one
   the longest display-link interval; `held`: ticks where the camera moved but the canvas kept its
   picture, waiting for the DOM; other ticks not `drawn` had nothing new, as a two-finger undo tap):
   a tick over a frame misses a refresh. Read it before guessing at dropped frames.
-- The canvas never queues frames behind the GPU or the display (canvas `host.rs` `Pace`): a tick
-  whose previous frame the GPU has not finished draws nothing (`gpuLate`, the next tick draws the
-  newest camera), and after a wait over `BACKLOG_MS` for a drawable the next tick is skipped
-  (`drained`: the frames queued ahead cover it, so no refresh repeats). 3.0.3 on the owner's iPad,
-  after seconds at rest: `workP95` 16.9 ms with CPU work under 1 ms, every tick waiting one or two
-  refreshes in `nextDrawable` and showing its frame that much later.
+- The canvas never queues frames deep behind the GPU or the display (canvas `host.rs` `Pace`): a
+  tick with two frames still on the GPU draws nothing (`gpuLate`), and after a wait over
+  `BACKLOG_FRAMES` (1.5) display frames for a drawable the next tick is skipped (`drained`). One
+  frame in flight, and a one-frame wait, are the ordinary pipeline: 3.0.4-3.0.6 skipped on those
+  (`gpuLate` 49, `drained` 44 in one pinch, drawn 203 of 304: WebKit's drawing shares the GPU and
+  delays the canvas's frames by part of a frame when the page lays out). 3.0.3, with no pacing:
+  `workP95` 16.9 ms after seconds at rest, every tick waiting two refreshes in `nextDrawable`.
+  Each pinch entry's `drawnFps` is the frames drawn per second (`fps` counts display-link ticks).
 - `--native --only cameracoherence` is bimodal on this PC (since at least 3.0.2): some runs lock the
   canvas a page frame off the DOM (pan p50 exactly 20 px, the frame's motion). Run it twice.
 - Rubber banding (crates/viewport): pans past any edge stretch on UIScrollView's curve
@@ -340,8 +342,10 @@ show the iPad's compositing cost).
   the aspect ratio, sides stretch one way (ink and pictures stretch, LaTeX stretches via
   `stretchX`, a text box rewraps; its font scales only at a corner). `--only resize8`, `--only boxes`.
 - A long pinch commits its zoom on the way (`REBASE_RATIO` in useViewport.ts, a synchronous commit;
-  the Rust camera too, `Viewport::rebase`, on real samples only: 3.0.0-3.0.3 never did, `rebases`
-  0 in every pinch): everything is redrawn sharp while the fingers are down;
+  the Rust camera too, `Viewport::rebase`, on real samples only, at 2x and at most every 500 ms
+  (`rebases_now`: at the page's 1.5x / 250 ms a pinch going in and out committed 7 times in 2.5 s,
+  each a React layout while the canvas drew; 3.0.0-3.0.3 never did, `rebases` 0 in every pinch):
+  everything is redrawn sharp while the fingers are down;
   `--latex --only longpinch --shots <dir>`.
   Never re-run the gesture effect mid-pinch (its clean-up ends the pinch): callbacks it reads go
   through refs, and the editor's scroll ref callback is stable.
@@ -421,9 +425,15 @@ show the iPad's compositing cost).
   connect and then every `CAST_SYNC` when it changed, a snapshot of the placements meeting the
   device's screen and half a screen around it (paper with its pattern, ink capsules, fills;
   pictures left out; `canvas::cast`, `canvas_service::cast_document`), placed with the canvas's
-  own surface transform (camera packets, sent when it moves) on the device's screen letterboxed.
-  `--native --only nativecanvas` opens the cast in a browser: paper and ink shown, a stroke
-  written while casting reaching it.
+  own surface transform (camera packets, sent when it moves), filling the window's width or the
+  device's whole screen (the HUD's button). The viewer plays the camera back `PLAYOUT_MS` late,
+  interpolated by the device's timestamps (Wi-Fi delivers in bursts), and shows each page from a
+  bitmap drawn a slice at a time (`SLICE` capsules, ~5 ms a frame, the old bitmap up until then;
+  exact again once the camera rests; pages unchanged in a new snapshot keep theirs, by a hash of
+  their bytes). 3.0.6 drew every capsule as vectors per packet (a few fps on a large window); a
+  worker's OffscreenCanvas took seconds a page (no GPU there). `--native --only nativecanvas`
+  opens the cast in a browser: paper and ink shown, a stroke written while casting reaching it,
+  and a 1920x1080 viewer's frames while the camera moves at 120 Hz (60 fps, gaps <= 17 ms).
 - Launch screens follow the UI theme: the app sends it at start and on change (`setLaunchTheme`,
   platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
   the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView

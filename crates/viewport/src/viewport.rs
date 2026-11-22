@@ -751,7 +751,7 @@ impl Viewport {
                 // the fingers are down. 3.0.0 stopped this ("never rebase mid-gesture"): text
                 // stayed a stretched bitmap until the lift, and every pinch logged 0 rebases.
                 if !self.resampled
-                    && should_rebase(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r))
+                    && rebases_now(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r))
                 {
                     self.rebase(now);
                 }
