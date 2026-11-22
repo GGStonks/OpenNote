@@ -285,7 +285,7 @@ fn a_pinch_ending_near_the_page_width_snaps_to_it() {
 fn a_long_pinch_commits_its_zoom_on_the_way() {
     let mut v = fitted(5);
     let z0 = v.camera().zoom;
-    // Spread x3 over 600 ms: zero mid-gesture rebases. Commits atomically on settle when lifted.
+    // Spread x3 over 600 ms: rebased at 1.5x (and again after REBASE_MIN_MS).
     fingers(
         &mut v,
         &[(380.0, 600.0), (440.0, 600.0)],
@@ -293,30 +293,42 @@ fn a_long_pinch_commits_its_zoom_on_the_way() {
         1.0,
         600.0,
         120.0,
-        true,
+        false,
     );
-    assert_eq!(v.rebases, 0, "mid-gesture rebases must be 0");
+    assert!(v.rebases >= 1, "rebases {}", v.rebases);
     let c = v.camera().clone();
     assert!(c.zoom > z0 * 1.4, "committed zoom {} from {z0}", c.zoom);
-    // The picture did not jump: the scale is the fingers' (x3, less the engage step).
+    // The picture did not jump at the rebase: the scale is the fingers' (x3, less the engage step).
     assert!(close(c.ez / z0, 3.0 / 1.05, 0.05), "{}", c.ez / z0);
 }
 
 #[test]
-fn zero_mid_gesture_rebases_preserves_picture_in_place() {
-    // Under the invariant, during active pinch motion, rebases is strictly 0 and scale is driven continuously.
+fn rebasing_keeps_the_picture_in_place() {
+    // The camera just before and just after a rebase (same fingers) shows the same picture.
     let mut v = fitted(5);
     v.touch(0, Phase::Began, 380.0, 600.0, 1.0);
     v.touch(1, Phase::Began, 440.0, 600.0, 1.0);
     let mut t = 1.0;
+    let mut prev = v.camera().clone();
+    let mut checked = 0;
     for s in 1..=80 {
         t += 0.008;
         let d = 30.0 + s as f64 * 1.5;
+        let before = v.rebases;
         v.touch(0, Phase::Moved, 410.0 - d, 600.0 + s as f64, t);
         v.touch(1, Phase::Moved, 410.0 + d, 600.0 + s as f64, t);
         v.tick(t);
-        assert_eq!(v.rebases, 0, "Must be zero mid-gesture rebases");
+        let c = v.camera().clone();
+        if v.rebases > before {
+            // The fingers' centre moved down 1 px: the content under it is the same.
+            let a = content_at(&prev, 410.0, 600.0 + (s - 1) as f64);
+            let b = content_at(&c, 410.0, 600.0 + s as f64);
+            assert!(close(a.0, b.0, 1.0) && close(a.1, b.1, 1.0), "{a:?} {b:?}");
+            checked += 1;
+        }
+        prev = c;
     }
+    assert!(checked >= 1);
 }
 
 #[test]

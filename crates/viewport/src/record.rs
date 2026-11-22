@@ -48,6 +48,16 @@ pub struct GestureSummary {
     pub work_max: f64,
     pub camera_max: f64,
     pub upload_max: f64,
+    /// The longest wait for a drawable (ms; the display's, not the CPU's), the ticks skipped
+    /// because the GPU had not finished the previous frame (`gpuLate`) or to drain frames queued
+    /// ahead of the display (`drained`), and the longest display-link interval seen (`linkMax`:
+    /// over `linkMs` the display ran slower than asked).
+    pub acquire_max: f64,
+    pub gpu_late: u64,
+    pub drained: u64,
+    pub link_max: f64,
+    /// The longest wait for the canvas's lock (ms; held by the page's calls).
+    pub lock_max: f64,
 }
 
 /// One gesture being recorded.
@@ -66,6 +76,11 @@ pub struct GestureRecorder {
     work: Vec<f64>,
     camera_max: f64,
     upload_max: f64,
+    acquire_max: f64,
+    gpu_late: u64,
+    drained: u64,
+    link_max: f64,
+    lock_max: f64,
 }
 
 impl GestureRecorder {
@@ -87,6 +102,11 @@ impl GestureRecorder {
             work: Vec::with_capacity(4096),
             camera_max: 0.0,
             upload_max: 0.0,
+            acquire_max: 0.0,
+            gpu_late: 0,
+            drained: 0,
+            link_max: 0.0,
+            lock_max: 0.0,
         }
     }
 
@@ -114,6 +134,27 @@ impl GestureRecorder {
         }
         self.camera_max = self.camera_max.max(camera);
         self.upload_max = self.upload_max.max(upload);
+    }
+
+    /// How the tick's draw was paced: its wait for the canvas's lock and for a drawable (ms),
+    /// skipped because the GPU was still on the previous frame, skipped to drain the display's
+    /// queue.
+    pub fn pace(&mut self, lock_ms: f64, acquire_ms: f64, gpu_late: bool, drained: bool) {
+        if lock_ms.is_finite() {
+            self.lock_max = self.lock_max.max(lock_ms);
+        }
+        if acquire_ms.is_finite() {
+            self.acquire_max = self.acquire_max.max(acquire_ms);
+        }
+        self.gpu_late += u64::from(gpu_late);
+        self.drained += u64::from(drained);
+    }
+
+    /// The display link's interval at a tick (ms).
+    pub fn link(&mut self, duration_ms: f64) {
+        if duration_ms.is_finite() {
+            self.link_max = self.link_max.max(duration_ms);
+        }
     }
 
     /// The canvas drew a frame in the last tick.
@@ -197,6 +238,11 @@ impl GestureRecorder {
             work_max: r(work_at(1.0)),
             camera_max: r(self.camera_max),
             upload_max: r(self.upload_max),
+            acquire_max: r(self.acquire_max),
+            gpu_late: self.gpu_late,
+            drained: self.drained,
+            link_max: r(self.link_max),
+            lock_max: r(self.lock_max),
         }
     }
 }
@@ -225,6 +271,22 @@ mod tests {
         assert_eq!(s.max, 16.7);
         assert_eq!(s.slow, 1);
         assert_eq!((s.events, s.rebases, s.z0, s.z, s.id), (20, 1, 1.0, 2.0, 3));
+    }
+
+    #[test]
+    fn where_the_ticks_waited() {
+        let mut r = GestureRecorder::new(0.0, 1.0, 0, 0, 120.0);
+        r.pace(0.1, 0.02, false, false);
+        r.pace(0.3, 8.41, false, false);
+        r.pace(0.0, 0.0, false, true);
+        r.pace(0.0, 0.0, true, false);
+        r.link(8.33);
+        r.link(16.67);
+        r.tick(0.0, true);
+        r.tick(8.3, false);
+        let s = r.finish(1, 20.0, 1.0, 2, 0);
+        assert_eq!((s.acquire_max, s.lock_max, s.link_max), (8.4, 0.3, 16.7));
+        assert_eq!((s.gpu_late, s.drained), (1, 1));
     }
 
     #[test]

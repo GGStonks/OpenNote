@@ -673,7 +673,9 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
         if (pz.engaged) {
           if (pinchTimes) pinchTimes.events++;
           trackPinch(pz);
-          // Hard rule: NEVER rebase layout/zoom mid-gesture. Driven purely via CSS transform.
+          // A long pinch commits its zoom on the way (2.9.13; 3.0.0 dropped it: text stayed a
+          // stretched bitmap until the lift). Not under the shell's native pinch.
+          if (pz.native === null && shouldRebase(pz.k, now - pz.rebasedAt)) rebase(pz, now);
           if (pinchFrame === null) pinchFrame = requestAnimationFrame(applyPinch);
           last.current = { x: c.x, y: c.y, t: now };
           return;

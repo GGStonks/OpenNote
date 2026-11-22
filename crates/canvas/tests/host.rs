@@ -289,3 +289,40 @@ fn erase_shrinking_and_empty_scene_gpu_lifecycle() {
         assert!(s.pages.drawn_caps > 0, "frame {f}: no capsules drawn");
     }
 }
+
+#[test]
+fn a_paced_host_draws_again_once_the_gpu_is_done() {
+    // A tick whose previous frame the GPU has not finished draws nothing (3.0.3's queued frames
+    // on the iPad); the GPU's completion is seen by the next tick's non-blocking poll, so the
+    // canvas never stays stopped, and a light frame is done well within a 120 Hz tick.
+    let (mut host, _) = CanvasHost::offscreen(400, 400).expect("GPU host");
+    host.set_paced(true);
+    let at = |k: f32| FrameSpec {
+        surface: None,
+        placed: None,
+        clear: Some(Rgba::WHITE),
+        pages: vec![PagePlacement {
+            page: "p1".into(),
+            tf: Transform::scale(k, 0.0, 0.0),
+            paper: None,
+            at: None,
+            bx: None,
+        }],
+    };
+    let mut late = 0;
+    for i in 0..30 {
+        host.set_frame(at(1.0 + i as f32 * 0.01));
+        let t = std::time::Instant::now();
+        while !host.draw().unwrap() {
+            assert!(host.pace.gpu_late, "skipped only for the GPU: {:?}", host.pace);
+            late += 1;
+            assert!(
+                t.elapsed() < std::time::Duration::from_millis(60),
+                "the GPU's completion was never seen"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    assert!(late <= 3, "a light frame was still on the GPU a tick later {late} times");
+}

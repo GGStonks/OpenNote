@@ -200,7 +200,6 @@ struct Pinch {
     k: f64,
     /// The fingers' own factor (spread / d0), past the limits too: shown rubber-banded.
     kr: f64,
-    #[allow(dead_code)]
     rebased_at: Option<f64>,
 }
 
@@ -747,9 +746,15 @@ impl Viewport {
                 pz.kr = spread / pz.d0;
                 pz.c = c;
                 self.pinch = Some(pz);
-                // Hard rule: NEVER rebase layout/zoom mid-gesture.
-                // 100% of camera motion is driven via GPU uniforms and CSS transform.
-                // Single atomic rebase on settle only in end_pinch.
+                // A long pinch commits its zoom on the way (useViewport `rebase`), on a real
+                // sample only: the page lays its text and formulas out sharp at the new zoom while
+                // the fingers are down. 3.0.0 stopped this ("never rebase mid-gesture"): text
+                // stayed a stretched bitmap until the lift, and every pinch logged 0 rebases.
+                if !self.resampled
+                    && should_rebase(pz.k, pz.rebased_at.map_or(f64::INFINITY, |r| now - r))
+                {
+                    self.rebase(now);
+                }
                 self.last = Some((c, now));
                 return;
             }
@@ -855,7 +860,6 @@ impl Viewport {
     }
 
     /// useViewport `rebase`: the pinch's zoom committed while the fingers are down.
-    #[allow(dead_code)]
     fn rebase(&mut self, now: f64) {
         let Some(pz) = self.pinch else {
             return;

@@ -768,7 +768,8 @@ pub fn draw_at(present_ms: f64) -> bool {
         clock_ms()
     };
     let start = clock_ms();
-    TICK_PARTS.with(|p| p.set((0.0, 0.0)));
+    TICK_PARTS.with(|p| p.set((0.0, 0.0, Default::default())));
+    LOCK_MS.with(|l| l.set(0.0));
     let drawn = catch_unwind(AssertUnwindSafe(|| draw_locked(t))).unwrap_or_else(|_| {
         // Nothing drawn by a host that panicked is trusted: made again at a later tick.
         let mut slot = lock(&HOST);
@@ -779,14 +780,29 @@ pub fn draw_at(present_ms: f64) -> bool {
         note_error("draw panicked".into());
         false
     });
-    let (camera, upload) = TICK_PARTS.with(|p| p.get());
-    crate::viewport_service::tick_work(clock_ms() - start, camera, upload);
+    let (camera, upload, pace) = TICK_PARTS.with(|p| p.get());
+    let lock_ms = LOCK_MS.with(|l| l.get());
+    crate::viewport_service::tick_work(clock_ms() - start, camera, upload, lock_ms, pace);
     drawn
 }
 
 thread_local! {
-    /// This render tick's camera step and scene uploads (ms), for the gesture's record.
-    static TICK_PARTS: std::cell::Cell<(f64, f64)> = const { std::cell::Cell::new((0.0, 0.0)) };
+    /// This render tick's camera step and scene uploads (ms) and its draw's pacing, for the
+    /// gesture's record.
+    /// This render tick's wait for the canvas's lock (ms; the page's calls hold it).
+    static LOCK_MS: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+    static TICK_PARTS: std::cell::Cell<(f64, f64, canvas::host::Pace)> =
+        const {
+            std::cell::Cell::new((
+                0.0,
+                0.0,
+                canvas::host::Pace {
+                    acquire_ms: 0.0,
+                    gpu_late: false,
+                    drained: false,
+                },
+            ))
+        };
 }
 
 fn draw_locked(present_ms: f64) -> bool {
@@ -794,8 +810,10 @@ fn draw_locked(present_ms: f64) -> bool {
     let t_cam = clock_ms();
     let placed = crate::viewport_service::draw_tick(present_ms);
     let camera_ms = clock_ms() - t_cam;
-    TICK_PARTS.with(|p| p.set((camera_ms, 0.0)));
+    TICK_PARTS.with(|p| p.set((camera_ms, 0.0, Default::default())));
+    let t_lock = clock_ms();
     let mut guard = lock(&HOST);
+    LOCK_MS.with(|l| l.set(clock_ms() - t_lock));
     let slot: &mut Slot = &mut guard;
     if slot.host.is_none() {
         if !slot.remake || slot.surface.is_none() {
@@ -848,7 +866,7 @@ fn draw_locked(present_ms: f64) -> bool {
         slot.complete = false;
     }
     let upload_ms = clock_ms() - t_up;
-    TICK_PARTS.with(|p| p.set((camera_ms, upload_ms)));
+    TICK_PARTS.with(|p| p.set((camera_ms, upload_ms, Default::default())));
     if let Some(sf) = moved {
         host.set_surface(sf);
     }
@@ -863,6 +881,8 @@ fn draw_locked(present_ms: f64) -> bool {
         host.place(k, x, y);
     }
     let result = host.draw();
+    let pace = host.pace;
+    TICK_PARTS.with(|p| p.set((camera_ms, upload_ms, pace)));
     let mut gpu_ms = None;
     if result == Ok(true) {
         crate::viewport_service::drew(host.paper_gap());

@@ -19,8 +19,31 @@ use crate::scene::Transform;
 use crate::telemetry::{FrameSample, FrameStats, StatsSummary};
 use crate::{Frame, GpuCanvas, GpuScene, PageDraw, Scene};
 use model::Stroke;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// A drawable that took longer than this to come (ms) means frames were queued ahead of the
+/// display (3.0.3's waits were whole refreshes, 8.4 and 16.9 ms): the next tick is skipped, so
+/// the queue drains to the frame being drawn. Where a wait stays long though a tick was skipped
+/// (a driver whose images come late anyway), nothing is skipped for `DRAIN_PAUSE`.
+const BACKLOG_MS: f64 = 4.0;
+const DRAIN_PAUSE: Duration = Duration::from_secs(1);
+/// A frame whose GPU work has not been seen done for this long is drawn over anyway (a completion
+/// that never came must not stop the canvas).
+const GPU_STALE: Duration = Duration::from_millis(100);
+
+/// How the last `draw` was paced (the gesture's crash-log entry: `acquireMax`, `gpuLate`,
+/// `drained`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Pace {
+    /// Time spent waiting for the surface's next image (ms).
+    pub acquire_ms: f64,
+    /// Skipped: the GPU had not finished the previous frame.
+    pub gpu_late: bool,
+    /// Skipped: the drawable queue was draining after a long wait for an image.
+    pub drained: bool,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Stats {
@@ -39,6 +62,10 @@ pub struct Stats {
     pub skipped_pages: u64,
     /// Frames whose surface image was suboptimal.
     pub suboptimal: u64,
+    /// Ticks skipped because the GPU had not finished the previous frame, or to drain frames
+    /// queued ahead of the display (`Pace`).
+    pub gpu_late: u64,
+    pub drained: u64,
     /// The pages' scenes: held, on the GPU, drawn, waited for (crates/canvas `pages`).
     pub pages: PageStats,
     /// Pictures' textures on the device, their bytes and the budget (textures.rs).
@@ -77,6 +104,20 @@ pub struct CanvasHost {
     stats: Stats,
     pub telemetry: FrameStats,
     last_frame_instant: Option<Instant>,
+    /// Frames submitted to a surface, and the last one the GPU was seen to finish (set by the
+    /// queue's completion callback, read after a non-blocking poll).
+    submitted: u64,
+    done: Arc<AtomicU64>,
+    submitted_at: Option<Instant>,
+    /// The last wait for a drawable was long: the next tick is skipped; the tick before this draw
+    /// was skipped so; no skipping until then.
+    drain: bool,
+    drained_last: bool,
+    no_drain_until: Option<Instant>,
+    /// Paced (`Pace`): a surface's ticks are; an offscreen target's on request (`set_paced`).
+    paced: bool,
+    /// How the last `draw` was paced.
+    pub pace: Pace,
 }
 
 impl CanvasHost {
@@ -244,6 +285,14 @@ impl CanvasHost {
                 stats,
                 telemetry: FrameStats::default(),
                 last_frame_instant: None,
+                submitted: 0,
+                done: Arc::new(AtomicU64::new(0)),
+                submitted_at: None,
+                drain: false,
+                drained_last: false,
+                no_drain_until: None,
+                paced: true,
+                pace: Pace::default(),
             },
             name,
         ))
@@ -277,6 +326,14 @@ impl CanvasHost {
                 },
                 telemetry: FrameStats::default(),
                 last_frame_instant: None,
+                submitted: 0,
+                done: Arc::new(AtomicU64::new(0)),
+                submitted_at: None,
+                drain: false,
+                drained_last: false,
+                no_drain_until: None,
+                paced: false,
+                pace: Pace::default(),
             },
             name,
         ))
@@ -519,6 +576,11 @@ impl CanvasHost {
         self.canvas.health().last()
     }
 
+    /// Paces an offscreen host's draws as a surface's are (`Pace`; tests).
+    pub fn set_paced(&mut self, on: bool) {
+        self.paced = on;
+    }
+
     /// The device was lost: this host draws nothing more and must be made again.
     pub fn is_lost(&self) -> bool {
         self.canvas.health().is_lost()
@@ -530,6 +592,7 @@ impl CanvasHost {
     /// error while it was drawn, the surface failed, or the device is lost). A frame that failed
     /// on the GPU is not retried until the page sends something new.
     pub fn draw(&mut self) -> Result<bool, String> {
+        self.pace = Pace::default();
         // Pictures the worker decoded since: the frame is drawn again with them.
         if self.canvas.pictures.arrived() {
             self.dirty = true;
@@ -553,6 +616,28 @@ impl CanvasHost {
         // No frame from the page yet (also after a resize): leave the surface as it is.
         if self.frame == FrameSpec::default() && matches!(self.target, Target::Surface { .. }) {
             return Ok(false);
+        }
+        // Paced on the GPU and the display, never queued behind them (3.0.3 on the owner's iPad,
+        // after a few seconds at rest: the GPU's frames ran past a refresh, the drawables filled
+        // up and each tick waited 8 or 17 ms for one, every frame shown one or two refreshes
+        // after its time). A tick whose previous frame the GPU has not finished draws nothing
+        // (the next tick draws the newest camera); after a long wait for a drawable one tick is
+        // skipped, which the frames queued ahead cover, so the queue drains without a gap.
+        if self.paced {
+            let _ = self.canvas.device.poll(wgpu::PollType::Poll);
+            let busy = self.submitted > self.done.load(Ordering::Acquire)
+                && self.submitted_at.is_some_and(|t| t.elapsed() < GPU_STALE);
+            if busy {
+                self.pace.gpu_late = true;
+                self.stats.gpu_late += 1;
+                return Ok(false);
+            }
+            if std::mem::take(&mut self.drain) {
+                self.pace.drained = true;
+                self.drained_last = true;
+                self.stats.drained += 1;
+                return Ok(false);
+            }
         }
         let t0 = Instant::now();
         let frame_dt_us = self
@@ -631,7 +716,17 @@ impl CanvasHost {
                     surface.configure(&self.canvas.device, config);
                     *reconfigure = false;
                 }
-                let st = match surface.get_current_texture() {
+                let ta = Instant::now();
+                let acquired = surface.get_current_texture();
+                self.pace.acquire_ms = ta.elapsed().as_secs_f64() * 1000.0;
+                let long = self.pace.acquire_ms > BACKLOG_MS;
+                let now = Instant::now();
+                if long && self.drained_last {
+                    self.no_drain_until = Some(now + DRAIN_PAUSE);
+                }
+                self.drained_last = false;
+                self.drain = long && self.no_drain_until.is_none_or(|t| now >= t);
+                let st = match acquired {
                     Ok(st) => st,
                     Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
                         // The window changed under the surface (rotation, a size not told yet):
@@ -670,6 +765,15 @@ impl CanvasHost {
                 self.canvas.draw_frame(&view, tw, th, &frame)
             }
         };
+        if self.paced {
+            // Seen done by a later tick's poll (Pace).
+            self.submitted += 1;
+            self.submitted_at = Some(Instant::now());
+            let (done, n) = (self.done.clone(), self.submitted);
+            self.canvas.queue.on_submitted_work_done(move || {
+                done.fetch_max(n, Ordering::AcqRel);
+            });
+        }
         self.dirty = false;
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         if !drawn || self.errors() > errors_before {
@@ -681,7 +785,8 @@ impl CanvasHost {
         self.stats.frames += 1;
         self.stats.last_draw_ms = ms;
         self.stats.worst_draw_ms = self.stats.worst_draw_ms.max(ms);
-        let cpu_prepare_us = (ms * 1000.0) as u64;
+        // The CPU's part: the wait for a drawable is the display's (Pace::acquire_ms).
+        let cpu_prepare_us = ((ms - self.pace.acquire_ms).max(0.0) * 1000.0) as u64;
         let bytes_uploaded = self.pages.stats().gpu_bytes.saturating_sub(bytes_before);
         self.telemetry.record(FrameSample {
             frame_dt_us,

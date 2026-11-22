@@ -163,7 +163,16 @@ Smoothness lives in the camera, which the DOM and the canvas share; never in one
   in land exactly on the page's own gestures).
 - Each gesture's crash-log `pinch` entry says where the render thread's ticks went (`workP95`,
   `workMax`: the whole tick; `cameraMax`: the camera's step and its lock; `uploadMax`: scene
-  uploads): a tick over a frame misses a refresh. Read it before guessing at dropped frames.
+  uploads; `lockMax`: the wait for the canvas's lock; `acquireMax`: the wait for a drawable, the
+  display's, not the CPU's; `gpuLate` / `drained`: ticks skipped by the pacing below; `linkMax`:
+  the longest display-link interval): a tick over a frame misses a refresh. Read it before
+  guessing at dropped frames.
+- The canvas never queues frames behind the GPU or the display (canvas `host.rs` `Pace`): a tick
+  whose previous frame the GPU has not finished draws nothing (`gpuLate`, the next tick draws the
+  newest camera), and after a wait over `BACKLOG_MS` for a drawable the next tick is skipped
+  (`drained`: the frames queued ahead cover it, so no refresh repeats). 3.0.3 on the owner's iPad,
+  after seconds at rest: `workP95` 16.9 ms with CPU work under 1 ms, every tick waiting one or two
+  refreshes in `nextDrawable` and showing its frame that much later.
 - `--native --only cameracoherence` is bimodal on this PC (since at least 3.0.2): some runs lock the
   canvas a page frame off the DOM (pan p50 exactly 20 px, the frame's motion). Run it twice.
 - Rubber banding (crates/viewport): pans past any edge stretch on UIScrollView's curve
@@ -329,8 +338,10 @@ show the iPad's compositing cost).
 - Selections and text boxes resize with eight handles (`RESIZE_HANDLES` in Blocks.tsx): corners keep
   the aspect ratio, sides stretch one way (ink and pictures stretch, LaTeX stretches via
   `stretchX`, a text box rewraps; its font scales only at a corner). `--only resize8`, `--only boxes`.
-- A long pinch commits its zoom on the way (`REBASE_RATIO` in useViewport.ts, a synchronous commit):
-  everything is redrawn sharp while the fingers are down; `--latex --only longpinch --shots <dir>`.
+- A long pinch commits its zoom on the way (`REBASE_RATIO` in useViewport.ts, a synchronous commit;
+  the Rust camera too, `Viewport::rebase`, on real samples only: 3.0.0-3.0.3 never did, `rebases`
+  0 in every pinch): everything is redrawn sharp while the fingers are down;
+  `--latex --only longpinch --shots <dir>`.
   Never re-run the gesture effect mid-pinch (its clean-up ends the pinch): callbacks it reads go
   through refs, and the editor's scroll ref callback is stable.
 - Fit to width fits the page on screen (Editor's `curSheet`), `FIT_MARGIN` px from the edges, and refits as

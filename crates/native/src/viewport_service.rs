@@ -745,11 +745,13 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
 
 /// The tick's frame was drawn; `ink_paper` the largest gap between the papers and the ink as
 /// drawn (device px).
-/// The tick just done on the render thread (ms): all of it, the camera's step, the uploads.
-pub(crate) fn tick_work(total: f64, camera: f64, upload: f64) {
+/// The tick just done on the render thread (ms): all of it, the camera's step, the uploads, the
+/// wait for the canvas's lock; and how its draw was paced (canvas `Pace`).
+pub(crate) fn tick_work(total: f64, camera: f64, upload: f64, lock: f64, pace: canvas::host::Pace) {
     with_view(|v| {
         if let Some(r) = v.rec.as_mut() {
             r.work(total, camera, upload);
+            r.pace(lock, pace.acquire_ms, pace.gpu_late, pace.drained);
         }
     });
 }
@@ -1173,7 +1175,12 @@ pub extern "C" fn opennote_viewport_link(duration: f64, lead: f64) {
 
 pub fn link(duration_ms: f64, lead_ms: f64) {
     if duration_ms.is_finite() && lead_ms.is_finite() {
-        with_view(|v| v.link = (duration_ms, lead_ms));
+        with_view(|v| {
+            v.link = (duration_ms, lead_ms);
+            if let Some(r) = v.rec.as_mut() {
+                r.link(duration_ms);
+            }
+        });
     }
 }
 
