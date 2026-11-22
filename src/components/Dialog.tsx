@@ -147,6 +147,7 @@ export const DialogContainer: React.FC = () => {
 
   return (
     <div
+      data-viewport-hole
       className="fixed inset-0 z-[10000] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 select-none"
       onClick={() => dialog.close()}
       data-no-pan

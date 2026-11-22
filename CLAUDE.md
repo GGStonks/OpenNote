@@ -349,11 +349,24 @@ show the iPad's compositing cost).
   panels use it too. `--only popups` opens each one on phones (portrait, landscape, 320 px) and a
   tablet: all must be wholly on screen and closable by their own button (the + menu once hung below
   a phone's screen; the pen popover, moved up, covered its own button with the phone sideways).
-- The editor's top bar fits any width by construction: after layout, if the left group (title,
-  undo, redo) is covered, Paper, Export and Settings move into the "…" menu one at a time, then the
-  title may shrink away (`useHeaderFold` in Toolbar.tsx, again on every resize); the tool shelf's
-  buttons shrink down to 280 px screens. `--only header` checks 280-1920 px wide screens for
-  overlapping or cut buttons (on a 360 px phone undo and redo slid under record and paper).
+- The editor's top bar (`data-editor-bar`: two islands) fits any width: the title gives up its
+  room first; under `sm` the pages button, AI and Cast go (the page pill opens the pages, AI and
+  Cast are in the "…" menu), under 340 px Redo, under 300 px the title. The tool dock
+  (`data-tool-dock`) is never wider or taller than the screen: its tools are a strip that scrolls
+  (ends fade where tools lie beyond, the chosen tool is scrolled into view, `useScrollStrip`), its
+  popovers anchor to the dock outside the strip's clip, and the colour and width dots show from
+  `sm` (the popovers hold the same). Bars along the bottom (selection, paste, zoom) stand above a
+  bottom dock (Editor `dockLift`). `--only header` checks 280-1920 px wide screens for
+  overlapping, cut or under-36 px buttons and a dock off the screen (3.0.1's 640 px dock hung off
+  both sides of a phone held upright).
+- Anything drawn over the note that takes touches (dialogs, sheets, popovers, the toolbar) carries
+  `data-viewport-hole` (and `data-no-pan`): on iOS the shell hands fingers to the Rust camera
+  wherever `Viewport::accepts` says so, and Settings' header and edges, not a hole, scrolled the
+  note behind it.
+- Cast to PC (`crates/native/src/remote_service.rs`, MirrorPopover): the server listens on
+  0.0.0.0 and the URL carries this device's LAN IPv4 (`lan_ipv4`: Wi-Fi `en0` / `wlan*` first,
+  never loopback or cellular); its QR code is encoded in Rust (`qr_svg_path`, qrcode crate) and
+  drawn as one SVG path. 3.0.1 sent `127.0.0.1` with a decorative pattern that was no QR code.
 - Launch screens follow the UI theme: the app sends it at start and on change (`setLaunchTheme`,
   platform.ts) to `OpenNoteLaunchPlugin` (Android: SharedPreferences, `setSplashScreenTheme` with
   the `Launch.<Theme>` styles from Android 13, the app's night mode on Android 12, window and WebView

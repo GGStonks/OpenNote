@@ -113,19 +113,19 @@ export const AudioRecorder: React.FC<{ noteId: string; onError: (msg: string) =>
   return (
     <div ref={wrapRef} className="relative flex items-center">
       {recording ? (
-        <button onClick={stop} className="flex items-center gap-1.5 bg-red-500 text-white px-2.5 py-1.5 rounded-xl text-xs font-semibold" title="Stop recording">
+        <button onClick={stop} className="flex items-center gap-1.5 bg-red-500 text-white px-2.5 h-10 sm:h-9 rounded-xl text-xs font-semibold tabular-nums active:scale-95 transition" title="Stop recording">
           <Square className="w-3 h-3 fill-current" />
           {fmt(elapsed)}
         </button>
       ) : (
-        <button onClick={start} className="p-2 rounded-lg text-gray-600 dark:text-gray-300" title="Record audio">
+        <button onClick={start} className="min-w-[40px] h-10 sm:min-w-[36px] sm:h-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition" title="Record audio" aria-label="Record audio">
           <Mic className="w-[18px] h-[18px]" />
         </button>
       )}
       {list.length > 0 && (
-        <button onClick={() => setOpen(!open)} className="p-2 rounded-lg text-gray-600 dark:text-gray-300 relative" title="Recordings">
+        <button onClick={() => setOpen(!open)} className="min-w-[40px] h-10 sm:min-w-[36px] sm:h-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition relative" title="Recordings" aria-label="Recordings">
           <ListMusic className="w-[18px] h-[18px]" />
-          <span className="absolute top-0.5 right-0.5 text-[9px] bg-blue-600 text-white rounded-full px-1">{list.length}</span>
+          <span className="absolute top-1 right-0.5 text-[9px] bg-blue-600 text-white rounded-full px-1">{list.length}</span>
         </button>
       )}
       {open && (

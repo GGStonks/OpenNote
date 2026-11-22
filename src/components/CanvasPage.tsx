@@ -91,6 +91,8 @@ interface CanvasPageProps {
   printMode: boolean;
   /** The native canvas draws this page's ink and paper (services/rustCore.ts nativeCanvasFor). */
   nativeCanvas?: boolean;
+  /** White paper is shown dark (Settings: "Auto-adapt paper to dark mode", only under a dark UI theme). */
+  adaptDarkPaper?: boolean;
   /**
    * Print layout for the PDF export: pages showing a PDF are printed without it and without their
    * paper (the export lays the original PDF page under them, pdfExport.ts).
@@ -1255,7 +1257,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   const inputRef = useRef<HTMLDivElement>(null);
   const activeCanvasRef = useRef<HTMLCanvasElement>(null);
   const visible = true;
-  const adaptDark = !printMode && typeof document !== 'undefined' && document.documentElement.classList.contains('dark');
+  const adaptDark = !printMode && !!props.adaptDarkPaper;
   /** Blocks: the default ink follows the paper of the page they are on. */
   const darkAt = (y: number) => paperIsDark(sheetAt(y).paperColor, adaptDark);
   const inkAt = (y: number) => (darkAt(y) ? '#F3F4F6' : '#111827');
@@ -1295,8 +1297,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     const sheets = layout.sheets.map((sh) => {
       const paper = {
         style: styleCode[sh.paperStyle] ?? 0,
-        base: [...rgb01(paperHex(sh.paperColor)), 1] as [number, number, number, number],
-        dark: paperIsDark(sh.paperColor),
+        base: [...rgb01(paperHex(sh.paperColor, adaptDark)), 1] as [number, number, number, number],
+        dark: paperIsDark(sh.paperColor, adaptDark),
         pattern: sh.patternColor && /^#[0-9a-f]{6}$/i.test(sh.patternColor) ? rgb01(sh.patternColor) : null,
       };
       const key = JSON.stringify(paper);
@@ -1348,7 +1350,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       cancelAnimationFrame(raf);
       clearTimeout(status);
     };
-  }, [isNative, page.id, layout, hasImages]);
+  }, [isNative, page.id, layout, hasImages, adaptDark]);
 
   // Never a black page: once a second, whether the canvas really draws; if not, the page draws
   // the note itself for the rest of the run (rustCore `fallBackFromNativeCanvas`). Its own effect:

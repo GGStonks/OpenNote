@@ -851,6 +851,8 @@ export interface MirrorStatus {
   pin?: string;
   port?: number;
   clients: number;
+  /** The URL's QR code from Rust (remote_service.rs `qr_svg_path`): dark modules as one SVG path on a size x size grid. */
+  qr?: { size: number; d: string } | null;
 }
 
 export async function mirrorStart(port?: number, pin?: string): Promise<MirrorStatus> {

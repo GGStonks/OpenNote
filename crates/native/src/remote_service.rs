@@ -16,7 +16,101 @@ struct ActiveSession {
     url: String,
     pin: String,
     port: u16,
+    /// The URL's QR code (see `qr_svg_path`).
+    qr: Option<QrPath>,
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
+}
+
+/// A QR code as one SVG path: `d` draws the dark modules on a `size` x `size` grid (quiet zone not
+/// included: the page adds it).
+#[derive(Serialize, Clone)]
+pub struct QrPath {
+    pub size: usize,
+    pub d: String,
+}
+
+/// The URL's QR code (medium error correction), or None if it does not fit a QR code.
+pub fn qr_svg_path(text: &str) -> Option<QrPath> {
+    let code = qrcode::QrCode::with_error_correction_level(text.as_bytes(), qrcode::EcLevel::M).ok()?;
+    let size = code.width();
+    let colors = code.to_colors();
+    let mut d = String::with_capacity(size * size * 4);
+    for y in 0..size {
+        let mut x = 0;
+        while x < size {
+            if colors[y * size + x] == qrcode::Color::Dark {
+                let start = x;
+                while x < size && colors[y * size + x] == qrcode::Color::Dark {
+                    x += 1;
+                }
+                d.push_str(&format!("M{start} {y}h{}v1h-{}z", x - start, x - start));
+            } else {
+                x += 1;
+            }
+        }
+    }
+    Some(QrPath { size, d })
+}
+
+/// True for the private IPv4 ranges a home or office Wi-Fi hands out (RFC 1918) and link-local.
+fn is_lan(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_private() || ip.is_link_local()
+}
+
+/// This device's IPv4 address on the local network, Wi-Fi first: the interfaces' private addresses
+/// (Wi-Fi `en0` / `wlan*` before others; cellular `pdp_ip*` / `rmnet*` / `ccmni*` never), else the
+/// address the system routes outward from (no packet is sent).
+pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    {
+        let mut best: Option<(u8, std::net::Ipv4Addr)> = None;
+        // SAFETY: getifaddrs fills a linked list we only read and then free with freeifaddrs.
+        unsafe {
+            let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut head) == 0 {
+                let mut cur = head;
+                while !cur.is_null() {
+                    let ifa = &*cur;
+                    cur = ifa.ifa_next;
+                    if ifa.ifa_addr.is_null() || i32::from((*ifa.ifa_addr).sa_family) != libc::AF_INET {
+                        continue;
+                    }
+                    let flags = ifa.ifa_flags as i32;
+                    if flags & libc::IFF_UP as i32 == 0 || flags & libc::IFF_LOOPBACK as i32 != 0 {
+                        continue;
+                    }
+                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    let ip = std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
+                    if !is_lan(ip) {
+                        continue;
+                    }
+                    let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+                    let rank = if name == "en0" || name.starts_with("wlan") {
+                        0
+                    } else if ["pdp_ip", "rmnet", "ccmni", "utun", "ipsec", "awdl", "llw"].iter().any(|p| name.starts_with(p)) {
+                        continue;
+                    } else if ip.is_link_local() {
+                        2
+                    } else {
+                        1
+                    };
+                    if best.is_none_or(|(r, _)| rank < r) {
+                        best = Some((rank, ip));
+                    }
+                }
+                libc::freeifaddrs(head);
+            }
+        }
+        if let Some((_, ip)) = best {
+            return Some(ip);
+        }
+    }
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.0.2.1:9").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
 }
 
 static SESSION: OnceLock<Mutex<Option<ActiveSession>>> = OnceLock::new();
@@ -60,6 +154,7 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
                 "pin": s.pin,
                 "port": s.port,
                 "clients": s.broadcaster.client_count(),
+                "qr": s.qr,
             })
             .to_string(),
             Vec::new(),
@@ -90,7 +185,10 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         .map_err(|e| format!("failed to bind listener: {e}"))?;
 
     let actual_port = local_addr.port();
-    let url = format!("http://127.0.0.1:{actual_port}/?pin={pin}");
+    // The URL other devices on the Wi-Fi open (and the QR code carries): this device's LAN address,
+    // never loopback (127.0.0.1 sent the other device to itself).
+    let host = lan_ipv4().map(|ip| ip.to_string()).unwrap_or_else(|| "127.0.0.1".into());
+    let url = format!("http://{host}:{actual_port}/?pin={pin}");
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     // Spawn server in runtime
@@ -106,12 +204,14 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         })
         .map_err(|e| format!("failed to spawn mirror thread: {e}"))?;
 
+    let qr = qr_svg_path(&url);
     let resp = json!({
         "active": true,
         "url": url,
         "pin": pin,
         "port": actual_port,
         "clients": 0,
+        "qr": qr,
     });
 
     *guard = Some(ActiveSession {
@@ -119,6 +219,7 @@ pub fn mirror_start(meta: &str) -> Result<(String, Vec<u8>), String> {
         url,
         pin,
         port: actual_port,
+        qr,
         shutdown_tx,
     });
     MIRROR_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
@@ -144,6 +245,7 @@ pub fn mirror_status(_meta: &str) -> Result<(String, Vec<u8>), String> {
             "pin": s.pin,
             "port": s.port,
             "clients": s.broadcaster.client_count(),
+            "qr": s.qr,
         }),
         None => json!({
             "active": false,
@@ -246,4 +348,30 @@ pub fn broadcast_laser(x: f32, y: f32, intensity: f32, color_rgba: u32) {
         intensity,
         color_rgba,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lan_address_is_never_loopback() {
+        if let Some(ip) = lan_ipv4() {
+            assert!(!ip.is_loopback() && !ip.is_unspecified(), "{ip}");
+        }
+    }
+
+    #[test]
+    fn qr_path_covers_the_grid() {
+        let qr = qr_svg_path("http://192.168.1.23:38400/?pin=123456").expect("fits a QR code");
+        assert_eq!(qr.size % 4, 1, "QR sizes are 17 + 4 x version");
+        assert!(qr.size >= 25);
+        // The three finder patterns start with a 7-module dark run on the first row.
+        assert!(qr.d.starts_with("M0 0h7v1h-7z"), "{}", &qr.d[..20]);
+        if let Ok(out) = std::env::var("OPENNOTE_QR_SVG") {
+            let n = qr.size + 8;
+            let svg = format!(r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="-4 -4 {n} {n}" width="{w}" height="{w}" shape-rendering="crispEdges"><rect x="-4" y="-4" width="{n}" height="{n}" fill="#fff"/><path d="{}" fill="#000"/></svg>"##, qr.d, w = n * 8);
+            std::fs::write(out, svg).unwrap();
+        }
+    }
 }

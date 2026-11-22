@@ -7,23 +7,11 @@ export default {
   darkMode: 'class',
   theme: {
     extend: {
-      fontFamily: {
-        serif: ['"Playfair Display"', 'Georgia', 'Cambria', '"Times New Roman"', 'Times', 'serif'],
-        sans: ['-apple-system', 'BlinkMacSystemFont', '"SF Pro Text"', '"Inter"', 'system-ui', 'sans-serif'],
-      },
       // Panels drawn with bg-white take the theme's lightest surface (cream in Sepia).
       backgroundColor: {
         white: 'rgb(var(--ui-white) / <alpha-value>)',
       },
       colors: {
-        studio: {
-          accent: 'var(--studio-accent)',
-          'accent-hover': 'var(--studio-accent-hover)',
-          'accent-subtle': 'var(--studio-accent-subtle)',
-          'accent-glow': 'var(--studio-accent-glow)',
-          border: 'var(--studio-border-subtle)',
-          'border-strong': 'var(--studio-border-strong)',
-        },
         // Theme-driven (src/theme.ts): the gray scale and the UI surfaces.
         gray: {
           50: 'rgb(var(--g-50) / <alpha-value>)',

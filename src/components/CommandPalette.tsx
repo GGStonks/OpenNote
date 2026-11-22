@@ -104,6 +104,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = (p) => {
 
   return (
     <div
+      data-viewport-hole
       className="fixed inset-0 z-[10001] bg-black/45 backdrop-blur-md flex items-start justify-center pt-[15vh] px-4 select-none"
       onClick={p.onClose}
       data-no-pan

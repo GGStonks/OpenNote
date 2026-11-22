@@ -111,7 +111,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
   );
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4 overscroll-contain" data-no-pan data-viewport-hole>
       <div className="bg-white dark:bg-ui-panel rounded-t-3xl sm:rounded-3xl w-full sm:max-w-lg shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[var(--sa-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -125,7 +125,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
           </button>
         </div>
 
-        <div className="p-5 space-y-4 overflow-y-auto">
+        <div className="p-5 space-y-4 overflow-y-auto overscroll-contain">
           <section>
             <div className={label}>Appearance</div>
             <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
@@ -261,8 +261,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose: c
             <Toggle
               checked={Boolean(draft.showFps)}
               onChange={(v) => set({ showFps: v })}
-              title="Show frame rate (FPS)"
-              sub="Developer overlay: displays a real-time framerate counter on the screen while using the app."
+              title="Live frame rate"
+              sub="Shows a live frames-per-second counter over the app."
             />
             <Toggle
               checked={rec.on}

@@ -957,16 +957,17 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             <span data-cutout-item className="text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-500 px-2 py-0.5 rounded-full">{visibleNotes.length}</span>
           </div>
           <div className="flex items-center gap-2">
-            {/* Search Pill */}
-            <div className="hidden md:flex items-center relative max-w-xs w-48 lg:w-60">
+            {/* Search (the sidebar has its own: shown here only while the sidebar is hidden) */}
+            {!sidebarShown && <div className="hidden md:flex items-center relative max-w-xs w-48 lg:w-60">
               <Search className="w-3.5 h-3.5 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" strokeWidth={1.75} />
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search notes..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-gray-100 dark:bg-ui-raised border border-gray-200/50 dark:border-white/5 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40 select-text"
+                aria-label="Search notes"
+                className="w-full pl-8 pr-3 h-9 rounded-xl bg-gray-100 dark:bg-ui-raised border border-gray-200/50 dark:border-white/5 text-xs text-gray-900 dark:text-gray-100 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500/40 select-text"
               />
-            </div>
+            </div>}
             <div className="hidden sm:flex items-center bg-gray-100 dark:bg-ui-raised p-1 rounded-xl">
               <button onClick={() => setPrefs({ viewMode: 'grid' })} className={`p-1.5 rounded-lg ${prefs.viewMode === 'grid' ? 'bg-white dark:bg-ui-high text-blue-600 shadow-sm' : 'text-gray-400'}`} title="Grid"><GridIcon className="w-4 h-4" /></button>
               <button onClick={() => setPrefs({ viewMode: 'list' })} className={`p-1.5 rounded-lg ${prefs.viewMode === 'list' ? 'bg-white dark:bg-ui-high text-blue-600 shadow-sm' : 'text-gray-400'}`} title="List"><ListIcon className="w-4 h-4" /></button>
@@ -974,8 +975,10 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             <div className="relative" onClick={(e) => e.stopPropagation()}>
               <button
                 onClick={() => { const open = !filterOpen; closeMenus(); setFilterOpen(open); }}
-                className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold ${filterOpen || filterOn ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-ui-raised text-gray-600 dark:text-gray-300'}`}
+                className={`relative flex items-center justify-center gap-1.5 min-w-[40px] px-3 h-10 sm:h-9 rounded-xl text-xs font-semibold ${filterOpen || filterOn ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'bg-gray-100 dark:bg-ui-raised text-gray-600 dark:text-gray-300'}`}
                 title="Sort and filter"
+                aria-label="Sort and filter"
+                aria-expanded={filterOpen}
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">{filterOn ? (prefs.tagMode === 'whitelist' ? 'Only tagged' : 'Hiding tags') : 'Sort & filter'}</span>
@@ -986,8 +989,9 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             {/* Visible Import button */}
             <button
               onClick={() => importRef.current?.click()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+              className="flex items-center justify-center gap-1.5 min-w-[40px] px-3 h-10 sm:h-9 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
               title="Import PDF, Word, Notability, .opennote, or images"
+              aria-label="Import"
             >
               <Upload className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" strokeWidth={1.75} />
               <span className="hidden sm:inline">Import</span>
@@ -995,7 +999,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
             {/* Visible + New Note button */}
             <button
               onClick={p.onCreateNote}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-blue-600 text-white shadow-md shadow-blue-600/25 hover:bg-blue-700 active:scale-95 transition"
+              className="hidden sm:flex items-center gap-1.5 px-3.5 h-10 sm:h-9 rounded-xl text-xs font-semibold bg-blue-600 text-white shadow-md shadow-blue-600/25 hover:bg-blue-700 active:scale-95 transition"
               title="Create a new note"
             >
               <Plus className="w-3.5 h-3.5" strokeWidth={2.4} />
@@ -1075,7 +1079,7 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
       {/* Translucent full-window dropzone overlay */}
       {isDraggingFiles && (
         <div className="fixed inset-0 z-[200] bg-blue-600/15 backdrop-blur-md border-4 border-dashed border-blue-500/70 rounded-3xl m-4 flex flex-col items-center justify-center pointer-events-none pop-enter select-none">
-          <Upload className="w-16 h-16 text-blue-600 animate-bounce mb-3" strokeWidth={1.75} />
+          <Upload className="w-16 h-16 text-blue-600 mb-3" strokeWidth={1.75} />
           <h3 className="text-xl font-bold text-gray-900 dark:text-gray-100">Drop PDF, .note, .docx, or Image to import</h3>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Automatic conversion and instant new note creation</p>
         </div>

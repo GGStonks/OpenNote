@@ -70,7 +70,7 @@ export const UpdatePrompt: React.FC<{ enabled: boolean }> = ({ enabled }) => {
   if (phase.kind === 'offer') {
     const mb = phase.rel.asset.size ? ` (${(phase.rel.asset.size / 1048576).toFixed(1)} MB)` : '';
     return (
-      <div className="fixed inset-0 z-[900] bg-black/40 flex items-center justify-center p-4" onClick={() => setPhase({ kind: 'idle' })}>
+      <div data-no-pan data-viewport-hole className="fixed inset-0 z-[900] bg-black/40 flex items-center justify-center p-4" onClick={() => setPhase({ kind: 'idle' })}>
         <div className="bg-white dark:bg-ui-raised rounded-2xl shadow-2xl w-full max-w-sm p-5" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-center gap-3 mb-2">
             <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-900/40 text-blue-600 flex items-center justify-center flex-shrink-0">

@@ -1,71 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { Cast, Check, ChevronDown, ChevronRight, Copy, Monitor, Power, QrCode, RefreshCw, Terminal, Wifi } from 'lucide-react';
+import { Check, ChevronDown, ChevronRight, Copy, Power, RefreshCw, Terminal } from 'lucide-react';
 import { mirrorStart, mirrorStatus, mirrorStop, MirrorStatus } from '../services/rustCore';
 import { toast } from './Toast';
 
-// Lightweight offline SVG QR Code generator (Version 2-4 Byte Mode with Reed-Solomon ECC)
-function generateQrSvg(text: string): string {
-  // Simple deterministic visual matrix with finder patterns and data hash encoding
-  // for reliable visual recognition and offline preview
-  const size = 25;
-  const grid: boolean[][] = Array.from({ length: size }, () => Array(size).fill(false));
-
-  const addFinder = (r: number, c: number) => {
-    for (let i = 0; i < 7; i++) {
-      for (let j = 0; j < 7; j++) {
-        if (i === 0 || i === 6 || j === 0 || j === 6 || (i >= 2 && i <= 4 && j >= 2 && j <= 4)) {
-          grid[r + i][c + j] = true;
-        }
-      }
-    }
-  };
-
-  addFinder(0, 0);
-  addFinder(0, size - 7);
-  addFinder(size - 7, 0);
-
-  // Timing patterns
-  for (let i = 8; i < size - 8; i++) {
-    if (i % 2 === 0) {
-      grid[6][i] = true;
-      grid[i][6] = true;
-    }
-  }
-
-  // Hash content into data cells
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      const inFinder1 = r < 8 && c < 8;
-      const inFinder2 = r < 8 && c >= size - 8;
-      const inFinder3 = r >= size - 8 && c < 8;
-      const inTiming = r === 6 || c === 6;
-      if (inFinder1 || inFinder2 || inFinder3 || inTiming) continue;
-
-      h ^= (r * 31 + c * 17) & 0xff;
-      h = Math.imul(h, 0x01000193);
-      if ((h & 1) === 1) {
-        grid[r][c] = true;
-      }
-    }
-  }
-
-  const paths: string[] = [];
-  for (let r = 0; r < size; r++) {
-    for (let c = 0; c < size; c++) {
-      if (grid[r][c]) {
-        paths.push(`M${c + 2},${r + 2}h1v1h-1z`);
-      }
-    }
-  }
-
-  return `<svg viewBox="0 0 ${size + 4} ${size + 4}" class="w-full h-full fill-current"><path d="${paths.join('')}"/></svg>`;
-}
+/** The cast URL's QR code, encoded by Rust (remote_service.rs), drawn with its 4-module quiet zone. */
+const CastQr: React.FC<{ qr: NonNullable<MirrorStatus['qr']> }> = ({ qr }) => (
+  <svg viewBox={`-4 -4 ${qr.size + 8} ${qr.size + 8}`} className="w-full h-full" shapeRendering="crispEdges" role="img" aria-label="QR code of the cast address">
+    <rect x={-4} y={-4} width={qr.size + 8} height={qr.size + 8} fill="#fff" />
+    <path d={qr.d} fill="#000" />
+  </svg>
+);
 
 export const MirrorPopover: React.FC<{
   onClose: () => void;
@@ -110,15 +54,21 @@ export const MirrorPopover: React.FC<{
     }
   };
 
-  const handleCopy = () => {
+  const handleCopy = async () => {
     if (!status.url) return;
-    navigator.clipboard?.writeText(status.url);
-    setCopied(true);
-    toast.success('Mirror URL copied to clipboard');
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(status.url);
+      setCopied(true);
+      toast.success('Cast address copied');
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error('Could not copy: type the address shown on the PC');
+    }
   };
+  const loopback = !!status.url && /\/\/127\.0\.0\.1[:/]/.test(status.url);
 
   const isLive = status.active;
+  const port = status.port ?? 38400;
   const hasClients = (status.clients ?? 0) > 0;
 
   return (
@@ -172,17 +122,26 @@ export const MirrorPopover: React.FC<{
         <>
           {/* QR Code and PIN card */}
           <div className="flex items-center gap-4 bg-gray-50 dark:bg-white/5 p-3 rounded-2xl border border-gray-200/50 dark:border-white/5">
-            <div className="w-20 h-20 bg-white p-1 rounded-xl shadow-inner flex-shrink-0 text-gray-900" dangerouslySetInnerHTML={{ __html: generateQrSvg(status.url ?? 'opennote') }} />
+            {status.qr && !loopback && (
+              <div className="w-28 h-28 rounded-lg overflow-hidden flex-shrink-0">
+                <CastQr qr={status.qr} />
+              </div>
+            )}
             <div className="flex-1 min-w-0 flex flex-col justify-center">
               <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Access PIN</span>
               <span className="text-2xl font-mono font-bold tracking-widest text-blue-600 dark:text-blue-400 tabular-nums">
                 {status.pin ?? '----'}
               </span>
-              <span className="text-[11px] text-gray-500 dark:text-gray-400 truncate mt-0.5">
-                Port {status.port ?? 38400}
+              <span className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5">
+                Scan the code or open the address below on a PC on the same Wi-Fi.
               </span>
             </div>
           </div>
+          {loopback && (
+            <p className="text-xs rounded-xl px-3 py-2 bg-amber-50 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+              This device has no Wi-Fi address right now: join the same Wi-Fi as the PC, then stop and start casting. Over a USB cable, use the steps below.
+            </p>
+          )}
 
           {/* Copy URL button */}
           <button
@@ -226,10 +185,10 @@ export const MirrorPopover: React.FC<{
           {showTether && (
             <div className="p-2.5 mt-1 rounded-xl bg-gray-100 dark:bg-ui-high text-[11px] font-mono leading-relaxed space-y-1">
               <div className="text-gray-400 font-sans font-semibold">Android (via USB cable):</div>
-              <div className="text-blue-600 dark:text-blue-400 select-all">adb forward tcp:38400 tcp:38400</div>
+              <div className="text-blue-600 dark:text-blue-400 select-all">adb forward tcp:{port} tcp:{port}</div>
               <div className="text-gray-400 font-sans font-semibold mt-1.5">iOS (via USB cable):</div>
-              <div className="text-blue-600 dark:text-blue-400 select-all">iproxy 38400 38400</div>
-              <div className="text-gray-500 font-sans mt-1">Then open <b>http://localhost:38400</b> in your browser.</div>
+              <div className="text-blue-600 dark:text-blue-400 select-all">iproxy {port} {port}</div>
+              <div className="text-gray-500 font-sans mt-1">Then open <b className="select-all">http://localhost:{port}/{status.pin ? `?pin=${status.pin}` : ''}</b> in your browser.</div>
             </div>
           )}
         </div>

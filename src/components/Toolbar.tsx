@@ -130,6 +130,53 @@ export interface ToolbarProps {
   onToggleCleanPresentation?: (clean: boolean) => void;
   adaptDarkPaper?: boolean;
   onToggleAdaptDarkPaper?: (adapt: boolean) => void;
+  /** Changes when something else (the command palette) asks for the paper panel. */
+  openPaperSignal?: number;
+}
+
+/**
+ * The tool strip scrolls when the screen is narrower than its tools (phones upright): its ends fade
+ * where more tools lie beyond them, and the chosen tool is scrolled into view.
+ */
+function useScrollStrip(vertical: boolean, activeKey: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [ends, setEnds] = useState({ start: false, end: false });
+  const measure = () => {
+    const el = ref.current;
+    if (!el) return;
+    const pos = vertical ? el.scrollTop : el.scrollLeft;
+    const max = vertical ? el.scrollHeight - el.clientHeight : el.scrollWidth - el.clientWidth;
+    const next = { start: pos > 1, end: pos < max - 1 };
+    setEnds((e) => (e.start === next.start && e.end === next.end ? e : next));
+  };
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [vertical]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const el = ref.current;
+    const btn = el?.querySelector<HTMLElement>('[data-active]');
+    if (!el || !btn) return;
+    if (vertical) {
+      const top = btn.offsetTop - el.offsetTop, bottom = top + btn.offsetHeight;
+      if (top < el.scrollTop) el.scrollTop = top - 8;
+      else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight + 8;
+    } else {
+      const left = btn.offsetLeft - el.offsetLeft, right = left + btn.offsetWidth;
+      if (left < el.scrollLeft) el.scrollLeft = left - 8;
+      else if (right > el.scrollLeft + el.clientWidth) el.scrollLeft = right - el.clientWidth + 8;
+    }
+    measure();
+  }, [activeKey, vertical]); // eslint-disable-line react-hooks/exhaustive-deps
+  const dir = vertical ? 'to bottom' : 'to right';
+  const mask = ends.start || ends.end
+    ? `linear-gradient(${dir}, ${ends.start ? 'transparent, #000 28px' : '#000, #000'}, ${ends.end ? '#000 calc(100% - 28px), transparent' : '#000'})`
+    : undefined;
+  return { ref, onScroll: measure, style: mask ? { maskImage: mask, WebkitMaskImage: mask } : undefined };
 }
 
 function usePopover() {
@@ -156,7 +203,10 @@ const ToolDockButton: React.FC<{
   <button
     onClick={onClick}
     title={title}
-    className={`min-w-[40px] min-h-[40px] h-10 w-10 sm:h-11 sm:w-11 rounded-2xl flex items-center justify-center relative transition-all duration-150 active:scale-95 ${
+    aria-label={title}
+    aria-pressed={active}
+    data-active={active || undefined}
+    className={`flex-shrink-0 min-w-[40px] min-h-[40px] h-10 w-10 sm:h-11 sm:w-11 rounded-2xl flex items-center justify-center relative transition-[background-color,color,box-shadow,transform] duration-150 active:scale-95 ${
       active
         ? 'bg-blue-600 text-white shadow-md shadow-blue-600/30'
         : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
@@ -180,7 +230,9 @@ const DockPopover: React.FC<{
   return (
     <OnScreen
       data-ui-panel
-      className={`absolute z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-120px)] overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${positionClass}`}
+      data-no-pan
+      data-viewport-hole
+      className={`absolute z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-120px)] overscroll-contain overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${positionClass}`}
     >
       {children}
     </OnScreen>
@@ -193,7 +245,9 @@ const HeaderPopover: React.FC<{
 }> = ({ align = 'right', children }) => (
   <OnScreen
     data-ui-panel
-    className={`absolute top-12 z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${
+    data-no-pan
+    data-viewport-hole
+    className={`absolute top-full mt-2 z-50 glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-90px)] overscroll-contain overflow-y-auto no-scrollbar pop-enter text-gray-900 dark:text-gray-100 ${
       align === 'right' ? 'right-0' : 'left-0'
     }`}
   >
@@ -266,6 +320,9 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
   const [smartPenTab, setSmartPenTab] = useState<'shape' | 'style'>('shape');
   const [colorPickerOpen, setColorPickerOpen] = useState(false);
   const dockPos = p.dockPosition ?? 'bottom';
+  useEffect(() => {
+    if (p.openPaperSignal) headerPop.setOpen('paper');
+  }, [p.openPaperSignal]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const selectTool = (tool: ToolType, menu?: string) => {
     if (tools.tool === tool && menu) {
@@ -311,37 +368,42 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
     else setTools({ penColor: c });
   };
 
+  const vertical = dockPos !== 'bottom';
   const dockOrientationClass =
     dockPos === 'left'
-      ? 'fixed left-3 top-1/2 -translate-y-1/2 flex-col z-40'
+      ? 'fixed left-[calc(0.75rem+var(--sa-left))] top-1/2 -translate-y-1/2 z-40 max-h-[calc(100dvh-9rem-var(--sa-top)-var(--sa-bottom))]'
       : dockPos === 'right'
-      ? 'fixed right-3 top-1/2 -translate-y-1/2 flex-col z-40'
-      : 'fixed bottom-4 left-1/2 -translate-x-1/2 flex-row z-40';
+      ? 'fixed right-[calc(0.75rem+var(--sa-right))] top-1/2 -translate-y-1/2 z-40 max-h-[calc(100dvh-9rem-var(--sa-top)-var(--sa-bottom))]'
+      : 'fixed bottom-[calc(1rem+var(--sa-bottom))] left-1/2 -translate-x-1/2 z-40 max-w-[calc(100vw-1.5rem-var(--sa-left)-var(--sa-right))]';
+  const strip = useScrollStrip(vertical, tools.tool);
 
-  const iconBtn = 'min-w-[40px] min-h-[40px] h-10 w-10 sm:h-11 sm:w-11 rounded-2xl flex items-center justify-center text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition';
+  const barBtn = 'min-w-[40px] min-h-[40px] h-10 w-10 sm:h-9 sm:w-9 sm:min-w-[36px] sm:min-h-[36px] flex flex-shrink-0 items-center justify-center rounded-xl active:scale-95 transition';
 
   return (
     <>
       {/* =========================================================================
           TOP FLOATING GLASS ISLANDS (Zero Full-Width Opaque Header!)
           ========================================================================= */}
-      <div className="fixed top-3 left-3 right-3 z-30 pointer-events-none flex items-center justify-between gap-3 pt-[var(--sa-top)] select-none">
-        {/* Top-Left Island */}
-        <div className="glass-pill rounded-2xl px-2 py-1.5 flex items-center gap-1 sm:gap-1.5 pointer-events-auto max-w-[calc(100vw-120px)] sm:max-w-md">
+      <div data-editor-bar className="fixed top-[calc(0.75rem+var(--sa-top))] left-[calc(0.75rem+var(--sa-left))] right-[calc(0.75rem+var(--sa-right))] z-30 pointer-events-none flex items-center justify-between gap-2 sm:gap-3 select-none">
+        {/* Top-Left Island: shrinks first (the title gives up its room). */}
+        <div data-no-pan data-viewport-hole className="glass-pill rounded-2xl px-1.5 py-1 sm:px-2 sm:py-1.5 flex items-center gap-1 sm:gap-1.5 pointer-events-auto min-w-0 flex-1 sm:flex-initial sm:max-w-md">
           <button
             onClick={p.onBack}
-            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20 active:scale-95 transition"
+            className={`${barBtn} text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20`}
             title="Back to notes"
+            aria-label="Back to notes"
           >
             <ChevronLeft className="w-5 h-5" strokeWidth={1.75} />
           </button>
 
           <button
             onClick={p.onTogglePages}
-            className={`min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl active:scale-95 transition ${
+            className={`${barBtn} !hidden sm:!flex ${
               p.pagesOpen ? 'bg-blue-600 text-white shadow-sm' : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
             }`}
-            title="Page Overview Drawer"
+            title="Pages"
+            aria-label="Pages"
+            aria-pressed={p.pagesOpen}
           >
             <PanelLeft className="w-5 h-5" strokeWidth={1.75} />
           </button>
@@ -349,26 +411,31 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           <input
             value={p.title}
             onChange={(e) => p.setTitle(e.target.value)}
-            className="font-semibold text-sm sm:text-base bg-transparent rounded-lg px-2 py-1 w-24 min-[420px]:w-36 sm:w-48 text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 hover:bg-black/5 dark:hover:bg-white/5 transition select-text"
-            title="Click to rename note"
+            className="hidden min-[300px]:block font-semibold text-sm sm:text-base bg-transparent rounded-lg px-1.5 sm:px-2 h-10 sm:h-9 min-w-0 flex-1 sm:flex-none sm:w-48 text-gray-900 dark:text-gray-100 truncate focus:outline-none focus:ring-1 focus:ring-blue-500 hover:bg-black/5 dark:hover:bg-white/5 transition select-text"
+            title="Rename note"
+            aria-label="Note title"
           />
 
           <button
             onClick={p.onTogglePages}
-            className="px-2 py-1 rounded-xl text-xs font-semibold text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/10 tabular-nums flex-shrink-0"
-            title="Current page / Total pages"
+            className={`h-10 sm:h-9 px-2 rounded-xl text-xs font-semibold tabular-nums flex-shrink-0 whitespace-nowrap transition ${
+              p.pagesOpen ? 'bg-blue-600 text-white sm:bg-transparent sm:text-gray-500 sm:dark:text-gray-400' : 'text-gray-500 dark:text-gray-400 hover:bg-black/5 dark:hover:bg-white/10'
+            }`}
+            title="Pages"
+            aria-label={`Page ${p.currentPage} of ${p.totalPages}: show pages`}
           >
             {p.currentPage} / {p.totalPages}
           </button>
         </div>
 
         {/* Top-Right Island */}
-        <div ref={headerPop.ref} className="glass-pill rounded-2xl px-2 py-1.5 flex items-center gap-1 pointer-events-auto relative">
+        <div ref={headerPop.ref} data-no-pan data-viewport-hole className="glass-pill rounded-2xl px-1.5 py-1 sm:px-2 sm:py-1.5 flex items-center gap-0.5 sm:gap-1 pointer-events-auto relative flex-shrink-0">
           <button
             onClick={p.onUndo}
             disabled={!p.canUndo}
-            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition"
+            className={`${barBtn} text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30`}
             title="Undo"
+            aria-label="Undo"
           >
             <Undo2 className="w-5 h-5" strokeWidth={1.75} />
           </button>
@@ -376,13 +443,14 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           <button
             onClick={p.onRedo}
             disabled={!p.canRedo}
-            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30 active:scale-95 transition"
+            className={`${barBtn} !hidden min-[340px]:!flex text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 disabled:opacity-30`}
             title="Redo"
+            aria-label="Redo"
           >
             <Redo2 className="w-5 h-5" strokeWidth={1.75} />
           </button>
 
-          <div className="h-5 w-px bg-gray-300 dark:bg-white/10 mx-0.5" />
+          <div className="h-5 w-px bg-gray-300 dark:bg-white/10 mx-0.5 hidden sm:block" />
 
           {/* Audio slot */}
           <div className="flex items-center">
@@ -392,7 +460,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           {/* AI Assist button */}
           <button
             onClick={() => headerPop.setOpen(headerPop.open === 'ai' ? null : 'ai')}
-            className={`min-w-[36px] min-h-[36px] h-9 px-2.5 rounded-xl flex items-center gap-1.5 text-xs font-semibold active:scale-95 transition ${
+            className={`min-w-[36px] min-h-[36px] h-9 px-2.5 rounded-xl hidden sm:flex items-center gap-1.5 text-xs font-semibold active:scale-95 transition ${
               headerPop.open === 'ai'
                 ? 'bg-blue-600 text-white shadow-sm'
                 : 'text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/20'
@@ -406,7 +474,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           {/* Cast button with live indicator */}
           <button
             onClick={() => headerPop.setOpen(headerPop.open === 'mirror' ? null : 'mirror')}
-            className={`min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl relative active:scale-95 transition ${
+            className={`min-w-[36px] min-h-[36px] h-9 w-9 hidden sm:flex items-center justify-center rounded-xl relative active:scale-95 transition ${
               headerPop.open === 'mirror' || p.isMirrorActive
                 ? 'bg-blue-600 text-white shadow-sm'
                 : 'text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10'
@@ -422,10 +490,15 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           {/* More menu */}
           <button
             onClick={() => headerPop.setOpen(headerPop.open === 'more' ? null : 'more')}
-            className="min-w-[36px] min-h-[36px] h-9 w-9 flex items-center justify-center rounded-xl text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
+            className={`${barBtn} relative ${headerPop.open === 'more' ? 'bg-black/5 dark:bg-white/10' : ''} text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10`}
             title="More actions"
+            aria-label="More actions"
+            aria-expanded={headerPop.open === 'more'}
           >
             <MoreHorizontal className="w-5 h-5" strokeWidth={1.75} />
+            {p.isMirrorActive && (
+              <span className="sm:hidden absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-emerald-400 ring-2 ring-white dark:ring-black" />
+            )}
           </button>
 
           {/* AI Assist Popover */}
@@ -474,6 +547,37 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           {headerPop.open === 'more' && (
             <HeaderPopover align="right">
               <div className="flex flex-col text-sm text-gray-800 dark:text-gray-200">
+                {/* Phones: the bar's AI and Cast buttons are here (and Redo on the narrowest). */}
+                <div className="sm:hidden flex flex-col">
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onRedo(); }}
+                    disabled={!p.canRedo}
+                    className="min-[340px]:hidden flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left disabled:opacity-40"
+                  >
+                    <Redo2 className="w-5 h-5" strokeWidth={1.75} /> Redo
+                  </button>
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onConvertPage(); }}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <Sparkles className="w-5 h-5 text-blue-500" strokeWidth={1.75} /> Transcribe Page → LaTeX
+                  </button>
+                  <button
+                    onClick={() => { headerPop.setOpen(null); p.onInsertLatex(); }}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <Sigma className="w-5 h-5 text-indigo-500" strokeWidth={1.75} /> Insert LaTeX / TikZ Block
+                  </button>
+                  <button
+                    onClick={() => headerPop.setOpen('mirror')}
+                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
+                  >
+                    <Cast className="w-5 h-5" strokeWidth={1.75} />
+                    <span className="flex-1">Cast to PC</span>
+                    {p.isMirrorActive && <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">Live</span>}
+                  </button>
+                  <div className="h-px bg-gray-200 dark:bg-white/10 my-1" />
+                </div>
                 <button
                   onClick={() => headerPop.setOpen('paper')}
                   className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-black/5 dark:hover:bg-white/10 text-left"
@@ -576,11 +680,20 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           ========================================================================= */}
       <div
         ref={dockPop.ref}
+        data-tool-dock
         data-cutout-clear
-        className={`glass-pill rounded-3xl p-1.5 flex items-center gap-1 shadow-2xl transition-all duration-300 pointer-events-auto ${dockOrientationClass}`}
+        data-no-pan
+        data-viewport-hole
+        className={`glass-pill rounded-3xl p-1.5 flex shadow-2xl transition-[transform,opacity] duration-300 pointer-events-auto ${dockOrientationClass}`}
       >
+        <div
+          ref={strip.ref}
+          onScroll={strip.onScroll}
+          style={strip.style}
+          className={`flex items-center gap-1 no-scrollbar overscroll-contain ${vertical ? 'flex-col overflow-y-auto' : 'flex-row overflow-x-auto'}`}
+        >
         {/* Pen Button */}
-        <div className="relative">
+        <div>
           <ToolDockButton
             active={tools.tool === 'pen'}
             title="Pen (tap again for options)"
@@ -588,7 +701,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           >
             <PenLine className="w-5 h-5" strokeWidth={1.75} />
             <span
-              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-white/50"
               style={{ backgroundColor: tools.penColor }}
             />
           </ToolDockButton>
@@ -623,15 +736,15 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         </div>
 
         {/* Smart Pen Button */}
-        <div className="relative">
+        <div>
           <ToolDockButton
             active={tools.tool === 'shape'}
-            title="Smart Pen: smooth curves, lines, rectangles, ellipses, fills (tap again for options)"
+            title="Smart pen: smooth curves, lines, rectangles, ellipses, fills (tap again for options)"
             onClick={() => selectTool('shape', 'shape')}
           >
             {SHAPE_MODES.find((m) => m.id === tools.shapeMode)?.icon ?? <Spline className="w-5 h-5" strokeWidth={1.75} />}
             <span
-              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-white/50"
               style={{ backgroundColor: tools.shapeColor }}
             />
           </ToolDockButton>
@@ -740,7 +853,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         </div>
 
         {/* Highlighter Button */}
-        <div className="relative">
+        <div>
           <ToolDockButton
             active={tools.tool === 'highlighter'}
             title="Highlighter (tap again for options)"
@@ -748,7 +861,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
           >
             <Highlighter className="w-5 h-5" strokeWidth={1.75} />
             <span
-              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-black/50"
+              className="absolute bottom-1.5 right-1.5 w-2 h-2 rounded-full ring-1 ring-white/90 dark:ring-white/50"
               style={{ backgroundColor: tools.highlighterColor }}
             />
           </ToolDockButton>
@@ -769,7 +882,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         </div>
 
         {/* Eraser Button */}
-        <div className="relative">
+        <div>
           <ToolDockButton
             active={tools.tool === 'eraser'}
             title="Eraser (tap again for options)"
@@ -803,7 +916,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         </div>
 
         {/* Lasso Button */}
-        <div className="relative">
+        <div>
           <ToolDockButton
             active={tools.tool === 'lasso'}
             title="Lasso: select, move, recolor, convert to LaTeX/TikZ"
@@ -874,9 +987,9 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         {/* =====================================================================
             1-TAP FAVORITE COLOR DOTS
             ===================================================================== */}
-        <div className="h-5 w-px bg-gray-300 dark:bg-white/15 mx-0.5" />
+        <div className={`bg-gray-300 dark:bg-white/15 hidden sm:block flex-shrink-0 ${vertical ? 'w-5 h-px my-0.5' : 'h-5 w-px mx-0.5'}`} />
 
-        <div className="flex items-center gap-1">
+        <div className={`hidden sm:flex items-center gap-1 ${vertical ? 'flex-col' : ''}`}>
           {quickColors.map((color) => {
             const isSelected = currentStrokeColor.toLowerCase() === color.toLowerCase();
             return (
@@ -884,7 +997,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
                 key={color}
                 onClick={() => setQuickColor(color)}
                 className={`min-w-[28px] min-h-[28px] w-7 h-7 rounded-full transition-all active:scale-90 flex items-center justify-center ${
-                  isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white dark:ring-offset-ui-raised scale-105' : 'hover:scale-105 ring-1 ring-black/10 dark:ring-white/10'
+                  isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-white dark:ring-offset-ui-raised scale-105 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.35)]' : 'hover:scale-105 ring-1 ring-black/10 dark:ring-white/35'
                 }`}
                 style={{ backgroundColor: color }}
                 title={`Select color ${color}`}
@@ -907,9 +1020,9 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         {/* =====================================================================
             1-TAP WIDTH PRESET DOTS
             ===================================================================== */}
-        <div className="h-5 w-px bg-gray-300 dark:bg-white/15 mx-0.5" />
+        <div className={`bg-gray-300 dark:bg-white/15 hidden sm:block flex-shrink-0 ${vertical ? 'w-5 h-px my-0.5' : 'h-5 w-px mx-0.5'}`} />
 
-        <div className="flex items-center gap-1 px-0.5">
+        <div className={`hidden sm:flex items-center gap-1 px-0.5 ${vertical ? 'flex-col' : ''}`}>
           {widthPresets.map((w, idx) => {
             const isSelected = Math.abs(currentStrokeWidth - w) < 0.8;
             const dotSize = idx === 0 ? 'w-2 h-2' : idx === 1 ? 'w-3 h-3' : 'w-4 h-4';
@@ -926,6 +1039,7 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
               </button>
             );
           })}
+        </div>
         </div>
       </div>
 

@@ -28,6 +28,7 @@ import { GestureBus } from '../editor/gestures';
 import { MAX_ZOOM, PULL_THRESHOLD, SavedView, useViewport } from '../editor/useViewport';
 import { Selection, computeBounds, isEmptySelection, removeSelection, textHeight } from '../editor/selection';
 import { AppSettings, saveSettings } from '../settings';
+import { THEMES } from '../theme';
 import { ConversionMode, convertImage } from '../services/vlmService';
 import { crashLog } from '../services/crashLog';
 import { boundsOfStrokes, renderInkImage } from '../services/rasterize';
@@ -269,8 +270,13 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   toolsRef.current = tools;
   const lastNonEraser = useRef<ToolSettings['tool']>('pen');
 
+  // White paper goes dark only when the user wants it and the interface is dark (PaperPicker's switch).
+  const adaptDarkPaper = settings.adaptDarkPaper && !!THEMES[settings.theme]?.dark;
   const [isMirrorActive, setIsMirrorActive] = useState(false);
   const [mirrorOpen, setMirrorOpen] = useState(false);
+  /** Bumped to open the toolbar's paper panel (the command palette's paper command). */
+  const [paperSignal, setPaperSignal] = useState(0);
+  useBack(mirrorOpen, () => setMirrorOpen(false));
 
   useEffect(() => {
     let unmounted = false;
@@ -373,6 +379,8 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [zenMode, setZenMode] = useState(false);
   const [cleanPresentation, setCleanPresentation] = useState(false);
   const [dockPosition, setDockPosition] = useState<'bottom' | 'left' | 'right'>('bottom');
+  /** Bars along the bottom edge stand above the tool dock when it is there (dock 52-56 px, 16 px from the edge). */
+  const dockLift = dockPosition === 'bottom' && !zenMode ? 76 : 0;
   const [modal, setModal] = useState<LatexModalState | null>(null);
   const [target, setTarget] = useState<ConvTarget | null>(null);
   const [busy, setBusy] = useState<{ label: string; detail?: string } | null>(null);
@@ -1437,6 +1445,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           onSetDockPosition={setDockPosition}
           onOpenMirror={() => setMirrorOpen(true)}
           isMirrorActive={isMirrorActive}
+          openPaperSignal={paperSignal}
           cleanPresentation={cleanPresentation}
           onToggleCleanPresentation={setCleanPresentation}
           adaptDarkPaper={settings.adaptDarkPaper}
@@ -1510,6 +1519,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
                     onEditLatex={onEditLatex}
                     printMode={false}
                     nativeCanvas={nativeCanvasFor(note)}
+                    adaptDarkPaper={adaptDarkPaper}
                     scrollRoot={scrollEl}
                   />
                 </div>
@@ -1528,13 +1538,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
             <div
               data-cutout-clear
               className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
-              style={{ bottom: `calc(${selection || (clipboard && tools.tool === 'lasso') ? 84 : 14}px + var(--sa-bottom))` }}
+              style={{ bottom: `calc(${(selection || (clipboard && tools.tool === 'lasso') ? 84 : 14) + dockLift}px + var(--sa-bottom))` }}
               data-no-pan
               data-viewport-hole
             >
-              <div className="pointer-events-none px-3 py-1.5 rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur">
-                {Math.min(currentPage, pageCount - 1) + 1} / {pageCount}
-              </div>
               <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
                 <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
                   <Minus className="w-3.5 h-3.5" />
@@ -1558,7 +1565,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
       {/* Paste (lasso tool, something copied, nothing selected) */}
       {!selection && clipboard && tools.tool === 'lasso' && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pointer-events-none" style={{ bottom: `calc(${16 + dockLift}px + var(--sa-bottom))` }} data-no-pan>
           <button onClick={paste} className="pointer-events-auto flex items-center gap-2 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-4 py-2.5 text-sm font-semibold active:scale-95 transition pop-enter" title="Paste the copied items here">
             <ClipboardPaste className="w-5 h-5 text-blue-600 dark:text-blue-400" strokeWidth={1.75} /> Paste
           </button>
@@ -1567,7 +1574,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
 
       {/* Selection action bar */}
       {selection && fillMenu && selectionHasInk && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(84px + var(--sa-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(${84 + dockLift}px + var(--sa-bottom))` }} data-no-pan>
           <div className="flex items-center gap-1 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-2 py-2 text-xs font-semibold overflow-x-auto max-w-full no-scrollbar">
             {FILL_OPTIONS.map((f) => (
               <button key={f.id} onClick={() => { fillSelection(f.id); setFillMenu(false); }} className="flex flex-col items-center gap-1 px-2.5 py-1.5 rounded-2xl hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition" title={f.label}>
@@ -1579,7 +1586,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
         </div>
       )}
       {selection && (
-        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(16px + var(--sa-bottom))` }} data-no-pan>
+        <div className="fixed left-0 right-0 z-40 flex justify-center px-3 pop-enter" style={{ bottom: `calc(${16 + dockLift}px + var(--sa-bottom))` }} data-no-pan>
           <div className="flex items-center gap-1 glass-pill text-gray-900 dark:text-gray-100 rounded-3xl px-2.5 py-1.5 overflow-x-auto max-w-full text-sm font-semibold">
             {selectionHasInk && (
               <>
@@ -1624,7 +1631,7 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
       )}
 
       {busy && (
-        <div className="fixed inset-0 bg-black/35 z-50 flex items-center justify-center" data-no-pan>
+        <div className="fixed inset-0 bg-black/35 z-50 flex items-center justify-center" data-no-pan data-viewport-hole>
           <div className="bg-white dark:bg-ui-panel px-6 py-5 rounded-3xl shadow-2xl flex flex-col items-center text-gray-900 dark:text-gray-100 max-w-xs text-center">
             <Loader2 className="w-7 h-7 text-blue-600 animate-spin mb-2" />
             <div className="font-bold text-sm">{busy.label}</div>
@@ -1759,12 +1766,19 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           input.click();
         }}
         onToggleZen={() => setZenMode((z) => !z)}
-        onOpenPaper={() => {}}
+        onOpenPaper={() => setPaperSignal((n) => n + 1)}
       />
 
       {mirrorOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-end p-4 pt-16 pointer-events-none">
-          <div className="pointer-events-auto shadow-2xl rounded-2xl">
+        // Opened from the command palette (the bar's Cast button has its own popover): the same
+        // glass panel under the top bar, closed by a tap outside it or the device's back.
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-end px-[calc(0.75rem+var(--sa-right))] pt-[calc(4.25rem+var(--sa-top))]"
+          onPointerDown={(e) => { if (e.target === e.currentTarget) setMirrorOpen(false); }}
+          data-no-pan
+          data-viewport-hole
+        >
+          <div data-ui-panel className="glass-pill rounded-3xl p-4 shadow-2xl w-80 max-w-[calc(100vw-24px)] max-h-[calc(100dvh-6rem)] overflow-y-auto no-scrollbar overscroll-contain pop-enter">
             <MirrorPopover
               onClose={() => setMirrorOpen(false)}
               cleanPresentation={cleanPresentation}

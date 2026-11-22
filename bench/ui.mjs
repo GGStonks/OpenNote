@@ -692,12 +692,24 @@ if (ONLY.has('fitwidth')) {
   console.log(`fitwidth after a 1.4x pinch (kept): ${JSON.stringify(await edges())}`);
   if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'fitwidth.png') });
 }
+
+/** The paper panel (the editor's "…" menu > Paper Template & Pattern): opened, or closed when open. */
+async function togglePaper(pg) {
+  if (await pg.locator('[data-ui-panel]', { hasText: 'Note paper template' }).count()) {
+    await pg.evaluate(() => window.OpenNoteBack());
+    return;
+  }
+  await pg.locator('button[title="More actions"]').first().click();
+  await sleep(200);
+  await pg.locator('[data-ui-panel] button', { hasText: 'Paper Template' }).first().click();
+}
+
 // --only papershots --shots <dir>: the paper menu with any colour for the paper (spectrum open) and
 // a pattern colour, then the page with them.
 if (ONLY.has('papershots') && arg('shots')) {
   await reopen();
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
-  await page.locator('button[title="Paper"]').first().click();
+  await togglePaper(page);
   await sleep(300);
   await page.locator('button[title="#EF4444"]').first().click();
   await page.locator('button[title^="Any colour"]').first().click();
@@ -706,7 +718,7 @@ if (ONLY.has('papershots') && arg('shots')) {
   await page.mouse.click(sq.x + sq.width * 0.3, sq.y + sq.height * 0.12);
   await sleep(600);
   await page.screenshot({ path: join(arg('shots'), 'paper-menu.png') });
-  await page.locator('button[title="Paper"]').first().click();
+  await togglePaper(page);
   await sleep(600);
   const bg = await page.evaluate(() => { const p = [...document.querySelectorAll('.on-page > div')].find((e) => e.className.includes('shadow-')); return p && getComputedStyle(p).backgroundColor; });
   console.log(`papershots paper colour on the page: ${bg}`);
@@ -1172,10 +1184,10 @@ if (ONLY.has('pdfimport') && arg('shots')) {
   console.log(`pdfimport joined export: ${joined.length} bytes -> pdf-joined.pdf`);
   // The pages panel (PDF previews in the thumbnails) and the library card.
   await page.keyboard.press('Control+0');
-  await page.locator('button[title="Pages"]').first().click();
+  await page.locator('button[title="Pages"]:visible').first().click();
   await sleep(2500);
   await page.screenshot({ path: join(arg('shots'), 'pdf-pages.png') });
-  await page.locator('button[title="Pages"]').first().click();
+  await page.locator('button[title="Pages"]:visible').first().click();
   await sleep(300);
   await page.evaluate(() => [...document.querySelectorAll('button')].find((b) => b.className.includes('text-blue-600') && b.querySelector('svg'))?.click());
   await sleep(3000);
@@ -1298,7 +1310,7 @@ if (ONLY.has('pdfexport') && arg('shots')) {
   const t0 = Date.now();
   const exportBtn = page.locator('button[title="Export"]').first();
   if (await exportBtn.isVisible()) await exportBtn.click();
-  else { await page.locator('button[title="Insert & pages"]').first().click(); await sleep(300); await page.getByText('Export', { exact: true }).last().click(); }
+  else { await page.locator('button[title="More actions"]').first().click(); await sleep(300); await page.locator('[data-ui-panel] button', { hasText: 'Export Note' }).first().click(); }
   await sleep(600);
   if (process.env.BENCH_EXPORT === 'printpdf') await page.getByText('Print…', { exact: true }).first().click();
   else await page.getByText('PDF', { exact: true }).first().click();
@@ -1369,7 +1381,7 @@ if (ONLY.has('pdfinsert') && arg('shots')) {
   for (let i = 1; i <= 30; i++) { await mouse('mouseMoved', 200 + i * 12, 500 + Math.sin(i / 3) * 40, 0.5); await sleep(10); }
   await mouse('mouseReleased', 560, 500, 0);
   await sleep(1200);
-  await page.locator('button[title="Insert & pages"]').first().click();
+  await page.locator('button[title="More actions"]').first().click();
   await sleep(400);
   console.log(`pdfinsert before: ${await page.evaluate(() => document.body.innerText.match(/Page \d+ of \d+/)?.[0])}`);
   const chooser = page.waitForEvent('filechooser');
@@ -1382,7 +1394,7 @@ if (ONLY.has('pdfinsert') && arg('shots')) {
   console.log(`pdfinsert toast: ${await page.evaluate(() => document.body.innerText.match(/Inserted[^\n]*|Couldn't[^\n]*/)?.[0])}`);
   await page.screenshot({ path: join(arg('shots'), 'insert-view.png') });
   await page.keyboard.press('Control+0');
-  await page.locator('button[title="Pages"]').first().click();
+  await page.locator('button[title="Pages"]:visible').first().click();
   await sleep(2500);
   await page.screenshot({ path: join(arg('shots'), 'insert-pages.png') });
 }
@@ -1400,15 +1412,15 @@ if (ONLY.has('pdfthumb') && arg('shots')) {
   await page.locator('input[type=file]').first().setInputFiles({ name: 'Thumb test.pdf', mimeType: 'application/pdf', buffer: Buffer.from(await mk.save()) });
   await page.waitForSelector('[data-pdf-page]', { timeout: 20000 });
   await sleep(1500);
-  console.log(`pdfthumb title: ${await page.evaluate(() => document.querySelector('header')?.innerText.split('\n').find((t) => /Thumb/.test(t)) ?? document.title)}`);
-  await page.locator('button[title="Paper"]').first().click();
+  console.log(`pdfthumb title: ${await page.evaluate(() => document.querySelector('[data-editor-bar] input')?.value ?? document.title)}`);
+  await togglePaper(page);
   await sleep(300);
   await page.locator('button[title="#FEF9C3"]').first().click();
   await sleep(300);
-  await page.locator('button[title="Paper"]').first().click();
+  await togglePaper(page);
   await sleep(1500);
   await page.screenshot({ path: join(arg('shots'), 'thumb-page.png') });
-  await page.evaluate(() => [...document.querySelectorAll('header button')][0].click());
+  await page.locator('button[aria-label="Back to notes"]').first().click();
   await sleep(3000);
   await page.screenshot({ path: join(arg('shots'), 'thumb-library.png') });
 }
@@ -3376,13 +3388,13 @@ if (ONLY.has('popups')) {
     await pp.getByText('Welcome to', { exact: false }).first().click();
     await sleep(2000);
     // Editor: each popover is closed by its own button again. The pen is the tool already: one tap.
-    const tools = [['pen', 'Pen (tap again', 1], ['smart pen', 'Smart pen', 2], ['highlighter', 'Highlighter', 2], ['eraser', 'Eraser', 2], ['paper', 'Paper', 1], ['insert & pages', 'Insert & pages', 1]];
+    const tools = [['pen', 'Pen (tap again', 1], ['smart pen', 'Smart pen', 2], ['highlighter', 'Highlighter', 2], ['eraser', 'Eraser', 2], ['paper', 'Paper', 1], ['… menu', 'More actions', 1]];
     for (const [label, title, taps] of tools) {
       const btn = pp.locator(`button[title^="${title}"]`).first();
       if (label === 'paper' && !(await btn.count())) {
         // Folded into the "…" menu (narrow top bar): opened from there, closed by reopening the note.
-        const more = pp.locator('button[title="Insert & pages"]').first();
-        await check('paper (…)', async () => { await more.click({ timeout: 2500 }); await sleep(200); await pp.locator('header button', { hasText: 'Paper' }).first().click({ timeout: 2500 }); }, async () => {
+        const more = pp.locator('button[title="More actions"]').first();
+        await check('paper (…)', async () => { await more.click({ timeout: 2500 }); await sleep(200); await pp.locator('[data-ui-panel] button', { hasText: 'Paper Template' }).first().click({ timeout: 2500 }); }, async () => {
           await pp.reload();
           await sleep(1500);
           await pp.getByText('Welcome to', { exact: false }).first().click();
@@ -3397,10 +3409,11 @@ if (ONLY.has('popups')) {
   }
   console.log(`popups ${bad ? `${bad} OFF SCREEN` : 'all on screen'}`);
 }
-// --only header: the editor's top bar at many screen widths (phones to desktops): no two of its
-// buttons (or the title) may overlap, and all must be on the screen. On a 360 px phone undo and redo
-// slid under the record and paper buttons; buttons without room go into the "…" menu (Toolbar's
-// useHeaderFold).
+// --only header: the editor's top bar and tool dock at many screen widths (phones to desktops): no
+// two of the bar's buttons (or the title) may overlap, all must be on the screen, and the dock must
+// lie within the screen (a strip that scrolls when the tools do not fit). On a 360 px phone undo and
+// redo once slid under other buttons, and in 3.0.1 the dock (about 640 px wide) hung off both sides
+// of a phone held upright.
 if (ONLY.has('header')) {
   const widths = [[280, 640], [320, 568], [360, 780], [390, 844], [412, 915], [600, 960], [780, 360], [820, 1180], [1024, 768], [1180, 820], [1366, 1024], [1920, 1080]];
   let bad = 0;
@@ -3413,25 +3426,28 @@ if (ONLY.has('header')) {
     await pp.getByText('Welcome to', { exact: false }).first().click();
     await sleep(1800);
     const out = await pp.evaluate(() => {
-      const items = [...document.querySelectorAll('header button, header input:not([type=file])')].filter((e) => e.getClientRects().length);
-      const rects = items.map((e) => ({ name: e.getAttribute('title')?.split(' (')[0] || e.tagName.toLowerCase(), r: e.getBoundingClientRect() }));
+      const items = [...document.querySelectorAll('[data-editor-bar] button, [data-editor-bar] input:not([type=file])')].filter((e) => e.getClientRects().length && !e.closest('[data-ui-panel]'));
+      const rects = items.map((e) => ({ name: e.getAttribute('aria-label') || e.getAttribute('title')?.split(' (')[0] || e.tagName.toLowerCase(), r: e.getBoundingClientRect() }));
       const overlaps = [];
       for (let i = 0; i < rects.length; i++) {
         for (let j = i + 1; j < rects.length; j++) {
           const a = rects[i].r, b = rects[j].r;
           const w = Math.min(a.right, b.right) - Math.max(a.left, b.left), h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
-          // Nested elements (a button inside another's box) do not occur in the header.
           if (w > 1 && h > 1) overlaps.push(`${rects[i].name}/${rects[j].name}`);
         }
       }
       const off = rects.filter(({ r }) => r.left < -0.5 || r.right > innerWidth + 0.5 || r.top < -0.5).map(({ name }) => name);
-      const title = rects.find((x) => x.name === 'input');
-      const shown = ['Paper', 'Export', 'Settings'].filter((t) => rects.some((x) => x.name === t));
-      return { overlaps, off, title: title ? Math.round(title.r.width) : 0, shown, rows: new Set(rects.map(({ r }) => Math.round(r.top / 8))).size };
+      const title = rects.find((x) => x.name === 'Note title');
+      const dock = document.querySelector('[data-tool-dock]');
+      const d = dock?.getBoundingClientRect();
+      const strip = dock?.firstElementChild;
+      const dockOff = !d || d.left < -0.5 || d.right > innerWidth + 0.5 || d.bottom > innerHeight + 0.5;
+      const small = rects.filter(({ r }) => Math.min(r.width, r.height) < 36 && r.width < 200).map(({ name }) => name);
+      return { overlaps, off, small, title: title ? Math.round(title.r.width) : 0, buttons: rects.length, dockW: d ? Math.round(d.width) : 0, dockOff, scrolls: strip ? strip.scrollWidth - strip.clientWidth : 0 };
     });
-    const ok = !out.overlaps.length && !out.off.length;
+    const ok = !out.overlaps.length && !out.off.length && !out.dockOff && !out.small.length;
     if (!ok) bad++;
-    console.log(`header ${String(width).padStart(4)}x${height}  title ${String(out.title).padStart(3)} px  in the bar: ${out.shown.join(', ') || '(all in the menu)'}  ${ok ? 'ok' : `OVERLAP ${out.overlaps.join(' ')} OFF ${out.off.join(' ')}`}`);
+    console.log(`header ${String(width).padStart(4)}x${height}  title ${String(out.title).padStart(3)} px  ${out.buttons} in the bar  dock ${out.dockW} px${out.scrolls > 0 ? ` (scrolls ${out.scrolls} px)` : ''}  ${ok ? 'ok' : `OVERLAP ${out.overlaps.join(' ')} OFF ${out.off.join(' ')}${out.dockOff ? ' DOCK OFF SCREEN' : ''}${out.small.length ? ` SMALL ${out.small.join(' ')}` : ''}`}`);
     await pctx.close();
   }
   console.log(`header ${bad ? `${bad} screens with overlapping or cut buttons` : 'no overlaps at any width'}`);
@@ -3450,7 +3466,7 @@ if (ONLY.has('back')) {
   const shown = () => pp.evaluate(() => ({
     popups: [...document.querySelectorAll('[data-on-screen]')].filter((e) => e.getClientRects().length).length,
     dialogs: [...document.querySelectorAll('.fixed.inset-0')].filter((e) => e.getClientRects().length).length,
-    editor: !!document.querySelector('header button[title="Insert & pages"]'),
+    editor: !!document.querySelector('[data-editor-bar] button[title="More actions"]'),
     depth: window.OpenNoteBackDepth(),
   }));
   const steps = [];
@@ -3475,15 +3491,15 @@ if (ONLY.has('back')) {
   const depth = (await shown()).depth;
   steps.push(`note open, depth ${depth}: ${depth === 1 ? 'ok' : 'WRONG'}`);
   ok = depth === 1 && ok;
-  await pp.locator('button[title="Insert & pages"]').first().click();
+  await pp.locator('button[title="More actions"]').first().click();
   await sleep(300);
   ok = (await step('… menu', (r, s) => r && !s.popups && s.editor)) && ok;
   const exp = pp.locator('button[title="Export"]');
   if (await exp.count()) await exp.first().click();
-  else { await pp.locator('button[title="Insert & pages"]').first().click(); await sleep(200); await pp.locator('header button', { hasText: 'Export' }).first().click(); }
+  else { await pp.locator('button[title="More actions"]').first().click(); await sleep(200); await pp.locator('[data-ui-panel] button', { hasText: 'Export Note' }).first().click(); }
   await sleep(400);
   ok = (await step('export dialog', (r, s) => r && !s.dialogs && s.editor)) && ok;
-  await pp.locator('button[title="Pages"]').first().click();
+  await pp.locator('button[title="Pages"]:visible').first().click();
   await sleep(400);
   ok = (await step('pages panel', (r, s) => r && s.editor)) && ok;
   ok = (await step('note', (r, s) => r && !s.editor)) && ok;
@@ -3553,7 +3569,7 @@ if (ONLY.has('cutout')) {
     await sleep(2200);
     results.push(await check('editor'));
     if (arg('shots')) await pp.screenshot({ path: join(arg('shots'), `cutout-${name}-editor.png`) });
-    await pp.locator('button[title="Pages"]').first().click();
+    await pp.locator('button[title="Pages"]:visible').first().click();
     await sleep(800);
     results.push(await check('pages panel'));
     // Expected: beside a 96 px notch on a 360 px phone there is no room for undo and redo (the
@@ -3716,7 +3732,7 @@ if (ONLY.has('resume')) {
     return { top: Math.round(el.scrollTop), left: Math.round(el.scrollLeft), zoom: document.body.innerText.match(/(\d+)%/)?.[1], page: document.body.innerText.match(/(\d+)\s*\/\s*\d+/)?.[1] };
   });
   const back = async () => {
-    await page.locator('header button').first().click();
+    await page.locator('button[aria-label="Back to notes"]').first().click();
     await sleep(1200);
     await page.getByText('Bench note').first().click();
     await sleep(2000);
@@ -3963,7 +3979,7 @@ if (ONLY.has('selsvg')) {
   await sleep(300);
   const exportBtn = page.locator('button[title="Export"]').first();
   if (await exportBtn.isVisible()) await exportBtn.click();
-  else { await page.locator('button[title="Insert & pages"]').first().click(); await sleep(300); await page.getByText('Export', { exact: true }).last().click(); }
+  else { await page.locator('button[title="More actions"]').first().click(); await sleep(300); await page.locator('[data-ui-panel] button', { hasText: 'Export Note' }).first().click(); }
   await sleep(500);
   await page.getByText('Vector SVG', { exact: true }).first().click();
   for (let i = 0; i < 80 && !saved; i++) await sleep(250);

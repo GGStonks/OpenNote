@@ -95,7 +95,7 @@ export const LatexModal: React.FC<LatexModalProps> = ({ state, onClose, onInsert
   const primary = state.origin === 'edit' ? 'Save' : 'Insert';
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4" data-no-pan>
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-end sm:items-center justify-center sm:p-4 overscroll-contain" data-no-pan data-viewport-hole>
       <div className="bg-white dark:bg-ui-panel w-full sm:max-w-2xl rounded-t-3xl sm:rounded-3xl shadow-2xl border border-gray-200 dark:border-gray-800 overflow-hidden max-h-[calc(100dvh-16px)] flex flex-col pb-[var(--sa-bottom)]">
         <div className="px-5 py-3.5 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between">
           <div className="flex items-center gap-2 min-w-0">
