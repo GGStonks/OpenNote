@@ -861,7 +861,8 @@ export function useViewport({ contentWidth, fingersNavigate: fingersNavigateProp
     let pullSeen = 0;
     let pulls = -1;
     let placed = -1;
-    onRustGesture((g) => crashLog.event('pinch', { ...g, gl: 'rust', pageHz: Math.round(frameRate.hz), ...powerState() }));
+    // One finger: a scroll or a fling (its glide included); two: a pinch.
+    onRustGesture((g) => crashLog.event((g as { fingers?: number }).fingers === 1 ? 'scroll' : 'pinch', { ...g, gl: 'rust', pageHz: Math.round(frameRate.hz), ...powerState() }));
     const el0 = scrollRef.current;
     // The page's own scroll (one finger natively, the wheel, the keyboard, a mouse drag): to Rust.
     const onScroll = () => {

@@ -132,7 +132,7 @@ viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (i
 sendEvent:`, Android `MainActivity.dispatchTouchEvent`: every sample with its own timestamp,
 coalesced / historical ones included) and advanced by the canvas's render thread to each display
 frame's presentation time, the fingers resampled 8 ms before it, at the display's best rate (the
-iOS display link asks 80-120 while the camera moves), in Low Power Mode too (no snapshot); the page
+iOS display link asks it all the time), in Low Power Mode too (no snapshot); the page
 mirrors the camera the shell pushes (`window.__opennoteCamera`, one at a time), reports the camera
 it put on its DOM (`viewportShown`) and sends its own views to it. The canvas draws the camera the
 DOM shows (ADR-008: text, formulas, the selection and the ink move as one), unless the DOM is more
@@ -172,12 +172,25 @@ Smoothness lives in the camera, which the DOM and the canvas share; never in one
   a tick over a frame misses a refresh. Read it before guessing at dropped frames.
 - The canvas never queues frames deep behind the GPU or the display (canvas `host.rs` `Pace`): a
   tick with two frames still on the GPU draws nothing (`gpuLate`), and after a wait over
-  `BACKLOG_FRAMES` (1.5) display frames for a drawable the next tick is skipped (`drained`). One
+  `BACKLOG_FRAMES` (1.5) display frames for a drawable the next tick is skipped (`drained`; a skip
+  that does not shorten the next wait stops skipping for `DRAIN_PAUSE`, 30 s: at 1 s a canvas
+  composed at 60 Hz drained every second, 164 times in one pinch, holding it at 60). One
   frame in flight, and a one-frame wait, are the ordinary pipeline: 3.0.4-3.0.6 skipped on those
   (`gpuLate` 49, `drained` 44 in one pinch, drawn 203 of 304: WebKit's drawing shares the GPU and
   delays the canvas's frames by part of a frame when the page lays out). 3.0.3, with no pacing:
   `workP95` 16.9 ms after seconds at rest, every tick waiting two refreshes in `nextDrawable`.
   Each pinch entry's `drawnFps` is the frames drawn per second (`fps` counts display-link ticks).
+- Every gesture is recorded: `kind: 'scroll'` for one finger (a scroll, or a fling with its
+  glide), `'pinch'` for two (`fingers`). Until 3.0.8 only two fingers started a record: no scroll or
+  fling was ever logged. Each entry says where its frames dropped: `startFps` (drawn fps over the
+  first 200 ms), `worstFps` / `worstAt` (the worst 100 ms, ms into the gesture), `rampMs` (until
+  the display link reached the display's best rate), `heldStart` (ticks of the first 200 ms where
+  the canvas waited for the page). The report keeps each session's 10 lowest `worstFps` gestures
+  apart from the rolling crumbs (`fpsDrops`): read those first for "it ran at 60 fps". The iOS
+  canvas link asks the display's best rate all the time, at rest too (`ONCanvasTicker`): relaxed at
+  rest (0.5 s until 3.0.7, 5 s in 3.0.8 work), the next movement after 20 s or more could stay at
+  60 Hz for its whole length (link at 8.3 ms, each drawable 16.5 ms: `acquireMax`, 12.6 s of one
+  pinch). A tick at rest draws nothing.
 - `--native --only cameracoherence` is bimodal on this PC (since at least 3.0.2): some runs lock the
   canvas a page frame off the DOM (pan p50 exactly 20 px, the frame's motion). Run it twice.
 - Rubber banding (crates/viewport): pans past any edge stretch on UIScrollView's curve

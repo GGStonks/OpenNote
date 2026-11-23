@@ -65,6 +65,19 @@ pub struct GestureSummary {
     /// ADR-008): a refresh shown twice while the fingers move. The other ticks not `drawn` had
     /// nothing new (fingers down before a pinch engages, the end of a glide).
     pub held: u64,
+    /// Where the gesture's frames dropped: the frames drawn per second over its first 200 ms
+    /// (`startFps`) and over its worst 100 ms (`worstFps`, `worstAt` ms into it); how long the
+    /// display link took to reach the display's best rate (`rampMs`: 0 when it was there from the
+    /// start); ticks in the first 200 ms where the canvas waited for the page (`heldStart`).
+    /// "Everything at 60 fps as a movement starts" shows as a low `startFps` with a long `rampMs`
+    /// (the display link) or many `heldStart` (the page's DOM).
+    pub start_fps: f64,
+    pub worst_fps: f64,
+    pub worst_at: f64,
+    pub ramp_ms: f64,
+    pub held_start: u64,
+    /// The most fingers down at once: 1 a scroll or a fling, 2 a pinch.
+    pub fingers: usize,
 }
 
 /// One gesture being recorded.
@@ -72,6 +85,10 @@ pub struct GestureSummary {
 pub struct GestureRecorder {
     start: f64,
     ticks: Vec<f64>,
+    /// Each tick: drawn, held, the display link's interval then (ms).
+    per_tick: Vec<(bool, bool, f64)>,
+    cur_link: f64,
+    max_fingers: usize,
     drawn: u64,
     z0: f64,
     events0: u64,
@@ -99,6 +116,9 @@ impl GestureRecorder {
             start: t_ms,
             // Sized for a long gesture at 120 Hz: no allocation on the render thread's ticks.
             ticks: Vec::with_capacity(4096),
+            per_tick: Vec::with_capacity(4096),
+            cur_link: 0.0,
+            max_fingers: 0,
             drawn: 0,
             z0,
             events0: events,
@@ -122,6 +142,9 @@ impl GestureRecorder {
     /// The camera moved this tick but the canvas's did not.
     pub fn held(&mut self, held: bool) {
         self.held += u64::from(held);
+        if let Some(t) = self.per_tick.last_mut() {
+            t.1 |= held;
+        }
     }
 
     /// What the tick drew: `trail_ms` behind the newest camera, `alone` when the page's DOM was
@@ -136,6 +159,7 @@ impl GestureRecorder {
     /// A display tick at `t_ms`; `drawn`: the canvas drew a frame in it.
     pub fn tick(&mut self, t_ms: f64, drawn: bool) {
         self.ticks.push(t_ms);
+        self.per_tick.push((drawn, false, self.cur_link));
         if drawn {
             self.drawn += 1;
         }
@@ -168,12 +192,67 @@ impl GestureRecorder {
     pub fn link(&mut self, duration_ms: f64) {
         if duration_ms.is_finite() {
             self.link_max = self.link_max.max(duration_ms);
+            self.cur_link = duration_ms;
         }
+    }
+
+    /// Fingers down at a tick.
+    pub fn fingers(&mut self, n: usize) {
+        self.max_fingers = self.max_fingers.max(n);
     }
 
     /// The canvas drew a frame in the last tick.
     pub fn drew(&mut self) {
         self.drawn += 1;
+        if let Some(t) = self.per_tick.last_mut() {
+            t.0 = true;
+        }
+    }
+
+    /// `startFps`, `worstFps`, `worstAt`, `rampMs`, `heldStart` (GestureSummary) for a display of
+    /// `frame` ms.
+    fn drops(&self, frame: f64) -> (f64, f64, f64, f64, u64) {
+        let (t, p) = (&self.ticks, &self.per_tick);
+        let Some(&t0) = t.first() else {
+            return (0.0, 0.0, 0.0, 0.0, 0);
+        };
+        let last = *t.last().unwrap_or(&t0);
+        let in_start = |i: usize| t[i] < t0 + 200.0;
+        let start_n = (0..t.len()).filter(|&i| in_start(i) && p[i].0).count();
+        let start_span = (last - t0 + frame).clamp(frame, 200.0);
+        let start_fps = start_n as f64 * 1000.0 / start_span;
+        let held_start = (0..t.len()).filter(|&i| in_start(i) && p[i].1).count() as u64;
+        // The worst 100 ms: each window of ticks starting at a tick (the last ones as long as the
+        // gesture lets them be).
+        let (mut worst, mut worst_at) = (f64::INFINITY, 0.0);
+        let mut j = 0;
+        let mut drawn = 0usize;
+        for i in 0..t.len() {
+            while j < t.len() && t[j] - t[i] < 100.0 {
+                drawn += usize::from(p[j].0);
+                j += 1;
+            }
+            if i == 0 || t[i] + 100.0 <= last + frame {
+                let span = (t[j - 1] - t[i] + frame).clamp(frame, 100.0);
+                let fps = drawn as f64 * 1000.0 / span;
+                if fps < worst {
+                    worst = fps;
+                    worst_at = t[i] - t0;
+                }
+            }
+            drawn -= usize::from(p[i].0);
+        }
+        // The link at the display's best rate: six ticks in a row within a quarter of its frame.
+        let ok = |i: usize| p[i].2 > 0.0 && p[i].2 <= frame * 1.25;
+        // No interval from the shell at all (an old shell, the bench's stand-in): nothing to say.
+        let ramp = if p.iter().all(|x| x.2 <= 0.0) {
+            0.0
+        } else {
+            (0..t.len())
+                .find(|&i| (i..(i + 6).min(t.len())).all(ok))
+                .map_or(last - t0, |i| t[i] - t0)
+        };
+        (start_fps, if worst.is_finite() { worst } else { 0.0 }, worst_at, ramp, held_start)
     }
 
     /// The camera glided after the fingers lifted.
@@ -223,8 +302,15 @@ impl GestureRecorder {
         } else {
             1000.0 / 60.0
         };
+        let (start_fps, worst_fps, worst_at, ramp_ms, held_start) = self.drops(frame);
         GestureSummary {
             id,
+            start_fps: r(start_fps),
+            worst_fps: r(worst_fps),
+            worst_at: r(worst_at),
+            ramp_ms: r(ramp_ms),
+            held_start,
+            fingers: self.max_fingers,
             ms: r(t_ms - self.start),
             frames: gaps.len(),
             drawn: self.drawn,
@@ -309,6 +395,28 @@ mod tests {
         let s = r.finish(1, 20.0, 1.0, 2, 0);
         assert_eq!((s.acquire_max, s.lock_max, s.link_max), (8.4, 0.3, 16.7));
         assert_eq!((s.gpu_late, s.drained, s.held), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_movement_starting_at_60_fps_shows_where() {
+        // 120 Hz display; the link at 16.7 ms for the first 100 ms (6 ticks), then 8.3 ms for
+        // 400 ms; every tick drawn, one finger.
+        let mut r = GestureRecorder::new(0.0, 1.0, 0, 0, 120.0);
+        let mut t = 0.0;
+        for i in 0..54 {
+            let slow = i < 6;
+            r.link(if slow { 16.67 } else { 8.33 });
+            r.tick(t, false);
+            r.held(false);
+            r.fingers(1);
+            r.drew();
+            t += if slow { 16.67 } else { 8.33 };
+        }
+        let s = r.finish(1, t, 1.0, 10, 0);
+        assert_eq!(s.fingers, 1);
+        assert!((s.ramp_ms - 100.0).abs() < 1.0, "ramp {}", s.ramp_ms);
+        assert!(s.worst_fps < 70.0 && s.worst_at < 1.0, "worst {} at {}", s.worst_fps, s.worst_at);
+        assert!(s.start_fps > 70.0 && s.start_fps < 100.0, "start {}", s.start_fps);
     }
 
     #[test]

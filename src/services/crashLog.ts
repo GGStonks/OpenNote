@@ -36,7 +36,15 @@ interface Session {
   dpr: number;
   lost?: boolean;
   crumbs: Crumb[];
+  /**
+   * The session's gestures (pinches, scrolls, flings) with the lowest frame rate over their worst
+   * 100 ms (`worstFps`), worst first: kept apart from the crumbs, which roll over.
+   */
+  fpsDrops?: Crumb[];
 }
+
+/** The gestures `fpsDrops` keeps. */
+const FPS_DROPS = 10;
 
 interface Stored {
   current?: Session;
@@ -158,6 +166,12 @@ export const crashLog = {
   },
   event(kind: string, data: Record<string, unknown> = {}) {
     push({ kind, ...data });
+    if (session && typeof data.worstFps === 'number' && (kind === 'pinch' || kind === 'scroll')) {
+      const drops = (session.fpsDrops ??= []);
+      drops.push({ t: Date.now(), kind, ...data });
+      drops.sort((a, b) => (a.worstFps as number) - (b.worstFps as number));
+      drops.length = Math.min(drops.length, FPS_DROPS);
+    }
   },
   /** The app hit an error it recovered from: this session is the crash report right away. */
   fail(reason: string, data: Record<string, unknown> = {}) {

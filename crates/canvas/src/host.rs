@@ -28,9 +28,12 @@ use std::time::{Duration, Instant};
 /// so the queue drains to the frame being drawn. A wait of one frame is the swapchain's ordinary
 /// pipelining: 3.0.4-3.0.6 skipped a tick after any wait over 4 ms (`drained` 44 in one pinch on
 /// the owner's iPad, each a refresh shown twice). Where a wait stays long though a tick was
-/// skipped (a driver whose images come late anyway), nothing is skipped for `DRAIN_PAUSE`.
+/// skipped (a display composing the canvas at half the link's rate, a driver whose images come
+/// late anyway), nothing is skipped for `DRAIN_PAUSE`: at 1 s (3.0.4-3.0.8) a canvas composed at
+/// 60 Hz on a 120 Hz link drained again every second (`drained` 164 in one 12.6 s pinch), each
+/// skip a refresh shown twice and a commit rate that kept the display at 60.
 const BACKLOG_FRAMES: f64 = 1.5;
-const DRAIN_PAUSE: Duration = Duration::from_secs(1);
+const DRAIN_PAUSE: Duration = Duration::from_secs(30);
 /// A frame whose GPU work has not been seen done for this long is drawn over anyway (a completion
 /// that never came must not stop the canvas).
 const GPU_STALE: Duration = Duration::from_millis(100);

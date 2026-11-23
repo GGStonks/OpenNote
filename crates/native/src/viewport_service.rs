@@ -582,7 +582,9 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         if moved_now {
             v.moved_at = clock_ms();
         }
-        if v.vp.gesture() && v.rec.is_none() && v.vp.fingers() >= 2 {
+        // Every gesture: one finger's scrolls and flings (their glide included) as well as pinches.
+        // Until 3.0.8 only two fingers started a record, so no scroll or fling was ever logged.
+        if v.vp.gesture() && v.rec.is_none() && v.vp.fingers() >= 1 {
             // The zoom committed when the gesture began (a pinch commits only at its release): the
             // shown one at the first recorded tick had already moved when that tick came late.
             v.rec = Some(GestureRecorder::new(
@@ -681,6 +683,7 @@ pub(crate) fn draw_tick(t_ms: f64) -> Option<(f64, f64, f64)> {
         if let Some(r) = v.rec.as_mut() {
             r.tick(t_ms, false);
             r.held(held);
+            r.fingers(v.vp.fingers());
             r.placed(t_ms - draw_cam_t, alone);
             if v.vp.gliding() {
                 r.glided();

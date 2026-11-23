@@ -1337,35 +1337,15 @@ static const double kInkHoldSeconds = 0.06;
 - (void)tick:(CADisplayLink *)link;
 @end
 
-/** The display's best rate, read on the main thread when the canvas thread starts. */
-static float gCanvasMaxFps = 60;
-
-@implementation ONCanvasTicker {
-    BOOL _fast;
-    CFTimeInterval _idleSince;
-}
+@implementation ONCanvasTicker
 - (void)tick:(CADisplayLink *)link {
     @autoreleasepool {
-        // The display's best rate while the camera moves or holds fingers: a minimum close to the
-        // maximum (Apple's ProMotion recipe, 80-120), never the range down to half that 2.9.6
-        // asked for, which let iOS run this background display link at 60 (69-85 fps measured on
-        // the owner's iPad Pro M4 while the page ran at 120). Relaxed after half a second at rest.
-        BOOL busy = opennote_viewport_busy();
-        if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
-            float max = gCanvasMaxFps;
-            if (busy && !_fast) {
-                _fast = YES;
-                link.preferredFrameRateRange = CAFrameRateRangeMake(max, max, max);
-            } else if (!busy && _fast) {
-                if (_idleSince == 0) _idleSince = link.timestamp;
-                if (link.timestamp - _idleSince > 0.5) {
-                    _fast = NO;
-                    _idleSince = 0;
-                    link.preferredFrameRateRange = CAFrameRateRangeMake(MIN(30.0f, max), max, max > 60 ? 60.0f : max);
-                }
-            }
-            if (busy) _idleSince = 0;
-        }
+        // The link asks the display's best rate all the time (ONStartCanvasThread), at rest too.
+        // Relaxed at rest (until 3.0.8, after 0.5 s then 5 s), the display dropped to its idle
+        // rate, and after 20 s or more the next movement could stay at 60 Hz for its whole length:
+        // the link ticking at 120 but each drawable taking a 60 Hz refresh to come back
+        // (`acquireMax` 16.5 ms, 12.6 s of it in one pinch on the owner's iPad Pro M4). A tick at
+        // rest draws nothing (no change, no frame), so the cost is the display's refresh rate.
         // What the link really gives (its interval) and how far ahead of the frame it runs, for
         // the gesture's crash-log entry; then the frame drawn for its presentation time.
         opennote_viewport_link(link.duration, link.targetTimestamp - CACurrentMediaTime());
@@ -1386,7 +1366,6 @@ static void ONStartCanvasThread(void) {
     static NSThread *thread;
     if (thread) return;
     NSInteger fps = ONMaxFramesPerSecond();
-    gCanvasMaxFps = (float)fps;
     // The display's best rate, whatever it is (60 on most iPads, 120 on ProMotion): asked for, never
     // assumed; the system may lower it (Low Power Mode, heat) down to half. Recorded with each
     // gesture beside the rate achieved.
@@ -1394,9 +1373,9 @@ static void ONStartCanvasThread(void) {
     thread = [[NSThread alloc] initWithBlock:^{
         CADisplayLink *link = [CADisplayLink displayLinkWithTarget:[ONCanvasTicker new] selector:@selector(tick:)];
         if ([link respondsToSelector:@selector(setPreferredFrameRateRange:)]) {
-            // At rest until the camera moves (ONCanvasTicker raises it at once).
+            // The display's best rate, at rest too (ONCanvasTicker; Low Power Mode caps it itself).
             float max = (float)fps;
-            link.preferredFrameRateRange = CAFrameRateRangeMake(MIN(30.0f, max), max, max > 60 ? 60.0f : max);
+            link.preferredFrameRateRange = CAFrameRateRangeMake(max, max, max);
         } else {
             link.preferredFramesPerSecond = fps;
         }
