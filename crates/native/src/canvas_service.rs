@@ -698,6 +698,13 @@ fn make_host(surface: &Surface, w: u32, h: u32) -> Result<(CanvasHost, String), 
                     win.cast(),
                 )),
             };
+            if !USE_GL.load(Ordering::SeqCst) {
+                if let Some(gpu) = fragile_vulkan_gpu() {
+                    fall_back_to_gl(format!(
+                        "gles chosen at start: Vulkan on {gpu} (Mali before Valhall) draws the canvas wrong"
+                    ));
+                }
+            }
             // SAFETY (both attaches): the window holds our reference until the slot drops the host
             // first and then the window (`drop_host`), so the surface never outlives it.
             if !USE_GL.load(Ordering::SeqCst) {
@@ -710,6 +717,47 @@ fn make_host(surface: &Surface, w: u32, h: u32) -> Result<(CanvasHost, String), 
             unsafe { CanvasHost::attach(target(), w, h, canvas::wgpu::Backends::GL) }
         }
     }
+}
+
+/// The device's Vulkan GPU when it is a Mali before Valhall (asked once per run).
+///
+/// 3.0.8 moved Android off GLES unless the last run ended in a native crash. On a Galaxy Tab A8
+/// (Mali-G52, Android 14) the canvas then drew filled shapes black, drew strokes away from where
+/// the page put them while scrolling, and the app ended a second after a note opened, with no
+/// exit record that named a native crash, so it never fell back. Until 3.0.7 that tablet drew on
+/// GLES and was right. Midgard and Bifrost Malis draw on GLES from the start.
+#[cfg(target_os = "android")]
+fn fragile_vulkan_gpu() -> Option<String> {
+    static GPU: OnceLock<Option<String>> = OnceLock::new();
+    GPU.get_or_init(|| {
+        let vk = canvas::wgpu::Backends::VULKAN;
+        let inst = canvas::wgpu::Instance::new(&canvas::wgpu::InstanceDescriptor {
+            backends: vk,
+            ..Default::default()
+        });
+        inst.enumerate_adapters(vk)
+            .iter()
+            .map(|a| a.get_info().name)
+            .find(|name| mali_before_valhall(name))
+    })
+    .clone()
+}
+
+/// Midgard (Mali-T…) and Bifrost (Mali-G31, G51, G52, G71, G72, G76). Valhall and later (G57,
+/// G68, G77, G78, G310, G510, G610, G710, G615, G715, G720, …) keep Vulkan.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn mali_before_valhall(name: &str) -> bool {
+    let Some(rest) = name.trim().strip_prefix("Mali-") else {
+        return false;
+    };
+    if rest.starts_with('T') {
+        return true;
+    }
+    let Some(model) = rest.strip_prefix('G') else {
+        return false;
+    };
+    let digits: String = model.chars().take_while(char::is_ascii_digit).collect();
+    matches!(digits.as_str(), "31" | "51" | "52" | "71" | "72" | "76")
 }
 
 fn fall_back_to_gl(why: String) {
@@ -1576,4 +1624,22 @@ pub extern "C" fn opennote_canvas_draw_at(present_s: f64) -> bool {
 #[no_mangle]
 pub extern "C" fn opennote_canvas_draw_active() -> bool {
     catch_unwind(draw_active).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mali_before_valhall;
+
+    #[test]
+    fn midgard_and_bifrost_malis_draw_on_gles() {
+        for name in ["Mali-G52", "Mali-G52 MC2", "Mali-G76", "Mali-G31", "Mali-T880", " Mali-G72 "] {
+            assert!(mali_before_valhall(name), "{name}");
+        }
+        for name in [
+            "Mali-G57", "Mali-G68", "Mali-G78", "Mali-G510", "Mali-G610", "Mali-G710", "Mali-G715",
+            "Mali-G720", "Adreno (TM) 619", "PowerVR B-Series", "Mali-G5", "",
+        ] {
+            assert!(!mali_before_valhall(name), "{name}");
+        }
+    }
 }

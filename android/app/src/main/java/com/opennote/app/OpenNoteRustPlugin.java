@@ -273,6 +273,21 @@ public class OpenNoteRustPlugin extends Plugin {
         pendingSurface = surface;
     }
 
+    /** The application's context (set at load), for the drawing marker. */
+    private static android.content.Context appContext;
+
+    /**
+     * Kept while the canvas has a surface (on screen, the app in front), and cleared when the surface
+     * goes (the app sent to the background, where the system may kill it with no harm done). Still
+     * set at the next start, the last run ended while the canvas drew: GLES then. On a Galaxy Tab A8
+     * (3.0.8-3.0.9) the run ended a second after a note opened with no exit record naming a native
+     * crash, so the exit record alone never switched it.
+     */
+    private static void markDrawing(boolean on) {
+        if (appContext == null) return;
+        appContext.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit().putBoolean("drawing", on).commit();
+    }
+
     static void onSurfaceChanged(Surface surface, int width, int height) {
         if (!LOADED) return;
         // The canvas's surface at the display's best rate (Android 11+; the window's display mode,
@@ -295,7 +310,10 @@ public class OpenNoteRustPlugin extends Plugin {
         if (!canvasAttached) {
             canvasAttached = canvasSurfaceCreated(surface, width, height);
             pendingSurface = null;
-            if (canvasAttached) startFrameCallback();
+            if (canvasAttached) {
+                markDrawing(true);
+                startFrameCallback();
+            }
             return;
         }
         canvasSurfaceChanged(width, height);
@@ -308,6 +326,7 @@ public class OpenNoteRustPlugin extends Plugin {
         // A frame callback still queued on the render thread finds no canvas and draws nothing.
         canvasSurfaceDestroyed();
         canvasAttached = false;
+        markDrawing(false);
     }
 
     static void startFrameCallback() {
@@ -355,6 +374,7 @@ public class OpenNoteRustPlugin extends Plugin {
             WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), js, Collections.singleton(page.getScheme() + "://" + page.getAuthority()));
         }
         if (!LOADED) return;
+        appContext = getContext().getApplicationContext();
         // A run with the canvas on that ended in a native crash (the system's exit record: a GPU
         // driver's segfault ends the process past anything Rust catches) makes the canvas use GLES,
         // else Vulkan on a fragile driver (Mali) would end every run the same way. Only a native
@@ -365,8 +385,10 @@ public class OpenNoteRustPlugin extends Plugin {
             android.content.SharedPreferences prefs = getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE);
             long version = appVersion();
             if (prefs.getLong("gl_version", -1) != version) prefs.edit().remove("gl").putLong("gl_version", version).apply();
-            if (lastEnd.contains("android exit:") && lastEnd.contains("CRASH_NATIVE")) prefs.edit().putBoolean("gl", true).apply();
-            if (prefs.getBoolean("gl", false)) canvasPreferGl("the last run with the canvas ended in a native crash");
+            boolean endedDrawing = prefs.getBoolean("drawing", false);
+            if (endedDrawing) prefs.edit().remove("drawing").apply();
+            if (endedDrawing || (lastEnd.contains("android exit:") && lastEnd.contains("CRASH_NATIVE"))) prefs.edit().putBoolean("gl", true).apply();
+            if (prefs.getBoolean("gl", false)) canvasPreferGl("the last run with the canvas ended while it drew (or in a native crash)");
         }
         // The page asks window.__opennoteNativeCanvas (platform.ts hasNativeCanvas) before it draws.
         if (nativeCanvasEnabled(getContext()) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {

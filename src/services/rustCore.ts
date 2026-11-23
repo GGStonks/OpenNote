@@ -783,6 +783,11 @@ export function mirrorLaser(x: number, y: number, on: boolean): void {
   go();
 }
 
+/** Clean presentation: the cast's viewers on the PC hide their HUD (the device keeps its own UI). */
+export function mirrorClean(clean: boolean): void {
+  rustCall('mirrorClean', { clean }).catch(() => undefined);
+}
+
 export async function mirrorStatus(): Promise<MirrorStatus> {
   const reply = await rustCall('mirrorStatus', {});
   return reply.meta as unknown as MirrorStatus;

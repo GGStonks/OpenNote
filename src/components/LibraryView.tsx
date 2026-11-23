@@ -986,25 +986,6 @@ export const LibraryView: React.FC<LibraryViewProps> = (p) => {
               </button>
               {filterOpen && filterMenu}
             </div>
-            {/* Visible Import button */}
-            <button
-              onClick={() => importRef.current?.click()}
-              className="flex items-center justify-center gap-1.5 min-w-[40px] px-3 h-10 sm:h-9 rounded-xl text-xs font-semibold bg-gray-100 dark:bg-ui-raised text-gray-700 dark:text-gray-200 hover:bg-black/5 dark:hover:bg-white/10 active:scale-95 transition"
-              title="Import PDF, Word, Notability, .opennote, or images"
-              aria-label="Import"
-            >
-              <Upload className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" strokeWidth={1.75} />
-              <span className="hidden sm:inline">Import</span>
-            </button>
-            {/* Visible + New Note button */}
-            <button
-              onClick={p.onCreateNote}
-              className="hidden sm:flex items-center gap-1.5 px-3.5 h-10 sm:h-9 rounded-xl text-xs font-semibold bg-blue-600 text-white shadow-md shadow-blue-600/25 hover:bg-blue-700 active:scale-95 transition"
-              title="Create a new note"
-            >
-              <Plus className="w-3.5 h-3.5" strokeWidth={2.4} />
-              <span>New Note</span>
-            </button>
           </div>
         </header>
 

@@ -102,6 +102,8 @@ pub struct HandshakePayload {
 
 pub const CAMERA_FLAG_IN_MOTION: u32 = 1 << 0;
 pub const CAMERA_FLAG_MOMENTUM_GLIDE: u32 = 1 << 1;
+/// Clean presentation: the viewer shows the note alone, without its HUD (the device keeps its own UI).
+pub const CAMERA_FLAG_CLEAN: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CameraPayload {

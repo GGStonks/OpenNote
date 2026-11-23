@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use opennote_remote::{
-    CameraPayload, LaserPointerPayload, MirrorBroadcaster, PointData, StrokeCommitPayload,
+    CameraPayload, LaserPointerPayload, CAMERA_FLAG_CLEAN, MirrorBroadcaster, PointData, StrokeCommitPayload,
     StrokeLiveAddPayload, ToolType, DEFAULT_PORT,
 };
 
@@ -316,22 +316,51 @@ pub fn broadcast_camera(k: f64, x: f64, y: f64) {
     }
     // Only a camera that moved (the canvas draws more often than it moves; at rest nothing goes).
     // A viewer connecting later is sent the last one (the broadcaster keeps it).
-    static LAST: Mutex<[f64; 3]> = Mutex::new([f64::NAN; 3]);
     {
-        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = LAST_CAMERA.lock().unwrap_or_else(|e| e.into_inner());
         if *last == [k, x, y] {
             return;
         }
         *last = [k, x, y];
     }
-    s.broadcaster.broadcast_camera(CameraPayload {
+    send_camera(&s.broadcaster, k, x, y);
+}
+
+/// The last camera sent to the viewers (scale, left, top; NaN before the first).
+static LAST_CAMERA: Mutex<[f64; 3]> = Mutex::new([f64::NAN; 3]);
+/// Clean presentation (the cast popover's checkbox): the viewers hide their HUD. The device's own
+/// UI is never changed by it.
+static CLEAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn send_camera(b: &MirrorBroadcaster, k: f64, x: f64, y: f64) {
+    let clean = CLEAN.load(std::sync::atomic::Ordering::Relaxed);
+    b.broadcast_camera(CameraPayload {
         timestamp_us: (crate::clock_ms() * 1000.0) as u64,
         x: x as f32,
         y: y as f32,
         zoom: k as f32,
         rotation: 0.0,
-        flags: 0,
+        flags: if clean { CAMERA_FLAG_CLEAN } else { 0 },
     });
+}
+
+/// Clean presentation on or off (`{ "clean": bool }`): kept for every later camera packet, and the
+/// last camera sent again at once so viewers (and the one kept for late joiners) follow while the
+/// note is still.
+pub fn mirror_clean(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        clean: bool,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("mirrorClean: {e}"))?;
+    CLEAN.store(r.clean, std::sync::atomic::Ordering::Relaxed);
+    let [k, x, y] = *LAST_CAMERA.lock().unwrap_or_else(|e| e.into_inner());
+    if !k.is_nan() {
+        if let Some(s) = session_lock().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            send_camera(&s.broadcaster, k, x, y);
+        }
+    }
+    Ok(("{}".into(), Vec::new()))
 }
 
 /// Broadcast live pen point sample.

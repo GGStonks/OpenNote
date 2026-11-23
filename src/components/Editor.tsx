@@ -3,6 +3,7 @@ import { createPortal, flushSync } from 'react-dom';
 import {
   Sparkles, Share2, Shapes, Copy, Trash2, X, Wand2, FileText, Loader2, AlertCircle, PaintBucket, MoveUpRight, Scissors, ClipboardCopy, Share,
   ClipboardPaste, CopyPlus, Plus, Minus, Maximize, MoveHorizontal,
+  EyeOff,
 } from 'lucide-react';
 import { copySelection, pasteClipboard, useClipboard } from '../editor/clipboard';
 import { FillType, LatexBlock, NoteDocument, NotePage, Rect, Stroke, newId, LineStyle } from '../types';
@@ -17,7 +18,7 @@ const MemoizedToolbar = React.memo(Toolbar);
 import { LatexModal, LatexModalState } from './LatexModal';
 import { ExportModal, SelectionExportModal, baseName } from './ExportModal';
 import { MirrorPopover } from './MirrorPopover';
-import { mirrorStatus } from '../services/rustCore';
+import { mirrorClean, mirrorStatus } from '../services/rustCore';
 import { selectionSvg } from '../services/svgExport';
 import { TextFormatBar } from './TextFormatBar';
 import { CommandPalette } from './CommandPalette';
@@ -45,7 +46,7 @@ import {
 } from '../editor/sheets';
 import { PageManager } from './PageManager';
 import { nativeCanvasFor, nativeViewportFor, useCanvasFallback } from '../services/rustCore';
-import { ExportMode, canMakePdf, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
+import { ExportMode, canMakePdf, hasNativeCanvas, haptic, pdfOfPrintLayout, pdfPrintingFailed, printDocument, printNeedsCalibration, printPdfDocument, exportFile } from '../platform';
 import { CALIBRATION_MARK, Calibration, PrintFix, calibrationMarks, measureCalibration } from '../services/printCalibration';
 import { PdfSource, PrintedPage, joinPdfPages, loadUnderlays, pdfPageCount } from '../services/pdfExport';
 import { pdfPrintReady } from './PdfBackground';
@@ -378,6 +379,10 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [zenMode, setZenMode] = useState(false);
   const [cleanPresentation, setCleanPresentation] = useState(false);
+  // Clean presentation hides the UI on the cast's PC viewer only (its HUD); this device keeps its own.
+  useEffect(() => {
+    if (hasNativeCanvas()) mirrorClean(cleanPresentation);
+  }, [cleanPresentation]);
   const [dockPosition, setDockPosition] = useState<'bottom' | 'left' | 'right'>('bottom');
   /** Bars along the bottom edge stand above the tool dock when it is there (dock 52-56 px, 16 px from the edge). */
   const dockLift = dockPosition === 'bottom' && !zenMode ? 76 : 0;
@@ -1404,11 +1409,25 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
   // a running conversion, the selection and the pages panel (dialogs and popovers register themselves).
   useBack(true, () => void goHome());
   useBack(pagesOpen, () => setPagesOpen(false));
+  useBack(zenMode, () => setZenMode(false));
   useBack(!!selection, () => setSelectionState(null));
   useBack(!!busy, cancelConversion);
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
+      {/* Zen mode hides the bars (shown on hover only, which a tablet has not): its own way out. */}
+      {zenMode && (
+        <button
+          onClick={() => setZenMode(false)}
+          data-cutout-clear
+          data-no-pan
+          data-viewport-hole
+          className="fixed z-50 top-[calc(0.75rem+var(--sa-top))] right-[calc(0.75rem+var(--sa-right))] flex items-center gap-1.5 min-h-[36px] rounded-full bg-black/55 text-white text-xs font-semibold px-3 backdrop-blur active:scale-95 transition pop-enter"
+          title="Exit Zen Mode (Tab)"
+        >
+          <EyeOff className="w-4 h-4" strokeWidth={1.75} /> Exit Zen
+        </button>
+      )}
       <div className={`transition-opacity duration-300 ${zenMode ? 'opacity-0 pointer-events-none hover:opacity-100 hover:pointer-events-auto' : 'opacity-100'}`}>
         <MemoizedToolbar
           tools={tools}
@@ -1534,32 +1553,30 @@ export const Editor: React.FC<EditorProps> = ({ note, settings, setSettings, onS
           <PullIndicator bind={bindPull} />
 
           {/* Page indicator and zoom */}
-          {!cleanPresentation && (
-            <div
-              data-cutout-clear
-              className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
-              style={{ bottom: `calc(${(selection || (clipboard && tools.tool === 'lasso') ? 84 : 14) + dockLift}px + var(--sa-bottom))` }}
-              data-no-pan
-              data-viewport-hole
-            >
-              <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
-                <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
-                  <Minus className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  onClick={toggleFit}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
-                  title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
-                >
-                  {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </div>
+          <div
+            data-cutout-clear
+            className="absolute right-[calc(0.75rem+var(--sa-right))] z-30 flex items-center gap-1.5"
+            style={{ bottom: `calc(${(selection || (clipboard && tools.tool === 'lasso') ? 84 : 14) + dockLift}px + var(--sa-bottom))` }}
+            data-no-pan
+            data-viewport-hole
+          >
+            <div className="flex items-center rounded-full bg-black/55 text-white text-xs font-semibold tabular-nums backdrop-blur overflow-hidden">
+              <button onClick={() => zoomBy(0.8)} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10" title="Zoom out (⌘−)">
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={toggleFit}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 hover:bg-white/10"
+                title={fitMode === 'width' ? 'Fit the whole page' : 'Fit the page width (⌘0)'}
+              >
+                {fitMode === 'width' ? <Maximize className="w-3.5 h-3.5" /> : <MoveHorizontal className="w-3.5 h-3.5" />}
+                {Math.round(zoom * 100)}%
+              </button>
+              <button onClick={() => zoomBy(1.25)} disabled={zoom >= MAX_ZOOM - 1e-3} className="hidden sm:flex px-2 py-1.5 hover:bg-white/10 disabled:opacity-40" title="Zoom in (⌘+)">
+                <Plus className="w-3.5 h-3.5" />
+              </button>
             </div>
-          )}
+          </div>
         </div>
       </div>
 

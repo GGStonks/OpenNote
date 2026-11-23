@@ -123,9 +123,14 @@ shell where the content really landed (the snapshot glides there and goes). `npm
 messages and that the snapshot's last position matches the drawn page.
 
 Over the native canvas (on in the apps since 3.0.3: iOS skips it for the one run after a native
-crash, Android uses GLES after a native crash until the next app version (`OpenNoteRustPlugin`;
-until 3.0.7 any abnormal end, the system's background kills included, switched it to GLES for
-good: most devices drew on the far slower GLES); the page draws notes with PDF pages, the browser,
+crash, Android uses GLES on Malis before Valhall (Midgard, Bifrost: `mali_before_valhall` in
+canvas_service.rs; 3.0.8-3.0.9 put a Galaxy Tab A8's Mali-G52 on Vulkan: filled shapes black,
+strokes off their place while scrolling, the app ended a second after a note opened) and, until
+the next app version, after a run that ended while the canvas drew in front (`OpenNoteRustPlugin`
+`drawing` marker, cleared when the surface goes, so background kills do not count; that tablet's
+end left no exit record naming a native crash) or in a native crash (until 3.0.7 any abnormal
+end, the system's background kills included, switched it to GLES for good: most devices drew on
+the far slower GLES); the page draws notes with PDF pages, the browser,
 and whenever the canvas fails, `canvas-fallback`) none of this applies:
 two fingers move the Rust camera (`crates/viewport`, a port of useViewport.ts's gestures and
 viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (iOS `ONWindow
@@ -452,7 +457,9 @@ show the iPad's compositing cost).
   device's screen and half a screen around it (paper with its pattern, ink capsules, fills;
   pictures left out; `canvas::cast`, `canvas_service::cast_document`), placed with the canvas's
   own surface transform (camera packets, sent when it moves), filling the window's width or the
-  device's whole screen (the HUD's button). The viewer plays the camera back `PLAYOUT_MS` late,
+  device's whole screen (the HUD's button). Clean presentation (the cast popover) hides the
+  viewer's HUD only (`CAMERA_FLAG_CLEAN` on camera packets, `mirrorClean`); the device keeps its
+  UI (3.0.9 hid the tablet's zoom pill instead). The viewer plays the camera back `PLAYOUT_MS` late,
   interpolated by the device's timestamps (Wi-Fi delivers in bursts), and shows each page from a
   bitmap drawn a slice at a time (`SLICE` capsules, ~5 ms a frame, the old bitmap up until then;
   exact again once the camera rests; pages unchanged in a new snapshot keep theirs, by a hash of

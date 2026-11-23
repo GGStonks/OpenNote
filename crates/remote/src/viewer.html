@@ -32,6 +32,8 @@
     z-index: 10;
   }
   #hud.autohide { opacity: 0.15; }
+  /* Clean presentation (the device's cast popover): the note alone. */
+  body.clean #hud { display: none; }
   #hud:hover { opacity: 1; }
 
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
@@ -479,6 +481,7 @@
           clockOffset = Math.min(now - t, clockOffset + 0.05);
           if (cams.length && t <= cams[cams.length - 1].t) cams.length = 0;
           cams.push({ t, k: view.getFloat32(24, true), x: view.getFloat32(16, true), y: view.getFloat32(20, true) });
+          document.body.classList.toggle('clean', (view.getUint32(32, true) & 4) !== 0); // CAMERA_FLAG_CLEAN
           while (cams.length > 2 && cams[1].t < t - 1000) cams.shift();
           break;
         }
