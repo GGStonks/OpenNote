@@ -761,6 +761,28 @@ export async function mirrorStop(): Promise<{ active: boolean }> {
   return reply.meta as unknown as { active: boolean };
 }
 
+/**
+ * The laser pointer to the cast's viewers (surface px, `on` while the pen is down): one call in
+ * flight at a time, the newest position sent when it ends (none while no cast is on).
+ */
+let laserBusy = false;
+let laserNext: { x: number; y: number; on: boolean } | null = null;
+export function mirrorLaser(x: number, y: number, on: boolean): void {
+  laserNext = { x, y, on };
+  if (laserBusy) return;
+  const go = () => {
+    const m = laserNext;
+    laserNext = null;
+    if (!m) {
+      laserBusy = false;
+      return;
+    }
+    laserBusy = true;
+    rustCall('mirrorLaser', m).catch(() => undefined).finally(go);
+  };
+  go();
+}
+
 export async function mirrorStatus(): Promise<MirrorStatus> {
   const reply = await rustCall('mirrorStatus', {});
   return reply.meta as unknown as MirrorStatus;

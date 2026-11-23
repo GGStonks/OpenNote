@@ -296,6 +296,8 @@
     dirty = true;
   });
   let doc = null;
+  // The device's laser pointer (surface px) and its trail (viewer clock), fading over 300 ms.
+  const laser = { on: false, trail: [] };
   const live = new Map();
   let packetsCount = 0;
   let framesCount = 0;
@@ -500,6 +502,12 @@
         case 0x04: { // StrokeCommit: shown until the snapshot with the stroke comes
           const stroke = live.get(view.getUint32(8, true));
           if (stroke) stroke.done = true;
+          break;
+        }
+        case 0x05: { // LaserPointer: surface px, on while the pen is down
+          laser.on = view.getFloat32(16, true) > 0.05;
+          laser.trail.push({ x: view.getFloat32(8, true), y: view.getFloat32(12, true), t: performance.now() });
+          dirty = true;
           break;
         }
         case 0x06: { // DocumentSync: the note near the view
@@ -732,7 +740,7 @@
     startJob(pg, want);
   }
 
-  let shown = null, restSince = 0, sharp = false, liveShown = false;
+  let shown = null, restSince = 0, sharp = false, liveShown = false, laserShown = false;
 
   // Render loop: the device's screen, filling the window's width or whole.
   function render(now) {
@@ -773,7 +781,9 @@
     }
     // At rest for a moment: drawn once more, exactly.
     const rest = now - restSince > 120;
-    if (!moved && !dirty && (sharp || !rest)) return;
+    laser.trail = laser.trail.filter((p) => now - p.t < 300 || (laser.on && p === laser.trail[laser.trail.length - 1]));
+    const lasering = laser.on || laser.trail.length > 0;
+    if (!moved && !dirty && !lasering && !laserShown && (sharp || !rest)) return;
     const t0 = performance.now();
     dirty = false;
     shown = cam;
@@ -814,10 +824,11 @@
     for (const pg of doc.pages) if (!pg.paper) show(pg);
     // The stroke being written, in the device's view units (cleared when there is none).
     const vp = doc.viewPx || 2;
-    if (live.size || liveShown) {
+    if (live.size || liveShown || lasering || laserShown) {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, liveCanvas.width, liveCanvas.height);
-      liveShown = live.size > 0;
+      liveShown = live.size > 0 || lasering;
+      laserShown = lasering;
       // Hidden when empty: one window-sized layer less for the browser to blend each frame.
       liveCanvas.style.visibility = liveShown ? 'visible' : 'hidden';
     }
@@ -837,6 +848,31 @@
       ctx.moveTo(p[0], p[1]);
       for (let i = 2; i < p.length; i += 2) ctx.lineTo(p[i], p[i + 1]);
       ctx.stroke();
+    }
+    // The laser pointer: its trail, then the dot while the pen is down.
+    if (lasering) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const at = (q) => [ox + s * (cam.x + q.x * cam.k), oy + s * (cam.y + q.y * cam.k)];
+      const r = Math.max(4, 7 * s * (doc.viewPx || 2));
+      if (laser.trail.length > 1) {
+        ctx.strokeStyle = 'rgba(239,68,68,0.45)';
+        ctx.lineWidth = r * 0.7;
+        ctx.beginPath();
+        laser.trail.forEach((q, i) => (i ? ctx.lineTo(...at(q)) : ctx.moveTo(...at(q))));
+        ctx.stroke();
+      }
+      const head = laser.trail[laser.trail.length - 1];
+      if (laser.on && head) {
+        const [x, y] = at(head);
+        ctx.fillStyle = 'rgba(239,68,68,0.3)';
+        ctx.beginPath();
+        ctx.arc(x, y, r * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ef4444';
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.restore();
     sharp = rest;

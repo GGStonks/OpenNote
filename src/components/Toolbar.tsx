@@ -950,11 +950,10 @@ export const Toolbar: React.FC<ToolbarProps> = (p) => {
         {/* Laser Pointer */}
         <ToolDockButton
           active={tools.tool === 'laser'}
-          title="Laser Pointer (broadcasts to connected PCs)"
+          title="Laser pointer: a red dot and a fading trail where the pen is, nothing saved (shown on the PC when casting)"
           onClick={() => selectTool('laser')}
         >
           <Pointer className="w-5 h-5 text-red-500" strokeWidth={1.75} />
-          <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
         </ToolDockButton>
 
         {/* Text Button */}

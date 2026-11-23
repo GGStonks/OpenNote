@@ -260,6 +260,22 @@ pub fn mirror_stop(_meta: &str) -> Result<(String, Vec<u8>), String> {
     Ok((json!({ "active": false }).to_string(), Vec::new()))
 }
 
+/// The laser pointer (the dock's laser tool): where it is on the canvas's surface (surface px, the
+/// strokes' units), `on` while the pen is down. Nothing to do without a viewer.
+pub fn mirror_laser(meta: &str) -> Result<(String, Vec<u8>), String> {
+    #[derive(Deserialize)]
+    struct Req {
+        x: f32,
+        y: f32,
+        on: bool,
+    }
+    let r: Req = serde_json::from_str(meta).map_err(|e| format!("mirrorLaser: {e}"))?;
+    if active() {
+        broadcast_laser(r.x, r.y, if r.on { 1.0 } else { 0.0 }, 0xEF44_44FF);
+    }
+    Ok(("{}".into(), Vec::new()))
+}
+
 pub fn mirror_status(_meta: &str) -> Result<(String, Vec<u8>), String> {
     let guard = session_lock().lock().unwrap();
     let resp = match guard.as_ref() {

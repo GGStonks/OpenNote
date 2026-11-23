@@ -27,11 +27,11 @@ import { prewarmTools } from '../editor/prewarm';
 import { ShapeHandle, SnapAdjust, adjustSnappedShape, dragHandle, shapeHandles } from '../editor/shapeEdit';
 import { XY } from '../ink/spline';
 import { haptic } from '../platform';
-import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, imageKey, rustCanvasImageStatus, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
+import { cameraFeed, canvasFellBack, canvasHealth, deskRgba, fallBackFromNativeCanvas, imageKey, mirrorLaser, rustCanvasImageStatus, rustGetCanvasStats, rustSetCanvasFrame, rustSetCanvasScene } from '../services/rustCore';
 import { useCanvasPageStream, useSheetWindow } from '../services/canvasPages';
 import { GestureBus } from '../editor/gestures';
 import {
-  Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectInRect, selectionRotation, singleBlockSelection, textHeight, transformSelection,
+  Selection, computeBounds, normDeg, resetRotation, shownDeg, selectInLasso, selectionRotation, singleBlockSelection, textHeight, transformSelection,
 } from '../editor/selection';
 import { HANDLE_DOT, ImageBlockView, LatexBlockView, RESIZE_HANDLES, TextBlockView, handleBox, layoutZoom } from './Blocks';
 import { checkboxAt, compactParas, paragraphsOf, parasOf } from '../editor/richText';
@@ -1745,6 +1745,65 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     };
   };
 
+  /**
+   * The lasso being drawn: dashed, its inside tinted. Drawn again only when the pen moves (3.0.7
+   * animated its dashes, redrawing a big loop's whole outline and fill on a screen-sized canvas
+   * every frame); in the apps on the shell's native ink layer (syncInk), not the page's canvas.
+   */
+  function paintLasso(ctx: CanvasRenderingContext2D, d: NonNullable<typeof drawing.current>, k: number, coarse = false): DirtyRect {
+    ctx.save();
+    ctx.strokeStyle = '#3B82F6';
+    ctx.lineWidth = 1.5 * k;
+    ctx.setLineDash([6 * k, 5 * k]);
+    ctx.lineJoin = d.isRectLasso ? 'miter' : 'round';
+    ctx.fillStyle = 'rgba(59,130,246,0.07)';
+    if (d.isRectLasso) {
+      const p0 = d.points[0], p1 = d.points[d.points.length - 1];
+      const x = Math.min(p0.x, p1.x);
+      const y = Math.min(p0.y, p1.y);
+      const w = Math.abs(p1.x - p0.x);
+      const h = Math.abs(p1.y - p0.y);
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x, y, w, h);
+      ctx.restore();
+      return { minX: x - 2 * k, minY: y - 2 * k, maxX: x + w + 2 * k, maxY: y + h + 2 * k };
+    }
+    ctx.beginPath();
+    // Held still and snapped: the clean shape, its corners sharp. Drawn, a loop is thinned to
+    // points 1.5 screen px apart (a big one held thousands, all drawn again on every move); for
+    // the shell (`coarse`) 4 px apart, straight between them (a big loop's drawing was 48 kB).
+    const all = d.snapped ? d.snapped.points : d.points;
+    const pts: { x: number; y: number }[] = [];
+    const gap = (coarse ? 4 : 1.5) * k;
+    for (const p of all) {
+      const l = pts[pts.length - 1];
+      if (!l || Math.hypot(p.x - l.x, p.y - l.y) >= gap || p === all[all.length - 1]) pts.push(p);
+    }
+    {
+      ctx.moveTo(pts[0].x, pts[0].y);
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      if (d.snapped || coarse) for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      else {
+        // A smooth curve through the midpoints (the points themselves as control points).
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1], b = pts[i];
+          ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) / 2, (a.y + b.y) / 2);
+        }
+        ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
+      }
+      for (const p of pts) {
+        minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+      }
+      ctx.closePath();
+      // The shell's copy is the outline alone (its path would go twice, the drawing's length).
+      if (!coarse) ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      return { minX: minX - 2 * k, minY: minY - 2 * k, maxX: maxX + 2 * k, maxY: maxY + 2 * k };
+    }
+  }
+
+  const lassoQueued = useRef(new WeakSet<object>()).current;
   const renderActive = () => {
     raf.current = null;
     const canvas = activeCanvasRef.current;
@@ -1808,47 +1867,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
         next = drawLiveStroke(ctx, d.predicted.length ? [...d.points, ...d.predicted] : d.points, liveStyle(d.tool));
       }
     } else if (d && d.tool === 'lasso' && d.points.length > 1) {
-      ctx.save();
-      ctx.strokeStyle = '#3B82F6';
-      ctx.lineWidth = 1.5 * k;
-      ctx.setLineDash([6 * k, 5 * k]);
-      ctx.lineDashOffset = -((performance.now() / 40) % 11) * k;
-      ctx.lineJoin = d.isRectLasso ? 'miter' : 'round';
-      ctx.fillStyle = 'rgba(59,130,246,0.07)';
-      if (d.isRectLasso) {
-        const p0 = d.points[0], p1 = d.points[d.points.length - 1];
-        const x = Math.min(p0.x, p1.x);
-        const y = Math.min(p0.y, p1.y);
-        const w = Math.abs(p1.x - p0.x);
-        const h = Math.abs(p1.y - p0.y);
-        ctx.fillRect(x, y, w, h);
-        ctx.strokeRect(x, y, w, h);
-        ctx.restore();
-        next = { minX: x - 2 * k, minY: y - 2 * k, maxX: x + w + 2 * k, maxY: y + h + 2 * k };
-      } else {
-        ctx.beginPath();
-        // Held still and snapped: the clean shape, its corners sharp.
-        const pts = d.snapped ? d.snapped.points : d.points;
-        ctx.moveTo(pts[0].x, pts[0].y);
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        if (d.snapped) for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        else {
-          // A smooth curve through the midpoints (the points themselves as control points).
-          for (let i = 1; i < pts.length; i++) {
-            const a = pts[i - 1], b = pts[i];
-            ctx.quadraticCurveTo(a.x, a.y, (a.x + b.x) / 2, (a.y + b.y) / 2);
-          }
-          ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y);
-        }
-        for (const p of pts) {
-          minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-        }
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-        next = { minX: minX - 2 * k, minY: minY - 2 * k, maxX: maxX + 2 * k, maxY: maxY + 2 * k };
-      }
+      next = paintLasso(ctx, d, k);
     }
     if (d && d.tool === 'eraser' && d.snapped) {
       // The band a snapped eraser erases along its shape.
@@ -2140,11 +2159,61 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     haptic('snap');
   };
 
+  /**
+   * The laser pointer (the dock's laser tool): a red dot where the pen is and a trail fading over
+   * `LASER_TRAIL_MS`, nothing saved; sent to the cast's viewers too (mirrorLaser). Drawn on an SVG
+   * of its own, changed in place each frame (no React render per move).
+   */
+  const LASER_TRAIL_MS = 300;
+  const laserSvgRef = useRef<SVGSVGElement>(null);
+  const laser = useRef<{ pointerId: number; down: boolean; trail: { x: number; y: number; t: number }[]; raf: number } | null>(null);
+  const paintLaser = () => {
+    const L = laser.current, svg = laserSvgRef.current;
+    if (!L || !svg) return;
+    const now = performance.now();
+    L.trail = L.trail.filter((p) => now - p.t < LASER_TRAIL_MS || (L.down && p === L.trail[L.trail.length - 1]));
+    const k = 1 / Math.max(0.3, zoomRef.current);
+    const [path, dot] = [svg.children[0] as SVGPathElement, svg.children[1] as SVGCircleElement];
+    path.setAttribute('d', L.trail.length > 1 ? 'M' + L.trail.map((p) => `${p.x},${p.y}`).join('L') : '');
+    path.setAttribute('stroke-width', String(5 * k));
+    const head = L.trail[L.trail.length - 1];
+    dot.setAttribute('r', String(7 * k));
+    dot.setAttribute('cx', String(head?.x ?? 0));
+    dot.setAttribute('cy', String(head?.y ?? 0));
+    dot.style.opacity = L.down && head ? '1' : '0';
+    if (L.down || L.trail.length) L.raf = requestAnimationFrame(paintLaser);
+    else laser.current = null;
+  };
+  const laserAt = (e: React.PointerEvent<HTMLDivElement>, down: boolean) => {
+    const L = laser.current;
+    if (!L) return;
+    const p = toPoint(e, 0);
+    L.down = down;
+    L.trail.push({ x: p.x, y: p.y, t: performance.now() });
+    mirrorLaser(p.x, p.y, down);
+  };
+
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const tool = tools.tool;
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    // Any touch outside the selection lets it go at once: a finger, the pen, any tool (the frame,
+    // its handles and the selection bar lie over this layer, so a touch reaching it is outside).
+    if (selection) setSelection(null);
     if (tool === 'hand') return;
     if (e.pointerType === 'touch' && (tools.stylusOnly || gestures.touches > 1 || gestures.navigating)) return;
+    if (tool === 'laser') {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      if (laser.current) cancelAnimationFrame(laser.current.raf);
+      rectCache.current = null;
+      laser.current = { pointerId: e.pointerId, down: true, trail: [], raf: 0 };
+      laserAt(e, true);
+      paintLaser();
+      return;
+    }
     const existing = drawing.current;
     if (existing) {
       // Palm rejection: a pencil touching down replaces a finger/palm stroke in progress.
@@ -2208,7 +2277,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
     rectCache.current = null;
     // In the apps the shell draws pen strokes (NativeInk): the live canvas is not needed for them
     // (the Draw tool still shows its measurements there).
-    if (!(tool === 'pen' && NativeInk.available)) claimLive();
+    if (!((tool === 'pen' || tool === 'lasso') && NativeInk.available)) claimLive();
     const start = eventTime(e.nativeEvent);
     const pt = toPoint(e, start, stylusAngles(e.nativeEvent));
     paperStyleRef.current = sheetAt(pt.y).paperStyle;
@@ -2238,7 +2307,7 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // Handwriting's and the lasso's: fast movements fill their wide gaps on a smooth curve (a
       // fast lasso was a polygon of straight pieces, a fast highlighter stroke jagged).
       dense: !isRectLasso && (tool === 'pen' || tool === 'highlighter' || tool === 'lasso' || (tool === 'shape' && toolsRef.current.shapeMode === 'curve')) ? new SampleDensifier() : null,
-      ink: (tool === 'pen' || tool === 'shape') && NativeInk.available ? new NativeInk() : null,
+      ink: (tool === 'pen' || tool === 'shape' || tool === 'lasso') && NativeInk.available ? new NativeInk() : null,
       inkTf: null,
       realPressure: e.pointerType === 'pen' && e.pressure > 0 && e.pressure !== 0.5,
       native: null,
@@ -2278,6 +2347,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (laser.current?.down && laser.current.pointerId === e.pointerId) {
+      laserAt(e, true);
+      return;
+    }
     const d = drawing.current;
     if (!d) {
       // Hover preview of the eraser (Apple Pencil hover / mouse).
@@ -2347,16 +2420,9 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       if ('buttons' in ce && (ce.pointerType === 'pen' || ce.pointerType === 'mouse') && (ce as PointerEvent).buttons === 0) continue;
       const pt = toPoint(ce, d.start, stylusAngles(ce as PointerEvent));
       if (d.isRectLasso) {
+        // Only its corner: it selects when the pen lifts, as the freehand lasso (3.0.7 selected
+        // again on every sample, the selection's frame, handles and bar redrawn under the pen).
         d.points = [d.points[0], pt];
-        const p0 = d.points[0];
-        const x = Math.min(p0.x, pt.x);
-        const y = Math.min(p0.y, pt.y);
-        const w = Math.abs(pt.x - p0.x);
-        const h = Math.abs(pt.y - p0.y);
-        if (w >= 3 || h >= 3) {
-          const liveSel = selectInRect(pageRef.current, { minX: x, minY: y, maxX: x + w, maxY: y + h });
-          setSelection(liveSel);
-        }
         continue;
       }
       if (d.rec) d.rec.push(recSample(pt, ce.pointerType === 'pen' ? ce.pressure : 0.5, d.start));
@@ -2451,6 +2517,19 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   function syncInk(d: NonNullable<typeof drawing.current>) {
     if (!d.ink) return;
     d.inkTf ??= inkTransform();
+    if (d.tool === 'lasso') {
+      // The lasso on the shell's native layer (no screen-sized canvas in the web view), once a
+      // frame however many samples came (a big loop is a long drawing).
+      if (d.points.length < 2 || lassoQueued.has(d)) return;
+      lassoQueued.add(d);
+      requestAnimationFrame(() => {
+        lassoQueued.delete(d);
+        if (drawing.current !== d || !d.ink || !d.inkTf) return;
+        const k = 1 / Math.max(0.3, zoomRef.current);
+        d.ink.drawing(record(d.inkTf, (ctx) => paintLasso(ctx, d, k, true)), d.inkTf);
+      });
+      return;
+    }
     if (d.smart || d.snapped) {
       // Shapes (Draw tool, or a pen stroke held still and snapped): the whole drawing, as the page draws it.
       const k = 1 / Math.max(0.3, zoomRef.current);
@@ -2582,7 +2661,8 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       // empty ink-grid entries, after a layout read, in the middle of writing).
       const end = () => { ink.end(); if (!isNative) logInkGrid(zoomRef.current); };
       const sent = sceneSent.current;
-      if (cancelled) ink.cancel();
+      // The lasso leaves nothing behind: its outline goes with the lift.
+      if (cancelled || d.tool === 'lasso') ink.cancel();
       else if (isNative) {
         // The native canvas draws it once its scene is in (a long note's took 150 ms and more,
         // and the stroke vanished meanwhile): the shell's copy is cleared a frame after that.
@@ -2658,41 +2738,28 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
       editor.endGesture();
       if (pointerType === 'touch') eraserPos.current = null;
     } else if (!cancelled && d.tool === 'lasso') {
-      if (d.isRectLasso) {
-        const p0 = d.points[0];
-        const p1 = d.points[d.points.length - 1];
-        const x = Math.min(p0.x, p1.x);
-        const y = Math.min(p0.y, p1.y);
-        const w = Math.abs(p1.x - p0.x);
-        const h = Math.abs(p1.y - p0.y);
-        if (w < 8 && h < 8) {
-          const at = p0;
-          const pg = pageRef.current;
-          const hit = [...pg.strokes].reverse().find((s) => strokeHitTest(s, at.x, at.y, 6 / Math.max(0.3, zoomRef.current)));
-          if (hit) {
-            const sel = { pageId: pg.id, strokeIds: [hit.id], latexIds: [], textIds: [], imageIds: [] };
-            const bounds = computeBounds(pg, sel);
-            if (bounds) setSelection({ ...sel, bounds });
-          }
-        } else {
-          setSelection(selectInRect(pageRef.current, { minX: x, minY: y, maxX: x + w, maxY: y + h }));
+      // The rectangle and the freehand lasso select alike: the rectangle is a lasso of its four
+      // corners (3.0.7 took its own path, with another tap rule), a short one is a tap.
+      const p0 = d.points[0], p1 = d.points[d.points.length - 1];
+      const loop = d.isRectLasso
+        ? [p0, { x: p1.x, y: p0.y }, p1, { x: p0.x, y: p1.y }]
+        : d.snapped
+          ? d.snapped.points
+          : d.points;
+      let len = 0;
+      for (let i = 1; i < d.points.length; i++) len += Math.hypot(d.points[i].x - d.points[i - 1].x, d.points[i].y - d.points[i - 1].y);
+      if (d.isRectLasso) len = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      if (len < 12 && !d.snapped) {
+        // A tap with the lasso selects the stroke under it (topmost first).
+        const at = p0;
+        const pg = pageRef.current;
+        const hit = [...pg.strokes].reverse().find((s) => strokeHitTest(s, at.x, at.y, 6 / Math.max(0.3, zoomRef.current)));
+        if (hit) {
+          const sel = { pageId: pg.id, strokeIds: [hit.id], latexIds: [], textIds: [], imageIds: [] };
+          const bounds = computeBounds(pg, sel);
+          if (bounds) setSelection({ ...sel, bounds });
         }
-      } else {
-        let len = 0;
-        for (let i = 1; i < d.points.length; i++) len += Math.hypot(d.points[i].x - d.points[i - 1].x, d.points[i].y - d.points[i - 1].y);
-        if (len < 12) {
-          // A tap with the lasso selects the stroke under it (topmost first).
-          const at = d.points[0];
-          const pg = pageRef.current;
-          const hit = [...pg.strokes].reverse().find((s) => strokeHitTest(s, at.x, at.y, 6 / Math.max(0.3, zoomRef.current)));
-          if (hit) {
-            const sel = { pageId: pg.id, strokeIds: [hit.id], latexIds: [], textIds: [], imageIds: [] };
-            const bounds = computeBounds(pg, sel);
-            if (bounds) setSelection({ ...sel, bounds });
-          }
-        } else if (d.snapped) setSelection(selectInLasso(pageRef.current, d.snapped.points));
-        else if (d.points.length > 3) setSelection(selectInLasso(pageRef.current, d.points));
-      }
+      } else if (loop.length > 3) setSelection(selectInLasso(pageRef.current, loop));
     }
     // The committed canvas paints in the same frame as React's commit (layout effect), so the
     // live layer can be cleared on the next frame without flicker.
@@ -2700,6 +2767,10 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
   }
 
   const finish = (e: React.PointerEvent<HTMLDivElement>, cancelled: boolean) => {
+    if (laser.current?.down && laser.current.pointerId === e.pointerId) {
+      laserAt(e, false);
+      return;
+    }
     const d = drawing.current;
     if (!d || e.pointerId !== d.pointerId) return;
     if (d.native && d.nativeSeen) {
@@ -3341,6 +3412,14 @@ const CanvasPageImpl: React.FC<CanvasPageProps> = (props) => {
             }
           }}
         />
+      )}
+
+      {/* The laser pointer (page px, over everything; painted in place by paintLaser). */}
+      {!printMode && (
+        <svg ref={laserSvgRef} className="absolute left-0 top-0 pointer-events-none z-30 overflow-visible" width={1} height={1} aria-hidden>
+          <path fill="none" stroke="rgba(239,68,68,0.45)" strokeLinecap="round" strokeLinejoin="round" />
+          <circle fill="#ef4444" style={{ opacity: 0, filter: 'drop-shadow(0 0 4px rgba(239,68,68,0.9))' }} />
+        </svg>
       )}
 
       {/* Lasso selection box */}

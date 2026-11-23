@@ -331,6 +331,16 @@ public class OpenNoteRustPlugin extends Plugin {
     private final Handler main = new Handler(Looper.getMainLooper());
     private boolean port = false;
 
+    /** The app's version code (the GLES choice lasts until the next version). */
+    private long appVersion() {
+        try {
+            android.content.pm.PackageInfo info = getContext().getPackageManager().getPackageInfo(getContext().getPackageName(), 0);
+            return android.os.Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
     @Override
     public void load() {
         // How the last run ended (a native crash ends the process before the page logs it), for the
@@ -345,13 +355,18 @@ public class OpenNoteRustPlugin extends Plugin {
             WebViewCompat.addDocumentStartJavaScript(getBridge().getWebView(), js, Collections.singleton(page.getScheme() + "://" + page.getAuthority()));
         }
         if (!LOADED) return;
-        // A run with the canvas on that ended abnormally (the system's exit record: a GPU driver's
-        // segfault ends the process past anything Rust catches) makes the canvas use GLES from then
-        // on, else Vulkan on a fragile driver (Mali) would end every run the same way.
+        // A run with the canvas on that ended in a native crash (the system's exit record: a GPU
+        // driver's segfault ends the process past anything Rust catches) makes the canvas use GLES,
+        // else Vulkan on a fragile driver (Mali) would end every run the same way. Only a native
+        // crash, and only until the next version of the app: until 3.0.7 any abnormal end did, for
+        // good, and the system killing the app in the background (low memory) is one, so the
+        // canvas soon ran on GLES, far slower, on most devices.
         if (nativeCanvasEnabled(getContext())) {
             android.content.SharedPreferences prefs = getContext().getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE);
-            if (lastEnd.contains("android exit:")) prefs.edit().putBoolean("gl", true).apply();
-            if (prefs.getBoolean("gl", false)) canvasPreferGl("the last run with the canvas ended abnormally");
+            long version = appVersion();
+            if (prefs.getLong("gl_version", -1) != version) prefs.edit().remove("gl").putLong("gl_version", version).apply();
+            if (lastEnd.contains("android exit:") && lastEnd.contains("CRASH_NATIVE")) prefs.edit().putBoolean("gl", true).apply();
+            if (prefs.getBoolean("gl", false)) canvasPreferGl("the last run with the canvas ended in a native crash");
         }
         // The page asks window.__opennoteNativeCanvas (platform.ts hasNativeCanvas) before it draws.
         if (nativeCanvasEnabled(getContext()) && WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {

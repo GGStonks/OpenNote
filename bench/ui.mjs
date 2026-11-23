@@ -1679,6 +1679,28 @@ if (ONLY.has('nativecanvas')) {
   const leftCanvases = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).map((c) => `${c.width}x${c.height}`));
   console.log(`nativecanvas eraser hover: ${hovering} canvas while hovering, after the pen left ${leftCanvases.length ? leftCanvases.join(' ') : 'none'}${leftCanvases.length || !hovering ? '  FAIL' : ''}`);
   if (leftCanvases.length || !hovering) process.exitCode = 1;
+  // A big selection: a lasso round most of the screen (what it shows, what it costs).
+  {
+    await page.click('[title^="Lasso"]');
+    await sleep(200);
+    const vw = page.viewportSize();
+    const cx = vw.width / 2, cy = vw.height / 2, rx = vw.width * 0.42, ry = vw.height * 0.38;
+    await mouse('mousePressed', cx + rx, cy);
+    for (let i = 1; i <= 80; i++) {
+      const a = (i / 80) * Math.PI * 2;
+      await mouse('mouseMoved', cx + Math.cos(a) * rx, cy + Math.sin(a) * ry);
+      await sleep(6);
+    }
+    await mouse('mouseReleased', cx + rx, cy);
+    await sleep(900);
+    const big = await page.evaluate(() => {
+      const cs = [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1);
+      return { canvases: cs.length, mb: Math.round(cs.reduce((n, c) => n + c.width * c.height * 4, 0) / 1048576), handles: document.querySelectorAll('[data-resize]').length };
+    });
+    console.log(`nativecanvas big selection: ${JSON.stringify(big)}`);
+    if (arg('shots')) await page.screenshot({ path: join(arg('shots'), 'big-selection.png') });
+    await seen('big-selection');
+  }
   // Cast to PC: a browser opening the cast's address gets the viewer, which shows the note as
   // the canvas holds it (paper and ink near the view), placed as the device's screen shows it.
   // 3.0.1-3.0.5 reset the connection, and the viewer had no note to show (a made-up blank page).
@@ -4327,6 +4349,47 @@ if (process.argv.includes('--native') && ONLY.has('pen')) {
   const crumbs = await page.evaluate(() => JSON.parse(localStorage.getItem('opennote_crashlog_v1') || '{}').current?.crumbs ?? []);
   const scenes = crumbs.filter((c) => c.kind === 'canvas-scene');
   console.log(`nativeink canvas-scene calls ${scenes.length}, ${scenes.filter((c) => c.sent === 0).length} sending nothing; ink-grid entries ${crumbs.filter((c) => c.kind === 'ink-grid').length}`);
+  // A big lasso: drawn by the shell (`d` drawings, thinned), no screen-sized canvas in the page
+  // (3.0.7 drew it there, its dashes animated every frame); cleared at the lift ('c'); it selects
+  // when the pen lifts. Then a touch outside the selection lets it go.
+  await page.click('[title^="Lasso"]');
+  await sleep(200);
+  const d0 = await page.evaluate(() => window.__inkD ?? 0);
+  const vw = page.viewportSize();
+  const cx = vw.width / 2, cy = vw.height / 2, rx = vw.width * 0.4, ry = vw.height * 0.32;
+  await page.mouse.move(cx + rx, cy);
+  await page.mouse.down();
+  let canvasesWhile = 0;
+  for (let i = 1; i <= 90; i++) {
+    const a = (i / 90) * Math.PI * 2;
+    await page.mouse.move(cx + Math.cos(a) * rx, cy + Math.sin(a) * ry);
+    if (i === 45) canvasesWhile = await page.evaluate(() => [...document.querySelectorAll('canvas')].filter((c) => c.width * c.height > 1).length);
+  }
+  await page.mouse.up();
+  await sleep(500);
+  const lasso = await page.evaluate((d0) => ({ d: (window.__inkD ?? 0) - d0, longest: window.__inkDLen ?? 0, cleared: window.__inkMsgs.filter((m) => m === 'c').length, handles: document.querySelectorAll('[data-resize]').length }), d0);
+  const lassoOk = lasso.d > 10 && canvasesWhile === 0 && lasso.handles > 0;
+  console.log(`nativeink big lasso: ${lasso.d} shell drawings (longest ${lasso.longest} chars), page canvases while drawing ${canvasesWhile}, selected (handles ${lasso.handles})${lassoOk ? '' : '  FAIL'}`);
+  await page.mouse.click(30, cy);
+  await sleep(300);
+  const after = await page.evaluate(() => document.querySelectorAll('[data-resize]').length);
+  console.log(`nativeink a touch outside the selection: handles ${after}${after === 0 ? '' : '  FAIL'}`);
+  // The laser pointer: a red dot where the pen is, nothing saved.
+  await page.click('[title^="Laser"]');
+  const strokesBefore = await page.evaluate(() => document.querySelectorAll('[data-ink-key]').length);
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  for (let i = 1; i <= 10; i++) await page.mouse.move(cx + i * 6, cy + i * 2);
+  await sleep(50);
+  const dot = await page.evaluate(() => {
+    const c = document.querySelector('svg circle[fill="#ef4444"]');
+    return c ? { op: c.style.opacity, r: c.getAttribute('r') } : null;
+  });
+  await page.mouse.up();
+  await sleep(500);
+  const strokesAfter = await page.evaluate(() => document.querySelectorAll('[data-ink-key]').length);
+  const laserOk = dot && dot.op === '1' && strokesAfter === strokesBefore;
+  console.log(`nativeink laser: dot ${JSON.stringify(dot)}, strokes ${strokesBefore} -> ${strokesAfter}${laserOk ? '' : '  FAIL'}`);
 }
 await browser.close();
 cleanup();

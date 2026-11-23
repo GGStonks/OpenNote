@@ -6,7 +6,8 @@
  * `record(tf, draw)` runs `draw` on a stand-in 2D context while the stroke renderer makes its
  * paths as stand-ins too (withPathFactory), and returns the commands in the shell's view units.
  * Only what the live drawing uses is supported: paths (moveTo, lineTo, quadratic / bezier curves,
- * arc, rect, closePath, addPath), fill and clip (nonzero / evenodd), stroke, save / restore, colours,
+ * arc, rect, closePath, addPath), fillRect / strokeRect (the lasso's rectangle), fill and clip
+ * (nonzero / evenodd), stroke, save / restore, colours,
  * globalAlpha, line width, caps, joins and dashes. Text is left to the page.
  *
  * Commands (comma-separated tokens):
@@ -138,11 +139,28 @@ class RecCtx {
   lineTo(x: number, y: number) {
     this.path.lineTo(x, y);
   }
+  quadraticCurveTo(cx: number, cy: number, x: number, y: number) {
+    this.path.quadraticCurveTo(cx, cy, x, y);
+  }
+  bezierCurveTo(x1: number, y1: number, x2: number, y2: number, x: number, y: number) {
+    this.path.bezierCurveTo(x1, y1, x2, y2, x, y);
+  }
   arc(cx: number, cy: number, r: number, a0: number, a1: number, ccw = false) {
     this.path.arc(cx, cy, r, a0, a1, ccw);
   }
   rect(x: number, y: number, w: number, h: number) {
     this.path.rect(x, y, w, h);
+  }
+  // The lasso's rectangle: a path of its own, filled or stroked (the current path is kept).
+  fillRect(x: number, y: number, w: number, h: number) {
+    const p = new RecPath();
+    p.rect(x, y, w, h);
+    this.use(p, undefined, 'f');
+  }
+  strokeRect(x: number, y: number, w: number, h: number) {
+    const p = new RecPath();
+    p.rect(x, y, w, h);
+    this.use(p, undefined, 's');
   }
   roundRect(x: number, y: number, w: number, h: number) {
     this.path.rect(x, y, w, h);

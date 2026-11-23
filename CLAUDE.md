@@ -123,7 +123,9 @@ shell where the content really landed (the snapshot glides there and goes). `npm
 messages and that the snapshot's last position matches the drawn page.
 
 Over the native canvas (on in the apps since 3.0.3: iOS skips it for the one run after a native
-crash, Android uses GLES after an abnormal end; the page draws notes with PDF pages, the browser,
+crash, Android uses GLES after a native crash until the next app version (`OpenNoteRustPlugin`;
+until 3.0.7 any abnormal end, the system's background kills included, switched it to GLES for
+good: most devices drew on the far slower GLES); the page draws notes with PDF pages, the browser,
 and whenever the canvas fails, `canvas-fallback`) none of this applies:
 two fingers move the Rust camera (`crates/viewport`, a port of useViewport.ts's gestures and
 viewportMath.ts, rust/DECISIONS.md ADR-006), handed the fingers by the shells (iOS `ONWindow
@@ -378,6 +380,17 @@ show the iPad's compositing cost).
   --shots <dir> [--sparse]` (live / after / zoomed, and the layers shown each frame of a pinch;
   `BENCH_NO_GL=1` for the bitmap pinch), `--only zorder` (a fill over earlier ink while pinching).
 - A dragged selection is drawn by the GPU (`useDragInk`), glow included (GlInk `draw(tf, glow)`).
+- The lasso (CanvasPage `paintLasso`): in the apps drawn by the shell's native ink layer (`d`
+  drawings, once a frame, its points 4 screen px apart, the outline only), never a screen-sized
+  canvas in the web view; static dashes (3.0.7 animated them, redrawing a big loop's outline and
+  fill every frame). The rectangle selects as the freehand lasso does, when the pen lifts, as a
+  lasso of its four corners (3.0.7 selected again on every sample: the selection's frame, handles
+  and bar redrawn under the pen). Any touch reaching the input layer (a finger, the pen, any tool)
+  drops the selection: the frame, handles and bar lie over it. `--native --only pen` (the shell's
+  drawings, no page canvas, a touch outside, the laser).
+- The laser tool (the dock's red pointer): a red dot and a trail fading over 300 ms where the pen
+  is, nothing saved (CanvasPage `paintLaser`, an SVG changed in place), sent to the cast's viewers
+  (`mirrorLaser`, LaserPointer packets in surface px). 3.0.0 added the button wired to nothing.
 - After a zoom the content is placed exactly: positions from getBoundingClientRect, and the scroll
   rounding absorbed by a sub-pixel CSS `translate` on the content (only under 1 px).
 - Hold to snap: the pen must be held still `PEN_HOLD_MS` (1 s; the Draw tool `SHAPE_HOLD_MS`, 0.45 s)

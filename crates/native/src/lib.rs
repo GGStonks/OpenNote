@@ -151,6 +151,7 @@ pub fn call(method: &str, meta: &str, data: &[u8]) -> Result<(String, Vec<u8>), 
         "mirrorStart" => remote_service::mirror_start(meta),
         "mirrorStop" => remote_service::mirror_stop(meta),
         "mirrorStatus" => remote_service::mirror_status(meta),
+        "mirrorLaser" => remote_service::mirror_laser(meta),
         _ => Err(format!("unknown method {method}")),
     }
 }
